@@ -8,6 +8,7 @@ use crate::agent::Agents;
 use crate::primitives::WorkflowRunId;
 use crate::sandbox::Sandboxes;
 use crate::skill::Skills;
+use crate::toolset::ToolSets;
 
 use super::error::WorkflowError;
 use super::executor::Executor;
@@ -27,6 +28,7 @@ pub struct ExecuteRunJobInitializer {
     agents: Arc<Agents>,
     skills: Arc<Skills>,
     sandboxes: Arc<Sandboxes>,
+    toolsets: Arc<ToolSets>,
 }
 
 impl ExecuteRunJobInitializer {
@@ -36,6 +38,7 @@ impl ExecuteRunJobInitializer {
         agents: Arc<Agents>,
         skills: Arc<Skills>,
         sandboxes: Arc<Sandboxes>,
+        toolsets: Arc<ToolSets>,
     ) -> Self {
         Self {
             runs,
@@ -43,6 +46,7 @@ impl ExecuteRunJobInitializer {
             agents,
             skills,
             sandboxes,
+            toolsets,
         }
     }
 }
@@ -66,6 +70,7 @@ impl JobInitializer for ExecuteRunJobInitializer {
             Arc::clone(&self.agents),
             Arc::clone(&self.skills),
             Arc::clone(&self.sandboxes),
+            Arc::clone(&self.toolsets),
         );
         Ok(Box::new(ExecuteRunRunner { executor, config }))
     }

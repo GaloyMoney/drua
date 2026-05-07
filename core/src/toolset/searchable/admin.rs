@@ -359,7 +359,7 @@ impl WorkflowStepParams {
             sandbox_mode: self.sandbox_mode,
             timeout_seconds: self.timeout_seconds,
             model_chain: self.model_chain,
-            output_schema,
+            output_schema: Box::new(output_schema),
         })
     }
 }

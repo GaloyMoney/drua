@@ -35,6 +35,14 @@ pub enum WorkflowError {
     BuildEntity(String),
     #[error("WorkflowError - InvalidDefinition: {0}")]
     InvalidDefinition(String),
+    #[error("WorkflowError - InvalidStep: {0}")]
+    InvalidStep(String),
+    #[error("WorkflowError - InvalidTemplateRef: {0}")]
+    InvalidTemplateRef(String),
+    #[error("WorkflowError - ToolNotFound: {0}")]
+    ToolNotFound(String),
+    #[error("WorkflowError - ToolDispatch: {0}")]
+    ToolDispatch(String),
     #[error("WorkflowError - InvalidCronExpression: {0}")]
     InvalidCronExpression(String),
     #[error("WorkflowError - InvalidTimezone: {0}")]

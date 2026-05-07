@@ -5,20 +5,58 @@ use std::time::Duration;
 
 use crate::agent::session::message::SUBMIT_OUTPUT_TOOL_NAME;
 use crate::agent::{Agent, Agents};
+use crate::auth::AuthSubject;
 use crate::primitives::{
     AgentId, ChatOutputEvent, ProjectId, SandboxId, WorkflowDefinitionId, WorkflowRunId,
 };
 use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxSpecs, SandboxState, Sandboxes};
 use crate::skill::Skills;
+use crate::toolset::ToolSets;
 
 use super::definition::{WorkflowSandboxDecl, WorkflowStepDef};
 use super::error::WorkflowError;
 use super::repo::WorkflowDefinitionRepo;
-use super::run::{WorkflowRunRepo, WorkflowRunState};
+use super::run::{StepResult, WorkflowRunRepo, WorkflowRunState};
+use super::template::{substitute_value, TemplateContext};
 
 /// Hard cap on the pre-flight per-sandbox readiness wait. Protects the
 /// queue from a stuck infrastructure step.
 const SANDBOX_READY_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Default per-`ToolStep` dispatch timeout when the step doesn't
+/// specify one. Same shape as the agent step's idle timeout default.
+const DEFAULT_TOOL_STEP_TIMEOUT_SECS: u64 = 300;
+
+/// Build the `steps` slice of the template context from the run's
+/// completed-step outputs. Skips entries with no recorded output
+/// (pending or failed steps).
+fn collect_step_outputs(results: &[StepResult]) -> HashMap<String, serde_json::Value> {
+    let mut out = HashMap::with_capacity(results.len());
+    for r in results {
+        if let Some(value) = &r.output {
+            out.insert(r.name.clone(), value.clone());
+        }
+    }
+    out
+}
+
+fn first_text_content(result: &rmcp::model::CallToolResult) -> Option<String> {
+    result.content.iter().find_map(|c| match &c.raw {
+        rmcp::model::RawContent::Text(t) => Some(t.text.clone()),
+        _ => None,
+    })
+}
+
+fn type_label(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
 
 pub struct Executor {
     runs: WorkflowRunRepo,
@@ -26,6 +64,9 @@ pub struct Executor {
     agents: Arc<Agents>,
     skills: Arc<Skills>,
     sandboxes: Arc<Sandboxes>,
+    /// Used by `ToolStep` dispatch; held here rather than passed per
+    /// call so the agent-step path is unchanged.
+    toolsets: Arc<ToolSets>,
 }
 
 impl Executor {
@@ -35,6 +76,7 @@ impl Executor {
         agents: Arc<Agents>,
         skills: Arc<Skills>,
         sandboxes: Arc<Sandboxes>,
+        toolsets: Arc<ToolSets>,
     ) -> Self {
         Self {
             runs,
@@ -42,6 +84,7 @@ impl Executor {
             agents,
             skills,
             sandboxes,
+            toolsets,
         }
     }
 
@@ -134,6 +177,7 @@ impl Executor {
                 self.runs.update(&mut run).await?;
             }
 
+            let step_outputs = collect_step_outputs(&run.step_results);
             let outcome = self
                 .execute_step(
                     project_id,
@@ -141,6 +185,7 @@ impl Executor {
                     run_id,
                     step,
                     &trigger_context,
+                    &step_outputs,
                     &sandbox_ids,
                     &preexisting_ids,
                     &mut borrowed_preexisting,
@@ -373,6 +418,7 @@ impl Executor {
         run_id: WorkflowRunId,
         step: &WorkflowStepDef,
         trigger_context: &serde_json::Value,
+        step_outputs: &HashMap<String, serde_json::Value>,
         sandbox_ids: &HashMap<String, SandboxId>,
         preexisting_ids: &HashSet<SandboxId>,
         borrowed_preexisting: &mut HashSet<SandboxId>,
@@ -385,6 +431,7 @@ impl Executor {
                 sandbox,
                 sandbox_mode,
                 timeout_seconds,
+                output_schema,
                 ..
             } => {
                 let attach_sandbox = match sandbox.as_deref() {
@@ -400,12 +447,24 @@ impl Executor {
                 let arguments = serde_json::to_string_pretty(trigger_context)
                     .unwrap_or_else(|_| trigger_context.to_string());
                 let sandbox_id = attach_sandbox.map(|(id, _)| id);
-                let prompt = self
+                let raw_prompt = self
                     .skills
                     .interpolate_skill(skill, Some(project_id), sandbox_id, Some(&arguments))
                     .await
                     .map_err(|e| WorkflowError::Skill(e.to_string()))?
                     .ok_or_else(|| WorkflowError::SkillNotFound(skill.clone()))?;
+
+                // Layer `${{ trigger.X }}` / `${{ steps.<n>.outputs.Y }}`
+                // substitution on top of the existing `$ARGUMENTS` /
+                // `$N` handling that `interpolate_skill` already
+                // applied. Errors propagate as `Skill` failures
+                // (template syntax is the skill body author's concern).
+                let template_ctx = TemplateContext {
+                    trigger: trigger_context,
+                    steps: step_outputs,
+                };
+                let prompt = super::template::substitute_in_string(&raw_prompt, &template_ctx)
+                    .map_err(|e| WorkflowError::Skill(e.to_string()))?;
 
                 let agent_name = format!("workflow-{}-{name}", run_id.short());
                 let mut op = self
@@ -447,7 +506,7 @@ impl Executor {
                             &agent_name,
                             attach_sandbox,
                             chain_override,
-                            step.output_schema().clone(),
+                            output_schema.as_ref().clone(),
                         )
                         .await
                         .map_err(|e| WorkflowError::Agent(e.to_string()))?;
@@ -489,6 +548,24 @@ impl Executor {
                 }
 
                 result
+            }
+            WorkflowStepDef::ToolStep {
+                name,
+                tool,
+                params,
+                timeout_seconds,
+            } => {
+                self.execute_tool_step(
+                    project_id,
+                    run_id,
+                    name,
+                    tool,
+                    params,
+                    *timeout_seconds,
+                    trigger_context,
+                    step_outputs,
+                )
+                .await
             }
         }
     }
@@ -612,6 +689,100 @@ impl Executor {
             .submitted_output(agent.id)
             .await
             .map_err(|e| WorkflowError::Agent(e.to_string()))
+    }
+
+    /// Dispatch a single top-level MCP tool with `${{ … }}`-substituted
+    /// params. Mints an `AuthSubject::WorkflowExecutor` carrying the
+    /// workflow's project authority. The called tool MUST declare
+    /// `output_schema()` (Q9-c, memo `019e01a4`); the resulting
+    /// `structured_content` is what flows into `StepResult.output`.
+    /// Tool errors (`is_error: true` or absent structured content)
+    /// fail the step.
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_tool_step(
+        &self,
+        project_id: ProjectId,
+        run_id: WorkflowRunId,
+        step_name: &str,
+        tool_name: &str,
+        params: &serde_json::Value,
+        timeout_seconds: Option<u64>,
+        trigger_context: &serde_json::Value,
+        step_outputs: &HashMap<String, serde_json::Value>,
+    ) -> Result<serde_json::Value, WorkflowError> {
+        let tool = self
+            .toolsets
+            .find_top_level_tool(tool_name)
+            .ok_or_else(|| WorkflowError::ToolNotFound(tool_name.to_string()))?;
+
+        if !tool.composable() {
+            return Err(WorkflowError::InvalidStep(format!(
+                "tool_step '{step_name}': tool '{tool_name}' is not composable; \
+                 only `composable: true` tools can be called from a workflow step"
+            )));
+        }
+        if tool.output_schema().is_none() {
+            return Err(WorkflowError::InvalidStep(format!(
+                "tool_step '{step_name}': tool '{tool_name}' does not declare an \
+                 output_schema; tool_step requires structured output"
+            )));
+        }
+
+        let template_ctx = TemplateContext {
+            trigger: trigger_context,
+            steps: step_outputs,
+        };
+        let resolved_params = substitute_value(params, &template_ctx)
+            .map_err(|e| WorkflowError::InvalidTemplateRef(e.to_string()))?;
+
+        // Top-level tools accept `Option<JsonObject>`. Coerce non-objects
+        // to an empty object — the tool's input schema rejects the
+        // missing-field case with a clear error if it cared.
+        let arguments = match resolved_params {
+            serde_json::Value::Object(map) => Some(map),
+            serde_json::Value::Null => None,
+            other => {
+                return Err(WorkflowError::InvalidStep(format!(
+                    "tool_step '{step_name}': resolved params must be a JSON object, got {}",
+                    type_label(&other)
+                )));
+            }
+        };
+
+        let subject = AuthSubject::workflow_executor(project_id, run_id);
+        let timeout =
+            Duration::from_secs(timeout_seconds.unwrap_or(DEFAULT_TOOL_STEP_TIMEOUT_SECS));
+
+        let call = self
+            .toolsets
+            .call_top_level_tool(&subject, tool_name, arguments);
+        let result = match tokio::time::timeout(timeout, call).await {
+            Ok(r) => r.map_err(|e| WorkflowError::ToolDispatch(e.to_string()))?,
+            Err(_) => {
+                return Err(WorkflowError::StepFailed {
+                    step: step_name.to_string(),
+                    reason: format!("tool '{tool_name}' timed out after {}s", timeout.as_secs()),
+                })
+            }
+        };
+
+        if result.is_error.unwrap_or(false) {
+            let detail = first_text_content(&result)
+                .unwrap_or_else(|| "tool returned is_error: true with no text content".to_string());
+            return Err(WorkflowError::StepFailed {
+                step: step_name.to_string(),
+                reason: format!("tool '{tool_name}' failed: {detail}"),
+            });
+        }
+
+        result
+            .structured_content
+            .ok_or_else(|| WorkflowError::StepFailed {
+                step: step_name.to_string(),
+                reason: format!(
+                    "tool '{tool_name}' returned no structured_content; tool_step requires it"
+                ),
+            })
     }
 
     async fn detach_step_sandbox(&self, sandbox_id: SandboxId, agent_id: AgentId) {

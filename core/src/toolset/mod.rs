@@ -383,6 +383,15 @@ impl ToolSets {
             .into_iter()
     }
 
+    /// Direct lookup by name, bypassing visibility. Used by the
+    /// workflow executor + parse-time validator to resolve a
+    /// `tool_step.tool` reference; the dispatch path still routes
+    /// through `call_top_level_tool` which threads `subject`.
+    pub fn find_top_level_tool(&self, name: &str) -> Option<Arc<dyn TopLevelTool>> {
+        let map = self.top_level.read().expect("top_level lock poisoned");
+        map.get(name).cloned()
+    }
+
     /// Visible top-level tools converted to wire `ToolDefinition`s
     /// for the session layer. When `output_schema` is `Some` the
     /// `submit_output` entry's `input_schema` is replaced with the

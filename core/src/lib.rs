@@ -240,6 +240,7 @@ impl App {
             Arc::clone(&agents),
             Arc::clone(&sandboxes),
             Arc::clone(&users),
+            Arc::clone(&toolsets),
             &mut jobs,
         ));
 

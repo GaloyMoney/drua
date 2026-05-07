@@ -7,6 +7,7 @@ pub mod importer;
 pub(crate) mod job;
 pub(crate) mod repo;
 pub mod run;
+pub mod template;
 pub mod yaml;
 
 pub use importer::WorkflowsImporter;
@@ -20,6 +21,7 @@ use crate::agent::Agents;
 use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 use crate::skill::Skills;
+use crate::toolset::ToolSets;
 use crate::user::Users;
 
 pub const WORKFLOW_DOC_TYPE: drua_library::DocType = drua_library::DocType::new("workflow");
@@ -36,6 +38,44 @@ use cron_job::{cron_queue_id, TriggerCronConfig, TriggerCronJobInitializer};
 use job::{ExecuteRunConfig, ExecuteRunJobInitializer};
 use repo::WorkflowDefinitionRepo;
 use run::entity::NewWorkflowRun;
+use template::{PathSegment, TemplateRef};
+
+/// Reject `${{ steps.X.outputs.… }}` refs whose `X` hasn't been
+/// validated yet. Trigger refs always pass (their schema check is
+/// deferred — memo `019e01a4` open Q6: skip provider-payload
+/// validation in MVP).
+fn validate_ref_against_prior_steps(
+    step_name: &str,
+    r: &TemplateRef,
+    seen: &std::collections::HashSet<String>,
+) -> Result<(), WorkflowError> {
+    let mut iter = r.path.iter();
+    match iter.next() {
+        Some(PathSegment::Field(s)) if s == "trigger" => Ok(()),
+        Some(PathSegment::Field(s)) if s == "steps" => {
+            let target = match iter.next() {
+                Some(PathSegment::Field(n)) => n.clone(),
+                _ => {
+                    return Err(WorkflowError::InvalidTemplateRef(format!(
+                        "step '{step_name}': {} — `steps.<name>` requires a step name",
+                        r.raw
+                    )))
+                }
+            };
+            if !seen.contains(&target) {
+                return Err(WorkflowError::InvalidTemplateRef(format!(
+                    "step '{step_name}': {} — references step '{target}' which is not declared earlier in the workflow",
+                    r.raw
+                )));
+            }
+            Ok(())
+        }
+        _ => Err(WorkflowError::InvalidTemplateRef(format!(
+            "step '{step_name}': {} — root must be `trigger` or `steps`",
+            r.raw
+        ))),
+    }
+}
 
 #[derive(Clone)]
 pub struct Workflows {
@@ -43,6 +83,10 @@ pub struct Workflows {
     run_repo: WorkflowRunRepo,
     skills: Arc<Skills>,
     users: Arc<Users>,
+    /// Held for parse-time `${{ … }}` reference validation in
+    /// `tool_step.params` — looks up the called tool's
+    /// `output_schema()` + `composable()` flag.
+    toolsets: Arc<ToolSets>,
     execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
     cron_spawner: ::job::JobSpawner<TriggerCronConfig>,
     /// Cloned `Jobs` handle so `await_run_completion` can block on the
@@ -63,6 +107,7 @@ impl Workflows {
         agents: Arc<Agents>,
         sandboxes: Arc<Sandboxes>,
         users: Arc<Users>,
+        toolsets: Arc<ToolSets>,
         jobs: &mut ::job::Jobs,
     ) -> Self {
         let execute_run_spawner = jobs.add_initializer(ExecuteRunJobInitializer::new(
@@ -71,6 +116,7 @@ impl Workflows {
             agents,
             Arc::clone(&skills),
             sandboxes,
+            Arc::clone(&toolsets),
         ));
         let cron_spawner = jobs.add_initializer(TriggerCronJobInitializer::new(
             WorkflowDefinitionRepo::new_without_library(pool),
@@ -82,6 +128,7 @@ impl Workflows {
             run_repo: WorkflowRunRepo::new(pool),
             skills,
             users,
+            toolsets,
             execute_run_spawner,
             cron_spawner,
             jobs: jobs.clone(),
@@ -226,6 +273,12 @@ impl Workflows {
         // sees the full list (rather than fixing one and re-running).
         let mut missing_skills: Vec<(String, String)> = Vec::new();
         let mut undeclared_sandboxes: Vec<(String, String)> = Vec::new();
+        // Names of steps that have already been validated, in order;
+        // a step's `${{ steps.X.outputs.… }}` refs may only point at
+        // entries already in this set (i.e. earlier in the linear
+        // step list).
+        let mut seen_step_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
 
         for step in steps {
             match step {
@@ -262,7 +315,46 @@ impl Workflows {
                     // invariant at construction/deserialization
                     // (memo 019dfc8c). Bad schemas can't reach here.
                 }
+                WorkflowStepDef::ToolStep {
+                    name, tool, params, ..
+                } => {
+                    if tool.trim().is_empty() {
+                        return Err(WorkflowError::InvalidStep(format!(
+                            "tool_step '{name}': `tool` is required and must be non-empty"
+                        )));
+                    }
+                    let resolved = self.toolsets.find_top_level_tool(tool).ok_or_else(|| {
+                        WorkflowError::ToolNotFound(format!(
+                            "tool_step '{name}': tool '{tool}' is not registered"
+                        ))
+                    })?;
+                    if !resolved.composable() {
+                        return Err(WorkflowError::InvalidStep(format!(
+                            "tool_step '{name}': tool '{tool}' is not composable; \
+                             only `composable: true` tools can be called from a workflow step"
+                        )));
+                    }
+                    if resolved.output_schema().is_none() {
+                        return Err(WorkflowError::InvalidStep(format!(
+                            "tool_step '{name}': tool '{tool}' does not declare an \
+                             output_schema; tool_step requires structured output"
+                        )));
+                    }
+
+                    let refs = template::extract_refs_in_value(params).map_err(|e| {
+                        WorkflowError::InvalidTemplateRef(format!("tool_step '{name}': {e}"))
+                    })?;
+                    for r in &refs {
+                        if let Err(e) = template::validate_root(r) {
+                            return Err(WorkflowError::InvalidTemplateRef(format!(
+                                "tool_step '{name}': {e}"
+                            )));
+                        }
+                        validate_ref_against_prior_steps(name, r, &seen_step_names)?;
+                    }
+                }
             }
+            seen_step_names.insert(step.name().to_string());
         }
 
         if !missing_skills.is_empty() {
@@ -721,5 +813,36 @@ mod tests {
         })
         .unwrap_err();
         assert!(matches!(err, WorkflowError::InvalidTimezone(_)));
+    }
+
+    #[test]
+    fn template_ref_against_prior_steps_accepts_trigger() {
+        let r = template::parse_path("trigger.payload.build").unwrap();
+        let seen = std::collections::HashSet::new();
+        validate_ref_against_prior_steps("any", &r, &seen).expect("trigger refs always accepted");
+    }
+
+    #[test]
+    fn template_ref_against_prior_steps_accepts_seen_step() {
+        let r = template::parse_path("steps.triage.outputs.workflow").unwrap();
+        let mut seen = std::collections::HashSet::new();
+        seen.insert("triage".to_string());
+        validate_ref_against_prior_steps("dispatch", &r, &seen).unwrap();
+    }
+
+    #[test]
+    fn template_ref_against_prior_steps_rejects_forward_ref() {
+        let r = template::parse_path("steps.later.outputs.x").unwrap();
+        let seen = std::collections::HashSet::new();
+        let err = validate_ref_against_prior_steps("first", &r, &seen).unwrap_err();
+        assert!(matches!(err, WorkflowError::InvalidTemplateRef(_)));
+    }
+
+    #[test]
+    fn template_ref_against_prior_steps_rejects_unknown_root() {
+        let r = template::parse_path("env.HOME").unwrap();
+        let seen = std::collections::HashSet::new();
+        let err = validate_ref_against_prior_steps("any", &r, &seen).unwrap_err();
+        assert!(matches!(err, WorkflowError::InvalidTemplateRef(_)));
     }
 }

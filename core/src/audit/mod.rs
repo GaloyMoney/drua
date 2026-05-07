@@ -58,6 +58,10 @@ impl Audit {
                 Self::set_resource_id(ctx, "project_id", *project_id);
                 ctx.on_behalf_of_user_id = Some(*user_id);
             }
+            AuthSubject::WorkflowExecutor(project_id, run_id, _) => {
+                Self::set_resource_id(ctx, "project_id", *project_id);
+                Self::set_resource_id(ctx, "workflow_run_id", *run_id);
+            }
             AuthSubject::Anonymous => {}
         });
     }

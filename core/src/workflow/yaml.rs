@@ -8,6 +8,10 @@ use crate::primitives::WorkflowDefinitionId;
 use crate::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
 
 use super::definition::{default_output_schema, OutputSchema};
+
+fn default_output_schema_boxed() -> Box<OutputSchema> {
+    Box::new(default_output_schema())
+}
 use crate::skill::file::slugify;
 use crate::skill::name_from_filename;
 
@@ -212,8 +216,16 @@ enum WorkflowStepYaml {
         timeout_seconds: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_chain: Option<ModelChain>,
-        #[serde(default = "default_output_schema")]
-        output_schema: OutputSchema,
+        #[serde(default = "default_output_schema_boxed")]
+        output_schema: Box<OutputSchema>,
+    },
+    ToolStep {
+        name: String,
+        tool: String,
+        #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+        params: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_seconds: Option<u64>,
     },
 }
 
@@ -237,6 +249,17 @@ impl WorkflowStepYaml {
                 model_chain: model_chain.clone(),
                 output_schema: output_schema.clone(),
             },
+            WorkflowStepDef::ToolStep {
+                name,
+                tool,
+                params,
+                timeout_seconds,
+            } => WorkflowStepYaml::ToolStep {
+                name: name.clone(),
+                tool: tool.clone(),
+                params: params.clone(),
+                timeout_seconds: *timeout_seconds,
+            },
         }
     }
 
@@ -258,6 +281,17 @@ impl WorkflowStepYaml {
                 timeout_seconds,
                 model_chain,
                 output_schema,
+            },
+            WorkflowStepYaml::ToolStep {
+                name,
+                tool,
+                params,
+                timeout_seconds,
+            } => WorkflowStepDef::ToolStep {
+                name,
+                tool,
+                params,
+                timeout_seconds,
             },
         }
     }
@@ -426,7 +460,7 @@ mod tests {
             sandbox_mode: None,
             timeout_seconds: Some(120),
             model_chain: None,
-            output_schema: default_output_schema(),
+            output_schema: Box::new(default_output_schema()),
         }]
     }
 
@@ -629,7 +663,7 @@ steps:
             sandbox_mode: None,
             timeout_seconds: None,
             model_chain: None,
-            output_schema: schema,
+            output_schema: Box::new(schema),
         }];
         let content = render_workflow_yaml(
             id,
@@ -654,6 +688,7 @@ steps:
                 let actual = serde_json::to_value(output_schema).unwrap();
                 assert_eq!(actual, schema_value);
             }
+            other => panic!("expected AgentStep, got {other:?}"),
         }
     }
 
@@ -674,7 +709,7 @@ steps:
         let parsed = parse_workflow_yaml(yaml_without_field, "runtime/workflows/simple-flow.yml")
             .expect("parses");
         let step = &parsed.steps[0];
-        let actual = serde_json::to_value(step.output_schema()).unwrap();
+        let actual = serde_json::to_value(step.output_schema().expect("AgentStep")).unwrap();
         let default = serde_json::to_value(default_output_schema()).unwrap();
         assert_eq!(actual, default);
         // Re-rendered YAML now contains the default schema explicitly.

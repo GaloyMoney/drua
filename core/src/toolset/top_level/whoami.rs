@@ -32,7 +32,7 @@ static WHOAMI_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
 
 #[derive(Default, serde::Serialize, schemars::JsonSchema)]
 struct WhoAmIOutput {
-    /// user, exported_agent, agent, agent_on_behalf_of_user, or anonymous.
+    /// user, exported_agent, agent, agent_on_behalf_of_user, workflow_executor, or anonymous.
     #[serde(rename = "type")]
     identity_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -43,6 +43,8 @@ struct WhoAmIOutput {
     project_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workflow_run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     scopes: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -114,6 +116,13 @@ impl TopLevelTool for WhoAmI {
                     ..Default::default()
                 }
             }
+            AuthSubject::WorkflowExecutor(project_id, run_id, scopes) => WhoAmIOutput {
+                identity_type: "workflow_executor".into(),
+                project_id: Some(project_id.to_string()),
+                workflow_run_id: Some(run_id.to_string()),
+                scopes: Some(scopes_list(scopes)),
+                ..Default::default()
+            },
             AuthSubject::Anonymous => WhoAmIOutput {
                 identity_type: "anonymous".into(),
                 ..Default::default()
