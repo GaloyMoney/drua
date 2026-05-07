@@ -52,7 +52,13 @@ pub enum WorkflowRunEvent {
         output: serde_json::Value,
         completed_at: DateTime<Utc>,
     },
-    StepFailed {
+    /// Infrastructure-level error during step execution (sandbox not
+    /// ready, idle timeout, agent error). Distinct from agent-reported
+    /// failure (`output.success == false`), which lands as a
+    /// `StepCompleted` event with a falsy `success` payload.
+    /// Wire format kept as `"step_failed"` for replay safety.
+    #[serde(rename = "step_failed")]
+    StepErrored {
         step_name: String,
         error: String,
         completed_at: DateTime<Utc>,
@@ -111,7 +117,7 @@ impl WorkflowRun {
             already_applied:
                 WorkflowRunEvent::StepCompleted { step_name: n, .. } if n == &step_name,
             already_applied:
-                WorkflowRunEvent::StepFailed { step_name: n, .. } if n == &step_name,
+                WorkflowRunEvent::StepErrored { step_name: n, .. } if n == &step_name,
         );
         let now = Utc::now();
         if !self.step_results.iter().any(|r| r.name == step_name) {
@@ -143,7 +149,7 @@ impl WorkflowRun {
             already_applied:
                 WorkflowRunEvent::StepCompleted { step_name: n, .. } if n == &step_name,
             already_applied:
-                WorkflowRunEvent::StepFailed { step_name: n, .. } if n == &step_name,
+                WorkflowRunEvent::StepErrored { step_name: n, .. } if n == &step_name,
         );
         let now = Utc::now();
         if let Some(r) = self.step_results.iter_mut().find(|r| r.name == step_name) {
@@ -165,12 +171,18 @@ impl WorkflowRun {
         Idempotent::Executed(())
     }
 
+    /// Records an infrastructure-level step error (sandbox not ready,
+    /// idle timeout, agent error). Agent-reported failure
+    /// (`output.success == false`) goes through `step_completed`, not
+    /// here — those are aggregated into `WorkflowRunState::Failed`,
+    /// while errors aggregated here become `WorkflowRunState::Errored`.
+    ///
     /// No-op if the step already terminated.
-    pub fn step_failed(&mut self, step_name: String, error: String) -> Idempotent<()> {
+    pub fn step_errored(&mut self, step_name: String, error: String) -> Idempotent<()> {
         idempotency_guard!(
             self.events.iter_all().rev(),
             already_applied:
-                WorkflowRunEvent::StepFailed { step_name: n, .. } if n == &step_name,
+                WorkflowRunEvent::StepErrored { step_name: n, .. } if n == &step_name,
             already_applied:
                 WorkflowRunEvent::StepCompleted { step_name: n, .. } if n == &step_name,
         );
@@ -186,7 +198,7 @@ impl WorkflowRun {
                 completed_at: Some(now),
             });
         }
-        self.events.push(WorkflowRunEvent::StepFailed {
+        self.events.push(WorkflowRunEvent::StepErrored {
             step_name,
             error,
             completed_at: now,
@@ -306,7 +318,7 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
                         });
                     }
                 }
-                WorkflowRunEvent::StepFailed {
+                WorkflowRunEvent::StepErrored {
                     step_name,
                     error,
                     completed_at: ts,
@@ -412,8 +424,8 @@ mod tests {
         run.step_completed(name.into(), output).did_execute();
     }
 
-    fn fail(run: &mut WorkflowRun, name: &str, err: &str) {
-        run.step_failed(name.into(), err.into()).did_execute();
+    fn error(run: &mut WorkflowRun, name: &str, err: &str) {
+        run.step_errored(name.into(), err.into()).did_execute();
     }
 
     fn finalize(run: &mut WorkflowRun) -> WorkflowRunState {
@@ -477,7 +489,7 @@ mod tests {
     fn run_state_errored_when_step_hits_infrastructure_error() {
         let mut run = fresh_run(&["only"]);
         start(&mut run, "only");
-        fail(&mut run, "only", "sandbox not ready");
+        error(&mut run, "only", "sandbox not ready");
 
         assert_eq!(finalize(&mut run), WorkflowRunState::Errored);
     }
@@ -492,7 +504,7 @@ mod tests {
             json!({ "success": false, "reason": "agent gave up", "output": "" }),
         );
         start(&mut run, "b");
-        fail(&mut run, "b", "idle timeout");
+        error(&mut run, "b", "idle timeout");
 
         assert_eq!(finalize(&mut run), WorkflowRunState::Errored);
     }
@@ -514,6 +526,30 @@ mod tests {
         );
 
         assert_eq!(finalize(&mut run), WorkflowRunState::Failed);
+    }
+
+    #[test]
+    fn step_errored_event_wire_format_is_step_failed() {
+        let ev = WorkflowRunEvent::StepErrored {
+            step_name: "s".into(),
+            error: "boom".into(),
+            completed_at: Utc::now(),
+        };
+        let v = serde_json::to_value(&ev).unwrap();
+        assert_eq!(
+            v.get("type").and_then(|t| t.as_str()),
+            Some("step_failed"),
+            "wire format must stay `step_failed` for replay of pre-rename events"
+        );
+
+        let old = serde_json::json!({
+            "type": "step_failed",
+            "step_name": "s",
+            "error": "boom",
+            "completed_at": "2026-05-07T00:00:00Z",
+        });
+        let parsed: WorkflowRunEvent = serde_json::from_value(old).unwrap();
+        assert!(matches!(parsed, WorkflowRunEvent::StepErrored { .. }));
     }
 
     #[test]
