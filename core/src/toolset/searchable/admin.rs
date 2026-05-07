@@ -19,14 +19,15 @@ use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::library::{AuthedSearch, AuthedSpaces};
 use crate::note::{Note, Notes};
 use crate::primitives::{
-    AgentId, NoteId, ProjectId, SandboxId, SkillId, UserId, WorkflowDefinitionId,
+    AgentId, NoteId, ProjectId, SandboxId, SkillId, UserId, WorkflowDefinitionId, WorkflowRunId,
 };
 use crate::project::{Project, Projects};
 use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandboxes};
 use crate::skill::{ScopedSkill, Skill, SkillSource, Skills};
 use crate::space_fs::SpaceFs;
 use crate::workflow::{
-    WorkflowDefinition, WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger, Workflows,
+    WorkflowDefinition, WorkflowRun, WorkflowRunState, WorkflowSandboxDecl, WorkflowStepDef,
+    WorkflowTrigger, Workflows,
 };
 
 use super::super::error::ToolSetsError;
@@ -318,49 +319,96 @@ enum WorkflowCommand {
     List,
     Get,
     Update,
+    /// Spawn a run with the given trigger payload. Returns the run id.
+    Trigger,
+    /// Block until a run reaches a terminal state, then surface the
+    /// per-step outputs verbatim (full JSON, not truncated).
+    AwaitRun,
+    /// Read a single run with full per-step outputs.
+    Run,
 }
 
+/// Tagged step input. `type: agent_step` (the historical default,
+/// inferred when omitted) reuses the existing AgentStep shape;
+/// `type: tool_step` dispatches a single top-level MCP tool with
+/// `${{ … }}`-substituted params.
 #[derive(Deserialize, schemars::JsonSchema)]
-struct WorkflowStepParams {
-    name: String,
-    /// NAME of an existing skill in the target project.
-    skill: String,
-    #[serde(default)]
-    sandbox: Option<String>,
-    #[serde(default)]
-    sandbox_mode: Option<SandboxAgentMode>,
-    #[serde(default)]
-    timeout_seconds: Option<u64>,
-    #[serde(default)]
-    model_chain: Option<llm::ModelChain>,
-    /// JSON Schema (root must be `type: object`) for this step's
-    /// structured output. Omit to fall back to the default `{success,
-    /// reason}` schema. Surfaced to the agent as the `submit_output`
-    /// tool's `input_schema`.
-    #[serde(default)]
-    output_schema: Option<serde_json::Value>,
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WorkflowStepParams {
+    AgentStep {
+        name: String,
+        /// NAME of an existing skill in the target project.
+        skill: String,
+        #[serde(default)]
+        sandbox: Option<String>,
+        #[serde(default)]
+        sandbox_mode: Option<SandboxAgentMode>,
+        #[serde(default)]
+        timeout_seconds: Option<u64>,
+        #[serde(default)]
+        model_chain: Option<llm::ModelChain>,
+        /// JSON Schema (root must be `type: object`) for this step's
+        /// structured output. Omit to fall back to the default
+        /// `{success, output, reason}` schema.
+        #[serde(default)]
+        output_schema: Option<serde_json::Value>,
+    },
+    ToolStep {
+        name: String,
+        /// Top-level tool name (e.g. `"whoami"`, `"workflow"`). Must
+        /// be `composable: true` and declare an `output_schema`.
+        tool: String,
+        /// Pre-substitution params; `${{ trigger.X }}` and
+        /// `${{ steps.<name>.outputs.Y }}` resolve at run time.
+        #[serde(default)]
+        params: serde_json::Value,
+        #[serde(default)]
+        timeout_seconds: Option<u64>,
+    },
 }
 
 impl WorkflowStepParams {
     fn into_step(self) -> Result<WorkflowStepDef, ToolSetsError> {
-        let output_schema = match self.output_schema {
-            Some(value) => serde_json::from_value(value).map_err(|e| {
-                ToolSetsError::MissingArgument(format!(
-                    "step '{}': output_schema invalid (root must be `type: object` per MCP): {e}",
-                    self.name
-                ))
-            })?,
-            None => crate::workflow::default_output_schema(),
-        };
-        Ok(WorkflowStepDef::AgentStep {
-            name: self.name,
-            skill: self.skill,
-            sandbox: self.sandbox,
-            sandbox_mode: self.sandbox_mode,
-            timeout_seconds: self.timeout_seconds,
-            model_chain: self.model_chain,
-            output_schema: Box::new(output_schema),
-        })
+        match self {
+            WorkflowStepParams::AgentStep {
+                name,
+                skill,
+                sandbox,
+                sandbox_mode,
+                timeout_seconds,
+                model_chain,
+                output_schema,
+            } => {
+                let output_schema = match output_schema {
+                    Some(value) => serde_json::from_value(value).map_err(|e| {
+                        ToolSetsError::MissingArgument(format!(
+                            "step '{name}': output_schema invalid (root must be `type: object` per MCP): {e}"
+                        ))
+                    })?,
+                    None => crate::workflow::default_output_schema(),
+                };
+                Ok(WorkflowStepDef::AgentStep {
+                    name,
+                    skill,
+                    sandbox,
+                    sandbox_mode,
+                    timeout_seconds,
+                    model_chain,
+                    output_schema: Box::new(output_schema),
+                })
+            }
+            WorkflowStepParams::ToolStep {
+                name,
+                tool,
+                params,
+                timeout_seconds,
+            } => Ok(WorkflowStepDef::ToolStep {
+                name,
+                tool,
+                params,
+                timeout_seconds,
+            }),
+        }
     }
 }
 
@@ -448,9 +496,24 @@ struct WorkflowParams {
     #[schemars(with = "Option<uuid::Uuid>")]
     project_id: Option<ProjectId>,
 
-    /// Required for `get`, `update`.
+    /// Required for `get`, `update`, `trigger`. UUID — admin tier
+    /// keeps it strict; the top-level `workflow` tool accepts
+    /// names too for skill-author ergonomics.
     #[schemars(with = "Option<uuid::Uuid>")]
     definition_id: Option<WorkflowDefinitionId>,
+
+    /// Required for `await_run`, `run`.
+    #[schemars(with = "Option<uuid::Uuid>")]
+    run_id: Option<WorkflowRunId>,
+
+    /// `trigger`: webhook-equivalent payload bound to the run's
+    /// `trigger.*` template namespace. Defaults to `{}`.
+    #[serde(default)]
+    payload: Option<serde_json::Value>,
+
+    /// `await_run`: wait budget in seconds. Defaults to 360.
+    #[serde(default)]
+    timeout_seconds: Option<u64>,
 
     /// `create`: required. `update`: optional rename.
     name: Option<String>,
@@ -1364,6 +1427,57 @@ impl AdminToolSet {
                     format_workflow(&definition, false),
                 )]))
             }
+
+            WorkflowCommand::Trigger => {
+                let definition_id = params.definition_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument(
+                        "definition_id is required for trigger".to_string(),
+                    )
+                })?;
+                Audit::record_action("workflow.trigger");
+                let payload = params
+                    .payload
+                    .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+                let run = self
+                    .workflows
+                    .trigger_run(subject, definition_id, payload)
+                    .await
+                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format_run(
+                    &run,
+                ))]))
+            }
+
+            WorkflowCommand::AwaitRun => {
+                let run_id = params.run_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("run_id is required for await_run".to_string())
+                })?;
+                Audit::record_action("workflow.await_run");
+                let timeout = std::time::Duration::from_secs(params.timeout_seconds.unwrap_or(360));
+                let run = self
+                    .workflows
+                    .await_run_completion(subject, run_id, Some(timeout))
+                    .await
+                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format_run(
+                    &run,
+                ))]))
+            }
+
+            WorkflowCommand::Run => {
+                let run_id = params.run_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("run_id is required for run".to_string())
+                })?;
+                Audit::record_action("workflow.run");
+                let run = self
+                    .workflows
+                    .find_run_by_id(subject, run_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format_run(
+                    &run,
+                ))]))
+            }
         }
     }
 
@@ -1943,6 +2057,38 @@ fn format_workflow(d: &WorkflowDefinition, created: bool) -> String {
     )
 }
 
+/// Renders a `WorkflowRun` as text. Step outputs are emitted as
+/// compact JSON (one per line) so callers can read the structured
+/// payload directly without a second round-trip through the inspect
+/// MCP. Used by `trigger`, `await_run`, and `run`.
+fn format_run(r: &WorkflowRun) -> String {
+    let state = match r.state {
+        WorkflowRunState::Pending => "pending",
+        WorkflowRunState::Running => "running",
+        WorkflowRunState::Succeeded => "succeeded",
+        WorkflowRunState::Failed => "failed",
+    };
+    let mut out = format!(
+        "Run:\n  id: {}\n  definition_id: {}\n  project_id: {}\n  state: {}\n",
+        r.id, r.definition_id, r.project_id, state,
+    );
+    if !r.step_results.is_empty() {
+        out.push_str("  steps:\n");
+        for step in &r.step_results {
+            out.push_str(&format!("    - name: {}\n", step.name));
+            if let Some(err) = &step.error {
+                out.push_str(&format!("      error: {err}\n"));
+            }
+            if let Some(value) = &step.output {
+                let json =
+                    serde_json::to_string(value).unwrap_or_else(|_| "<unserializable>".to_string());
+                out.push_str(&format!("      output: {json}\n"));
+            }
+        }
+    }
+    out
+}
+
 fn format_workflows(defs: &[WorkflowDefinition]) -> String {
     if defs.is_empty() {
         return "No workflows found.".to_string();
@@ -2428,7 +2574,7 @@ mod tests {
             "description": "Run nightly checks",
             "manual": true,
             "steps": [
-                { "name": "step", "skill": "audit", "timeout_seconds": 60 }
+                { "type": "agent_step", "name": "step", "skill": "audit", "timeout_seconds": 60 }
             ],
             "sandboxes": [
                 { "type": "scratch", "name": "sb1" }
@@ -2468,6 +2614,35 @@ mod tests {
     }
 
     #[test]
+    fn workflow_create_parses_tool_step() {
+        let project_id = uuid::Uuid::new_v4();
+        let p: WorkflowParams = parse_params(args(serde_json::json!({
+            "command": "create",
+            "project_id": project_id,
+            "name": "dispatch-flow",
+            "manual": true,
+            "steps": [
+                {
+                    "type": "tool_step",
+                    "name": "identify",
+                    "tool": "whoami",
+                    "params": {}
+                }
+            ],
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, WorkflowCommand::Create));
+        assert_eq!(p.steps.len(), 1);
+        match &p.steps[0] {
+            WorkflowStepParams::ToolStep { name, tool, .. } => {
+                assert_eq!(name, "identify");
+                assert_eq!(tool, "whoami");
+            }
+            _ => panic!("expected ToolStep"),
+        }
+    }
+
+    #[test]
     fn workflow_update_parses_partial_fields() {
         let definition_id = uuid::Uuid::new_v4();
         let p: WorkflowParams = parse_params(args(serde_json::json!({
@@ -2476,7 +2651,7 @@ mod tests {
             "name": "renamed",
             "update_steps": true,
             "steps": [
-                { "name": "s1", "skill": "audit" }
+                { "type": "agent_step", "name": "s1", "skill": "audit" }
             ],
         })))
         .expect("parse");
