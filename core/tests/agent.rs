@@ -54,6 +54,13 @@ async fn build_agents(pool: &sqlx::PgPool) -> (Agents, Arc<Sandboxes>) {
             compaction: Default::default(),
         },
     );
+    builtin_roles.insert(
+        AgentRole::WorkflowStepAgent,
+        RoleConfig {
+            chain: Some(llm::ModelChain::new(model_name.clone())),
+            compaction: Default::default(),
+        },
+    );
     let mut models = HashMap::new();
     models.insert(
         model_name.clone(),

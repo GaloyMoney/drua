@@ -47,14 +47,13 @@ start_server() {
 }
 
 stop_server() {
-  # Dump server.log on test-suite failure so CI logs surface panics
-  # / errors instead of swallowing them. `BATS_SUITE_TEST_NUMBER` is
-  # only meaningful inside a test; on teardown_file we treat any
-  # exit code != 0 as failure.
-  if [ "${BATS_SUITE_FAILURE_COUNT:-0}" != "0" ] && [ -f "${BATS_FILE_TMPDIR:-}/server.log" ]; then
-    echo "===== server.log (last 200 lines) ====="
-    tail -n 200 "$BATS_FILE_TMPDIR/server.log"
-    echo "===== end server.log ====="
+  # Always dump the tail of server.log to CI output so panics /
+  # errors aren't swallowed when a test fails. Cheap and surfaces
+  # the real cause when bats prints only the assertion line.
+  if [ -f "${BATS_FILE_TMPDIR:-}/server.log" ]; then
+    printf '===== server.log (last 200 lines) =====\n' >&2
+    tail -n 200 "$BATS_FILE_TMPDIR/server.log" >&2
+    printf '===== end server.log =====\n' >&2
   fi
 
   if [ -f "$SERVER_PID_FILE" ]; then
