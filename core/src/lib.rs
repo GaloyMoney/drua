@@ -300,6 +300,7 @@ impl App {
             Arc::clone(&projects),
             Arc::clone(&spaces),
             Arc::clone(&space_fs),
+            Arc::clone(&search),
             Arc::clone(&workflows),
             Arc::clone(&skills),
             Arc::clone(&notes),

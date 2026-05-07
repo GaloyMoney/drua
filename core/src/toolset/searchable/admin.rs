@@ -11,12 +11,12 @@ use rmcp::model::{CallToolResult, Content, JsonObject};
 use sandbox::instance_client::ExecuteRequest;
 use serde::Deserialize;
 
-use drua_library::{Space, SpaceError};
+use drua_library::{Space, SpaceError, SPACE_DOC_TYPE};
 
 use crate::agent::{Agent, AgentRole, Agents};
 use crate::audit::{Audit, AuditEntry, AuditLogQuery};
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
-use crate::library::AuthedSpaces;
+use crate::library::{AuthedSearch, AuthedSpaces};
 use crate::note::{Note, Notes};
 use crate::primitives::{
     AgentId, NoteId, ProjectId, SandboxId, SkillId, UserId, WorkflowDefinitionId,
@@ -31,6 +31,7 @@ use crate::workflow::{
 
 use super::super::error::ToolSetsError;
 use super::super::inspect::{dispatch_edit, dispatch_view, parse_view_range, EditOp, ReadOp};
+use super::super::top_level::SpacesTool;
 use super::super::traits::{SearchableToolSet, ToolSetEntry};
 
 fn parse_params<T: serde::de::DeserializeOwned>(
@@ -230,13 +231,18 @@ enum SpacesCommand {
     /// (write|str_replace|insert|delete|move); `op_args` shape
     /// depends on it.
     Edit,
+    /// Hybrid FTS + semantic search inside a single space. Admin
+    /// variant of the agent-tier `spaces.search` — does not require
+    /// the space to be mounted on any project.
+    Search,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct SpacesParams {
     command: SpacesCommand,
-    /// Slug for `create`, `get`, `mount`, `unmount`, `view`, `edit`.
-    /// Must match `[a-z0-9-]+` with no leading / trailing / double hyphens.
+    /// Slug for `create`, `get`, `mount`, `unmount`, `view`, `edit`,
+    /// `search`. Must match `[a-z0-9-]+` with no leading / trailing /
+    /// double hyphens.
     slug: Option<String>,
     /// Optional human-readable summary, used by `create`.
     description: Option<String>,
@@ -252,6 +258,18 @@ struct SpacesParams {
     /// Per-op arguments. See command docs for shape.
     #[serde(default)]
     op_args: Option<JsonObject>,
+
+    /// Required for `search`. Keywords or natural language.
+    query: Option<String>,
+    /// `search`: optional path-prefix scope. Each entry restricts hits
+    /// to files whose path equals it or lives under it as a subtree.
+    /// Trailing slash optional. Empty / omitted = whole space. Reject
+    /// leading `/`, `..` segments, and glob metacharacters.
+    #[serde(default)]
+    paths: Option<Vec<String>>,
+    /// `search`: max number of hits (default 10).
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -620,7 +638,12 @@ static TOOLS: &[ToolDef] = &[
                        (read|ls|grep|glob), `tool_args`), \
                        `write` (requires `slug`, `path`, `content`), \
                        `delete` (requires `slug`, `path`), \
-                       `move` (requires `slug`, `from`, `to`).",
+                       `move` (requires `slug`, `from`, `to`), \
+                       `search` (hybrid FTS + semantic search inside a single \
+                       space; requires `slug`, `query`; optional `paths` \
+                       (subtree prefixes; reject leading `/`, `..`, globs); \
+                       optional `limit` (default 10). Admin variant — does not \
+                       require the space to be mounted on any project).",
         schema: &SPACES_SCHEMA,
     },
 ];
@@ -633,6 +656,7 @@ pub struct AdminToolSet {
     projects: Arc<Projects>,
     spaces: Arc<AuthedSpaces>,
     space_fs: Arc<SpaceFs>,
+    search: Arc<AuthedSearch>,
     workflows: Arc<Workflows>,
     skills: Arc<Skills>,
     notes: Arc<Notes>,
@@ -647,6 +671,7 @@ impl AdminToolSet {
         projects: Arc<Projects>,
         spaces: Arc<AuthedSpaces>,
         space_fs: Arc<SpaceFs>,
+        search: Arc<AuthedSearch>,
         workflows: Arc<Workflows>,
         skills: Arc<Skills>,
         notes: Arc<Notes>,
@@ -672,6 +697,7 @@ impl AdminToolSet {
             projects,
             spaces,
             space_fs,
+            search,
             workflows,
             skills,
             notes,
@@ -1050,6 +1076,40 @@ impl AdminToolSet {
                 let op_args = params.op_args.unwrap_or_default();
                 Audit::record_action("spaces.edit");
                 dispatch_edit(&self.space_fs, subject, &slug, op, op_args).await
+            }
+
+            SpacesCommand::Search => {
+                let slug = params.slug.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("slug is required for search".to_string())
+                })?;
+                let query = params.query.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("query is required for search".to_string())
+                })?;
+                Audit::record_action("spaces.search");
+                subject
+                    .can(AuthVerb::Read, AuthResource::Space(None))
+                    .map_err(|e| ToolSetsError::Library(e.into()))?;
+                let space =
+                    self.spaces.find_by_slug(&slug).await?.ok_or_else(|| {
+                        ToolSetsError::Library(SpaceError::NotFound { slug }.into())
+                    })?;
+                let path_prefixes =
+                    SpacesTool::normalize_path_prefixes(params.paths.unwrap_or_default())?;
+                let limit = params.limit.unwrap_or(10);
+                let hits = self
+                    .search
+                    .search(
+                        subject,
+                        &[uuid::Uuid::from(space.id)],
+                        &query,
+                        &[SPACE_DOC_TYPE],
+                        &path_prefixes,
+                        limit,
+                    )
+                    .await?;
+                Ok(CallToolResult::success(vec![Content::text(
+                    format_space_search(&space, &hits),
+                )]))
             }
         }
     }
@@ -1953,6 +2013,29 @@ fn format_space(s: &Space, created: bool) -> String {
     )
 }
 
+fn format_space_search(space: &Space, hits: &[drua_library::SearchHit]) -> String {
+    if hits.is_empty() {
+        return format!("No matches in space '{}' for query.", space.slug);
+    }
+    let entries: Vec<String> = hits
+        .iter()
+        .map(|hit| {
+            let preview: String = hit.fields.content.chars().take(200).collect();
+            let path = hit.fields.path.clone().unwrap_or_default();
+            format!(
+                "path: {path}\ntitle: {}\nscore: {:.3}\npreview: {preview}",
+                hit.fields.name, hit.score,
+            )
+        })
+        .collect();
+    format!(
+        "Found {} hit(s) in space '{}':\n\n{}",
+        hits.len(),
+        space.slug,
+        entries.join("\n---\n"),
+    )
+}
+
 fn format_spaces(spaces: &[Space]) -> String {
     if spaces.is_empty() {
         return "No spaces found.".to_string();
@@ -2079,6 +2162,40 @@ mod tests {
         assert!(s.contains("\"unmount\""));
         assert!(s.contains("\"view\""));
         assert!(s.contains("\"edit\""));
+        assert!(s.contains("\"search\""));
+    }
+
+    #[test]
+    fn spaces_search_parses_minimal() {
+        let p: SpacesParams = parse_params(args(serde_json::json!({
+            "command": "search",
+            "slug": "oncall",
+            "query": "ha readiness",
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, SpacesCommand::Search));
+        assert_eq!(p.slug.as_deref(), Some("oncall"));
+        assert_eq!(p.query.as_deref(), Some("ha readiness"));
+        assert!(p.paths.is_none());
+        assert!(p.limit.is_none());
+    }
+
+    #[test]
+    fn spaces_search_parses_full_args() {
+        let p: SpacesParams = parse_params(args(serde_json::json!({
+            "command": "search",
+            "slug": "oncall",
+            "query": "tunnel registry",
+            "paths": ["research/", "decisions/"],
+            "limit": 25,
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, SpacesCommand::Search));
+        assert_eq!(
+            p.paths.as_deref(),
+            Some(&["research/".to_string(), "decisions/".to_string()][..])
+        );
+        assert_eq!(p.limit, Some(25));
     }
 
     #[test]
