@@ -96,6 +96,30 @@ gen_test_project_agent_ids() {
   export GIT_PROXY_TOKEN="dev-agent:$AGENT_ID"
 }
 
+# Renders an isolated bare upstream repo at $BATS_FILE_TMPDIR/<owner>-<repo>.git
+# with one commit on `main`. Returns its `file://` URL via stdout so
+# the caller can plug it into write_git_proxy_config's upstream override.
+mk_upstream_repo() {
+  local owner="$1" repo="$2"
+  local work="$BATS_FILE_TMPDIR/upstream/${owner}-${repo}"
+  local bare="$BATS_FILE_TMPDIR/upstream/${owner}-${repo}.git"
+  rm -rf "$work" "$bare"
+  mkdir -p "$work"
+  git -C "$work" init -q -b main
+  git -C "$work" config user.email "bats@example.com"
+  git -C "$work" config user.name "bats"
+  echo "# fixture" > "$work/README.md"
+  git -C "$work" add README.md
+  git -C "$work" commit -q -m "fixture initial"
+  git clone -q --bare "$work" "$bare" 2>/dev/null
+  # Pre-receive hook bare repos default to denyCurrentBranch=refuse
+  # which breaks pushes to the checked-out branch on the upstream.
+  # Bare clones don't have a checked-out branch so this is a no-op,
+  # but set it explicitly for clarity.
+  git -C "$bare" config receive.denyCurrentBranch ignore
+  echo "file://$bare"
+}
+
 # Persists the project + lead-agent SQL rows. Must run AFTER the
 # server is up (which brings up PG + applies migrations) and AFTER
 # `gen_test_project_agent_ids`.
@@ -166,16 +190,29 @@ EOF
   if [ "$#" -gt 0 ]; then
     echo "    entries:" >> "$out"
     for spec in "$@"; do
-      local owner_repo modes_patterns modes patterns owner repo_name
+      # spec format: <owner>/<repo>:<modes>:<patterns>[:<upstream_url>]
+      # split on : but keep only the first 3 splits — the 4th may itself contain ':' (file://).
+      local owner_repo modes patterns upstream_url remainder
       owner_repo="${spec%%:*}"
-      modes_patterns="${spec#*:}"
-      modes="${modes_patterns%%:*}"
-      patterns="${modes_patterns#*:}"
-      owner="${owner_repo%%/*}"
-      repo_name="${owner_repo#*/}"
+      remainder="${spec#*:}"
+      modes="${remainder%%:*}"
+      remainder="${remainder#*:}"
+      # `patterns` is everything until next `:` OR end if no upstream_url
+      if [[ "$remainder" == *":"* ]]; then
+        patterns="${remainder%%:*}"
+        upstream_url="${remainder#*:}"
+      else
+        patterns="$remainder"
+        upstream_url=""
+      fi
+      local owner="${owner_repo%%/*}"
+      local repo_name="${owner_repo#*/}"
       echo "      - project_id: $PROJECT_ID" >> "$out"
       echo "        owner: $owner" >> "$out"
       echo "        repo: $repo_name" >> "$out"
+      if [ -n "$upstream_url" ]; then
+        echo "        upstream_url: \"$upstream_url\"" >> "$out"
+      fi
       echo "        modes:" >> "$out"
       IFS=',' read -ra _modes <<< "$modes"
       for m in "${_modes[@]}"; do

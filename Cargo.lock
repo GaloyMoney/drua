@@ -1526,9 +1526,15 @@ dependencies = [
 name = "drua-git-proxy"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "bytes",
+ "git2",
  "globset",
+ "http",
  "serde",
+ "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "uuid",
 ]
@@ -1584,6 +1590,7 @@ dependencies = [
  "axum",
  "axum-extra",
  "base64 0.22.1",
+ "bytes",
  "chrono",
  "clap",
  "drua-core",
@@ -1591,6 +1598,7 @@ dependencies = [
  "drua-tracing-utils",
  "ed25519-dalek",
  "es-entity",
+ "http-body-util",
  "k8s-openapi",
  "kube",
  "oauth2",

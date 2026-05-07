@@ -3,29 +3,51 @@ pub mod error;
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use tracing::instrument;
 
 pub use audit::GitProxyAuditLog;
 pub use drua_git_proxy::{
-    Allowlist, AllowlistConfig, AllowlistEntry, AllowlistError, GitProxyDecision, GitProxyMode,
-    GitService, RefPatternSet, RepoCoord,
+    spawn_http_backend, Allowlist, AllowlistConfig, AllowlistEntry, AllowlistError, CgiError,
+    CgiRequest, CgiResponse, GitProxyDecision, GitProxyMode, GitService, MirrorConfig, MirrorError,
+    MirrorManager, RefPatternSet, RepoCoord, StaticCredential, UpstreamCredentialProvider,
 };
 pub use error::GitProxyError;
 
 use crate::auth::{error::AuthorizationError, AuthSubject};
+use crate::github_app::GitHubAppTokenProvider;
+
+/// Bridge `GitHubAppTokenProvider` to lib's
+/// [`UpstreamCredentialProvider`] so the leaf crate stays
+/// drua-core-free. Mints a fresh installation token per call.
+struct AppTokenCreds(Arc<GitHubAppTokenProvider>);
+
+#[async_trait]
+impl UpstreamCredentialProvider for AppTokenCreds {
+    async fn fresh_token(&self) -> Result<String, MirrorError> {
+        self.0
+            .generate_token()
+            .await
+            .map(|t| t.token)
+            .map_err(|e| MirrorError::CredentialProvider(e.to_string()))
+    }
+}
 
 /// Service surface for the git-proxy.
 ///
 /// Holds the YAML-driven allow-list (in-memory; rebuilt at boot from
-/// `[git_proxy.allowlist]` in `drua.yml`) and the audit-log writer.
-/// `check_authorization` is the single per-request authorization
-/// entry point — extracts `project_id` from `AuthSubject`, asserts
-/// the subject is an Agent, then delegates ref/mode/repo enforcement
-/// to lib's [`Allowlist`].
+/// `[git_proxy.allowlist]` in `drua.yml`), the audit-log writer, the
+/// per-project bare-mirror manager, and a credential bridge to the
+/// existing `GitHubAppTokenProvider`. `check_authorization` is the
+/// single per-request authorization entry point — extracts
+/// `project_id` from `AuthSubject`, asserts the subject is an Agent,
+/// then delegates ref/mode/repo enforcement to lib's [`Allowlist`].
 #[derive(Clone)]
 pub struct GitProxies {
     allowlist: Arc<Allowlist>,
     audit: GitProxyAuditLog,
+    mirror: Option<MirrorManager>,
+    creds: Option<Arc<dyn UpstreamCredentialProvider>>,
 }
 
 impl GitProxies {
@@ -33,7 +55,31 @@ impl GitProxies {
         Self {
             allowlist: Arc::new(allowlist),
             audit: GitProxyAuditLog::new(pool),
+            mirror: None,
+            creds: None,
         }
+    }
+
+    /// Wires in the per-project bare mirror manager + the GitHub App
+    /// credential bridge. `None` for either disables the upstream-fetch
+    /// path (handler returns 503 with a stable code) which is what we
+    /// want when the proxy is being run without a configured GitHub App
+    /// (local dev with no upstream).
+    pub fn with_mirror(
+        mut self,
+        mirror: MirrorManager,
+        github_app: Option<Arc<GitHubAppTokenProvider>>,
+    ) -> Self {
+        self.mirror = Some(mirror);
+        self.creds =
+            github_app.map(|a| Arc::new(AppTokenCreds(a)) as Arc<dyn UpstreamCredentialProvider>);
+        self
+    }
+
+    /// Test-only entry point — accepts any [`UpstreamCredentialProvider`].
+    pub fn with_credentials(mut self, creds: Arc<dyn UpstreamCredentialProvider>) -> Self {
+        self.creds = Some(creds);
+        self
     }
 
     pub fn allowlist(&self) -> &Allowlist {
@@ -42,6 +88,14 @@ impl GitProxies {
 
     pub fn audit(&self) -> &GitProxyAuditLog {
         &self.audit
+    }
+
+    pub fn mirror(&self) -> Option<&MirrorManager> {
+        self.mirror.as_ref()
+    }
+
+    pub fn credentials(&self) -> Option<&dyn UpstreamCredentialProvider> {
+        self.creds.as_deref()
     }
 
     /// Per-request authorization. Used by the axum handler in

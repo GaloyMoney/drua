@@ -37,6 +37,19 @@ pub struct AppConfig {
 pub struct GitProxyAppConfig {
     #[serde(default)]
     pub allowlist: AllowlistConfig,
+    /// Per-project bare mirrors live at `<mirror_root>/<project_id>/<owner>/<repo>.git`.
+    /// Defaults to `./.git-proxy-mirrors` (good for local dev). Production
+    /// should set this to a PVC path.
+    #[serde(default)]
+    pub mirror_root: Option<String>,
+    /// Pulls within this window reuse the existing mirror without
+    /// re-fetching from upstream. Default 300s (memo §7.1).
+    #[serde(default = "default_mirror_ttl_seconds")]
+    pub mirror_ttl_seconds: u64,
+}
+
+fn default_mirror_ttl_seconds() -> u64 {
+    300
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

@@ -196,7 +196,18 @@ impl App {
             entries = allowlist.entries().len(),
             "git-proxy allow-list loaded"
         );
-        let git_proxies = Arc::new(GitProxies::new(pool, allowlist));
+        let mirror_root = config
+            .git_proxy
+            .mirror_root
+            .clone()
+            .unwrap_or_else(|| "./.git-proxy-mirrors".to_string());
+        let mirror_cfg = drua_git_proxy::MirrorConfig {
+            root: std::path::PathBuf::from(&mirror_root),
+            fetch_ttl: std::time::Duration::from_secs(config.git_proxy.mirror_ttl_seconds),
+        };
+        let mirror = drua_git_proxy::MirrorManager::new(mirror_cfg);
+        let git_proxies =
+            Arc::new(GitProxies::new(pool, allowlist).with_mirror(mirror, github_app.clone()));
 
         // Read facade for the project↔space mount relationship. Built
         // before `Skills` so Skills can resolve mounted-space skills

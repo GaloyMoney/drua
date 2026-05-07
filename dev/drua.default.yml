@@ -50,4 +50,6 @@ library:
 git_proxy:
   allowlist:
     entries: []
+  mirror_root: null
+  mirror_ttl_seconds: 0
 

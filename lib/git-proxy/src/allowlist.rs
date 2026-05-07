@@ -17,6 +17,12 @@ pub struct AllowlistEntryConfig {
     pub allowed_ref_patterns: Vec<String>,
     #[serde(default)]
     pub modes: Vec<GitProxyMode>,
+    /// Override the upstream the mirror clones / fetches from. Defaults
+    /// to `https://github.com/<owner>/<repo>.git`. Set this for local
+    /// bats fixtures (`file:///tmp/upstream.git`) or for self-hosted
+    /// GitHub Enterprise. Never user-influenced — config-only.
+    #[serde(default)]
+    pub upstream_url: Option<String>,
 }
 
 /// Top-level allow-list config block; deserialised from the
@@ -36,6 +42,13 @@ pub struct AllowlistEntry {
     pub repo: String,
     pub modes: Vec<GitProxyMode>,
     pub patterns: RefPatternSet,
+    pub upstream_url: String,
+}
+
+impl AllowlistEntry {
+    pub fn default_upstream_url(owner: &str, repo: &str) -> String {
+        format!("https://github.com/{owner}/{repo}.git")
+    }
 }
 
 /// In-memory allow-list keyed by `(project_id, owner, repo)`.
@@ -63,6 +76,10 @@ impl Allowlist {
                 repo: raw.repo.clone(),
                 modes: raw.modes.clone(),
                 patterns: RefPatternSet::new(&raw.allowed_ref_patterns)?,
+                upstream_url: raw
+                    .upstream_url
+                    .clone()
+                    .unwrap_or_else(|| AllowlistEntry::default_upstream_url(&raw.owner, &raw.repo)),
             });
         }
         Ok(Self { entries })
@@ -137,6 +154,7 @@ mod tests {
                 repo: "drua".into(),
                 allowed_ref_patterns: vec!["refs/heads/bot/*".into(), "refs/heads/main".into()],
                 modes: vec![GitProxyMode::Pull, GitProxyMode::Push],
+                upstream_url: None,
             }],
         }
     }
@@ -150,6 +168,7 @@ mod tests {
                 repo: "y".into(),
                 allowed_ref_patterns: vec!["[unterminated".into()],
                 modes: vec![GitProxyMode::Pull],
+                upstream_url: None,
             }],
         };
         assert!(matches!(
@@ -224,6 +243,7 @@ mod tests {
                 repo: "drua".into(),
                 allowed_ref_patterns: vec!["refs/heads/main".into()],
                 modes: vec![GitProxyMode::Pull],
+                upstream_url: None,
             }],
         })
         .unwrap();
@@ -243,6 +263,7 @@ mod tests {
                 repo: "y".into(),
                 allowed_ref_patterns: vec![],
                 modes: vec![GitProxyMode::Push],
+                upstream_url: None,
             }],
         })
         .unwrap();

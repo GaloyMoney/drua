@@ -10,9 +10,16 @@ load helpers
 
 setup_file() {
   gen_test_project_agent_ids
+  # Bring up the test bare upstream(s) BEFORE rendering the config so
+  # we can plug their file:// URLs into the allow-list entries.
+  : > "$BATS_FILE_TMPDIR/setup.log" 2>/dev/null || true
+  mkdir -p "$BATS_FILE_TMPDIR/upstream"
+  UPSTREAM_DRUA="$(mk_upstream_repo GaloyMoney drua)"
+  UPSTREAM_RO="$(mk_upstream_repo GaloyMoney drua-readonly)"
+  export UPSTREAM_DRUA UPSTREAM_RO
   write_git_proxy_config \
-    "GaloyMoney/drua:pull,push:refs/heads/bot/*,refs/heads/main" \
-    "GaloyMoney/drua-readonly:pull:refs/heads/main"
+    "GaloyMoney/drua:pull,push:refs/heads/bot/*,refs/heads/main:$UPSTREAM_DRUA" \
+    "GaloyMoney/drua-readonly:pull:refs/heads/main:$UPSTREAM_RO"
   start_server
   seed_test_project_agent
 }
@@ -75,16 +82,15 @@ SVC_PULL="?service=git-upload-pack"
 
 # ─── Allow-list contract ───────────────────────────────────────────────
 
-@test "git-proxy: pull on allowed (project, owner, repo) passes authz" {
-  # M1: 501 returned post-authz (backend lands in M1.5). The point is
-  # the response is NOT a 401/403/400 — the policy accepted.
+@test "git-proxy: pull info/refs returns smart-HTTP advertisement + audit row" {
   status="$(curl -s -o "$BATS_TEST_TMPDIR/body" -w '%{http_code}' \
     -H "Authorization: Bearer $GIT_PROXY_TOKEN" \
     "$GP_URL/GaloyMoney/drua/info/refs$SVC_PULL")"
-  [ "$status" = "501" ]
-  grep -q 'policy accepted' "$BATS_TEST_TMPDIR/body"
+  [ "$status" = "200" ]
+  # Smart-HTTP service advertisement: 4-byte pkt-line length prefix
+  # + `# service=git-upload-pack` literal somewhere in the first frame.
+  grep -aq 'service=git-upload-pack' "$BATS_TEST_TMPDIR/body"
 
-  # Audit row should be `accepted`.
   count="$(psql "$PG_CON" -tAc "SELECT count(*) FROM sandbox_git_proxy_attempts WHERE project_id='$PROJECT_ID' AND owner='GaloyMoney' AND repo='drua' AND decision='accepted'")"
   [ "$count" -ge 1 ]
 }
@@ -146,20 +152,33 @@ SQL
   grep -q 'repo_not_allowed' "$BATS_TEST_TMPDIR/body"
 }
 
-# ─── M1.5 — git-client e2e (skip until backend lands) ──────────────────
+# ─── git-client e2e — pull side ────────────────────────────────────────
 
-@test "git-proxy: git ls-remote against allowed repo succeeds (M1.5)" {
-  skip "M1.5: requires git http-backend spawn + per-project mirror"
+@test "git-proxy: git ls-remote against allowed repo succeeds" {
+  cd "$BATS_TEST_TMPDIR"
+  run git -c "http.extraHeader=Authorization: Bearer $GIT_PROXY_TOKEN" \
+        ls-remote "$GP_URL/GaloyMoney/drua"
+  echo "$output"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "refs/heads/main"
 }
 
-@test "git-proxy: git clone through proxy yields a valid working repo (M1.5)" {
-  skip "M1.5: requires git http-backend spawn"
+@test "git-proxy: git clone through proxy yields a valid working repo" {
+  cd "$BATS_TEST_TMPDIR"
+  run git -c "http.extraHeader=Authorization: Bearer $GIT_PROXY_TOKEN" \
+        clone "$GP_URL/GaloyMoney/drua" ./clone
+  echo "$output"
+  [ "$status" -eq 0 ]
+  [ -d ./clone/.git ]
+  ( cd ./clone && git log --oneline | head -1 | grep -q "fixture initial" )
 }
 
-@test "git-proxy: git push to bot/* succeeds (M1.5)" {
-  skip "M1.5: requires receive-pack handler + pkt-line peek + upstream forward"
+# ─── push-side e2e (M1.6 — next commit) ────────────────────────────────
+
+@test "git-proxy: git push to bot/* succeeds (M1.6)" {
+  skip "M1.6: requires receive-pack pkt-line peek + upstream forward"
 }
 
-@test "git-proxy: git push to refs/heads/main rejected by ref-pattern (M1.5)" {
-  skip "M1.5: requires receive-pack handler + pkt-line peek"
+@test "git-proxy: git push to refs/heads/main rejected by ref-pattern (M1.6)" {
+  skip "M1.6: requires receive-pack pkt-line peek"
 }
