@@ -56,8 +56,6 @@ pub enum WorkflowRunEvent {
     /// ready, idle timeout, agent error). Distinct from agent-reported
     /// failure (`output.success == false`), which lands as a
     /// `StepCompleted` event with a falsy `success` payload.
-    /// Wire format kept as `"step_failed"` for replay safety.
-    #[serde(rename = "step_failed")]
     StepErrored {
         step_name: String,
         error: String,
@@ -529,27 +527,14 @@ mod tests {
     }
 
     #[test]
-    fn step_errored_event_wire_format_is_step_failed() {
+    fn step_errored_event_wire_format() {
         let ev = WorkflowRunEvent::StepErrored {
             step_name: "s".into(),
             error: "boom".into(),
             completed_at: Utc::now(),
         };
         let v = serde_json::to_value(&ev).unwrap();
-        assert_eq!(
-            v.get("type").and_then(|t| t.as_str()),
-            Some("step_failed"),
-            "wire format must stay `step_failed` for replay of pre-rename events"
-        );
-
-        let old = serde_json::json!({
-            "type": "step_failed",
-            "step_name": "s",
-            "error": "boom",
-            "completed_at": "2026-05-07T00:00:00Z",
-        });
-        let parsed: WorkflowRunEvent = serde_json::from_value(old).unwrap();
-        assert!(matches!(parsed, WorkflowRunEvent::StepErrored { .. }));
+        assert_eq!(v.get("type").and_then(|t| t.as_str()), Some("step_errored"));
     }
 
     #[test]
