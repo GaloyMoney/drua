@@ -214,10 +214,13 @@ impl ToolSets {
         let search = Arc::new(SearchCatalog::new(Arc::clone(&sets)));
         let describe = Arc::new(DescribeCatalogTool::new(Arc::clone(&sets)));
         let call = Arc::new(CallCatalogTool::new(Arc::clone(&sets)));
+        let classifiers = Arc::new(ClassifierRegistry::with_default());
         let compose = Arc::new(ComposeTool::new(
             Arc::clone(&sets),
             Arc::clone(&top_level),
             audit.clone(),
+            tool_invocations.clone(),
+            Arc::clone(&classifiers),
             config.compose.clone(),
         ));
         let compose_types = Arc::new(ComposeTypes::new(Arc::clone(&sets), Arc::clone(&top_level)));
@@ -248,7 +251,7 @@ impl ToolSets {
             top_level,
             audit,
             tool_invocations,
-            classifiers: Arc::new(ClassifierRegistry::with_default()),
+            classifiers,
             init_errors,
         })
     }

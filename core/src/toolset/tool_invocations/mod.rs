@@ -117,28 +117,29 @@ impl ToolInvocations {
         Ok(self.repo.find_latest_by_args_hash(owner, args_hash).await?)
     }
 
-    /// Persist the captured raw output and decorate the original
-    /// `CallToolResult` with an `envelope.invocation_id` so the caller
-    /// can recover detail through `tool_output_fetch`. Returns the
-    /// original raw result on persistence failure (the model still
-    /// gets a usable result; the failure is logged).
+    /// Persist the classifier's output as a `tool_invocations` row and
+    /// record the resulting id on the audit row. Pure persistence — no
+    /// CallToolResult mutation, no envelope construction. Used by both
+    /// `persist_and_envelope` (which wraps the model-facing result
+    /// after) and compose's CatalogDispatcher (which tracks the
+    /// invocation_id in `sub_invocations` while leaving the JS-facing
+    /// result un-wrapped).
     ///
-    /// Returns `None` when the subject is `Anonymous` (no scope key
-    /// for the persisted row); the dispatcher then falls back to raw
-    /// passthrough. Both agent-scoped and user-scoped subjects (the
-    /// latter for mcp-gateway external callers) get a wrapped result.
-    #[instrument(name = "core.tool_invocations.persist_and_envelope", skip_all)]
-    #[allow(clippy::too_many_arguments)]
-    pub async fn persist_and_envelope(
+    /// Returns `None` when:
+    /// - the subject doesn't yield an owner (`Anonymous`,
+    ///   `WorkflowExecutor` — see `ToolInvocationOwner::from_subject`);
+    /// - summary or args fail to serialize (logged + skipped);
+    /// - the PG insert errors (logged + skipped).
+    #[instrument(name = "core.tool_invocations.persist_classification", skip_all)]
+    pub async fn persist_classification(
         &self,
         subject: &AuthSubject,
         tool_name: &str,
         args: &serde_json::Value,
         classification: Classification,
-        raw: &CallToolResult,
         duration_ms: u64,
         started_at: chrono::DateTime<chrono::Utc>,
-    ) -> Option<CallToolResult> {
+    ) -> Option<PersistedClassification> {
         let owner = ToolInvocationOwner::from_subject(subject)?;
         let Classification {
             summary,
@@ -195,9 +196,45 @@ impl ToolInvocations {
 
         Audit::record_tool_invocation_id(persisted.id);
 
+        Some(PersistedClassification {
+            invocation_id: persisted.id,
+            summary,
+            summary_value,
+            raw_size_bytes: raw_size_bytes as u64,
+        })
+    }
+
+    /// Persist the captured raw output and decorate the original
+    /// `CallToolResult` with an `envelope.invocation_id` so the caller
+    /// can recover detail through `tool_output_fetch`. Returns the
+    /// original raw result on persistence failure (the model still
+    /// gets a usable result; the failure is logged).
+    #[instrument(name = "core.tool_invocations.persist_and_envelope", skip_all)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn persist_and_envelope(
+        &self,
+        subject: &AuthSubject,
+        tool_name: &str,
+        args: &serde_json::Value,
+        classification: Classification,
+        raw: &CallToolResult,
+        duration_ms: u64,
+        started_at: chrono::DateTime<chrono::Utc>,
+    ) -> Option<CallToolResult> {
+        let persisted = self
+            .persist_classification(
+                subject,
+                tool_name,
+                args,
+                classification,
+                duration_ms,
+                started_at,
+            )
+            .await?;
+
         let envelope = serde_json::json!({
-            "invocation_id": uuid::Uuid::from(persisted.id).to_string(),
-            "summary": summary_value,
+            "invocation_id": uuid::Uuid::from(persisted.invocation_id).to_string(),
+            "summary": persisted.summary_value,
             // Single source of truth for the call shape — `FETCH_HINT` lives
             // next to `FetchInput`'s definition so the hint and the
             // `deny_unknown_fields` schema stay aligned (locked-in by
@@ -206,10 +243,24 @@ impl ToolInvocations {
         });
 
         let mut wrapped = raw.clone();
-        wrapped.content = vec![Content::text(envelope_text(&summary, persisted.id))];
+        wrapped.content = vec![Content::text(envelope_text(
+            &persisted.summary,
+            persisted.invocation_id,
+        ))];
         wrapped.structured_content = Some(envelope);
         Some(wrapped)
     }
+}
+
+/// Result of [`ToolInvocations::persist_classification`]. Carries the
+/// pieces both the dispatcher (envelope construction) and compose
+/// (sub_invocations directory) need to inspect after persistence —
+/// without re-classifying or re-loading the persisted row.
+pub struct PersistedClassification {
+    pub invocation_id: ToolInvocationId,
+    pub summary: ToolResultSummary,
+    pub summary_value: serde_json::Value,
+    pub raw_size_bytes: u64,
 }
 
 fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId) -> String {

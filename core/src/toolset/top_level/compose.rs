@@ -17,12 +17,16 @@ use serde::Deserialize;
 use crate::audit::{Audit, InteractionType};
 use crate::auth::AuthSubject;
 
+use super::super::classifier::{ClassifierContext, ClassifierRegistry};
 use super::super::config::ComposeConfig;
 use super::super::error::ToolSetsError;
 use super::super::filter::OutputFilter;
+use super::super::tool_invocations::{PersistedClassification, ToolInvocations};
 use super::super::traits::{SearchableToolSet, TopLevelTool};
 use super::liberal;
 use super::{parse_params, schema_for};
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Mutex as StdMutex;
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct ComposeParams {
@@ -40,6 +44,13 @@ pub struct ComposeTool {
     /// `019dfd6e`); without it the sub-tool action inherits the parent
     /// compose call's outcome.
     audit: Option<Arc<Audit>>,
+    /// Same shape as `ToolSets::tool_invocations` — `None` in test paths.
+    /// When set, sub-tool dispatches inside the JS engine route through
+    /// `persist_classification` so each oversize sub-result lands in
+    /// `tool_invocations` and surfaces in compose's `sub_invocations`
+    /// directory. JS still receives the raw un-wrapped result.
+    tool_invocations: Option<Arc<ToolInvocations>>,
+    classifiers: Arc<ClassifierRegistry>,
     config: ComposeConfig,
 }
 
@@ -48,12 +59,16 @@ impl ComposeTool {
         sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
         top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
         audit: Option<Arc<Audit>>,
+        tool_invocations: Option<Arc<ToolInvocations>>,
+        classifiers: Arc<ClassifierRegistry>,
         config: ComposeConfig,
     ) -> Self {
         Self {
             sets,
             top_level,
             audit,
+            tool_invocations,
+            classifiers,
             config,
         }
     }
@@ -146,11 +161,17 @@ impl TopLevelTool for ComposeTool {
             format!("/*\n{dts}*/\n{}", params.script)
         };
 
+        let sub_invocations = Arc::new(StdMutex::new(Vec::<SubInvocation>::new()));
+        let seq_counter = Arc::new(AtomicU32::new(0));
         let dispatcher = Arc::new(CatalogDispatcher {
             sets: Arc::clone(&self.sets),
             top_level: Arc::clone(&self.top_level),
             subject: subject.clone(),
             audit: self.audit.clone(),
+            tool_invocations: self.tool_invocations.clone(),
+            classifiers: Arc::clone(&self.classifiers),
+            sub_invocations: Arc::clone(&sub_invocations),
+            seq_counter: Arc::clone(&seq_counter),
         });
 
         let engine = js_engine::JsEngine::new()
@@ -201,6 +222,32 @@ impl TopLevelTool for ComposeTool {
     }
 }
 
+/// One sub-tool dispatch's worth of recovery metadata. Accumulated by
+/// `CatalogDispatcher` while the JS script runs; surfaced in compose's
+/// final `structured_content.sub_invocations` directory so the agent
+/// can `tool_output_fetch(invocation_id, ...)` on any specific
+/// sub-call's persisted output.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SubInvocation {
+    /// Order within the script — `seq=0` is the first `tools.foo()`
+    /// call, `seq=1` the second, etc. Stable across re-runs of the
+    /// same script.
+    pub seq: u32,
+    pub tool_name: String,
+    /// Short human-readable identifier of the call. Format
+    /// `tool(key=value, ...)` truncated to 80 chars; lets agents pick
+    /// by call subject rather than by index.
+    pub args_digest: String,
+    /// `tool_invocations.id` — pass to `tool_output_fetch` to recover
+    /// elided detail.
+    pub invocation_id: uuid::Uuid,
+    /// `summary.kind` discriminator (e.g. `"concourse_build_log"`,
+    /// `"structured_elision"`, `"generic"`).
+    pub kind: String,
+    pub raw_size_bytes: u64,
+    pub summary_size_bytes: u64,
+}
+
 /// Bridges the JS engine's [`js_engine::ToolDispatcher`] trait to both the
 /// catalog (SearchableToolSet) dispatch path and the top-level tool registry,
 /// preserving visibility filtering, audit logging, and output filtering.
@@ -209,6 +256,15 @@ struct CatalogDispatcher {
     top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
     subject: AuthSubject,
     audit: Option<Arc<Audit>>,
+    tool_invocations: Option<Arc<ToolInvocations>>,
+    classifiers: Arc<ClassifierRegistry>,
+    /// Accumulator threaded through every sub-tool call. Compose reads
+    /// this after the JS engine finishes and emits the entries as
+    /// `structured_content.sub_invocations`. `Mutex` (sync, not async)
+    /// because mutations are short and uncontended — the JS engine
+    /// dispatches sub-calls sequentially.
+    sub_invocations: Arc<StdMutex<Vec<SubInvocation>>>,
+    seq_counter: Arc<AtomicU32>,
 }
 
 #[async_trait::async_trait]
@@ -225,6 +281,8 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
             let name_owned = name.to_string();
             let args_for_meta = args.clone();
             let parent_seed = EventContext::current().data();
+            let started_at = chrono::Utc::now();
+            let dispatcher = self.clone_for_persistence();
 
             return async move {
                 Audit::record_action(action);
@@ -235,15 +293,35 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
                 }));
 
                 let start = std::time::Instant::now();
-                let result = run_searchable_call(set, &subject, &tool_name, args, default_filter)
-                    .await
-                    .map_err(|e| with_hint(&name_owned, e));
+                let dispatch_result =
+                    run_searchable_call(set, &subject, &tool_name, args.clone(), default_filter)
+                        .await
+                        .map_err(|e| with_hint(&name_owned, e));
+                let duration_ms = start.elapsed().as_millis() as u64;
                 Audit::record_duration(start);
 
-                match &result {
-                    Ok(_) => Audit::record_success(),
-                    Err(msg) => Audit::record_error(msg.clone()),
-                }
+                let result = match dispatch_result {
+                    Ok((raw, value)) => {
+                        // Run the universal pipeline as a side-effect.
+                        // JS still gets `value`; persist + accumulate
+                        // for the sub_invocations directory.
+                        dispatcher
+                            .maybe_persist_sub_invocation(
+                                &name_owned,
+                                &args,
+                                &raw,
+                                duration_ms,
+                                started_at,
+                            )
+                            .await;
+                        Audit::record_success();
+                        Ok(value)
+                    }
+                    Err(msg) => {
+                        Audit::record_error(msg.clone());
+                        Err(msg)
+                    }
+                };
                 if let Some(audit) = audit.as_ref() {
                     audit.record_from_context();
                 }
@@ -303,6 +381,9 @@ impl CatalogDispatcher {
         let name_owned = name.to_string();
         let args_for_meta = args.clone();
         let parent_seed = EventContext::current().data();
+        let started_at = chrono::Utc::now();
+        let dispatcher = self.clone_for_persistence();
+        let bypass = tool.bypass_universal_pipeline();
 
         async move {
             Audit::record_action(action);
@@ -313,15 +394,33 @@ impl CatalogDispatcher {
             }));
 
             let start = std::time::Instant::now();
-            let result = run_top_level_call(tool, &subject, args)
+            let dispatch_result = run_top_level_call(tool, &subject, args.clone())
                 .await
                 .map_err(|e| with_hint(&name_owned, e));
+            let duration_ms = start.elapsed().as_millis() as u64;
             Audit::record_duration(start);
 
-            match &result {
-                Ok(_) => Audit::record_success(),
-                Err(msg) => Audit::record_error(msg.clone()),
-            }
+            let result = match dispatch_result {
+                Ok((raw, value)) => {
+                    if !bypass {
+                        dispatcher
+                            .maybe_persist_sub_invocation(
+                                &name_owned,
+                                &args,
+                                &raw,
+                                duration_ms,
+                                started_at,
+                            )
+                            .await;
+                    }
+                    Audit::record_success();
+                    Ok(value)
+                }
+                Err(msg) => {
+                    Audit::record_error(msg.clone());
+                    Err(msg)
+                }
+            };
             if let Some(audit) = audit.as_ref() {
                 audit.record_from_context();
             }
@@ -331,18 +430,141 @@ impl CatalogDispatcher {
         .with_event_context(parent_seed)
         .await
     }
+
+    /// Lightweight clone of the persistence-relevant fields. Used to
+    /// hand a borrow of the persistence machinery into the per-call
+    /// async block without holding a `&self` across the await.
+    fn clone_for_persistence(&self) -> CatalogDispatcherShared {
+        CatalogDispatcherShared {
+            subject: self.subject.clone(),
+            tool_invocations: self.tool_invocations.clone(),
+            classifiers: Arc::clone(&self.classifiers),
+            sub_invocations: Arc::clone(&self.sub_invocations),
+            seq_counter: Arc::clone(&self.seq_counter),
+        }
+    }
 }
 
-/// Inner dispatch for a [`SearchableToolSet`] — returns the raw `Result<_, String>`
-/// (no audit side-effects) so the surrounding child-context wrapper can attach
-/// the outcome to its own audit row.
+/// Persistence-side view of [`CatalogDispatcher`] — fields the
+/// per-call async block needs to record a `SubInvocation`. Cloned
+/// once per dispatch so the closure can move it without holding a
+/// borrow on the dispatcher.
+#[derive(Clone)]
+struct CatalogDispatcherShared {
+    subject: AuthSubject,
+    tool_invocations: Option<Arc<ToolInvocations>>,
+    classifiers: Arc<ClassifierRegistry>,
+    sub_invocations: Arc<StdMutex<Vec<SubInvocation>>>,
+    seq_counter: Arc<AtomicU32>,
+}
+
+impl CatalogDispatcherShared {
+    /// Run the universal pipeline as a side-effect. Skipped when:
+    ///   - no `ToolInvocations` is wired (test paths)
+    ///   - the subject doesn't yield an owner (`Anonymous`,
+    ///     `WorkflowExecutor`)
+    ///   - the classifier returned `Passthrough` (no recoverable
+    ///     detail; agent already has every byte via the JS-facing
+    ///     `Value`)
+    ///   - persistence itself failed (logged inside
+    ///     `persist_classification`)
+    async fn maybe_persist_sub_invocation(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+        raw: &CallToolResult,
+        duration_ms: u64,
+        started_at: chrono::DateTime<chrono::Utc>,
+    ) {
+        let Some(invocations) = self.tool_invocations.as_ref() else {
+            return;
+        };
+        let classification = self.classifiers.classify(&ClassifierContext {
+            tool_name,
+            args,
+            raw,
+            exit_code: None,
+        });
+        if classification.summary.is_passthrough() {
+            return;
+        }
+        let summary_value_size = serde_json::to_string(
+            &serde_json::to_value(&classification.summary).unwrap_or_default(),
+        )
+        .map(|s| s.len() as u64)
+        .unwrap_or(0);
+
+        let Some(persisted): Option<PersistedClassification> = invocations
+            .persist_classification(
+                &self.subject,
+                tool_name,
+                args,
+                classification,
+                duration_ms,
+                started_at,
+            )
+            .await
+        else {
+            return;
+        };
+
+        let seq = self.seq_counter.fetch_add(1, Ordering::Relaxed);
+        let entry = SubInvocation {
+            seq,
+            tool_name: tool_name.to_string(),
+            args_digest: args_digest(tool_name, args),
+            invocation_id: persisted.invocation_id.into(),
+            kind: persisted.summary.kind().to_string(),
+            raw_size_bytes: persisted.raw_size_bytes,
+            summary_size_bytes: summary_value_size,
+        };
+        if let Ok(mut guard) = self.sub_invocations.lock() {
+            guard.push(entry);
+        }
+    }
+}
+
+/// Format `tool(key1=value1, key2=value2)` truncated to ~80 chars.
+/// Reads better than a raw uuid for the agent scanning
+/// `sub_invocations`.
+fn args_digest(tool_name: &str, args: &serde_json::Value) -> String {
+    let mut out = String::from(tool_name);
+    out.push('(');
+    if let serde_json::Value::Object(obj) = args {
+        let mut first = true;
+        for (k, v) in obj.iter().take(4) {
+            if !first {
+                out.push_str(", ");
+            }
+            first = false;
+            let v_str: String = match v {
+                serde_json::Value::String(s) => s.chars().take(20).collect(),
+                other => other.to_string().chars().take(20).collect(),
+            };
+            out.push_str(k);
+            out.push('=');
+            out.push_str(&v_str);
+        }
+    }
+    out.push(')');
+    out.chars().take(80).collect()
+}
+
+/// Inner dispatch for a [`SearchableToolSet`] — returns both the raw
+/// (filter-applied) `CallToolResult` AND the JS-facing `Value`.
+/// The dispatcher takes the raw form, runs the classifier on it, and
+/// persists via `ToolInvocations::persist_classification`; JS still
+/// receives only the `Value`. Splitting the responsibilities here
+/// means existing scripts see exactly the shape they did before, but
+/// compose now has the recovery metadata to surface in
+/// `sub_invocations`.
 async fn run_searchable_call(
     set: Arc<dyn SearchableToolSet>,
     subject: &AuthSubject,
     tool_name: &str,
     args: serde_json::Value,
     default_filter: Option<OutputFilter>,
-) -> Result<serde_json::Value, String> {
+) -> Result<(CallToolResult, serde_json::Value), String> {
     let inner_args = match args {
         serde_json::Value::Object(obj) => Some(obj),
         serde_json::Value::Null => None,
@@ -357,23 +579,17 @@ async fn run_searchable_call(
     let filter = default_filter.unwrap_or_else(OutputFilter::global_default);
     let filtered = filter.apply(result).map_err(|e| e.to_string())?;
 
-    if let Some(structured) = &filtered.structured_content {
-        return Ok(structured.clone());
-    }
-
-    let text = extract_text(&filtered);
-    match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(v) => Ok(v),
-        Err(_) => Ok(serde_json::Value::String(text)),
-    }
+    let value = result_to_value(&filtered);
+    Ok((filtered, value))
 }
 
-/// Inner dispatch for a [`TopLevelTool`] — same shape as [`run_searchable_call`].
+/// Inner dispatch for a [`TopLevelTool`] — same shape as
+/// [`run_searchable_call`].
 async fn run_top_level_call(
     tool: Arc<dyn TopLevelTool>,
     subject: &AuthSubject,
     args: serde_json::Value,
-) -> Result<serde_json::Value, String> {
+) -> Result<(CallToolResult, serde_json::Value), String> {
     let inner_args = match args {
         serde_json::Value::Object(obj) => Some(obj),
         serde_json::Value::Null => None,
@@ -385,14 +601,23 @@ async fn run_top_level_call(
         .await
         .map_err(|e| e.to_string())?;
 
-    if let Some(structured) = &result.structured_content {
-        return Ok(structured.clone());
-    }
+    let value = result_to_value(&result);
+    Ok((result, value))
+}
 
-    let text = extract_text(&result);
+/// Convert a `CallToolResult` to the `Value` shape JS expects:
+/// structured_content wins; falls back to JSON-parsed text; falls
+/// back further to `Value::String(text)`. Same logic both inner
+/// dispatch paths used inline before; extracted so the new
+/// `(CallToolResult, Value)` return type doesn't duplicate it.
+fn result_to_value(result: &CallToolResult) -> serde_json::Value {
+    if let Some(structured) = &result.structured_content {
+        return structured.clone();
+    }
+    let text = extract_text(result);
     match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(v) => Ok(v),
-        Err(_) => Ok(serde_json::Value::String(text)),
+        Ok(v) => v,
+        Err(_) => serde_json::Value::String(text),
     }
 }
 
