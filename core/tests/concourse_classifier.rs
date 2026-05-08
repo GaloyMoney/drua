@@ -27,13 +27,11 @@ fn classify(raw: &str) -> ToolResultSummary {
     let mut result = CallToolResult::success(vec![Content::text(raw.to_string())]);
     result.structured_content = Some(serde_json::json!({"logs": raw}));
     let args = serde_json::json!({"build_id": 7001970u64});
-    let no_recurse: &dyn Fn(&str) -> Option<ToolResultSummary> = &|_| None;
     let ctx = ClassifierContext {
         tool_name: "concourse_get_build_logs",
         args: &args,
         raw: &result,
         exit_code: None,
-        classify_region: no_recurse,
     };
     ConcourseBuildLogClassifier
         .classify(&ctx)
@@ -183,13 +181,11 @@ fn registry_routes_concourse_to_typed_classifier() {
     result.structured_content = Some(serde_json::json!({"logs": BUILD_610_SUCCEEDED}));
 
     let args = serde_json::json!({"build_id": 7001970u64});
-    let no_recurse: &dyn Fn(&str) -> Option<ToolResultSummary> = &|_| None;
     let ctx = ClassifierContext {
         tool_name: "concourse_get_build_logs",
         args: &args,
         raw: &result,
         exit_code: None,
-        classify_region: no_recurse,
     };
     let classification = registry.classify(&ctx);
     assert_eq!(classification.summary.kind(), "concourse_logs");
@@ -216,14 +212,11 @@ error: builder for '/nix/store/aaaa-foo.drv' failed with exit code 1; last 10 lo
     let registry = ClassifierRegistry::with_default();
     let result = CallToolResult::success(vec![Content::text(nix_output.to_string())]);
     let args = serde_json::json!({"command": "nix build .#foo"});
-    let registry_ref = &registry;
-    let classify_region = |region: &str| registry_ref.classify_region(region);
     let ctx = ClassifierContext {
         tool_name: "bash",
         args: &args,
         raw: &result,
         exit_code: None,
-        classify_region: &classify_region,
     };
 
     let classification = registry.classify(&ctx);
@@ -263,14 +256,11 @@ fn unrelated_bash_output_passes_through() {
     let registry = ClassifierRegistry::with_default();
     let result = CallToolResult::success(vec![Content::text("file1.txt\nfile2.txt\nfile3.txt")]);
     let args = serde_json::json!({"command": "ls"});
-    let registry_ref = &registry;
-    let classify_region = |region: &str| registry_ref.classify_region(region);
     let ctx = ClassifierContext {
         tool_name: "bash",
         args: &args,
         raw: &result,
         exit_code: None,
-        classify_region: &classify_region,
     };
     let classification = registry.classify(&ctx);
     assert!(

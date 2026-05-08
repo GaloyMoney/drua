@@ -420,19 +420,6 @@ fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId) -> String {
                         out.push_str(&format!("  > {l}\n"));
                     }
                 }
-                // Nested classification of the failure's log_tail —
-                // typed shape (e.g. `nix_build`) inlined under the
-                // failure block. Recursion bottoms out fast (parent
-                // already capped log_tail at MAX_FAILURE_LOG_TAIL).
-                if let Some(embedded) = &f.embedded {
-                    out.push_str(&format!("embedded ({}):\n", embedded.kind()));
-                    let nested = envelope_text(embedded, id);
-                    for line in nested.lines() {
-                        out.push_str("  ");
-                        out.push_str(line);
-                        out.push('\n');
-                    }
-                }
             }
             if !s.final_lines.is_empty() {
                 out.push_str("=== final lines ===\n");

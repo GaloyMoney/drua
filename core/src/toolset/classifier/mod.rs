@@ -137,15 +137,6 @@ pub struct ClassifierContext<'a> {
     pub args: &'a serde_json::Value,
     pub raw: &'a CallToolResult,
     pub exit_code: Option<i32>,
-    /// Re-enter the registry to classify a sub-region of `raw`. Parent
-    /// classifiers (e.g. `ConcourseLogsClassifier` extracting a failed
-    /// derivation's log_tail) call this on the substring; matching
-    /// inner classifiers fire via `matches_content` and produce a
-    /// nested `ToolResultSummary` for the parent to embed. `None` when
-    /// no inner classifier matched (the caller stores raw text). The
-    /// region recursion is bounded — each region is strictly smaller
-    /// than its parent's input.
-    pub classify_region: &'a dyn Fn(&str) -> Option<ToolResultSummary>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -173,25 +164,10 @@ pub struct Classification {
 
 pub trait ResultClassifier: Send + Sync + 'static {
     fn name(&self) -> &str;
-    /// Identity-based fast-path match. Cheap; runs first.
+    /// Identity-based match (tool_name + args). Cheap; first match
+    /// wins. Content-aware classification happens at string leaves
+    /// inside the walker via `StringClassifier`, not at this level.
     fn matches(&self, tool_name: &str, args: &serde_json::Value) -> bool;
-    /// Content-sniff fallback. Runs only when no classifier matched
-    /// by identity, and when the parent is a sub-region recursion
-    /// (where there is no meaningful tool_name). Default: never.
-    /// Override to peek at the raw bytes via `ctx.raw` (e.g. regex
-    /// over `extract_text(ctx.raw)`).
-    fn matches_content(&self, _ctx: &ClassifierContext<'_>) -> bool {
-        false
-    }
-    /// `true` for the registry's last-resort classifier. The dispatcher
-    /// skips catch-all classifiers in the identity and content-sniff
-    /// passes and runs them only after every more-specific classifier
-    /// has declined. Without this, a `matches`-returns-`true` catch-all
-    /// would win the identity pass and short-circuit the content-sniff
-    /// pass for every input.
-    fn is_catch_all(&self) -> bool {
-        false
-    }
     fn classify(&self, ctx: &ClassifierContext<'_>) -> Result<Classification, ClassifierError>;
 }
 
@@ -231,13 +207,14 @@ impl ClassifierRegistry {
     }
 
     pub fn classify(&self, ctx: &ClassifierContext<'_>) -> Classification {
-        // First pass — identity match (cheap, declarative). Catch-all
-        // classifiers are skipped here: their always-true `matches`
-        // would short-circuit the content-sniff pass.
+        // First-match dispatch. Identity-aware classifiers
+        // (Concourse, future GitHubPR, K8sPodLogs) come earliest in
+        // the chain and claim the result for tools they recognise.
+        // `GenericFallback` is registered last and matches everything
+        // — it owns the structural walker and consults the
+        // `StringClassifierChain` at every string leaf (Nix, future
+        // Cargo / Nextest / cpp-compile).
         for classifier in &self.classifiers {
-            if classifier.is_catch_all() {
-                continue;
-            }
             if !classifier.matches(ctx.tool_name, ctx.args) {
                 continue;
             }
@@ -252,36 +229,6 @@ impl ClassifierRegistry {
                 }
             }
         }
-        // Second pass — content-sniff. Cargo / Nix / Nextest
-        // classifiers use this path to fire on bash-disguised content
-        // and on sub-region recursion. Catch-alls also skipped here.
-        for classifier in &self.classifiers {
-            if classifier.is_catch_all() {
-                continue;
-            }
-            if !classifier.matches_content(ctx) {
-                continue;
-            }
-            match classifier.classify(ctx) {
-                Ok(c) => return c,
-                Err(e) => {
-                    tracing::warn!(
-                        classifier = classifier.name(),
-                        error = %e,
-                        "content-sniff classifier failed; trying next",
-                    );
-                }
-            }
-        }
-        // Third pass — catch-all (GenericFallback). Last resort.
-        for classifier in &self.classifiers {
-            if !classifier.is_catch_all() {
-                continue;
-            }
-            if let Ok(c) = classifier.classify(ctx) {
-                return c;
-            }
-        }
         // Empty registry safety net.
         let canonical_text = extract_text(ctx.raw);
         Classification {
@@ -290,45 +237,6 @@ impl ClassifierRegistry {
             },
             canonical_text,
         }
-    }
-
-    /// Classify a substring of a parent's `raw_text` as a candidate
-    /// embedded summary. Used by parent classifiers (Concourse →
-    /// failed derivation log tail → optional Cargo/Nix/etc. inner
-    /// summary). Only the content-sniff pass runs — identity-based
-    /// match is meaningless for an anonymous text region. Returns
-    /// `None` when no classifier matched (the parent stores the
-    /// region as raw text instead).
-    pub fn classify_region(&self, region: &str) -> Option<ToolResultSummary> {
-        // Synthesize a minimal CallToolResult so existing classifiers
-        // can read the region via their normal `extract_text(ctx.raw)`
-        // helper. structured_content is left None, mimicking a plain-
-        // text tool's call result.
-        use rmcp::model::Content;
-        let synthetic = CallToolResult::success(vec![Content::text(region.to_string())]);
-        let no_args = serde_json::Value::Object(serde_json::Map::new());
-        let nop_recurse: &dyn Fn(&str) -> Option<ToolResultSummary> = &|_| None;
-        let region_ctx = ClassifierContext {
-            tool_name: "",
-            args: &no_args,
-            raw: &synthetic,
-            exit_code: None,
-            classify_region: nop_recurse,
-        };
-        for classifier in &self.classifiers {
-            // Catch-alls would always claim regions and defeat the
-            // `Option<...>` "no inner classifier matched" semantics.
-            if classifier.is_catch_all() {
-                continue;
-            }
-            if !classifier.matches_content(&region_ctx) {
-                continue;
-            }
-            if let Ok(c) = classifier.classify(&region_ctx) {
-                return Some(c.summary);
-            }
-        }
-        None
     }
 }
 
@@ -386,10 +294,6 @@ impl ResultClassifier for GenericFallback {
     }
 
     fn matches(&self, _tool_name: &str, _args: &serde_json::Value) -> bool {
-        true
-    }
-
-    fn is_catch_all(&self) -> bool {
         true
     }
 
@@ -481,15 +385,11 @@ mod tests {
         // tests the args value is just an empty object.
         static EMPTY_ARGS: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
         let args = EMPTY_ARGS.get_or_init(|| serde_json::json!({}));
-        // No-op region recursion — most tests don't care; the few that
-        // exercise nesting build their own context.
-        static NO_RECURSE: fn(&str) -> Option<ToolResultSummary> = |_| None;
         ClassifierContext {
             tool_name,
             args,
             raw,
             exit_code: None,
-            classify_region: &NO_RECURSE,
         }
     }
 

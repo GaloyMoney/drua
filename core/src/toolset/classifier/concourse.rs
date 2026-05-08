@@ -99,14 +99,6 @@ pub struct NixBuildFailure {
     /// parallel derivations.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub timestamp: String,
-    /// Recursive classification of `log_tail` joined as text. Lights up
-    /// when the inner builder output itself matches a typed classifier
-    /// (e.g. an embedded nix-build sequence triggered via
-    /// `--builders` or IFD; future Cargo / Nextest / cpp-compile
-    /// classifiers). `None` when no inner classifier sniffed a match —
-    /// the agent reads `log_tail` as raw text in that case.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub embedded: Option<Box<ToolResultSummary>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -159,23 +151,7 @@ impl ResultClassifier for ConcourseBuildLogClassifier {
         // `tool_output_fetch(invocation_id, query: tail/range/grep)`
         // operate on the bytes the summary's slicing actually saw.
         let raw = extract_text(ctx.raw);
-        let mut summary = parse_concourse_log(&raw);
-
-        // For each failed-derivation log_tail, ask the registry whether
-        // an inner classifier wants to type it. Common landings: the
-        // log_tail is itself nix-build output (when a derivation
-        // recursively invokes nix), or in future, Cargo / Nextest /
-        // cpp-compile shapes. Cheap: bounded to MAX_FAILURES_KEPT
-        // failures and each log_tail is already capped at
-        // MAX_FAILURE_LOG_TAIL lines.
-        for failure in &mut summary.failures {
-            let region = failure.log_tail.join("\n");
-            if region.is_empty() {
-                continue;
-            }
-            failure.embedded = (ctx.classify_region)(&region).map(Box::new);
-        }
-
+        let summary = parse_concourse_log(&raw);
         Ok(Classification {
             summary: ToolResultSummary::ConcourseLogs(summary),
             canonical_text: raw,
@@ -309,7 +285,6 @@ pub(crate) fn parse_concourse_log(raw: &str) -> ConcourseBuildLogSummary {
                     reason,
                     log_tail,
                     timestamp: timestamp.to_string(),
-                    embedded: None,
                 });
             }
             i = j;
