@@ -3,14 +3,11 @@
 //! and #609). Fixtures live under `core/tests/fixtures/concourse/`.
 //!
 //! Architecture under test:
-//! - Concourse classifier preprocesses (strips ANSI + timestamps,
-//!   captures envelope metadata).
-//! - Walker descends into the augmented value's `logs` field and
-//!   runs the `StringSummarizerChain` (Nix passes) over the
-//!   timestamped-stripped log text.
-//! - The compacted text — with `<nix-copy>`, `<nix-drv-list>`, and
-//!   `<nix-failure>` XML markers replacing the bulk of the noise —
-//!   ends up in `summary.logs`.
+//! - Concourse classifier preprocesses (strips ANSI + timestamps).
+//! - Output is a schema-faithful `{ logs: String }` summary.
+//! - The chain compacts copy-runs, drv-lists, cache-removal, and
+//!   git-clone progress runs into XML markers; the terminal
+//!   `BulkElide` pass bounds total size.
 
 use rmcp::model::{CallToolResult, Content};
 
@@ -44,89 +41,60 @@ fn classify(raw: &str) -> ToolResultSummary {
 #[test]
 fn build_610_succeeded_compacts_copy_runs_inline() {
     let raw_size = BUILD_610_SUCCEEDED.len();
-    assert!(
-        raw_size > 100_000,
-        "fixture should be large enough to demonstrate compression (got {raw_size} bytes)"
-    );
+    assert!(raw_size > 100_000);
 
     let summary = match classify(BUILD_610_SUCCEEDED) {
         ToolResultSummary::ConcourseLogs(s) => s,
         other => panic!("expected ConcourseLogs summary, got {other:?}"),
     };
 
-    // Status is no longer guessed from log content; only the
-    // upstream API call can provide ground truth.
-    assert!(summary.status.is_none());
+    // Schema-faithful: the only field is `logs`.
+    let v = serde_json::to_value(&summary).expect("serialise");
+    let obj = v.as_object().expect("summary is an object");
+    assert_eq!(obj.len(), 1);
+    assert!(obj.contains_key("logs"));
 
-    // Five distinct `warning:` lines in the fixture; preserved with
-    // line numbers so an agent can `tool_output_fetch(range=…)`
-    // around any of them.
-    assert_eq!(summary.warnings.len(), 5);
-    for w in &summary.warnings {
-        assert!(w.line_number > 0, "every warning carries a line number");
-    }
-    assert!(summary
-        .warnings
-        .iter()
-        .any(|w| w.message.contains("apps.x86_64-linux.bats")));
-    assert!(!summary.task_phases.is_empty());
-    assert!(summary.first_timestamp.is_some());
-    assert!(summary.last_timestamp.is_some());
-    assert!(summary
-        .final_lines
-        .iter()
-        .any(|l| l.contains("done saving")));
-
-    // The 700+ `copying path` lines should have collapsed into one
-    // or more `<nix-copy>` markers in `summary.logs`.
-    assert!(
-        summary.logs.contains("<nix-copy"),
-        "expected a <nix-copy> marker in compacted logs"
-    );
+    // 700+ `copying path` lines collapsed into <nix-copy>.
+    assert!(summary.logs.contains("<nix-copy"));
     assert!(summary.logs.contains("</nix-copy>"));
-    let copying_lines = summary.logs.matches("copying path '/nix/store/").count();
+    assert_eq!(summary.logs.matches("copying path '/nix/store/").count(), 0);
+
+    // Total size is bounded by the BulkElide terminal pass.
     assert!(
-        copying_lines == 0,
-        "all copy-path lines should be collapsed; {copying_lines} survived"
+        summary.logs.len() <= 16 * 1024,
+        "post-chain logs len {} exceeds BulkElide cap",
+        summary.logs.len()
     );
+
+    // Warning lines survive as ordinary text inside `logs`.
+    assert!(summary.logs.contains("warning:"));
 
     eprintln!(
-        "build #610: {} bytes raw → {} bytes kept ({} warnings, logs len {})",
-        summary.total_bytes,
-        summary.kept_bytes,
-        summary.warnings.len(),
+        "build #610: {} bytes raw → {} bytes kept",
+        BUILD_610_SUCCEEDED.len(),
         summary.logs.len(),
     );
 }
 
 #[test]
-fn build_609_failed_keeps_clippy_diagnostic_inline_in_failure_marker() {
+fn build_609_failed_compacts_under_bulk_elide_cap() {
     let summary = match classify(BUILD_609_FAILED) {
         ToolResultSummary::ConcourseLogs(s) => s,
         other => panic!("expected ConcourseLogs summary, got {other:?}"),
     };
 
-    // The classifier doesn't guess; status stays None.
-    assert!(summary.status.is_none());
-
-    // The failure block lands inline in `summary.logs` as a
-    // `<nix-failure>` marker carrying `drv=…` plus the `> ` log_tail
-    // body. The clippy E0063 diagnostic must survive into that body.
-    assert!(
-        summary.logs.contains("<nix-failure"),
-        "expected a <nix-failure> marker; got logs head:\n{}",
-        &summary.logs[..summary.logs.len().min(2_000)]
-    );
-    assert!(summary.logs.contains("drua-clippy-0.1.0.drv"));
+    // The chain compresses #609 well under the BulkElide cap.
+    // Failure header + indented `> ` log_tail stay inline as
+    // ordinary text — no marker, no special handling.
+    assert!(summary.logs.len() <= 16 * 1024);
+    assert!(summary.logs.contains("error: failed to build attribute"));
+    assert!(summary.logs.contains("drua-clippy"));
     assert!(summary.logs.contains("error[E0063]: missing fields"));
     assert!(summary.logs.contains("McpUpstreamConfig"));
-    assert!(summary.logs.contains("auth_mode"));
-    assert!(summary.logs.contains("internal_only"));
 
     eprintln!(
-        "build #609: {} bytes raw → {} bytes kept (logs len {})",
-        summary.total_bytes,
-        summary.kept_bytes,
+        "build #609: {} bytes raw → {} bytes kept",
+        BUILD_609_FAILED.len(),
         summary.logs.len(),
     );
 }
@@ -148,11 +116,9 @@ fn registry_routes_concourse_to_typed_classifier() {
     assert_eq!(classification.summary.kind(), "concourse_logs");
 }
 
-/// End-to-end: a `bash`-shape result whose stdout looks like a nix
-/// build lands in `StructuredElision { kept }` where `kept` is a
-/// `Value::String` (schema-faithful) with `<nix-copy>` and
-/// `<nix-failure>` markers substituted in place — no JSON
-/// substitution, just inline string compaction.
+/// Bash-shape result with nix-build chatter: walker descends to the
+/// string leaf, runs the chain, returns Value::String with markers
+/// substituted in place. Schema-faithful — kept stays a String.
 #[test]
 fn nix_summarizers_fire_on_bash_output_via_walker() {
     let mut nix_output = String::from("preparing to build /nix/store/aaaa-foo.drv\n");
@@ -162,9 +128,8 @@ fn nix_summarizers_fire_on_bash_output_via_walker() {
             "copying path '/nix/store/bbb{i:02}-bar' from 'https://cache.nixos.org/'\n"
         ));
     }
-    nix_output.push_str(
-        "error: builder for '/nix/store/aaaa-foo.drv' failed with exit code 1; last 10 log lines:\n",
-    );
+    nix_output
+        .push_str("error: builder for '/nix/store/aaaa-foo.drv' failed with exit code 1\n");
     nix_output.push_str("       > some compiler error\n");
     nix_output.push_str("       > another diagnostic line\n");
 
@@ -185,15 +150,51 @@ fn nix_summarizers_fire_on_bash_output_via_walker() {
         other => panic!("unexpected summary shape: {other:?}"),
     };
     let s = kept.as_str().expect("kept must remain Value::String");
-    assert!(s.contains("<nix-copy"), "got: {s}");
-    assert!(s.contains("</nix-copy>"), "got: {s}");
-    assert!(s.contains("<nix-failure"), "got: {s}");
-    assert!(s.contains("some compiler error"), "got: {s}");
-    // The 30 `copying path` lines should have collapsed.
+    assert!(s.contains("<nix-copy"));
+    assert!(s.contains("error: builder for"));
+    assert!(s.contains("some compiler error"));
+    assert!(!s.contains("copying path '/nix/store/"));
+}
+
+/// Pathological log: hundreds of KB of unstructured chatter that no
+/// structured pass matches. The terminal `BulkElide` pass must still
+/// bring the post-chain log under its byte budget.
+#[test]
+fn bulk_elide_bounds_unstructured_log_size() {
+    let mut raw = String::from("[03:00:00] === with-nix-cache: start ===\n");
+    for i in 0..5_000 {
+        raw.push_str(&format!(
+            "[03:00:01] some-tool: long unstructured diagnostic line #{i:05} with arbitrary text\n"
+        ));
+    }
+    raw.push_str("[03:99:99] tail line\n");
+
+    let mut result = CallToolResult::success(vec![Content::text(raw.clone())]);
+    result.structured_content = Some(serde_json::json!({"logs": raw.clone()}));
+    let args = serde_json::json!({"build_id": 1u64});
+    let chain = Arc::new(default_summarizer_chain());
+    let summary = match ConcourseBuildLogClassifier::new(chain)
+        .classify(&ClassifierContext {
+            tool_name: "concourse_get_build_logs",
+            args: &args,
+            raw: &result,
+            exit_code: None,
+        })
+        .expect("classify")
+        .summary
+    {
+        ToolResultSummary::ConcourseLogs(s) => s,
+        other => panic!("unexpected summary shape: {other:?}"),
+    };
+
     assert!(
-        !s.contains("copying path '/nix/store/"),
-        "no raw copy lines should survive; got: {s}"
+        summary.logs.len() <= 16 * 1024,
+        "post-chain logs len {} exceeds BulkElide cap",
+        summary.logs.len()
     );
+    assert!(summary.logs.contains("<bulk-elided"));
+    // Simple tail-keep — head is dropped, tail survives.
+    assert!(summary.logs.contains("tail line"));
 }
 
 #[test]
@@ -208,9 +209,5 @@ fn unrelated_bash_output_passes_through() {
         exit_code: None,
     };
     let classification = registry.classify(&ctx);
-    assert!(
-        classification.summary.is_passthrough(),
-        "ls output should pass through; got {:?}",
-        classification.summary
-    );
+    assert!(classification.summary.is_passthrough());
 }

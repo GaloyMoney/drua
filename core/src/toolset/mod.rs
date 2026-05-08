@@ -10,11 +10,12 @@ pub mod top_level;
 mod traits;
 
 pub use classifier::{
-    default_summarizer_chain, Classification, ClassifierContext, ClassifierError,
+    default_summarizer_chain, BulkElide, Classification, ClassifierContext, ClassifierError,
     ClassifierRegistry, ConcourseBuildLogClassifier, ConcourseBuildLogPreprocessor,
     ConcourseBuildLogSummary, ConcourseBuildStatus, ElidedPath, ElisionKind, GenericFallback,
-    LogContext, NixCopyRun, NixDrvList, NixFailureBlock, ResultClassifier, StringSummarizer,
-    StringSummarizerChain, TimestampedLine, ToolResultSummary,
+    GitCloneProgress, LogContext, NixBuildingRun, NixCacheActivity, NixCopyRun, NixDrvList,
+    NixFetchList, ResultClassifier, StringSummarizer, StringSummarizerChain, TimestampedLine,
+    ToolResultSummary,
 };
 pub use config::*;
 pub use error::*;
@@ -675,7 +676,7 @@ pub(crate) fn summary_kept_bytes(summary: &ToolResultSummary, raw_bytes: u64) ->
     match summary {
         ToolResultSummary::Passthrough { .. } => raw_bytes,
         ToolResultSummary::StructuredElision { kept_bytes, .. } => *kept_bytes as u64,
-        ToolResultSummary::ConcourseLogs(s) => s.kept_bytes as u64,
+        ToolResultSummary::ConcourseLogs(s) => s.logs.len() as u64,
     }
 }
 

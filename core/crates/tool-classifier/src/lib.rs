@@ -14,6 +14,7 @@ use rmcp::model::CallToolResult;
 use serde::{Deserialize, Serialize};
 
 mod concourse;
+mod git;
 mod nix;
 mod string_summarizer;
 mod walker;
@@ -22,9 +23,11 @@ pub use concourse::{
     ConcourseBuildLogClassifier, ConcourseBuildLogPreprocessor, ConcourseBuildLogSummary,
     ConcourseBuildStatus, TimestampedLine,
 };
-pub use nix::{NixCopyRun, NixDrvList, NixFailureBlock};
+pub use git::GitCloneProgress;
+pub use nix::{NixBuildingRun, NixCacheActivity, NixCopyRun, NixDrvList, NixFetchList};
 pub use string_summarizer::{
-    close_tag, open_tag, LogContext, StringSummarizer, StringSummarizerChain, VerbatimRegion,
+    build_marker, close_tag, open_tag, BulkElide, LogContext, StringSummarizer,
+    StringSummarizerChain, VerbatimRegion,
 };
 
 /// Default byte threshold for [`GenericFallback`]. Below → `Passthrough`;
@@ -293,16 +296,18 @@ impl GenericFallback {
     }
 }
 
-/// Chain registered by [`ClassifierRegistry::with_default`]. Order
-/// matters: failure blocks claim before drv-list (which would
-/// otherwise eat the failure header's drv path) and copy-run
-/// (which never overlaps but is registered last for ordering
-/// consistency).
+/// Chain registered by [`ClassifierRegistry::with_default`]. Order:
+/// structured passes first (each claims its content shape); then
+/// [`BulkElide`] last as the dumb tail-keep fallback.
 pub fn default_summarizer_chain() -> StringSummarizerChain {
     StringSummarizerChain::new()
-        .register(nix::NixFailureBlock)
         .register(nix::NixDrvList)
+        .register(nix::NixFetchList)
         .register(nix::NixCopyRun)
+        .register(nix::NixBuildingRun)
+        .register(nix::NixCacheActivity)
+        .register(git::GitCloneProgress)
+        .register(string_summarizer::BulkElide::default())
 }
 
 impl ResultClassifier for GenericFallback {
@@ -529,8 +534,9 @@ mod tests {
         // Walker is the spine; the StringSummarizer chain rewrites
         // string leaves in place. A bash result whose stdout looks
         // like nix output lands in `StructuredElision { kept }` where
-        // `kept` is still a `Value::String` — just with copy-run /
-        // failure-block runs collapsed into XML markers.
+        // `kept` is still a `Value::String` — just with copy-run
+        // chatter collapsed into XML markers. Failure headers stay
+        // inline as ordinary text.
         let registry = ClassifierRegistry::with_default();
         let mut nix_output = String::from("preparing to build\n");
         nix_output.push_str("building '/nix/store/aaaa-foo.drv'\n");
@@ -554,7 +560,8 @@ mod tests {
         let s = kept.as_str().expect("kept is still Value::String");
         assert!(s.contains("<nix-copy"), "got: {s}");
         assert!(s.contains("</nix-copy>"), "got: {s}");
-        assert!(s.contains("<nix-failure"), "got: {s}");
+        // Failure header stays inline as plain text — no dedicated marker.
+        assert!(s.contains("error: builder for"), "got: {s}");
         assert!(s.contains("some compiler error"), "got: {s}");
     }
 

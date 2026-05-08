@@ -117,6 +117,63 @@ impl LogContext {
         self.log.len().min(u32::MAX as usize) as u32
     }
 
+    /// Byte length of the slice covering `lines` (current
+    /// coordinates). Useful for passes that need to populate
+    /// `original-bytes` on a marker before calling
+    /// [`replace_with_summary`].
+    pub fn byte_len_of_lines(&self, lines: Range<u32>) -> u64 {
+        let start = self.line_offsets[lines.start as usize];
+        let end = self.line_offsets[lines.end as usize];
+        (end - start) as u64
+    }
+
+    /// Terminal compaction primitive: discard every line before
+    /// `keep_from_line` (current coords) and prepend a single
+    /// `<bulk-elided>` marker covering the dropped range. Resets
+    /// the segment map to `[Summary-marker, Verbatim-tail]` —
+    /// finer-grained mappings from earlier passes are gone, which
+    /// is fine because [`BulkElide`] is the chain's last pass.
+    pub fn elide_head_keep_tail(&mut self, keep_from_line: u32) -> bool {
+        if keep_from_line == 0 || keep_from_line >= self.current_lines() {
+            return false;
+        }
+        let cutoff_byte = self.line_offsets[keep_from_line as usize];
+        let elided_bytes = cutoff_byte as u64;
+        let kept_lines_count = self.current_lines() - keep_from_line;
+        let body = format!(
+            "{} lines · {} bytes elided · showing last {} lines\n",
+            keep_from_line, elided_bytes, kept_lines_count,
+        );
+        let marker = build_marker("bulk-elided", 0..keep_from_line, elided_bytes, &body, &[]);
+        let marker_lines = count_lines(&marker);
+
+        let mut new_log = String::with_capacity(marker.len() + (self.log.len() - cutoff_byte));
+        new_log.push_str(&marker);
+        new_log.push_str(&self.log[cutoff_byte..]);
+        self.log = new_log;
+        self.line_offsets = compute_line_offsets(&self.log);
+
+        let original_lines = self.original_lines;
+        let kept_orig_start = original_lines.saturating_sub(kept_lines_count);
+        self.segments = vec![
+            Segment {
+                current: 0..marker_lines,
+                original: 0..kept_orig_start,
+                kind: SegmentKind::Summary {
+                    by: "bulk-elide",
+                    kept_bytes: marker.len().min(u32::MAX as usize) as u32,
+                    original_bytes: elided_bytes,
+                },
+            },
+            Segment {
+                current: marker_lines..(marker_lines + kept_lines_count),
+                original: kept_orig_start..original_lines,
+                kind: SegmentKind::Verbatim,
+            },
+        ];
+        true
+    }
+
     pub fn was_modified(&self) -> bool {
         self.segments
             .iter()
@@ -286,23 +343,24 @@ fn count_lines(s: &str) -> u32 {
     (s.matches('\n').count() + trailing) as u32
 }
 
-/// Render an opening tag with the standard accounting attributes plus
-/// any pass-specific extras. Body lines sit between this and
-/// [`close_tag`].
+/// Render an opening tag with the standard accounting attributes
+/// (what got dropped) plus any pass-specific extras. Body lines sit
+/// between this and [`close_tag`]. Deliberately doesn't carry a
+/// `kept-bytes` attribute — the agent reads the kept bytes directly
+/// (they're literally the marker text); only the dropped count
+/// needs an explicit number.
 pub fn open_tag(
     name: &'static str,
     original_lines: Range<u32>,
     original_bytes: u64,
-    kept_bytes: u32,
     extra: &[(&str, &str)],
 ) -> String {
     use std::fmt::Write;
     let mut s = format!(
-        "<{name} original-lines=\"{}-{}\" original-bytes=\"{}\" kept-bytes=\"{}\"",
+        "<{name} original-lines=\"{}-{}\" original-bytes=\"{}\"",
         original_lines.start + 1,
         original_lines.end,
         original_bytes,
-        kept_bytes,
     );
     for (k, v) in extra {
         let _ = write!(s, " {k}=\"{}\"", escape_attr(v));
@@ -313,6 +371,20 @@ pub fn open_tag(
 
 pub fn close_tag(name: &'static str) -> String {
     format!("</{name}>\n")
+}
+
+/// Build a complete marker block: open tag + body + close tag. Body
+/// is whatever the pass wants to render between the tags.
+pub fn build_marker(
+    tag: &'static str,
+    original_lines: Range<u32>,
+    original_bytes: u64,
+    body: &str,
+    extra: &[(&str, &str)],
+) -> String {
+    let open = open_tag(tag, original_lines, original_bytes, extra);
+    let close = close_tag(tag);
+    format!("{open}{body}{close}")
 }
 
 fn escape_attr(v: &str) -> String {
@@ -360,6 +432,60 @@ impl StringSummarizerChain {
 impl Default for StringSummarizerChain {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Terminal fallback: if the post-chain log is still over
+/// `max_total_bytes`, keep the last `tail_lines` lines and replace
+/// everything before with a single `<bulk-elided>` marker.
+///
+/// Deliberately dumb — no scoring, no per-region heuristics. The
+/// agent gets the most-recent context (which for build logs is
+/// usually where the failure / completion signal lives) plus a
+/// breadcrumb noting how much was dropped; if it needs more, it
+/// fetches via `tool_output_fetch(invocation_id, range=…)`.
+pub struct BulkElide {
+    pub max_total_bytes: usize,
+    pub tail_lines: u32,
+}
+
+impl Default for BulkElide {
+    fn default() -> Self {
+        Self {
+            max_total_bytes: 16 * 1024,
+            tail_lines: 100,
+        }
+    }
+}
+
+impl BulkElide {
+    pub fn with_max_bytes(mut self, n: usize) -> Self {
+        self.max_total_bytes = n;
+        self
+    }
+
+    pub fn with_tail_lines(mut self, n: u32) -> Self {
+        self.tail_lines = n;
+        self
+    }
+}
+
+impl StringSummarizer for BulkElide {
+    fn name(&self) -> &'static str {
+        "bulk-elide"
+    }
+
+    fn can_summarize(&self, ctx: &LogContext) -> bool {
+        ctx.log().len() > self.max_total_bytes
+    }
+
+    fn apply(&self, ctx: &mut LogContext) -> bool {
+        let total = ctx.current_lines();
+        if total <= self.tail_lines {
+            return false;
+        }
+        let keep_from = total - self.tail_lines;
+        ctx.elide_head_keep_tail(keep_from)
     }
 }
 
@@ -417,7 +543,6 @@ mod tests {
                 let body_open = open_tag(
                     self.marker_tag,
                     0..original_lines_count,
-                    0,
                     0,
                     &[],
                 );
@@ -553,12 +678,12 @@ mod tests {
     }
 
     #[test]
-    fn open_close_tag_render_attrs() {
-        let open = open_tag("nix-copy", 11..22, 945, 62, &[]);
+    fn open_close_tag_render_drop_metadata_only() {
+        let open = open_tag("nix-copy", 11..22, 945, &[]);
         assert!(open.contains("<nix-copy"));
         assert!(open.contains("original-lines=\"12-22\""));
         assert!(open.contains("original-bytes=\"945\""));
-        assert!(open.contains("kept-bytes=\"62\""));
+        assert!(!open.contains("kept-bytes"), "kept-bytes was deliberately dropped");
         let close = close_tag("nix-copy");
         assert_eq!(close, "</nix-copy>\n");
     }
@@ -569,5 +694,75 @@ mod tests {
         assert!(!ctx.was_modified());
         ctx.replace_with_summary(0..1, "X\n", "p");
         assert!(ctx.was_modified());
+    }
+
+    #[test]
+    fn byte_len_of_lines_matches_slice() {
+        let raw = "aaaa\nbbbb\ncccc\n";
+        let ctx = LogContext::from_initial(raw);
+        assert_eq!(ctx.byte_len_of_lines(0..3), 15);
+        assert_eq!(ctx.byte_len_of_lines(1..2), 5); // "bbbb\n"
+    }
+
+    #[test]
+    fn bulk_elide_keeps_last_n_lines_drops_head() {
+        let mut raw = String::new();
+        for i in 0..1000 {
+            raw.push_str(&format!("line {i:04} of unstructured chatter\n"));
+        }
+        let mut ctx = LogContext::from_initial(&raw);
+        BulkElide {
+            max_total_bytes: 2_048,
+            tail_lines: 20,
+        }
+        .apply(&mut ctx);
+        let log = ctx.log();
+        assert!(log.starts_with("<bulk-elided"), "log starts: {log:.80}…");
+        assert!(log.contains("</bulk-elided>"));
+        assert!(log.contains("980 lines"), "elided count in body: {log:.300}");
+        // Last 20 lines survive in order.
+        assert!(log.contains("line 0980 of unstructured chatter"));
+        assert!(log.contains("line 0999 of unstructured chatter"));
+        // Earlier lines are gone.
+        assert!(!log.contains("line 0500 of unstructured chatter"));
+        assert!(!log.contains("line 0000 of unstructured chatter"));
+    }
+
+    #[test]
+    fn bulk_elide_skips_when_total_under_tail_lines() {
+        // Log is small (5 lines, 10 bytes), well under the byte
+        // budget *and* the tail_lines knob — so apply is a no-op.
+        let mut ctx = LogContext::from_initial("a\nb\nc\nd\ne\n");
+        let pass = BulkElide {
+            max_total_bytes: 4,
+            tail_lines: 100,
+        };
+        assert!(pass.can_summarize(&ctx));
+        // 5 lines ≤ 100 tail_lines → cannot keep "last 100", no-op.
+        assert!(!pass.apply(&mut ctx));
+        assert_eq!(ctx.log(), "a\nb\nc\nd\ne\n");
+    }
+
+    #[test]
+    fn bulk_elide_skips_when_under_byte_budget() {
+        let mut ctx = LogContext::from_initial("a\nb\nc\n");
+        let pass = BulkElide::default();
+        assert!(!pass.can_summarize(&ctx));
+        assert!(!pass.apply(&mut ctx));
+    }
+
+    #[test]
+    fn elide_head_keep_tail_preserves_trailing_marker() {
+        // Tail of the log is a Summary segment; elide_head_keep_tail
+        // doesn't care about segment kinds — it just keeps the last
+        // N lines verbatim, including any markers that happen to be
+        // there.
+        let mut ctx = LogContext::from_initial("a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n");
+        ctx.replace_with_summary(7..10, "<sum>tail</sum>\n", "p");
+        // current is now: a b c d e f g <sum> (8 lines)
+        ctx.elide_head_keep_tail(5);
+        let log = ctx.log();
+        assert!(log.starts_with("<bulk-elided"));
+        assert!(log.contains("<sum>tail</sum>"));
     }
 }

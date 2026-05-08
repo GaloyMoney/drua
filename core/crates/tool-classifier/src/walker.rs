@@ -97,23 +97,29 @@ fn walk(
         // Strings always get the chain offered, regardless of size —
         // a 200-byte nix copy run is worth collapsing even when no
         // byte-elision is needed. The chain mutates the string in
-        // place (preserving Value::String). Whatever's left, if
-        // still oversize, falls through to byte-elision.
+        // place (preserving Value::String); its terminal `BulkElide`
+        // pass owns the total-size bound, so when a chain ran we
+        // trust its output even when still over `threshold` (the
+        // chain may have its own, larger bound). Only when no chain
+        // is wired do we fall through to char-level byte-elision —
+        // that path is now strictly the legacy / no-classifier
+        // safety net.
         Value::String(s) => {
-            let mut current = s.clone();
             if let Some(c) = chain {
                 let mut ctx = LogContext::from_initial(s);
-                if c.run(&mut ctx) {
+                let modified = c.run(&mut ctx);
+                let current = ctx.into_log();
+                if modified {
                     *typed_replacements += 1;
-                    current = ctx.into_log();
+                    return Value::String(current);
+                }
+                if current != *s {
+                    return Value::String(current);
                 }
             }
-            let value_for_size = Value::String(current.clone());
-            let bytes = json_size(&value_for_size);
+            let bytes = json_size(value);
             if bytes >= threshold {
-                byte_elide_string(&current, &path, paths, bytes)
-            } else if current != *s {
-                Value::String(current)
+                byte_elide_string(s, &path, paths, bytes)
             } else {
                 value.clone()
             }

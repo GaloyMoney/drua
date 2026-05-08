@@ -380,53 +380,19 @@ fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId) -> String {
             out
         }
         ToolResultSummary::ConcourseLogs(s) => {
+            // Schema-faithful summary: a single `logs` string that
+            // already carries every signal inline (warning lines,
+            // structured-pass markers, bulk-elide markers, etc).
+            // Render with a brief envelope pointing at recovery.
             let mut out = String::new();
-            let status_str = match &s.status {
-                Some(st) => format!("{st:?}"),
-                None => "unknown (pair with concourse_get_build_status)".to_string(),
-            };
             out.push_str(&format!(
-                "[concourse build log: status={status_str}, {} lines / {} bytes; \
-                 fetch the raw stream via tool_output_fetch(invocation_id=\"{id}\")]\n",
-                s.total_lines, s.total_bytes,
+                "[concourse build log: {} bytes kept; \
+                 fetch raw via tool_output_fetch(invocation_id=\"{id}\")]\n",
+                s.logs.len(),
             ));
-            if let (Some(first), Some(last)) = (&s.first_timestamp, &s.last_timestamp) {
-                out.push_str(&format!("timestamps: {first} → {last}\n"));
-            }
-            out.push_str(&format!("tasks: {}\n", s.task_phases.len()));
-            if !s.warnings.is_empty() {
-                out.push_str("=== warnings ===\n");
-                for w in &s.warnings {
-                    out.push_str(&format!(
-                        "[{} · line {}] {}\n",
-                        w.timestamp, w.line_number, w.message
-                    ));
-                }
-            }
-            if !s.errors.is_empty() {
-                out.push_str("=== errors ===\n");
-                for e in &s.errors {
-                    out.push_str(&format!(
-                        "[{} · line {}] {}\n",
-                        e.timestamp, e.line_number, e.message
-                    ));
-                }
-            }
-            // The compacted log itself: timestamps stripped,
-            // summarisable runs replaced inline with XML markers
-            // (`<nix-copy>...</nix-copy>`, `<nix-failure ...>...`).
-            // Same coordinate space as `warnings[*].line_number`.
-            out.push_str("=== logs ===\n");
             out.push_str(&s.logs);
             if !s.logs.ends_with('\n') {
                 out.push('\n');
-            }
-            if !s.final_lines.is_empty() {
-                out.push_str("=== final lines ===\n");
-                for l in &s.final_lines {
-                    out.push_str(l);
-                    out.push('\n');
-                }
             }
             out
         }
