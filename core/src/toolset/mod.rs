@@ -9,9 +9,9 @@ pub mod top_level;
 mod traits;
 
 pub use classifier::{
-    ClassifierContext, ClassifierError, ClassifierRegistry, ConcourseBuildLogClassifier,
-    ConcourseBuildLogSummary, ConcourseBuildStatus, GenericFallback, NixBuildFailure,
-    ResultClassifier, TimestampedLine, ToolResultSummary,
+    Classification, ClassifierContext, ClassifierError, ClassifierRegistry,
+    ConcourseBuildLogClassifier, ConcourseBuildLogSummary, ConcourseBuildStatus, GenericFallback,
+    NixBuildFailure, ResultClassifier, TimestampedLine, ToolResultSummary,
 };
 pub use config::*;
 pub use error::*;
@@ -547,21 +547,21 @@ impl ToolSets {
                     let args_for_classify = args_value
                         .clone()
                         .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
-                    let summary = classifiers.classify(&ClassifierContext {
+                    let classification = classifiers.classify(&ClassifierContext {
                         tool_name: name,
                         args: &args_for_classify,
                         raw: &raw,
                         exit_code: None,
                     });
 
-                    let wrapped = match (&summary, tool_invocations.as_ref()) {
+                    let wrapped = match (&classification.summary, tool_invocations.as_ref()) {
                         (s, _) if s.is_passthrough() => raw,
                         (_, Some(invocations)) => invocations
                             .persist_and_envelope(
                                 subject,
                                 name,
                                 &args_for_classify,
-                                summary,
+                                classification,
                                 &raw,
                                 duration_ms,
                                 started_at,

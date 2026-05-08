@@ -25,7 +25,7 @@ use crate::audit::Audit;
 use crate::auth::AuthSubject;
 use crate::primitives::ToolInvocationId;
 
-use super::classifier::ToolResultSummary;
+use super::classifier::{Classification, ToolResultSummary};
 use super::top_level::FETCH_HINT;
 use repo::ToolInvocationRepo;
 
@@ -114,10 +114,7 @@ impl ToolInvocations {
         owner: ToolInvocationOwner,
         args_hash: &[u8],
     ) -> Result<Option<ToolInvocation>, ToolInvocationError> {
-        Ok(self
-            .repo
-            .find_latest_by_args_hash(owner, args_hash)
-            .await?)
+        Ok(self.repo.find_latest_by_args_hash(owner, args_hash).await?)
     }
 
     /// Persist the captured raw output and decorate the original
@@ -137,23 +134,20 @@ impl ToolInvocations {
         subject: &AuthSubject,
         tool_name: &str,
         args: &serde_json::Value,
-        summary: ToolResultSummary,
+        classification: Classification,
         raw: &CallToolResult,
         duration_ms: u64,
         started_at: chrono::DateTime<chrono::Utc>,
     ) -> Option<CallToolResult> {
         let owner = ToolInvocationOwner::from_subject(subject)?;
-
-        let raw_text = raw
-            .content
-            .iter()
-            .filter_map(|c| match &c.raw {
-                rmcp::model::RawContent::Text(t) => Some(t.text.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        let raw_size_bytes = raw_text.len() as i64;
+        let Classification {
+            summary,
+            canonical_text,
+        } = classification;
+        // `canonical_text` IS the bytes the summary's offsets point at —
+        // persist exactly those so subsequent `tool_output_fetch` calls
+        // return text whose line numbers match the summary's slicing.
+        let raw_size_bytes = canonical_text.len() as i64;
 
         let summary_value = match serde_json::to_value(&summary) {
             Ok(v) => v,
@@ -163,7 +157,7 @@ impl ToolInvocations {
             }
         };
 
-        let canonical = match serde_json::to_string(args) {
+        let canonical_args = match serde_json::to_string(args) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(error = %e, "failed to canonicalise args; skipping persistence");
@@ -171,7 +165,7 @@ impl ToolInvocations {
             }
         };
         let mut hasher = Sha256::new();
-        hasher.update(canonical.as_bytes());
+        hasher.update(canonical_args.as_bytes());
         let args_hash = hasher.finalize().to_vec();
 
         let new = NewToolInvocation {
@@ -181,7 +175,7 @@ impl ToolInvocations {
             args_hash,
             classifier: summary.kind().to_string(),
             summary: summary_value.clone(),
-            raw_text,
+            raw_text: canonical_text,
             raw_size_bytes,
             exit_code: None,
             duration_ms: duration_ms.min(i32::MAX as u64) as i32,

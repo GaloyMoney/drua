@@ -26,7 +26,9 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
-use super::{ClassifierContext, ClassifierError, ResultClassifier, ToolResultSummary};
+use super::{
+    Classification, ClassifierContext, ClassifierError, ResultClassifier, ToolResultSummary,
+};
 
 /// Lines kept from the very end of the log unconditionally. Bounded so a
 /// pathological tail of cache-pruning still doesn't blow context, but big
@@ -142,10 +144,18 @@ impl ResultClassifier for ConcourseBuildLogClassifier {
         tool_name == "concourse_get_build_logs"
     }
 
-    fn classify(&self, ctx: &ClassifierContext<'_>) -> Result<ToolResultSummary, ClassifierError> {
+    fn classify(&self, ctx: &ClassifierContext<'_>) -> Result<Classification, ClassifierError> {
+        // `extract_text` prefers `structured_content.logs` when set —
+        // exactly the bytes whose offsets the parsed summary references.
+        // Returning the same `raw` as `canonical_text` is what makes
+        // `tool_output_fetch(invocation_id, query: tail/range/grep)`
+        // operate on the bytes the summary's slicing actually saw.
         let raw = extract_text(ctx.raw);
         let summary = parse_concourse_log(&raw);
-        Ok(ToolResultSummary::Concourse(summary))
+        Ok(Classification {
+            summary: ToolResultSummary::Concourse(summary),
+            canonical_text: raw,
+        })
     }
 }
 

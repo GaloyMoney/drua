@@ -99,10 +99,24 @@ pub enum ClassifierError {
     },
 }
 
+/// What a classifier returns. Bundles the typed summary with the bytes
+/// the summary's offsets refer to so the dispatcher persists exactly
+/// what the classifier saw — fixes drift between classifier-side text
+/// extraction (e.g. Concourse reading `structured_content.logs`) and
+/// dispatcher-side persistence (which used to re-extract from
+/// `content[].text`). After this trait shape, `tool_output_fetch` is
+/// guaranteed to return bytes whose offsets match the summary's
+/// `head`/`tail` slicing.
+#[derive(Debug, Clone)]
+pub struct Classification {
+    pub summary: ToolResultSummary,
+    pub canonical_text: String,
+}
+
 pub trait ResultClassifier: Send + Sync + 'static {
     fn name(&self) -> &str;
     fn matches(&self, tool_name: &str, args: &serde_json::Value) -> bool;
-    fn classify(&self, ctx: &ClassifierContext<'_>) -> Result<ToolResultSummary, ClassifierError>;
+    fn classify(&self, ctx: &ClassifierContext<'_>) -> Result<Classification, ClassifierError>;
 }
 
 /// First-match dispatch. Order matters — most-specific classifiers go first;
@@ -132,13 +146,13 @@ impl ClassifierRegistry {
         self
     }
 
-    pub fn classify(&self, ctx: &ClassifierContext<'_>) -> ToolResultSummary {
+    pub fn classify(&self, ctx: &ClassifierContext<'_>) -> Classification {
         for classifier in &self.classifiers {
             if !classifier.matches(ctx.tool_name, ctx.args) {
                 continue;
             }
             match classifier.classify(ctx) {
-                Ok(summary) => return summary,
+                Ok(c) => return c,
                 Err(e) => {
                     tracing::warn!(
                         classifier = classifier.name(),
@@ -150,8 +164,12 @@ impl ClassifierRegistry {
         }
         // Unreachable when GenericFallback is registered, but produce a
         // safe default if someone hands us an empty registry.
-        ToolResultSummary::Passthrough {
-            text: extract_text(ctx.raw),
+        let canonical_text = extract_text(ctx.raw);
+        Classification {
+            summary: ToolResultSummary::Passthrough {
+                text: canonical_text.clone(),
+            },
+            canonical_text,
         }
     }
 }
@@ -185,10 +203,13 @@ impl ResultClassifier for GenericFallback {
         true
     }
 
-    fn classify(&self, ctx: &ClassifierContext<'_>) -> Result<ToolResultSummary, ClassifierError> {
+    fn classify(&self, ctx: &ClassifierContext<'_>) -> Result<Classification, ClassifierError> {
         let raw = extract_text(ctx.raw);
         if raw.len() < self.threshold_bytes {
-            return Ok(ToolResultSummary::Passthrough { text: raw });
+            return Ok(Classification {
+                summary: ToolResultSummary::Passthrough { text: raw.clone() },
+                canonical_text: raw,
+            });
         }
 
         let lines: Vec<&str> = raw.lines().collect();
@@ -201,12 +222,15 @@ impl ResultClassifier for GenericFallback {
         let tail_start = lines.len().saturating_sub(GENERIC_TAIL_LINES);
         let tail = lines[tail_start..].join("\n");
         let kept_bytes = (head.len() + tail.len()) as u32;
-        Ok(ToolResultSummary::Generic {
-            head,
-            tail,
-            total_bytes: raw.len() as u64,
-            kept_bytes,
-            classifier_hint: None,
+        Ok(Classification {
+            summary: ToolResultSummary::Generic {
+                head,
+                tail,
+                total_bytes: raw.len() as u64,
+                kept_bytes,
+                classifier_hint: None,
+            },
+            canonical_text: raw,
         })
     }
 }
@@ -251,8 +275,13 @@ mod tests {
     fn small_output_is_passthrough() {
         let raw = result_with("just a small bit of stdout");
         let registry = ClassifierRegistry::with_default();
-        let summary = registry.classify(&ctx("bash", &raw));
-        assert!(summary.is_passthrough(), "got: {:?}", summary);
+        let classification = registry.classify(&ctx("bash", &raw));
+        assert!(
+            classification.summary.is_passthrough(),
+            "got: {:?}",
+            classification.summary
+        );
+        assert_eq!(classification.canonical_text, "just a small bit of stdout");
     }
 
     #[test]
@@ -265,8 +294,11 @@ mod tests {
         );
         let raw = result_with(&body);
         let registry = ClassifierRegistry::with_default();
-        let summary = registry.classify(&ctx("bash", &raw));
-        match summary {
+        let classification = registry.classify(&ctx("bash", &raw));
+        // canonical_text is the bytes the summary's offsets refer to —
+        // exactly what the dispatcher will persist.
+        assert_eq!(classification.canonical_text, body);
+        match classification.summary {
             ToolResultSummary::Generic {
                 head,
                 tail,
@@ -298,7 +330,7 @@ mod tests {
             fn classify(
                 &self,
                 _: &ClassifierContext<'_>,
-            ) -> Result<ToolResultSummary, ClassifierError> {
+            ) -> Result<Classification, ClassifierError> {
                 Err(ClassifierError::Failed {
                     classifier: "test::always_fail",
                     message: "boom".into(),
@@ -310,15 +342,18 @@ mod tests {
             .register(AlwaysFail)
             .register(GenericFallback::default());
         let raw = result_with("hi");
-        let summary = registry.classify(&ctx("bash", &raw));
-        assert!(summary.is_passthrough());
+        let classification = registry.classify(&ctx("bash", &raw));
+        assert!(classification.summary.is_passthrough());
     }
 
     #[test]
     fn threshold_is_configurable() {
         let registry = ClassifierRegistry::new().register(GenericFallback { threshold_bytes: 4 });
         let raw = result_with("ten chars\n");
-        let summary = registry.classify(&ctx("bash", &raw));
-        assert!(matches!(summary, ToolResultSummary::Generic { .. }));
+        let classification = registry.classify(&ctx("bash", &raw));
+        assert!(matches!(
+            classification.summary,
+            ToolResultSummary::Generic { .. }
+        ));
     }
 }
