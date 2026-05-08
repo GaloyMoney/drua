@@ -199,6 +199,14 @@ impl WorkflowRun {
     /// here — those are aggregated into `WorkflowRunState::Failed`,
     /// while errors aggregated here become `WorkflowRunState::Errored`.
     ///
+    /// Drives the same Pending → Running transition that
+    /// `step_started` and `step_skipped` do — the executor's
+    /// condition-gate error paths call this directly without a
+    /// prior `step_started`, so without the transition a run whose
+    /// very first step's condition errored would jump from Pending
+    /// straight to Errored, leaving no `Running` phase in the
+    /// event log.
+    ///
     /// No-op if the step already terminated.
     pub fn step_errored(&mut self, step_name: String, error: String) -> Idempotent<()> {
         idempotency_guard!(
@@ -222,6 +230,9 @@ impl WorkflowRun {
                 completed_at: Some(now),
                 skipped: None,
             });
+        }
+        if self.state == WorkflowRunState::Pending {
+            self.state = WorkflowRunState::Running;
         }
         self.events.push(WorkflowRunEvent::StepErrored {
             step_name,
@@ -398,6 +409,7 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
                     error,
                     completed_at: ts,
                 } => {
+                    state = WorkflowRunState::Running;
                     if let Some(r) = results.iter_mut().find(|r| &r.name == step_name) {
                         r.error = Some(error.clone());
                         r.completed_at = Some(*ts);
@@ -592,6 +604,59 @@ mod tests {
         error(&mut run, "only", "sandbox not ready");
 
         assert_eq!(finalize(&mut run), WorkflowRunState::Errored);
+    }
+
+    /// The executor's condition-gate error paths
+    /// (`ConditionOutcome::NotBoolean`, CEL runtime error, parse
+    /// error) call `step_errored` directly without a prior
+    /// `step_started`. Same wart as `step_skipped` had — without
+    /// the Pending → Running transition on `step_errored`, a run
+    /// whose very first step's condition errored would jump from
+    /// Pending straight to Errored at `run_completed`, with no
+    /// `Running` phase ever recorded.
+    #[test]
+    fn step_errored_transitions_pending_to_running() {
+        let mut run = fresh_run(&["only"]);
+        assert_eq!(run.state, WorkflowRunState::Pending);
+        error(&mut run, "only", "condition body returned non-boolean");
+        assert_eq!(run.state, WorkflowRunState::Running);
+    }
+
+    /// Production condition-gate error path (`else` branch of
+    /// `step_errored`): no prior `step_started`, fresh `StepResult`
+    /// pushed with the error message.
+    #[test]
+    fn step_errored_creates_fresh_step_result() {
+        let mut run = fresh_run(&["only"]);
+        error(&mut run, "only", "condition body returned non-boolean");
+        assert_eq!(run.step_results.len(), 1);
+        let r = &run.step_results[0];
+        assert_eq!(r.name, "only");
+        assert_eq!(
+            r.error.as_deref(),
+            Some("condition body returned non-boolean")
+        );
+        assert!(r.output.is_none());
+        assert!(r.skipped.is_none());
+        assert!(r.completed_at.is_some());
+    }
+
+    /// Mid-flight rehydration: a run whose only event is
+    /// `StepErrored` (no prior `StepStarted`) must reflect Running
+    /// state, mirroring the live mutation. Same fix as the
+    /// `StepSkipped` arm.
+    #[test]
+    fn step_errored_hydrates_with_running_state() {
+        let mut run = fresh_run(&["only"]);
+        error(&mut run, "only", "condition body returned non-boolean");
+        let events = run.events;
+        let rehydrated = WorkflowRun::try_from_events(events).unwrap();
+        assert_eq!(rehydrated.state, WorkflowRunState::Running);
+        assert_eq!(rehydrated.step_results.len(), 1);
+        assert_eq!(
+            rehydrated.step_results[0].error.as_deref(),
+            Some("condition body returned non-boolean")
+        );
     }
 
     #[test]
