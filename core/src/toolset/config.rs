@@ -70,7 +70,15 @@ fn default_max_tool_result_bytes() -> usize {
 }
 
 fn default_max_return_bytes() -> usize {
-    100 * 1024
+    // 16 MiB. Hard ceiling vs runaway scripts only — `Compose`
+    // self-curates oversize returns through `GenericFallback`'s
+    // walker (4 KiB threshold), which produces a `StructuredElision`
+    // envelope and persists the full bytes to `tool_invocations` for
+    // `tool_output_fetch` recovery. Setting this anywhere near the
+    // walker's threshold (the historical 100 KiB) pre-empts the
+    // walker for normal-size tool outputs (concourse logs ~280 KiB,
+    // cargo build logs in MiB) and defeats the universal pipeline.
+    16 * 1024 * 1024
 }
 
 fn default_max_console_bytes() -> usize {

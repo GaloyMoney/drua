@@ -41,8 +41,14 @@ pub struct JsEngine {
     /// Cap on a single inner-tool result, in bytes. Scripts can pull large
     /// payloads and filter them before returning.
     max_tool_result_bytes: usize,
-    /// Cap on the script's final return value, in bytes — bounded so the
-    /// agent context stays clean.
+    /// Hard ceiling on the script's final return value, in bytes —
+    /// defends against runaway scripts that synthesize gigabytes.
+    /// Agent-context preservation is *not* this cap's job: callers
+    /// (e.g. `Compose`) self-curate the return through the
+    /// universal-pipeline walker, which produces an elided envelope
+    /// + recovery handle for any return ≥ the walker's threshold.
+    /// Setting this anywhere near typical tool-output sizes
+    /// pre-empts the walker and defeats the universal pipeline.
     max_return_bytes: usize,
     /// Cap on the console buffer in bytes. Drops oldest entries (tail
     /// truncation) when exceeded. Console is a debug sidecar, not primary
@@ -64,7 +70,7 @@ impl JsEngine {
             stack_limit: 512 * 1024,
             max_tool_calls: 50,
             max_tool_result_bytes: 4 * 1024 * 1024,
-            max_return_bytes: 100 * 1024,
+            max_return_bytes: 16 * 1024 * 1024,
             max_console_bytes: 8 * 1024,
         }
     }
