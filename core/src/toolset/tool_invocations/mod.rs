@@ -727,7 +727,9 @@ mod tests {
             },
         )
         .unwrap();
-        let elision = r.elision.expect("oversize slice should produce elision metadata");
+        let elision = r
+            .elision
+            .expect("oversize slice should produce elision metadata");
         assert_eq!(elision.kept_bytes, MAX_FETCH_RESPONSE_BYTES as u64);
         assert_eq!(elision.slice_bytes, big.len() as u64);
         assert!(elision.hint.contains("`len`"));

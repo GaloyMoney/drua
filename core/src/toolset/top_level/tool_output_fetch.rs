@@ -269,8 +269,14 @@ mod tests {
     /// description literally and hit `deny_unknown_fields` rejections.
     #[test]
     fn description_documents_view_and_each_query_mode() {
-        assert!(DESCRIPTION.contains("view"), "description should mention `view`");
-        assert!(DESCRIPTION.contains("query"), "description should mention `query`");
+        assert!(
+            DESCRIPTION.contains("view"),
+            "description should mention `view`"
+        );
+        assert!(
+            DESCRIPTION.contains("query"),
+            "description should mention `query`"
+        );
         for (mode, sample_args) in [
             ("tail", serde_json::json!({"mode": "tail", "lines": 5})),
             ("head", serde_json::json!({"mode": "head", "lines": 5})),

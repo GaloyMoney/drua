@@ -374,8 +374,7 @@ fn render_curated_result(summary: &ToolResultSummary) -> serde_json::Value {
 /// unique to compose is *which* invocation id to pass: compose
 /// emits both `result_invocation_id` (the full JS return) and a
 /// per-sub-call `sub_invocations[].invocation_id` directory.
-const COMPOSE_FETCH_HINT: &str =
-    "invocation_id is either `result_invocation_id` (full JS return) \
+const COMPOSE_FETCH_HINT: &str = "invocation_id is either `result_invocation_id` (full JS return) \
      or any `sub_invocations[].invocation_id` (specific sub-call's \
      persisted output) — see `tool_output_fetch` for the full call shape.";
 
@@ -450,10 +449,9 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
                 }));
 
                 let start = std::time::Instant::now();
-                let dispatch_result =
-                    run_searchable_call(set, &subject, &tool_name, args.clone())
-                        .await
-                        .map_err(|e| with_hint(&name_owned, e));
+                let dispatch_result = run_searchable_call(set, &subject, &tool_name, args.clone())
+                    .await
+                    .map_err(|e| with_hint(&name_owned, e));
                 let duration_ms = start.elapsed().as_millis() as u64;
                 Audit::record_duration(start);
 
