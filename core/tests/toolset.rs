@@ -23,6 +23,8 @@ async fn init_toolsets() {
             tool_prefix: None,
             allowed_tools: None,
             required_scopes: None,
+            internal_only: false,
+            auth_mode: Default::default(),
         }],
         ..Default::default()
     };
