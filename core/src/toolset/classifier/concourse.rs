@@ -153,7 +153,7 @@ impl ResultClassifier for ConcourseBuildLogClassifier {
         let raw = extract_text(ctx.raw);
         let summary = parse_concourse_log(&raw);
         Ok(Classification {
-            summary: ToolResultSummary::Concourse(summary),
+            summary: ToolResultSummary::ConcourseLogs(summary),
             canonical_text: raw,
         })
     }

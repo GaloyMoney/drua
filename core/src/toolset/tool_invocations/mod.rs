@@ -382,7 +382,7 @@ fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId) -> String {
             out.push_str(&pretty);
             out
         }
-        ToolResultSummary::Concourse(s) => {
+        ToolResultSummary::ConcourseLogs(s) => {
             let mut out = String::new();
             out.push_str(&format!(
                 "[concourse build log: status={:?}, {} lines / {} bytes; \

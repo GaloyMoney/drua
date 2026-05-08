@@ -362,7 +362,7 @@ fn render_curated_result(summary: &ToolResultSummary) -> serde_json::Value {
     match summary {
         ToolResultSummary::Passthrough { value } => value.clone(),
         ToolResultSummary::StructuredElision { kept, .. } => kept.clone(),
-        ToolResultSummary::Concourse(s) => {
+        ToolResultSummary::ConcourseLogs(s) => {
             serde_json::to_value(s).unwrap_or(serde_json::Value::Null)
         }
     }

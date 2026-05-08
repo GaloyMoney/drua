@@ -48,8 +48,8 @@ fn build_610_succeeded_extracts_warnings_and_counts_noise() {
     );
 
     let summary = match classify(BUILD_610_SUCCEEDED) {
-        ToolResultSummary::Concourse(s) => s,
-        other => panic!("expected Concourse summary, got {other:?}"),
+        ToolResultSummary::ConcourseLogs(s) => s,
+        other => panic!("expected ConcourseLogs summary, got {other:?}"),
     };
 
     // Build #610 succeeded in concourse, but the classifier deliberately
@@ -123,8 +123,8 @@ fn build_610_succeeded_extracts_warnings_and_counts_noise() {
 #[test]
 fn build_609_failed_extracts_clippy_rust_diagnostic() {
     let summary = match classify(BUILD_609_FAILED) {
-        ToolResultSummary::Concourse(s) => s,
-        other => panic!("expected Concourse summary, got {other:?}"),
+        ToolResultSummary::ConcourseLogs(s) => s,
+        other => panic!("expected ConcourseLogs summary, got {other:?}"),
     };
 
     assert_eq!(summary.status, ConcourseBuildStatus::Failed);

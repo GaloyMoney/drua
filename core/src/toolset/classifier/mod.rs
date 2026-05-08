@@ -67,7 +67,11 @@ pub enum ToolResultSummary {
     /// checks, cache pruning) into a structured shape that preserves
     /// every signal-bearing line — warnings, build failures, the full
     /// nix log tail of any failed derivation, and the closing N lines.
-    Concourse(ConcourseBuildLogSummary),
+    /// Renamed from `Concourse` because Concourse is the upstream
+    /// service, not a content shape — future Concourse-shaped outputs
+    /// (resource versions, pipeline config) would each get their own
+    /// kind.
+    ConcourseLogs(ConcourseBuildLogSummary),
 }
 
 impl ToolResultSummary {
@@ -78,13 +82,12 @@ impl ToolResultSummary {
     /// disagreement makes those two columns disagree about what
     /// kind of summary the row actually carries (cursor review
     /// #3207287028). Variants follow `rename_all = "snake_case"`
-    /// so e.g. `Concourse` serialises as `"concourse"`, not
-    /// `"concourse_build_log"`.
+    /// so e.g. `ConcourseLogs` serialises as `"concourse_logs"`.
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Passthrough { .. } => "passthrough",
             Self::StructuredElision { .. } => "structured_elision",
-            Self::Concourse(_) => "concourse",
+            Self::ConcourseLogs(_) => "concourse_logs",
         }
     }
 
