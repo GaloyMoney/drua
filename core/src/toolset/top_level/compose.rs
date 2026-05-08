@@ -17,7 +17,10 @@ use serde::Deserialize;
 use crate::audit::{Audit, InteractionType};
 use crate::auth::AuthSubject;
 
-use super::super::classifier::{ClassifierContext, ClassifierRegistry};
+use super::super::classifier::{
+    Classification, ClassifierContext, ClassifierRegistry, GenericFallback, ResultClassifier,
+    ToolResultSummary,
+};
 use super::super::config::ComposeConfig;
 use super::super::error::ToolSetsError;
 use super::super::filter::OutputFilter;
@@ -78,8 +81,26 @@ static COMPOSE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct ComposeOutput {
+    /// The JS script's return value. Verbatim when small; under
+    /// elision the walker's `kept` form (with sentinels for
+    /// dropped branches). When elided, `result_invocation_id` is
+    /// also present and the full return is recoverable via
+    /// `tool_output_fetch`.
     #[schemars(schema_with = "crate::toolset::any_json_schema")]
     result: serde_json::Value,
+    /// Set when `result` was curated by the walker. Pass to
+    /// `tool_output_fetch` to recover the full JS return value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result_invocation_id: Option<uuid::Uuid>,
+    /// Each sub-tool call worth recovering. Excludes Passthrough
+    /// (under-threshold) sub-calls, errored calls, and bypass-marked
+    /// calls — entries listed here always have a valid `invocation_id`
+    /// the agent can fetch.
+    sub_invocations: Vec<SubInvocation>,
+    /// Single fetch hint covering both `result_invocation_id` and any
+    /// `sub_invocations[].invocation_id`. Mirrors the universal
+    /// pipeline's hint shape so the agent learns one rule.
+    fetch_hint: String,
     console: Vec<String>,
     tool_calls: usize,
     execution_time_ms: u64,
@@ -181,46 +202,170 @@ impl TopLevelTool for ComposeTool {
             .with_max_console_bytes(self.config.max_console_bytes)
             .with_memory_limit(self.config.memory_limit_bytes)
             .with_stack_limit(self.config.stack_limit_bytes);
+        let started_at = chrono::Utc::now();
         let result = engine
             .execute(&script, dispatcher, timeout)
             .await
             .map_err(|e| ToolSetsError::Compose(e.to_string()))?;
 
-        let mut sections = Vec::new();
+        // Self-curation: run the unified walker over the JS return
+        // value with the SAME threshold every other classifier uses.
+        // Below threshold → result is the verbatim Value, no
+        // result_invocation_id. Above threshold → walker produces
+        // either StructuredElision (kept Value with sentinels) or
+        // Passthrough (when elision wouldn't shrink). When elided,
+        // persist the full return so the agent can fetch it.
+        let walker_classifier = GenericFallback::default();
+        let walker_input = build_walker_input(&result.value);
+        let no_args = serde_json::json!({});
+        let classification = walker_classifier
+            .classify(&ClassifierContext {
+                tool_name: "compose",
+                args: &no_args,
+                raw: &walker_input,
+                exit_code: None,
+            })
+            .unwrap_or_else(|_| Classification {
+                summary: ToolResultSummary::Passthrough {
+                    value: result.value.clone(),
+                },
+                canonical_text: serde_json::to_string(&result.value).unwrap_or_default(),
+            });
 
-        let value_str =
-            serde_json::to_string_pretty(&result.value).unwrap_or_else(|_| "null".to_string());
-        sections.push(format!("=== Result ===\n{value_str}"));
+        let (curated_result, result_invocation_id) =
+            match (classification.summary, self.tool_invocations.as_ref()) {
+                (ToolResultSummary::Passthrough { value }, _) => (value, None),
+                (summary, Some(invocations)) => {
+                    let canonical_text = classification.canonical_text;
+                    let curated = render_curated_result(&summary);
+                    let persisted = invocations
+                        .persist_classification(
+                            subject,
+                            "compose",
+                            &no_args,
+                            Classification {
+                                summary,
+                                canonical_text,
+                            },
+                            result.execution_time.as_millis() as u64,
+                            started_at,
+                        )
+                        .await;
+                    let invocation_id = persisted.map(|p| uuid::Uuid::from(p.invocation_id));
+                    (curated, invocation_id)
+                }
+                (summary, None) => {
+                    // No PG wired (test path) — surface the curated
+                    // form so the agent still sees the elision shape,
+                    // just without a recovery handle.
+                    (render_curated_result(&summary), None)
+                }
+            };
 
-        if !result.console_output.is_empty() {
-            sections.push(format!(
-                "=== Console ===\n{}",
-                result.console_output.join("\n")
-            ));
-        }
+        let sub_invocations = sub_invocations
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
 
-        if !dts.is_empty() {
-            sections.push(format!("=== Available Types ===\n{dts}"));
-        }
-
-        sections.push(format!(
-            "=== Metadata ===\ntool_calls: {}\nexecution_time: {:?}",
-            result.tool_calls_made, result.execution_time
-        ));
-
-        let text = sections.join("\n\n");
         let out = ComposeOutput {
-            result: result.value,
-            console: result.console_output,
+            result: curated_result,
+            result_invocation_id,
+            sub_invocations,
+            fetch_hint: COMPOSE_FETCH_HINT.to_string(),
+            console: result.console_output.clone(),
             tool_calls: result.tool_calls_made,
             execution_time_ms: result.execution_time.as_millis() as u64,
         };
+
+        // Prose rendering for the model's text content. Keep the
+        // legacy `=== Result ===` / `=== Console ===` / `=== Metadata ===`
+        // sections so existing agents reading the text form aren't
+        // broken; add a `=== Sub Invocations ===` section when there's
+        // anything to surface.
+        let mut sections = Vec::new();
+        let value_str =
+            serde_json::to_string_pretty(&out.result).unwrap_or_else(|_| "null".to_string());
+        sections.push(format!("=== Result ===\n{value_str}"));
+        if !out.console.is_empty() {
+            sections.push(format!("=== Console ===\n{}", out.console.join("\n")));
+        }
+        if !dts.is_empty() {
+            sections.push(format!("=== Available Types ===\n{dts}"));
+        }
+        if !out.sub_invocations.is_empty() {
+            let lines: Vec<String> = out
+                .sub_invocations
+                .iter()
+                .map(|s| {
+                    format!(
+                        "  [{}] {} → {} ({} bytes raw / {} bytes summary, kind={})",
+                        s.seq,
+                        s.args_digest,
+                        s.invocation_id,
+                        s.raw_size_bytes,
+                        s.summary_size_bytes,
+                        s.kind,
+                    )
+                })
+                .collect();
+            sections.push(format!("=== Sub Invocations ===\n{}", lines.join("\n"),));
+        }
+        sections.push(format!(
+            "=== Metadata ===\ntool_calls: {}\nexecution_time: {:?}\n{}",
+            out.tool_calls,
+            std::time::Duration::from_millis(out.execution_time_ms),
+            out.result_invocation_id
+                .map(|id| format!("result_invocation_id: {id}"))
+                .unwrap_or_else(|| "result: verbatim (small enough)".to_string()),
+        ));
+
+        let text = sections.join("\n\n");
         let structured = serde_json::to_value(&out).expect("ComposeOutput serialization");
         let mut ctr = CallToolResult::success(vec![Content::text(text)]);
         ctr.structured_content = Some(structured);
         Ok(ctr)
     }
 }
+
+/// Wrap a JS return Value as a `CallToolResult` so the existing
+/// classifier surface can walk it. structured_content carries the
+/// Value verbatim; content[].text is set to the compact serialized
+/// form so any text-extraction fallback still works.
+fn build_walker_input(value: &serde_json::Value) -> CallToolResult {
+    let text = serde_json::to_string(value).unwrap_or_default();
+    let mut ctr = CallToolResult::success(vec![Content::text(text)]);
+    ctr.structured_content = Some(value.clone());
+    ctr
+}
+
+/// For elided/non-Passthrough summaries, surface the walker's `kept`
+/// view inline as compose's `result` field (so the agent still sees
+/// data, just curated). Concourse / future typed shapes fall back
+/// to JSON-stringifying the entire summary — they won't be the
+/// shape compose's JS engine produces anyway.
+fn render_curated_result(summary: &ToolResultSummary) -> serde_json::Value {
+    match summary {
+        ToolResultSummary::Passthrough { value } => value.clone(),
+        ToolResultSummary::StructuredElision { kept, .. } => kept.clone(),
+        ToolResultSummary::Generic { head, tail, .. } => serde_json::json!({
+            "_elided": true,
+            "kind": "generic_text",
+            "head": head,
+            "tail": tail,
+        }),
+        ToolResultSummary::Concourse(s) => {
+            serde_json::to_value(s).unwrap_or(serde_json::Value::Null)
+        }
+    }
+}
+
+/// Single source of truth for compose's fetch instruction — embedded
+/// once in the envelope and once in the prose so the agent doesn't
+/// have to look it up separately.
+const COMPOSE_FETCH_HINT: &str =
+    "tool_output_fetch({invocation_id, query: {mode: 'tail'|'head'|'range'|'grep', ...}}) — \
+     invocation_id can be `result_invocation_id` (full JS return) or any \
+     `sub_invocations[].invocation_id` (specific sub-call's persisted output)";
 
 /// One sub-tool dispatch's worth of recovery metadata. Accumulated by
 /// `CatalogDispatcher` while the JS script runs; surfaced in compose's
