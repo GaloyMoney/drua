@@ -161,22 +161,36 @@ impl TemplateContext<'_> {
     /// `Ok(ConditionOutcome::NotBoolean(rendered))` when the body
     /// evaluated cleanly but produced a non-boolean (caller turns
     /// this into a `StepErrored`), and `Err(TemplateError)` for
-    /// compile errors and CEL runtime errors (type mismatch, etc.).
+    /// compile errors and CEL runtime errors (type mismatch,
+    /// reference to an unknown identifier, etc.).
+    ///
+    /// Compiles the CEL expression exactly once. The static
+    /// parse-time checks (`parse_path` body shape + `validate_root`
+    /// identifier scope) are workflow create/update concerns —
+    /// `Workflows::validate_steps` runs them via `parse_condition`
+    /// before any run is ever spawned. By the time this method
+    /// runs, the body is known-good against those static rules; an
+    /// `Err` here is a CEL evaluation failure (or, defensively, a
+    /// recompile failure).
     ///
     /// Truthy-coercion (treating `0`, `""`, `null`, etc. as false)
     /// is intentionally NOT supported — non-boolean bodies surface
-    /// as a hard error so authors fix the typing.
+    /// as `ConditionOutcome::NotBoolean` so authors fix the typing.
     pub fn evaluate_condition(&self, body: &str) -> Result<ConditionOutcome, TemplateError> {
-        let r = parse_condition(body)?;
+        let trimmed = body.trim();
+        let raw = format!("{OPEN} {trimmed} {CLOSE}");
+        if trimmed.is_empty() {
+            return Err(TemplateError::EmptyPath(raw));
+        }
         let built = self.build_cel_context()?;
-        let program = Program::compile(&r.body)
-            .map_err(|e| TemplateError::Compile(r.raw.clone(), e.to_string()))?;
+        let program = Program::compile(trimmed)
+            .map_err(|e| TemplateError::Compile(raw.clone(), e.to_string()))?;
         let value = program
             .execute(&built.cel)
-            .map_err(|e| TemplateError::Resolve(r.raw.clone(), e.to_string()))?;
+            .map_err(|e| TemplateError::Resolve(raw.clone(), e.to_string()))?;
         let json = value
             .json()
-            .map_err(|e| TemplateError::JsonConvert(r.raw.clone(), e.to_string()))?;
+            .map_err(|e| TemplateError::JsonConvert(raw.clone(), e.to_string()))?;
         Ok(match json {
             Value::Bool(true) => ConditionOutcome::True,
             Value::Bool(false) => ConditionOutcome::False,
@@ -941,8 +955,13 @@ mod tests {
         assert!(matches!(err, TemplateError::Compile(_, _)));
     }
 
+    /// Unknown roots aren't statically rejected by `evaluate_condition`
+    /// (that's `parse_condition`'s job at create time, exercised by
+    /// `parse_condition_rejects_unknown_root`). At runtime an
+    /// unbound identifier surfaces as a CEL `Resolve` error — the
+    /// runtime context simply doesn't have `env` bound.
     #[test]
-    fn evaluate_condition_rejects_unknown_root() {
+    fn evaluate_condition_unknown_identifier_surfaces_as_runtime_error() {
         let trigger = json!({});
         let steps = HashMap::new();
         let ctx = TemplateContext {
@@ -950,7 +969,19 @@ mod tests {
             steps: &steps,
         };
         let err = ctx.evaluate_condition("env.HOME == 'x'").unwrap_err();
-        assert!(matches!(err, TemplateError::UnknownRoot(_, _)));
+        assert!(matches!(err, TemplateError::Resolve(_, _)));
+    }
+
+    #[test]
+    fn evaluate_condition_rejects_empty_body() {
+        let trigger = json!({});
+        let steps = HashMap::new();
+        let ctx = TemplateContext {
+            trigger: &trigger,
+            steps: &steps,
+        };
+        let err = ctx.evaluate_condition("   ").unwrap_err();
+        assert!(matches!(err, TemplateError::EmptyPath(_)));
     }
 
     #[test]
