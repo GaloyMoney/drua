@@ -81,7 +81,7 @@ pub struct TimestampedLine {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NixBuildFailure {
     /// e.g. `"checks.x86_64-linux.clippy"`.
     pub attribute: String,

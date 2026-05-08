@@ -774,7 +774,7 @@ mod tests {
         assert!(elision.hint.contains("`len`"));
         // content carries the kept head followed by the trailer.
         assert!(r.content.starts_with(&"x".repeat(MAX_FETCH_RESPONSE_BYTES)));
-        assert!(r.content.contains("bytes elided"));
+        assert!(r.content.contains("byte slice elided"));
         assert!(r.content.contains("refine:"));
     }
 

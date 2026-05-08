@@ -321,7 +321,7 @@ fn nix_classifier_passes_through_unrelated_bash_output() {
     let registry = ClassifierRegistry::with_default();
     // Plain ls output — no nix shape.
     let result =
-        CallToolResult::success(vec![Content::text("file1.txt\nfile2.txt\nfile3.txt".into())]);
+        CallToolResult::success(vec![Content::text("file1.txt\nfile2.txt\nfile3.txt")]);
     let args = serde_json::json!({"command": "ls"});
     let registry_ref = &registry;
     let classify_region = |region: &str| registry_ref.classify_region(region);
