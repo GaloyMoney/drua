@@ -27,9 +27,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
 use super::string_classifier::StringClassifier;
-use super::{
-    Classification, ClassifierContext, ClassifierError, ResultClassifier, ToolResultSummary,
-};
 
 const MAX_FAILURES_KEPT: usize = 10;
 const MAX_FAILURE_LOG_TAIL: usize = 40;
@@ -59,36 +56,6 @@ pub struct NixBuildSummary {
     pub total_bytes: u64,
     /// Approximate number of bytes the agent now sees vs the raw input.
     pub kept_bytes: u32,
-}
-
-pub struct NixBuildClassifier;
-
-impl ResultClassifier for NixBuildClassifier {
-    fn name(&self) -> &str {
-        "nix::build::v1"
-    }
-
-    /// No identity-based match. Nix output reaches this classifier
-    /// either via content-sniff (bash running nix) or via region
-    /// recursion (`classify_region` called by a parent), neither of
-    /// which carries a useful `tool_name`. See `matches_content`.
-    fn matches(&self, _tool_name: &str, _args: &serde_json::Value) -> bool {
-        false
-    }
-
-    fn matches_content(&self, ctx: &ClassifierContext<'_>) -> bool {
-        let text = extract_text(ctx.raw);
-        sniff(&text)
-    }
-
-    fn classify(&self, ctx: &ClassifierContext<'_>) -> Result<Classification, ClassifierError> {
-        let raw = extract_text(ctx.raw);
-        let summary = parse(&raw);
-        Ok(Classification {
-            summary: ToolResultSummary::NixBuild(summary),
-            canonical_text: raw,
-        })
-    }
 }
 
 /// `StringClassifier` impl — fires when the walker encounters a
@@ -255,42 +222,9 @@ fn estimate_kept_bytes(
     bytes
 }
 
-fn extract_text(result: &rmcp::model::CallToolResult) -> String {
-    if let Some(sc) = result.structured_content.as_ref() {
-        if let Some(s) = sc.as_str() {
-            return s.to_string();
-        }
-        if let Some(map) = sc.as_object() {
-            if map.len() == 1 {
-                if let Some(serde_json::Value::String(s)) = map.values().next() {
-                    return s.clone();
-                }
-            }
-        }
-    }
-    result
-        .content
-        .iter()
-        .filter_map(|c| match &c.raw {
-            rmcp::model::RawContent::Text(t) => Some(t.text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rmcp::model::Content;
-
-    fn ctx_with(raw_text: &str) -> rmcp::model::CallToolResult {
-        rmcp::model::CallToolResult::success(vec![Content::text(raw_text.to_string())])
-    }
-
-    fn no_recurse() -> impl Fn(&str) -> Option<ToolResultSummary> {
-        |_| None
-    }
 
     #[test]
     fn sniff_matches_building_drv_line() {
@@ -382,34 +316,29 @@ some unrelated trailing line
     }
 
     #[test]
-    fn classifier_matches_content_when_nix_shape_present() {
-        let raw = ctx_with(
-            "building '/nix/store/aaaa-foo.drv'\ncopying path '/nix/store/bbbb-bar' from cache",
+    fn string_classifier_returns_typed_sentinel_on_nix_shape() {
+        let text =
+            "building '/nix/store/aaaa-foo.drv'\ncopying path '/nix/store/bbbb-bar' from cache";
+        let v = NixStringClassifier
+            .classify(text)
+            .expect("nix shape should match");
+        assert_eq!(v.get("_typed").and_then(|x| x.as_str()), Some("nix_build"));
+        let summary = v.get("summary").expect("summary inline");
+        assert_eq!(
+            summary
+                .get("derivations_attempted")
+                .and_then(|x| x.as_u64()),
+            Some(1)
         );
-        let no_args = serde_json::json!({});
-        let no_rec = no_recurse();
-        let ctx = ClassifierContext {
-            tool_name: "bash",
-            args: &no_args,
-            raw: &raw,
-            exit_code: None,
-            classify_region: &no_rec,
-        };
-        assert!(NixBuildClassifier.matches_content(&ctx));
+        assert_eq!(
+            summary.get("cache_paths_copied").and_then(|x| x.as_u64()),
+            Some(1)
+        );
     }
 
     #[test]
-    fn classifier_does_not_match_content_for_unrelated_bash_output() {
-        let raw = ctx_with("ls /home/user\nfile1.txt\nfile2.txt");
-        let no_args = serde_json::json!({});
-        let no_rec = no_recurse();
-        let ctx = ClassifierContext {
-            tool_name: "bash",
-            args: &no_args,
-            raw: &raw,
-            exit_code: None,
-            classify_region: &no_rec,
-        };
-        assert!(!NixBuildClassifier.matches_content(&ctx));
+    fn string_classifier_returns_none_on_unrelated_text() {
+        let text = "ls /home/user\nfile1.txt\nfile2.txt";
+        assert!(NixStringClassifier.classify(text).is_none());
     }
 }

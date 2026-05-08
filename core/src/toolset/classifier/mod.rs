@@ -22,7 +22,7 @@ pub use concourse::{
     ConcourseBuildLogClassifier, ConcourseBuildLogSummary, ConcourseBuildStatus, NixBuildFailure,
     TimestampedLine,
 };
-pub use nix::{NixBuildClassifier, NixBuildSummary, NixDerivationFailure, NixStringClassifier};
+pub use nix::{NixBuildSummary, NixDerivationFailure, NixStringClassifier};
 pub use string_classifier::{StringClassifier, StringClassifierChain};
 
 /// Default byte threshold for [`GenericFallback`]. Below → `Passthrough`;
@@ -76,13 +76,6 @@ pub enum ToolResultSummary {
     /// (resource versions, pipeline config) would each get their own
     /// kind.
     ConcourseLogs(ConcourseBuildLogSummary),
-
-    /// Typed summary of nix-build-shaped output. Lands here from two
-    /// directions: top-level content sniff (e.g. `bash` running
-    /// `nix build`) and region recursion from a parent classifier
-    /// (e.g. concourse → failed-derivation log_tail that itself
-    /// contains a nix-build sequence).
-    NixBuild(NixBuildSummary),
 }
 
 impl ToolResultSummary {
@@ -99,7 +92,6 @@ impl ToolResultSummary {
             Self::Passthrough { .. } => "passthrough",
             Self::StructuredElision { .. } => "structured_elision",
             Self::ConcourseLogs(_) => "concourse_logs",
-            Self::NixBuild(_) => "nix_build",
         }
     }
 
@@ -230,7 +222,6 @@ impl ClassifierRegistry {
         );
         Self::new()
             .register(ConcourseBuildLogClassifier)
-            .register(NixBuildClassifier)
             .register(GenericFallback::default().with_string_classifiers(string_chain))
     }
 
@@ -614,6 +605,55 @@ mod tests {
         let raw = result_with("hi");
         let classification = registry.classify(&ctx("bash", &raw));
         assert!(classification.summary.is_passthrough());
+    }
+
+    #[test]
+    fn walker_chain_embeds_typed_sentinel_at_string_leaf() {
+        // The new "walker is the spine, string classifiers fire at
+        // leaves" path: a bash result whose stdout looks like nix
+        // output should land in `StructuredElision { kept }` where
+        // `kept` is a typed sentinel (`{"_typed": "nix_build", ...}`)
+        // instead of a byte-elided string. No identity match for
+        // `bash`; the chain is the only signal.
+        let registry = ClassifierRegistry::with_default();
+        let nix_output = "\
+preparing to build\n\
+building '/nix/store/aaaa-foo.drv'\n\
+copying path '/nix/store/bbbb-bar' from 'https://cache.nixos.org/'\n\
+copying path '/nix/store/cccc-baz' from 'https://cache.nixos.org/'\n\
+error: builder for '/nix/store/aaaa-foo.drv' failed with exit code 1; last 10 log lines:\n\
+       > some compiler error\n\
+       > another diagnostic line\n";
+        let raw = result_with(nix_output);
+        let classification = registry.classify(&ctx("bash", &raw));
+        let kept = match classification.summary {
+            ToolResultSummary::StructuredElision { kept, .. } => kept,
+            other => panic!(
+                "expected StructuredElision with typed-sentinel kept, got {other:?}"
+            ),
+        };
+        // The walker chain should have substituted the root string
+        // with a Nix-typed sentinel.
+        let typed = kept
+            .get("_typed")
+            .and_then(|v| v.as_str())
+            .expect("kept should be a typed sentinel");
+        assert_eq!(typed, "nix_build");
+        let summary = kept
+            .get("summary")
+            .expect("typed sentinel carries the summary inline");
+        assert_eq!(
+            summary
+                .get("derivations_attempted")
+                .and_then(|v| v.as_u64()),
+            Some(1)
+        );
+        assert_eq!(
+            summary
+                .get("cache_paths_copied")
+                .and_then(|v| v.as_u64()),
+            Some(2)
+        );
     }
 
     #[test]

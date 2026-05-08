@@ -17,7 +17,7 @@ use rmcp::model::{CallToolResult, Content};
 
 use drua_core::toolset::{
     ClassifierContext, ClassifierRegistry, ConcourseBuildLogClassifier, ConcourseBuildStatus,
-    NixBuildClassifier, ResultClassifier, ToolResultSummary,
+    ResultClassifier, ToolResultSummary,
 };
 
 const BUILD_610_SUCCEEDED: &str = include_str!("fixtures/concourse/build-610-succeeded.log");
@@ -195,84 +195,14 @@ fn registry_routes_concourse_to_typed_classifier() {
     assert_eq!(classification.summary.kind(), "concourse_logs");
 }
 
-/// End-to-end exercise of the nesting wiring: a Concourse log whose
-/// failed-derivation log_tail is itself nix-shaped, run through the
-/// full registry. The Concourse classifier extracts the failure;
-/// `ctx.classify_region` is wired to the registry so its content-sniff
-/// pass picks up the inner nix shape; `NixBuildFailure.embedded` ends
-/// up `Some(NixBuild(...))` carrying the nested typed summary.
+/// End-to-end: a `bash`-shape result whose stdout looks like a nix
+/// build lands in `StructuredElision { kept: <typed sentinel> }`
+/// where the sentinel is the `NixStringClassifier`'s output. No
+/// identity match for `bash` — the walker descends to the root
+/// string, the chain matches via content sniff, and the typed shape
+/// is embedded inline.
 #[test]
-fn concourse_failure_log_tail_nests_nix_build_via_registry() {
-    let synthetic_log = "\
-[03:57:25] === with-nix-cache: start ===
-[03:57:28] error: failed to build attribute 'checks.x86_64-linux.nested-nix'
-[03:57:28]        builder for '/nix/store/abcd-nested.drv' failed with exit code 1; last 25 log lines:
-[03:57:28]        > building '/nix/store/eeee-inner-foo.drv'
-[03:57:28]        > building '/nix/store/ffff-inner-bar.drv'
-[03:57:28]        > copying path '/nix/store/gggg-cache-hit' from 'https://cache.nixos.org/'
-[03:57:28]        > error: builder for '/nix/store/eeee-inner-foo.drv' failed with exit code 2
-[03:57:28] === with-nix-cache: done ===
-";
-
-    let registry = ClassifierRegistry::with_default();
-    let mut result = CallToolResult::success(vec![Content::text(synthetic_log.to_string())]);
-    result.structured_content = Some(serde_json::json!({"logs": synthetic_log}));
-
-    let args = serde_json::json!({"build_id": 99u64});
-    // Wire classify_region to the same registry — this is what the
-    // production dispatcher does, and it's what activates the nested
-    // classification path.
-    let registry_ref = &registry;
-    let classify_region = |region: &str| registry_ref.classify_region(region);
-    let ctx = ClassifierContext {
-        tool_name: "concourse_get_build_logs",
-        args: &args,
-        raw: &result,
-        exit_code: None,
-        classify_region: &classify_region,
-    };
-
-    let classification = registry.classify(&ctx);
-    let summary = match classification.summary {
-        ToolResultSummary::ConcourseLogs(s) => s,
-        other => panic!("expected ConcourseLogs, got {other:?}"),
-    };
-    assert!(
-        !summary.failures.is_empty(),
-        "concourse classifier should extract the failure"
-    );
-
-    let failure = &summary.failures[0];
-    let embedded = failure
-        .embedded
-        .as_ref()
-        .expect("failure log_tail should round-trip through classify_region into NixBuild");
-    let nix_summary = match embedded.as_ref() {
-        ToolResultSummary::NixBuild(s) => s,
-        other => panic!("expected nested NixBuild, got {other:?}"),
-    };
-    assert_eq!(
-        nix_summary.derivations_attempted, 2,
-        "inner nix shape should count both `building '...drv'` lines"
-    );
-    assert_eq!(
-        nix_summary.cache_paths_copied, 1,
-        "inner nix shape should count the `copying path` line"
-    );
-    assert!(
-        nix_summary
-            .failures
-            .iter()
-            .any(|f| f.drv_path == "/nix/store/eeee-inner-foo.drv"),
-        "inner nix shape should extract its own builder failure"
-    );
-}
-
-/// Direct test of the Nix classifier on top-level content (e.g. what
-/// would land in a `bash({command: "nix build .#foo"})` call): no
-/// identity match required, just content sniff.
-#[test]
-fn nix_classifier_fires_on_content_sniff_top_level() {
+fn nix_string_classifier_fires_on_content_sniff_top_level() {
     let nix_output = "\
 preparing to build /nix/store/aaaa-foo.drv
 building '/nix/store/aaaa-foo.drv'
@@ -288,8 +218,6 @@ error: builder for '/nix/store/aaaa-foo.drv' failed with exit code 1; last 10 lo
     let args = serde_json::json!({"command": "nix build .#foo"});
     let registry_ref = &registry;
     let classify_region = |region: &str| registry_ref.classify_region(region);
-    // `tool_name = "bash"` — identity match would never fire the Nix
-    // classifier; only content sniff makes this work.
     let ctx = ClassifierContext {
         tool_name: "bash",
         args: &args,
@@ -299,29 +227,41 @@ error: builder for '/nix/store/aaaa-foo.drv' failed with exit code 1; last 10 lo
     };
 
     let classification = registry.classify(&ctx);
-    let nix = match classification.summary {
-        ToolResultSummary::NixBuild(s) => s,
-        other => panic!("expected NixBuild from content sniff (tool_name=bash), got {other:?}"),
+    let kept = match classification.summary {
+        ToolResultSummary::StructuredElision { kept, .. } => kept,
+        other => panic!("expected StructuredElision with typed sentinel, got {other:?}"),
     };
-    assert_eq!(nix.derivations_attempted, 1);
-    assert_eq!(nix.cache_paths_copied, 2);
-    assert_eq!(nix.failures.len(), 1);
-    assert_eq!(nix.failures[0].drv_path, "/nix/store/aaaa-foo.drv");
-    assert!(nix.failures[0]
-        .log_tail
-        .iter()
-        .any(|l| l.contains("some compiler error")));
+    assert_eq!(
+        kept.get("_typed").and_then(|v| v.as_str()),
+        Some("nix_build"),
+        "kept should be a NixStringClassifier sentinel"
+    );
+    let summary = kept.get("summary").expect("typed sentinel carries summary");
+    assert_eq!(
+        summary
+            .get("derivations_attempted")
+            .and_then(|v| v.as_u64()),
+        Some(1)
+    );
+    assert_eq!(
+        summary.get("cache_paths_copied").and_then(|v| v.as_u64()),
+        Some(2)
+    );
+    assert_eq!(
+        summary
+            .get("failures")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len()),
+        Some(1)
+    );
 }
 
-/// Confirms the Nix classifier does NOT fire on an unrelated bash
-/// output, so `bash` calls that don't run nix still fall through to
-/// `GenericFallback`.
+/// Confirms unrelated bash output (no nix shape) doesn't accidentally
+/// trip the chain — `ls`-style output passes through.
 #[test]
-fn nix_classifier_passes_through_unrelated_bash_output() {
+fn unrelated_bash_output_passes_through() {
     let registry = ClassifierRegistry::with_default();
-    // Plain ls output — no nix shape.
-    let result =
-        CallToolResult::success(vec![Content::text("file1.txt\nfile2.txt\nfile3.txt")]);
+    let result = CallToolResult::success(vec![Content::text("file1.txt\nfile2.txt\nfile3.txt")]);
     let args = serde_json::json!({"command": "ls"});
     let registry_ref = &registry;
     let classify_region = |region: &str| registry_ref.classify_region(region);
@@ -333,12 +273,9 @@ fn nix_classifier_passes_through_unrelated_bash_output() {
         classify_region: &classify_region,
     };
     let classification = registry.classify(&ctx);
-    // Small, no nix shape → Passthrough (well below the 4 KB threshold).
     assert!(
         classification.summary.is_passthrough(),
         "ls output should pass through, not match nix; got {:?}",
         classification.summary
     );
-    // Sanity that the standalone NixBuildClassifier explicitly rejects this.
-    assert!(!NixBuildClassifier.matches_content(&ctx));
 }

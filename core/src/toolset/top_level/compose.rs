@@ -368,9 +368,6 @@ fn render_curated_result(summary: &ToolResultSummary) -> serde_json::Value {
         ToolResultSummary::ConcourseLogs(s) => {
             serde_json::to_value(s).unwrap_or(serde_json::Value::Null)
         }
-        ToolResultSummary::NixBuild(s) => {
-            serde_json::to_value(s).unwrap_or(serde_json::Value::Null)
-        }
     }
 }
 

@@ -47,16 +47,25 @@ pub fn classify_value(
 ) -> WalkOutcome {
     let total_bytes = json_size(value);
     let mut paths = Vec::new();
-    let kept = walk(value, threshold, chain, "$".to_string(), &mut paths);
+    let mut typed_replacements = 0usize;
+    let kept = walk(
+        value,
+        threshold,
+        chain,
+        "$".to_string(),
+        &mut paths,
+        &mut typed_replacements,
+    );
     let kept_bytes = json_size(&kept);
-    // The walk produced something different from the input only when a
-    // string classifier matched (typed embedding), or elision actually
-    // shrank a payload. If neither happened, passthrough.
     if kept == *value {
         return WalkOutcome::Passthrough(value.clone());
     }
-    if kept_bytes >= total_bytes {
-        // Walk didn't help — bail.
+    // Walker bailout: if elision alone (no typed substitutions) didn't
+    // shrink, the kept form is just churn — passthrough wins. Typed
+    // substitutions are kept regardless of size: a structured shape is
+    // strictly more useful to the agent than the raw bytes even when
+    // it's a few bytes longer.
+    if typed_replacements == 0 && kept_bytes >= total_bytes {
         return WalkOutcome::Passthrough(value.clone());
     }
     WalkOutcome::Elided {
@@ -73,6 +82,7 @@ fn walk(
     chain: Option<&StringClassifierChain>,
     path: String,
     paths: &mut Vec<ElidedPath>,
+    typed_replacements: &mut usize,
 ) -> Value {
     match value {
         // Strings always get the chain offered, regardless of size —
@@ -82,6 +92,7 @@ fn walk(
         Value::String(s) => {
             if let Some(c) = chain {
                 if let Some(typed) = c.classify(s) {
+                    *typed_replacements += 1;
                     return typed;
                 }
             }
@@ -97,14 +108,14 @@ fn walk(
             if bytes < threshold {
                 return value.clone();
             }
-            walk_array(items, threshold, chain, &path, paths, bytes)
+            walk_array(items, threshold, chain, &path, paths, bytes, typed_replacements)
         }
         Value::Object(map) => {
             let bytes = json_size(value);
             if bytes < threshold {
                 return value.clone();
             }
-            walk_object(map, threshold, chain, &path, paths, bytes)
+            walk_object(map, threshold, chain, &path, paths, bytes, typed_replacements)
         }
         // Numbers, booleans, null can't be over-threshold in practice.
         _ => value.clone(),
@@ -154,6 +165,7 @@ fn walk_array(
     path: &str,
     paths: &mut Vec<ElidedPath>,
     original_bytes: usize,
+    typed_replacements: &mut usize,
 ) -> Value {
     // Snapshot the elided-paths length before recursing. If the
     // post-walk array still doesn't fit and we have to sentinel-
@@ -164,7 +176,16 @@ fn walk_array(
     let walked: Vec<Value> = items
         .iter()
         .enumerate()
-        .map(|(i, v)| walk(v, threshold, chain, format!("{path}[{i}]"), paths))
+        .map(|(i, v)| {
+            walk(
+                v,
+                threshold,
+                chain,
+                format!("{path}[{i}]"),
+                paths,
+                typed_replacements,
+            )
+        })
         .collect();
     let walked_value = Value::Array(walked.clone());
     if json_size(&walked_value) < threshold {
@@ -247,6 +268,7 @@ fn walk_object(
     path: &str,
     paths: &mut Vec<ElidedPath>,
     _original_bytes: usize,
+    typed_replacements: &mut usize,
 ) -> Value {
     // Walk each key into a LOCAL elided-paths bucket per child.
     // peel_object_keys then either flushes a key's bucket to `paths`
@@ -258,7 +280,14 @@ fn walk_object(
     let mut per_key_paths: Vec<(String, Vec<ElidedPath>)> = Vec::with_capacity(map.len());
     for (k, v) in map.iter() {
         let mut child_paths = Vec::new();
-        let walked_v = walk(v, threshold, chain, format!("{path}.{k}"), &mut child_paths);
+        let walked_v = walk(
+            v,
+            threshold,
+            chain,
+            format!("{path}.{k}"),
+            &mut child_paths,
+            typed_replacements,
+        );
         per_key_paths.push((k.clone(), child_paths));
         walked.insert(k.clone(), walked_v);
     }

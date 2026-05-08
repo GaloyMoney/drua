@@ -10,9 +10,9 @@ mod traits;
 pub use classifier::{
     Classification, ClassifierContext, ClassifierError, ClassifierRegistry,
     ConcourseBuildLogClassifier, ConcourseBuildLogSummary, ConcourseBuildStatus, ElidedPath,
-    ElisionKind, GenericFallback, NixBuildClassifier, NixBuildFailure, NixBuildSummary,
-    NixDerivationFailure, NixStringClassifier, ResultClassifier, StringClassifier,
-    StringClassifierChain, TimestampedLine, ToolResultSummary,
+    ElisionKind, GenericFallback, NixBuildFailure, NixBuildSummary, NixDerivationFailure,
+    NixStringClassifier, ResultClassifier, StringClassifier, StringClassifierChain,
+    TimestampedLine, ToolResultSummary,
 };
 pub use config::*;
 pub use error::*;
@@ -666,7 +666,6 @@ fn summary_kept_bytes(summary: &ToolResultSummary, raw_bytes: u64) -> u64 {
         ToolResultSummary::Passthrough { .. } => raw_bytes,
         ToolResultSummary::StructuredElision { kept_bytes, .. } => *kept_bytes as u64,
         ToolResultSummary::ConcourseLogs(s) => s.kept_bytes as u64,
-        ToolResultSummary::NixBuild(s) => s.kept_bytes as u64,
     }
 }
 

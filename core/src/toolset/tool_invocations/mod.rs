@@ -443,32 +443,10 @@ fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId) -> String {
             }
             out
         }
-        ToolResultSummary::NixBuild(s) => {
-            let mut out = String::new();
-            out.push_str(&format!(
-                "[nix build: {} derivations / {} cache copies / {} failures; \
-                 {} bytes raw; fetch the full stream via \
-                 tool_output_fetch(invocation_id=\"{}\")]\n",
-                s.derivations_attempted,
-                s.cache_paths_copied,
-                s.failures.len(),
-                s.total_bytes,
-                id,
-            ));
-            for f in &s.failures {
-                out.push_str(&format!("=== failure: {} ===\n", f.drv_path));
-                if let Some(reason) = &f.reason {
-                    out.push_str(&format!("reason: {reason}\n"));
-                }
-                if !f.log_tail.is_empty() {
-                    out.push_str("log_tail:\n");
-                    for l in &f.log_tail {
-                        out.push_str(&format!("  > {l}\n"));
-                    }
-                }
-            }
-            out
-        }
+        // (Top-level `NixBuild` summaries used to land here; Nix is now
+        // a `StringClassifier` only and lives inside StructuredElision
+        // typed sentinels — rendered through the StructuredElision arm
+        // above as part of `kept`.)
     }
 }
 
