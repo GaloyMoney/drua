@@ -340,7 +340,7 @@ impl ResultClassifier for GenericFallback {
 /// Render the canonical text representation of a JSON value for
 /// downstream grep-mode fetches. See `GenericFallback::classify`
 /// for the rationale on each branch.
-pub(super) fn canonical_text_for(value: &serde_json::Value) -> String {
+pub(crate) fn canonical_text_for(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(s) => s.clone(),
         serde_json::Value::Object(map) if map.len() == 1 => match map.values().next() {

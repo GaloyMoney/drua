@@ -13,6 +13,7 @@ async-graphql = { version = "8.0.0-rc.4", optional = true, default-features = fa
 anthropic-client = { workspace = true }
 code-assistant-core = { workspace = true }
 drua-library = { path = "crates/library" }
+drua-tool-classifier = { path = "crates/tool-classifier" }
 github-app = { workspace = true }
 openai-client = { workspace = true }
 anyhow = { workspace = true }

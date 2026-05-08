@@ -1,4 +1,4 @@
-pub mod classifier;
+pub use drua_tool_classifier as classifier;
 mod config;
 mod error;
 mod inspect;
