@@ -410,28 +410,35 @@ fn finish_audit(response: &Response) {
     }
 }
 
-/// Authorisation reject path: takes the typed error, maps to a status
-/// + reject_code, records the audit outcome, and renders the response.
+/// Authorisation reject path. Maps the typed error to a status code,
+/// records the audit outcome, and renders the response body. Allow-list
+/// errors emit their full `detail()` so a denied push surfaces the
+/// configured `allowed_push_refs` directly to the agent's stderr via
+/// `git`'s `remote:` line prefix.
 fn finish_authz_reject(err: GitProxyError) -> Response {
     let code = err.reject_code();
     tracing::warn!(error = %err, code = code, "git-proxy rejected request");
-    let status = match err {
-        GitProxyError::Authorization(_) => StatusCode::UNAUTHORIZED,
-        GitProxyError::Allowlist(drua_core::git_proxy::AllowlistError::RepoNotAllowed {
-            ..
-        })
-        | GitProxyError::Allowlist(drua_core::git_proxy::AllowlistError::ModeNotAllowed {
-            ..
-        })
-        | GitProxyError::Allowlist(drua_core::git_proxy::AllowlistError::RefPatternDenied {
-            ..
-        }) => StatusCode::FORBIDDEN,
-        GitProxyError::InvalidRepoCoord { .. }
-        | GitProxyError::Allowlist(drua_core::git_proxy::AllowlistError::InvalidRefPattern(_)) => {
-            StatusCode::BAD_REQUEST
+    let (status, body) = match &err {
+        GitProxyError::Authorization(_) => (StatusCode::UNAUTHORIZED, format!("{code}\n")),
+        GitProxyError::Allowlist(e) => {
+            let status = match e {
+                drua_core::git_proxy::AllowlistError::RepoNotAllowed { .. }
+                | drua_core::git_proxy::AllowlistError::ModeNotAllowed { .. }
+                | drua_core::git_proxy::AllowlistError::PushRefDenied { .. } => {
+                    StatusCode::FORBIDDEN
+                }
+                drua_core::git_proxy::AllowlistError::InvalidRefPattern(_) => {
+                    StatusCode::BAD_REQUEST
+                }
+            };
+            (status, e.detail())
         }
+        GitProxyError::InvalidRepoCoord { .. } => (StatusCode::BAD_REQUEST, format!("{code}\n")),
     };
-    finish_audit_reject(status, code)
+    Audit::record_outcome(InteractionOutcome::Error {
+        message: code.to_string(),
+    });
+    reject_with_body(status, &body)
 }
 
 /// Records a reject outcome with the given `reject_code` and renders
@@ -462,10 +469,19 @@ fn reject_response(auth: &AuthSubject, status: StatusCode, code: &'static str) -
 }
 
 fn reject_status(status: StatusCode, code: &'static str) -> Response {
+    reject_with_body(status, &format!("{code}\n"))
+}
+
+/// Renders a multi-line text/plain rejection body with a `git-proxy: `
+/// prefix on the first line. Used by [`finish_authz_reject`] to surface
+/// allow-list detail (e.g. the configured `allowed_push_refs`) so a
+/// denied push is self-explanatory in the agent's stderr.
+fn reject_with_body(status: StatusCode, body: &str) -> Response {
+    let prefixed = format!("git-proxy: {body}");
     (
         status,
         [(axum::http::header::CONTENT_TYPE, "text/plain")],
-        format!("git-proxy: {code}\n"),
+        prefixed,
     )
         .into_response()
 }

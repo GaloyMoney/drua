@@ -17,8 +17,15 @@ use crate::primitives::GitProxyMode;
 pub struct AllowlistEntryConfig {
     pub owner: String,
     pub repo: String,
-    #[serde(default)]
-    pub allowed_ref_patterns: Vec<String>,
+    /// Globs that constrain which refs an agent is allowed to PUSH.
+    /// Pull / clone / fetch are unrestricted — the patterns gate
+    /// `git-receive-pack` only. Empty list ⇒ no pushes accepted.
+    /// Examples: `refs/heads/bot/*`, `refs/heads/bot/**`,
+    /// `refs/tags/release-*`. Old config field name was
+    /// `allowed_ref_patterns`; both spellings are accepted on
+    /// deserialise so existing configs keep working.
+    #[serde(default, alias = "allowed_ref_patterns")]
+    pub allowed_push_refs: Vec<String>,
     #[serde(default)]
     pub modes: Vec<GitProxyMode>,
     /// Override the upstream the mirror clones / fetches from. Defaults
@@ -44,7 +51,7 @@ pub struct AllowlistEntry {
     pub owner: String,
     pub repo: String,
     pub modes: Vec<GitProxyMode>,
-    pub patterns: RefPatternSet,
+    pub push_refs: RefPatternSet,
     pub upstream_url: String,
 }
 
@@ -77,7 +84,7 @@ impl Allowlist {
                 owner: raw.owner.clone(),
                 repo: raw.repo.clone(),
                 modes: raw.modes.clone(),
-                patterns: RefPatternSet::new(&raw.allowed_ref_patterns)?,
+                push_refs: RefPatternSet::new(&raw.allowed_push_refs)?,
                 upstream_url: raw
                     .upstream_url
                     .clone()
@@ -102,11 +109,12 @@ impl Allowlist {
             .find(|e| e.owner.eq_ignore_ascii_case(owner) && e.repo.eq_ignore_ascii_case(repo))
     }
 
-    /// Authorization point called per smart-HTTP request. `refs` may be
-    /// empty for `info/refs` advertisements — in that case we authorize
-    /// the *mode* against the (owner, repo) pair but don't reject on
-    /// ref-pattern. For `git-receive-pack` POSTs we reach in again with
-    /// the parsed ref list once it's pulled from the pkt-line stream.
+    /// Authorization point called per smart-HTTP request.
+    ///
+    /// `refs` carries the parsed `git-receive-pack` cmd list; the
+    /// patterns are enforced **on push only**. Pull / clone / fetch
+    /// is unrestricted aside from the (owner, repo, mode) gate, so
+    /// callers can pass an empty slice for the pull-side path.
     ///
     /// Fail-closed: any miss returns `Err(_)` so the caller can record
     /// the rejection and respond 403 without forwarding upstream.
@@ -132,14 +140,20 @@ impl Allowlist {
             });
         }
 
-        for r in refs {
-            if !entry.patterns.matches(r) {
-                return Err(AllowlistError::RefPatternDenied {
-                    owner: owner.to_string(),
-                    repo: repo.to_string(),
-                    mode,
-                    ref_name: r.clone(),
-                });
+        // Ref-pattern enforcement is push-only. Pull / clone / fetch
+        // gets whatever the upstream advertises; restricting the read
+        // surface is a different problem (would require filtering
+        // `info/refs` advertisements, which we don't do).
+        if mode == GitProxyMode::Push {
+            for r in refs {
+                if !entry.push_refs.matches(r) {
+                    return Err(AllowlistError::PushRefDenied {
+                        owner: owner.to_string(),
+                        repo: repo.to_string(),
+                        ref_name: r.clone(),
+                        allowed: entry.push_refs.raw().to_vec(),
+                    });
+                }
             }
         }
 
@@ -156,7 +170,7 @@ mod tests {
             entries: vec![AllowlistEntryConfig {
                 owner: "GaloyMoney".into(),
                 repo: "drua".into(),
-                allowed_ref_patterns: vec!["refs/heads/bot/*".into(), "refs/heads/main".into()],
+                allowed_push_refs: vec!["refs/heads/bot/*".into(), "refs/heads/main".into()],
                 modes: vec![GitProxyMode::Pull, GitProxyMode::Push],
                 upstream_url: None,
             }],
@@ -169,7 +183,7 @@ mod tests {
             entries: vec![AllowlistEntryConfig {
                 owner: "x".into(),
                 repo: "y".into(),
-                allowed_ref_patterns: vec!["[unterminated".into()],
+                allowed_push_refs: vec!["[unterminated".into()],
                 modes: vec![GitProxyMode::Pull],
                 upstream_url: None,
             }],
@@ -237,8 +251,8 @@ mod tests {
                 &["refs/heads/release".to_string()],
             )
             .unwrap_err();
-        assert!(matches!(err, AllowlistError::RefPatternDenied { .. }));
-        assert_eq!(err.reject_code(), "ref_pattern_denied");
+        assert!(matches!(err, AllowlistError::PushRefDenied { .. }));
+        assert_eq!(err.reject_code(), "push_ref_denied");
     }
 
     #[test]
@@ -247,7 +261,7 @@ mod tests {
             entries: vec![AllowlistEntryConfig {
                 owner: "GaloyMoney".into(),
                 repo: "drua".into(),
-                allowed_ref_patterns: vec!["refs/heads/main".into()],
+                allowed_push_refs: vec!["refs/heads/main".into()],
                 modes: vec![GitProxyMode::Pull],
                 upstream_url: None,
             }],
@@ -266,7 +280,7 @@ mod tests {
             entries: vec![AllowlistEntryConfig {
                 owner: "x".into(),
                 repo: "y".into(),
-                allowed_ref_patterns: vec![],
+                allowed_push_refs: vec![],
                 modes: vec![GitProxyMode::Push],
                 upstream_url: None,
             }],

@@ -193,7 +193,7 @@ EOF
       for m in "${_modes[@]}"; do
         echo "          - $m" >> "$out"
       done
-      echo "        allowed_ref_patterns:" >> "$out"
+      echo "        allowed_push_refs:" >> "$out"
       IFS=',' read -ra _pats <<< "$patterns"
       for p in "${_pats[@]}"; do
         echo "          - \"$p\"" >> "$out"

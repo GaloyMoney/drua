@@ -198,7 +198,7 @@ SVC_PULL="?service=git-upload-pack"
   # "error: 22" wrapper.
   echo "$output" | grep -E "HTTP 403|error: 22" >/dev/null
 
-  # Audit row should record ref_pattern_denied for the receive-pack POST.
-  count="$(psql "$PG_CON" -tAc "SELECT count(*) FROM audit_entries WHERE action = 'git_proxy.git-receive-pack' AND outcome = 'error' AND error_message = 'ref_pattern_denied' AND metadata->>'owner' = 'GaloyMoney' AND metadata->>'repo' = 'drua'")"
+  # Audit row should record push_ref_denied for the receive-pack POST.
+  count="$(psql "$PG_CON" -tAc "SELECT count(*) FROM audit_entries WHERE action = 'git_proxy.git-receive-pack' AND outcome = 'error' AND error_message = 'push_ref_denied' AND metadata->>'owner' = 'GaloyMoney' AND metadata->>'repo' = 'drua'")"
   [ "$count" -ge 1 ]
 }
