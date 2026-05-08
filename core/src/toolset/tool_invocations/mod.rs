@@ -44,11 +44,52 @@ pub enum FetchQuery {
         offset: u64,
         len: u32,
     },
+    /// Line-grep with rg-style flags. Flag spelling mirrors the top-level
+    /// `Grep` tool so the model can transfer the shape directly. Operates
+    /// over the persisted `raw_text` line-by-line; cross-line patterns
+    /// are not currently supported (no `--multiline-dotall` equivalent).
     Grep {
+        /// Regular expression pattern matched against each line.
         pattern: String,
-        #[serde(default)]
+
+        /// Case-insensitive search (rg's `-i`). Equivalent to prefixing
+        /// `pattern` with `(?i)`, but explicit for discoverability.
+        #[serde(rename = "-i", default)]
+        case_insensitive: bool,
+
+        /// Lines of context after each match (rg's `-A`).
+        #[serde(rename = "-A", default, skip_serializing_if = "Option::is_none")]
+        after_context: Option<u32>,
+
+        /// Lines of context before each match (rg's `-B`).
+        #[serde(rename = "-B", default, skip_serializing_if = "Option::is_none")]
+        before_context: Option<u32>,
+
+        /// Symmetric pre/post context — equivalent to setting both
+        /// `-A` and `-B` to the same value (rg's `-C`). Ignored when
+        /// either `-A` or `-B` is set.
+        #[serde(rename = "-C", default, skip_serializing_if = "Option::is_none")]
         context: Option<u32>,
+
+        /// Prefix kept lines with their 1-based line number from the
+        /// original `raw_text` (rg's `-n`). Useful as input to a later
+        /// `range`/`head`/`tail` query against the same invocation.
+        /// Default: true.
+        #[serde(rename = "-n", default = "default_true")]
+        line_numbers: bool,
+
+        /// Drop matches; keep non-matching lines (rg's `-v`).
+        #[serde(default)]
+        invert_match: bool,
+
+        /// Cap output to first N kept lines (after context expansion).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        head_limit: Option<u32>,
     },
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -397,22 +438,50 @@ pub(crate) fn apply_fetch_query(
                 raw[start..end].to_string()
             }
         }
-        FetchQuery::Grep { pattern, context } => {
+        FetchQuery::Grep {
+            pattern,
+            case_insensitive,
+            after_context,
+            before_context,
+            context,
+            line_numbers,
+            invert_match,
+            head_limit,
+        } => {
             if pattern.len() > MAX_GREP_PATTERN_LENGTH {
                 return Err(ToolInvocationError::InvalidPattern(format!(
                     "grep pattern too long ({} chars, max {MAX_GREP_PATTERN_LENGTH})",
                     pattern.len()
                 )));
             }
-            let re = regex::Regex::new(pattern)
+            let re = regex::RegexBuilder::new(pattern)
+                .case_insensitive(*case_insensitive)
+                .build()
                 .map_err(|e| ToolInvocationError::InvalidPattern(format!("invalid regex: {e}")))?;
             let lines: Vec<&str> = raw.lines().collect();
-            let kept = grep::filter_lines(
-                &lines,
-                &re,
-                /* invert */ false,
-                context.map(|c| c as usize),
-            );
+
+            // -A / -B win over -C when either is set; otherwise -C
+            // applies symmetrically; otherwise no context.
+            let (before, after) = match (before_context, after_context) {
+                (None, None) => {
+                    let c = context.map(|c| c as usize).unwrap_or(0);
+                    (c, c)
+                }
+                (b, a) => (
+                    b.map(|n| n as usize).unwrap_or(0),
+                    a.map(|n| n as usize).unwrap_or(0),
+                ),
+            };
+
+            let kept = grep::filter_lines_rich(grep::FilterArgs {
+                lines: &lines,
+                re: &re,
+                invert: *invert_match,
+                before,
+                after,
+                line_numbers: *line_numbers,
+                head_limit: head_limit.map(|n| n as usize),
+            });
             kept.join("\n")
         }
     };
@@ -472,43 +541,92 @@ mod tests {
         assert_eq!(r.content, "alpha");
     }
 
+    fn grep_pattern(pattern: &str) -> FetchQuery {
+        FetchQuery::Grep {
+            pattern: pattern.to_string(),
+            case_insensitive: false,
+            after_context: None,
+            before_context: None,
+            context: None,
+            line_numbers: false,
+            invert_match: false,
+            head_limit: None,
+        }
+    }
+
     #[test]
     fn grep_matches_lines() {
-        let r = apply_fetch_query(
-            sample(),
-            &FetchQuery::Grep {
-                pattern: "error".to_string(),
-                context: None,
-            },
-        )
-        .unwrap();
+        let r = apply_fetch_query(sample(), &grep_pattern("error")).unwrap();
         assert_eq!(r.content, "bravo error one\ndelta error two");
     }
 
     #[test]
     fn grep_with_context_includes_neighbours() {
-        let r = apply_fetch_query(
-            sample(),
-            &FetchQuery::Grep {
-                pattern: "error one".to_string(),
-                context: Some(1),
-            },
-        )
-        .unwrap();
+        let mut q = grep_pattern("error one");
+        if let FetchQuery::Grep { context, .. } = &mut q {
+            *context = Some(1);
+        }
+        let r = apply_fetch_query(sample(), &q).unwrap();
         assert_eq!(r.content, "alpha\nbravo error one\ncharlie");
     }
 
     #[test]
     fn grep_invalid_regex_errors() {
-        let err = apply_fetch_query(
-            sample(),
-            &FetchQuery::Grep {
-                pattern: "[invalid".to_string(),
-                context: None,
-            },
-        )
-        .unwrap_err();
+        let err = apply_fetch_query(sample(), &grep_pattern("[invalid")).unwrap_err();
         assert!(matches!(err, ToolInvocationError::InvalidPattern(_)));
+    }
+
+    #[test]
+    fn grep_case_insensitive_flag() {
+        let mut q = grep_pattern("ERROR");
+        if let FetchQuery::Grep {
+            case_insensitive, ..
+        } = &mut q
+        {
+            *case_insensitive = true;
+        }
+        let r = apply_fetch_query(sample(), &q).unwrap();
+        assert_eq!(r.content, "bravo error one\ndelta error two");
+    }
+
+    #[test]
+    fn grep_invert_match_drops_matches() {
+        let mut q = grep_pattern("error");
+        if let FetchQuery::Grep { invert_match, .. } = &mut q {
+            *invert_match = true;
+        }
+        let r = apply_fetch_query(sample(), &q).unwrap();
+        assert_eq!(r.content, "alpha\ncharlie\necho\nfoxtrot");
+    }
+
+    #[test]
+    fn grep_line_numbers_prefix_kept_lines() {
+        let mut q = grep_pattern("error");
+        if let FetchQuery::Grep { line_numbers, .. } = &mut q {
+            *line_numbers = true;
+        }
+        let r = apply_fetch_query(sample(), &q).unwrap();
+        assert_eq!(r.content, "2:bravo error one\n4:delta error two");
+    }
+
+    #[test]
+    fn grep_asymmetric_context_after_only() {
+        let mut q = grep_pattern("error one");
+        if let FetchQuery::Grep { after_context, .. } = &mut q {
+            *after_context = Some(1);
+        }
+        let r = apply_fetch_query(sample(), &q).unwrap();
+        assert_eq!(r.content, "bravo error one\ncharlie");
+    }
+
+    #[test]
+    fn grep_head_limit_caps_kept_lines() {
+        let mut q = grep_pattern("error");
+        if let FetchQuery::Grep { head_limit, .. } = &mut q {
+            *head_limit = Some(1);
+        }
+        let r = apply_fetch_query(sample(), &q).unwrap();
+        assert_eq!(r.content, "bravo error one");
     }
 
     #[test]

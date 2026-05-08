@@ -144,7 +144,13 @@ async fn persist_round_trip_and_fetch_modes() {
             persisted.id,
             FetchQuery::Grep {
                 pattern: "^error".to_string(),
+                case_insensitive: false,
+                after_context: None,
+                before_context: None,
                 context: None,
+                line_numbers: false,
+                invert_match: false,
+                head_limit: None,
             },
         )
         .await

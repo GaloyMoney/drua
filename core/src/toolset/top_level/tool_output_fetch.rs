@@ -95,7 +95,10 @@ const DESCRIPTION: &str = "Fetch a previously-persisted tool result. Same respon
      `query` is optional — when present, content[].text carries a \
      slice (`tail`/`head`/`range`/`grep`); when absent, no slicing. \
      Per-mode args: `tail`/`head` take `lines`; `range` takes \
-     `offset` + `len`; `grep` takes `pattern` + optional `context`.";
+     `offset` + `len`; `grep` takes `pattern` plus rg-style flags — \
+     `-i` (case_insensitive), `-A`/`-B`/`-C` (context, asymmetric or \
+     symmetric), `-n` (line numbers, default true), `invert_match` \
+     (`-v`), and `head_limit` (cap kept lines).";
 
 #[async_trait::async_trait]
 impl TopLevelTool for ToolOutputFetch {
