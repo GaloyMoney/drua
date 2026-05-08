@@ -26,6 +26,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 
+use super::string_classifier::StringClassifier;
 use super::{
     Classification, ClassifierContext, ClassifierError, ResultClassifier, ToolResultSummary,
 };
@@ -87,6 +88,30 @@ impl ResultClassifier for NixBuildClassifier {
             summary: ToolResultSummary::NixBuild(summary),
             canonical_text: raw,
         })
+    }
+}
+
+/// `StringClassifier` impl — fires when the walker encounters a
+/// nix-build-shaped string leaf (bash output that ran `nix build`,
+/// concourse `logs` field after timestamp stripping, etc.). Returns
+/// `Some(typed sentinel)` on match, letting the walker substitute the
+/// raw string with a structured summary in `kept`.
+pub struct NixStringClassifier;
+
+impl StringClassifier for NixStringClassifier {
+    fn name(&self) -> &str {
+        "nix::string::v1"
+    }
+
+    fn classify(&self, text: &str) -> Option<serde_json::Value> {
+        if !sniff(text) {
+            return None;
+        }
+        let summary = parse(text);
+        Some(serde_json::json!({
+            "_typed": "nix_build",
+            "summary": summary,
+        }))
     }
 }
 

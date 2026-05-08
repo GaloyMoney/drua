@@ -11,7 +11,8 @@ pub use classifier::{
     Classification, ClassifierContext, ClassifierError, ClassifierRegistry,
     ConcourseBuildLogClassifier, ConcourseBuildLogSummary, ConcourseBuildStatus, ElidedPath,
     ElisionKind, GenericFallback, NixBuildClassifier, NixBuildFailure, NixBuildSummary,
-    NixDerivationFailure, ResultClassifier, TimestampedLine, ToolResultSummary,
+    NixDerivationFailure, NixStringClassifier, ResultClassifier, StringClassifier,
+    StringClassifierChain, TimestampedLine, ToolResultSummary,
 };
 pub use config::*;
 pub use error::*;

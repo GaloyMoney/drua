@@ -15,13 +15,15 @@ use serde::{Deserialize, Serialize};
 
 mod concourse;
 mod nix;
+mod string_classifier;
 mod walker;
 
 pub use concourse::{
     ConcourseBuildLogClassifier, ConcourseBuildLogSummary, ConcourseBuildStatus, NixBuildFailure,
     TimestampedLine,
 };
-pub use nix::{NixBuildClassifier, NixBuildSummary, NixDerivationFailure};
+pub use nix::{NixBuildClassifier, NixBuildSummary, NixDerivationFailure, NixStringClassifier};
+pub use string_classifier::{StringClassifier, StringClassifierChain};
 
 /// Default byte threshold for [`GenericFallback`]. Below → `Passthrough`;
 /// at-or-above → the JSON-aware walker emits `StructuredElision`. 4 KB is
