@@ -539,6 +539,8 @@ impl ToolSets {
 
             let final_result = match raw_result {
                 Ok(raw) if bypass_pipeline => {
+                    let raw_bytes = estimate_text_bytes(&raw);
+                    record_pipeline_metrics(raw_bytes, raw_bytes, "bypass", false);
                     Audit::record_tokens(estimate_tokens(&raw));
                     Audit::record_success();
                     Ok(raw)
@@ -554,9 +556,20 @@ impl ToolSets {
                         exit_code: None,
                     });
 
-                    let wrapped = match (&classification.summary, tool_invocations.as_ref()) {
-                        (s, _) if s.is_passthrough() => raw,
-                        (_, Some(invocations)) => invocations
+                    // Capture pipeline metrics before classification is
+                    // potentially moved into persist_and_envelope. Same
+                    // shape across passthrough / bypass / persisted so
+                    // the inspector's compression-ratio column has a
+                    // value for every audit row.
+                    let raw_bytes = classification.canonical_text.len() as u64;
+                    let classifier_kind = classification.summary.kind();
+                    let kept_bytes = summary_kept_bytes(&classification.summary, raw_bytes);
+                    let summary_is_passthrough = classification.summary.is_passthrough();
+
+                    let (wrapped, persisted) = if summary_is_passthrough {
+                        (raw, false)
+                    } else if let Some(invocations) = tool_invocations.as_ref() {
+                        match invocations
                             .persist_and_envelope(
                                 subject,
                                 name,
@@ -567,10 +580,15 @@ impl ToolSets {
                                 started_at,
                             )
                             .await
-                            .unwrap_or(raw),
-                        _ => raw,
+                        {
+                            Some(wrapped) => (wrapped, true),
+                            None => (raw, false),
+                        }
+                    } else {
+                        (raw, false)
                     };
 
+                    record_pipeline_metrics(raw_bytes, kept_bytes, classifier_kind, persisted);
                     Audit::record_tokens(estimate_tokens(&wrapped));
                     Audit::record_success();
                     Ok(wrapped)
@@ -603,6 +621,53 @@ pub fn estimate_tokens(result: &CallToolResult) -> u64 {
         })
         .sum();
     (total_chars / 4).max(1) as u64
+}
+
+/// Joined byte count of every text content block — used by the bypass
+/// branch where no canonical_text is computed.
+fn estimate_text_bytes(result: &CallToolResult) -> u64 {
+    result
+        .content
+        .iter()
+        .map(|c| match &c.raw {
+            rmcp::model::RawContent::Text(t) => t.text.len() as u64,
+            _ => 0,
+        })
+        .sum()
+}
+
+/// Bytes the model ends up seeing for a given summary. For
+/// `Passthrough` it equals the raw input (no elision); for elided
+/// shapes it's the summary's own kept_bytes counter.
+fn summary_kept_bytes(summary: &ToolResultSummary, raw_bytes: u64) -> u64 {
+    match summary {
+        ToolResultSummary::Passthrough { .. } => raw_bytes,
+        ToolResultSummary::Generic { kept_bytes, .. } => *kept_bytes as u64,
+        ToolResultSummary::Concourse(s) => s.kept_bytes as u64,
+    }
+}
+
+/// Attach pipeline metrics to the audit row's metadata. Recorded for
+/// every successful tool dispatch — bypass, passthrough, persisted —
+/// so the workflow-run inspector's compression column always has a
+/// value. `compression_ratio` of 1.0 is informative on its own
+/// (says "this call hit the threshold but didn't shrink").
+fn record_pipeline_metrics(raw_bytes: u64, kept_bytes: u64, classifier: &str, persisted: bool) {
+    let compression_ratio = if kept_bytes == 0 {
+        1.0
+    } else {
+        raw_bytes as f64 / kept_bytes as f64
+    };
+    Audit::augment_metadata(
+        "pipeline",
+        serde_json::json!({
+            "raw_bytes": raw_bytes,
+            "kept_bytes": kept_bytes,
+            "classifier": classifier,
+            "persisted": persisted,
+            "compression_ratio": compression_ratio,
+        }),
+    );
 }
 
 #[cfg(test)]

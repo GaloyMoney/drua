@@ -169,6 +169,25 @@ impl Audit {
         Self::update_context(|ctx| ctx.metadata = Some(value));
     }
 
+    /// Merge a single key/value into the metadata object, preserving
+    /// fields already recorded. The universal-pipeline dispatcher uses
+    /// this to attach `pipeline: { raw_bytes, kept_bytes, … }` onto
+    /// the audit row's existing `{ tool_name, arguments }` so cost
+    /// attribution is consistent across passthrough, bypass, and
+    /// persisted code paths. No-op when the existing metadata isn't a
+    /// JSON object (it always is in practice; defensive).
+    pub fn augment_metadata(key: impl Into<String>, value: serde_json::Value) {
+        Self::update_context(|ctx| {
+            let key = key.into();
+            let entry = ctx
+                .metadata
+                .get_or_insert_with(|| serde_json::Value::Object(Default::default()));
+            if let serde_json::Value::Object(map) = entry {
+                map.insert(key, value);
+            }
+        });
+    }
+
     fn update_context(f: impl FnOnce(&mut AuditContextData)) {
         let mut ec = EventContext::current();
         let mut data: AuditContextData = ec
