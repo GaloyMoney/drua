@@ -1,4 +1,3 @@
-pub mod audit;
 pub mod error;
 
 use std::sync::Arc;
@@ -6,12 +5,11 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use tracing::instrument;
 
-pub use audit::GitProxyAuditLog;
 pub use drua_git_proxy::{
     parse_command_list, push_to_upstream, spawn_http_backend, Allowlist, AllowlistConfig,
-    AllowlistEntry, AllowlistError, CgiError, CgiRequest, CgiResponse, GitProxyDecision,
-    GitProxyMode, GitService, MirrorConfig, MirrorError, MirrorManager, PktLineError,
-    RefPatternSet, RefUpdate, RepoCoord, StaticCredential, UpstreamCredentialProvider,
+    AllowlistEntry, AllowlistError, CgiError, CgiRequest, CgiResponse, GitProxyMode, GitService,
+    MirrorConfig, MirrorError, MirrorManager, PktLineError, RefPatternSet, RefUpdate, RepoCoord,
+    StaticCredential, UpstreamCredentialProvider,
 };
 pub use error::GitProxyError;
 
@@ -36,30 +34,32 @@ impl UpstreamCredentialProvider for AppTokenCreds {
 
 /// Service surface for the git-proxy. Holds the YAML-driven
 /// allow-list (rebuilt at boot from `[git_proxy.allowlist]` in
-/// `drua.yml`), the audit-log writer, the bare-mirror manager, and
-/// a credential bridge to the existing `GitHubAppTokenProvider`.
+/// `drua.yml`), the bare-mirror manager, and a credential bridge to
+/// the existing `GitHubAppTokenProvider`.
+///
+/// Per-request decisions land in `audit_entries` via the global
+/// `Audit` service (see `core::audit::Audit::record_*`); this
+/// service holds no audit state of its own.
 #[derive(Clone)]
 pub struct GitProxies {
     allowlist: Arc<Allowlist>,
-    audit: GitProxyAuditLog,
     mirror: Option<MirrorManager>,
     creds: Option<Arc<dyn UpstreamCredentialProvider>>,
 }
 
 impl GitProxies {
-    pub fn new(pool: &sqlx::PgPool, allowlist: Allowlist) -> Self {
+    pub fn new(allowlist: Allowlist) -> Self {
         Self {
             allowlist: Arc::new(allowlist),
-            audit: GitProxyAuditLog::new(pool),
             mirror: None,
             creds: None,
         }
     }
 
-    /// Wires in the per-project bare mirror manager + the GitHub App
-    /// credential bridge. `None` for either disables the upstream-fetch
-    /// path (handler returns 503 with a stable code) which is what we
-    /// want when the proxy is being run without a configured GitHub App
+    /// Wires in the bare mirror manager + the GitHub App credential
+    /// bridge. `None` for either disables the upstream-fetch path
+    /// (handler returns 503 with a stable code) which is what we want
+    /// when the proxy is being run without a configured GitHub App
     /// (local dev with no upstream).
     pub fn with_mirror(
         mut self,
@@ -80,10 +80,6 @@ impl GitProxies {
 
     pub fn allowlist(&self) -> &Allowlist {
         &self.allowlist
-    }
-
-    pub fn audit(&self) -> &GitProxyAuditLog {
-        &self.audit
     }
 
     pub fn mirror(&self) -> Option<&MirrorManager> {

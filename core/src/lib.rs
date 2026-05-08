@@ -207,7 +207,7 @@ impl App {
         };
         let mirror = drua_git_proxy::MirrorManager::new(mirror_cfg);
         let git_proxies =
-            Arc::new(GitProxies::new(pool, allowlist).with_mirror(mirror, github_app.clone()));
+            Arc::new(GitProxies::new(allowlist).with_mirror(mirror, github_app.clone()));
 
         // Read facade for the project↔space mount relationship. Built
         // before `Skills` so Skills can resolve mounted-space skills

@@ -41,14 +41,15 @@ SVC_PULL="?service=git-upload-pack"
 
 # ─── Auth contract ─────────────────────────────────────────────────────
 
-@test "git-proxy: missing Authorization rejected with 401 + audit row" {
+@test "git-proxy: missing Authorization rejected with 401" {
+  # No `Authorization` header → AuthSubject::Anonymous. The shared
+  # `Audit::record_from_context` skips entries without a subject by
+  # design (anonymous junk is high-volume and would drown audit_entries);
+  # the rejection is still visible via tracing on the handler span.
   status="$(curl -s -o "$BATS_TEST_TMPDIR/body" -w '%{http_code}' \
     "$GP_URL/GaloyMoney/drua/info/refs$SVC_PULL")"
   [ "$status" = "401" ]
   grep -q 'unauthorized' "$BATS_TEST_TMPDIR/body"
-
-  count="$(psql "$PG_CON" -tAc "SELECT count(*) FROM sandbox_git_proxy_attempts WHERE owner='GaloyMoney' AND repo='drua' AND decision='rejected' AND reject_reason='unauthorized'")"
-  [ "$count" -ge 1 ]
 }
 
 @test "git-proxy: dev-agent token with extra suffix rejected with 401" {
@@ -97,7 +98,7 @@ SVC_PULL="?service=git-upload-pack"
   # + `# service=git-upload-pack` literal somewhere in the first frame.
   grep -aq 'service=git-upload-pack' "$BATS_TEST_TMPDIR/body"
 
-  count="$(psql "$PG_CON" -tAc "SELECT count(*) FROM sandbox_git_proxy_attempts WHERE owner='GaloyMoney' AND repo='drua' AND decision='accepted'")"
+  count="$(psql "$PG_CON" -tAc "SELECT count(*) FROM audit_entries WHERE action = 'git_proxy.git-upload-pack' AND outcome = 'success' AND metadata->>'owner' = 'GaloyMoney' AND metadata->>'repo' = 'drua'")"
   [ "$count" -ge 1 ]
 }
 
@@ -108,7 +109,7 @@ SVC_PULL="?service=git-upload-pack"
   [ "$status" = "403" ]
   grep -q 'repo_not_allowed' "$BATS_TEST_TMPDIR/body"
 
-  count="$(psql "$PG_CON" -tAc "SELECT count(*) FROM sandbox_git_proxy_attempts WHERE owner='attacker' AND repo='exfil' AND decision='rejected' AND reject_reason='repo_not_allowed'")"
+  count="$(psql "$PG_CON" -tAc "SELECT count(*) FROM audit_entries WHERE action = 'git_proxy.git-upload-pack' AND outcome = 'error' AND error_message = 'repo_not_allowed' AND metadata->>'owner' = 'attacker' AND metadata->>'repo' = 'exfil'")"
   [ "$count" -ge 1 ]
 }
 
@@ -198,6 +199,6 @@ SVC_PULL="?service=git-upload-pack"
   echo "$output" | grep -E "HTTP 403|error: 22" >/dev/null
 
   # Audit row should record ref_pattern_denied for the receive-pack POST.
-  count="$(psql "$PG_CON" -tAc "SELECT count(*) FROM sandbox_git_proxy_attempts WHERE owner='GaloyMoney' AND repo='drua' AND service='git-receive-pack' AND decision='rejected' AND reject_reason='ref_pattern_denied'")"
+  count="$(psql "$PG_CON" -tAc "SELECT count(*) FROM audit_entries WHERE action = 'git_proxy.git-receive-pack' AND outcome = 'error' AND error_message = 'ref_pattern_denied' AND metadata->>'owner' = 'GaloyMoney' AND metadata->>'repo' = 'drua'")"
   [ "$count" -ge 1 ]
 }

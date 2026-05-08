@@ -10,8 +10,6 @@ pub use drua_git_proxy::AllowlistError;
 /// [`Self::reject_code`].
 #[derive(Error, Debug)]
 pub enum GitProxyError {
-    #[error("GitProxyError - Sqlx: {0}")]
-    Sqlx(#[from] sqlx::Error),
     #[error("GitProxyError - Allowlist: {0}")]
     Allowlist(#[from] AllowlistError),
     #[error("GitProxyError - Authorization: {0}")]
@@ -21,14 +19,13 @@ pub enum GitProxyError {
 }
 
 impl GitProxyError {
-    /// Stable machine-readable code for the audit log + the HTTP
-    /// response body. Agents see these strings in stderr.
+    /// Stable machine-readable code for the audit row's `error_message`
+    /// + the HTTP response body. Agents see these strings in stderr.
     pub fn reject_code(&self) -> &'static str {
         match self {
             GitProxyError::InvalidRepoCoord { .. } => "invalid_repo_coord",
             GitProxyError::Authorization(_) => "unauthorized",
             GitProxyError::Allowlist(e) => e.reject_code(),
-            GitProxyError::Sqlx(_) => "internal_error",
         }
     }
 }

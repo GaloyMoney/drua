@@ -56,23 +56,6 @@ impl std::fmt::Display for GitService {
     }
 }
 
-/// Decision recorded for every proxy attempt; written to
-/// `sandbox_git_proxy_attempts.decision`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GitProxyDecision {
-    Accepted,
-    Rejected,
-}
-
-impl GitProxyDecision {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            GitProxyDecision::Accepted => "accepted",
-            GitProxyDecision::Rejected => "rejected",
-        }
-    }
-}
-
 /// Identifies the (owner, repo) target on the GitHub side. Validated
 /// at parse time — owner + repo must match GitHub's character set so a
 /// malicious sandbox can't inject path-traversal into the mirror layout.

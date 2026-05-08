@@ -129,11 +129,10 @@ async fn resolve_auth_context(
         // Local-dev shortcut: a literal `dev-agent` Bearer token
         // synthesises an `AuthSubject::Agent` with nil project_id +
         // agent_id, granting access to anything the global git-proxy
-        // allow-list permits. No DB lookup. The nil UUIDs land in
-        // `sandbox_git_proxy_attempts` so dev traffic is grep-able
-        // (`WHERE project_id = '00000000-…'`). Off in prod (config
-        // flag default false). Emits a `tracing::warn!` at server
-        // boot when enabled.
+        // allow-list permits. No DB lookup. Audit rows for dev-mode
+        // requests carry `acting_agent_id = 00000000-…` so they're
+        // grep-able after the fact. Off in prod (config flag default
+        // false). Emits a `tracing::warn!` at server boot when enabled.
         if state.dev_mode_agent_tokens && raw_token == "dev-agent" {
             return AuthSubject::Agent(
                 domain::primitives::ProjectId::from(uuid::Uuid::nil()),

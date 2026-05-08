@@ -22,4 +22,4 @@ pub use mirror::{
 };
 pub use pktline::{parse_command_list, PktLineError, RefUpdate};
 pub use policy::{mode_allowed, RefPatternSet};
-pub use primitives::{GitProxyDecision, GitProxyMode, GitService, RepoCoord};
+pub use primitives::{GitProxyMode, GitService, RepoCoord};

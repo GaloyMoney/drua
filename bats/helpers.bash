@@ -147,6 +147,9 @@ agents:
     agent:
       compaction:
         prune_after_seconds: 600
+    workflow_step_agent:
+      compaction:
+        prune_after_seconds: 600
 sandbox:
   backend:
     provider: local
@@ -156,6 +159,7 @@ library:
   repo_url: "https://github.com/galoymoney/drua-test-library"
   skill_sync_interval_secs: 3600
 git_proxy:
+  mirror_root: "${BATS_FILE_TMPDIR}/git-proxy-mirrors"
   allowlist:
 EOF
 

@@ -33,7 +33,13 @@ async fn audit_middleware(request: Request, next: Next) -> Response {
 
     let method = request.method().clone();
     let path = request.uri().path().to_string();
-    if method == Method::GET || method == Method::HEAD || method == Method::OPTIONS {
+    let is_git_proxy = path.starts_with("/git/");
+    // Git-proxy GETs (`info/refs`) are policy decisions worth auditing
+    // — keep the middleware-managed EventContext + persistence on
+    // them. Other read-only HTTP paths skip audit by design.
+    if !is_git_proxy
+        && (method == Method::GET || method == Method::HEAD || method == Method::OPTIONS)
+    {
         return next.run(request).await;
     }
     // MCP gateway spawns its own tokio tasks so the EventContext does

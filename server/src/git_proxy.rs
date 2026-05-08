@@ -13,6 +13,18 @@
 //! provider on `GitProxies` mints a fresh installation token per
 //! upstream fetch via `GitHubAppTokenProvider`. The sandbox holds
 //! only its SA token; the App token never crosses the trust boundary.
+//!
+//! Audit: every request lands in `audit_entries` via the shared
+//! `core::audit::Audit::record_*` API. The handler enriches the
+//! request's audit context with proxy-specific fields and the global
+//! `audit_middleware` persists the row at request boundary
+//! (the GET-skip rule is suppressed for `/git/` so `info/refs`
+//! advertisements are recorded too). Wire shape:
+//! `action = "git_proxy.{service}"`, outcome `Success` for accepts,
+//! `Error { message: <reject_code> }` for rejects;
+//! `metadata = {owner, repo, refs}`. Bytes / upstream HTTP status are
+//! NOT in the audit row — they're tracing fields on the handler span
+//! so Honeycomb can query them without the audit table bloating.
 
 use axum::{
     body::Body,
@@ -27,10 +39,9 @@ use http_body_util::BodyExt;
 use serde::Deserialize;
 use tracing::instrument;
 
+use drua_core::audit::{primitives::InteractionOutcome, Audit};
 use drua_core::auth::AuthSubject;
-use drua_core::git_proxy::{
-    spawn_http_backend, CgiRequest, GitProxyDecision, GitProxyError, GitService, RepoCoord,
-};
+use drua_core::git_proxy::{spawn_http_backend, CgiRequest, GitProxyError, GitService, RepoCoord};
 
 use crate::AppState;
 
@@ -52,7 +63,7 @@ struct InfoRefsQuery {
 #[instrument(
     name = "web.git_proxy.info_refs",
     skip_all,
-    fields(owner, repo, service)
+    fields(owner, repo, service, bytes_sent, upstream_status)
 )]
 async fn info_refs(
     Extension(auth): Extension<AuthSubject>,
@@ -65,12 +76,12 @@ async fn info_refs(
     tracing::Span::current().record("repo", repo.as_str());
 
     let Some(service_str) = q.service.as_deref() else {
-        return reject_response(StatusCode::BAD_REQUEST, "missing_service_query");
+        return reject_response(&auth, StatusCode::BAD_REQUEST, "missing_service_query");
     };
     tracing::Span::current().record("service", service_str);
 
     let Some(service) = GitService::from_query(service_str) else {
-        return reject_response(StatusCode::BAD_REQUEST, "invalid_service");
+        return reject_response(&auth, StatusCode::BAD_REQUEST, "invalid_service");
     };
 
     let query_string = format!("service={service_str}");
@@ -92,7 +103,11 @@ async fn info_refs(
     .await
 }
 
-#[instrument(name = "web.git_proxy.git_upload_pack", skip_all, fields(owner, repo))]
+#[instrument(
+    name = "web.git_proxy.git_upload_pack",
+    skip_all,
+    fields(owner, repo, bytes_sent, bytes_received, upstream_status)
+)]
 async fn git_upload_pack(
     Extension(auth): Extension<AuthSubject>,
     State(state): State<AppState>,
@@ -106,7 +121,7 @@ async fn git_upload_pack(
         Ok(c) => c.to_bytes(),
         Err(e) => {
             tracing::warn!(error = %e, "failed to buffer upload-pack body");
-            return reject_response(StatusCode::BAD_REQUEST, "body_read_error");
+            return reject_response(&auth, StatusCode::BAD_REQUEST, "body_read_error");
         }
     };
     handle(
@@ -127,7 +142,11 @@ async fn git_upload_pack(
     .await
 }
 
-#[instrument(name = "web.git_proxy.git_receive_pack", skip_all, fields(owner, repo))]
+#[instrument(
+    name = "web.git_proxy.git_receive_pack",
+    skip_all,
+    fields(owner, repo, bytes_sent, bytes_received, upstream_status)
+)]
 async fn git_receive_pack(
     Extension(auth): Extension<AuthSubject>,
     State(state): State<AppState>,
@@ -141,13 +160,13 @@ async fn git_receive_pack(
         Ok(c) => c.to_bytes(),
         Err(e) => {
             tracing::warn!(error = %e, "failed to buffer receive-pack body");
-            return reject_response(StatusCode::BAD_REQUEST, "body_read_error");
+            return reject_response(&auth, StatusCode::BAD_REQUEST, "body_read_error");
         }
     };
 
     let coord = match RepoCoord::parse(&owner, &repo) {
         Some(c) => c,
-        None => return reject_response(StatusCode::BAD_REQUEST, "invalid_repo_coord"),
+        None => return reject_response(&auth, StatusCode::BAD_REQUEST, "invalid_repo_coord"),
     };
 
     // Peek the pkt-line cmd list BEFORE spawning git-http-backend so we
@@ -156,18 +175,13 @@ async fn git_receive_pack(
         Ok(refs) => refs,
         Err(e) => {
             tracing::warn!(error = %e, "git-proxy: failed to peek receive-pack pkt-line");
-            let _ = audit_reject(
-                &state,
-                &auth,
-                &coord,
-                GitService::GitReceivePack,
-                "malformed_receive_pack",
-            )
-            .await;
-            return reject_response(StatusCode::BAD_REQUEST, "malformed_receive_pack");
+            seed_audit_context(&auth, &coord, GitService::GitReceivePack, &[]);
+            return finish_audit_reject(StatusCode::BAD_REQUEST, "malformed_receive_pack");
         }
     };
     let ref_names: Vec<String> = updates.iter().map(|u| u.ref_name.clone()).collect();
+
+    seed_audit_context(&auth, &coord, GitService::GitReceivePack, &ref_names);
 
     let upstream_url = match state.app.git_proxies().check_authorization(
         &auth,
@@ -177,32 +191,7 @@ async fn git_receive_pack(
         &ref_names,
     ) {
         Ok(entry) => entry.upstream_url.clone(),
-        Err(err) => {
-            return render_authz_error(&state, &auth, &coord, GitService::GitReceivePack, err).await
-        }
-    };
-
-    let attempt_id = match state
-        .app
-        .git_proxies()
-        .audit()
-        .record_attempt(
-            auth.acting_agent_id(),
-            auth.project_id(),
-            &coord.owner,
-            &coord.repo,
-            GitService::GitReceivePack,
-            serde_json::to_value(&updates).unwrap_or(serde_json::Value::Null),
-            drua_core::git_proxy::GitProxyDecision::Accepted,
-            None,
-        )
-        .await
-    {
-        Ok(id) => Some(id),
-        Err(e) => {
-            tracing::error!(error = %e, "audit accept insert failed");
-            None
-        }
+        Err(err) => return finish_authz_reject(err),
     };
 
     let cgi_response = forward_to_backend(
@@ -216,13 +205,13 @@ async fn git_receive_pack(
             headers: &headers,
             body: body_bytes,
         },
-        attempt_id,
     )
     .await;
 
     // Mirror the accepted refs upstream. If the push fails the proxy
     // logs but still returns the local receive-pack success body —
-    // the audit row records the failure so ops can chase it.
+    // ops sees the upstream failure via Honeycomb (push_to_upstream's
+    // own span) and the audit row's outcome.
     let mirror_path = state
         .app
         .git_proxies()
@@ -246,6 +235,7 @@ async fn git_receive_pack(
         tracing::warn!(error = %e, "git-proxy: upstream forward failed");
     }
 
+    finish_audit(&cgi_response);
     cgi_response
 }
 
@@ -274,8 +264,10 @@ async fn handle(
 
     let coord = match RepoCoord::parse(owner_raw, repo_raw) {
         Some(c) => c,
-        None => return reject_response(StatusCode::BAD_REQUEST, "invalid_repo_coord"),
+        None => return reject_response(auth, StatusCode::BAD_REQUEST, "invalid_repo_coord"),
     };
+
+    seed_audit_context(auth, &coord, service, refs_in_request);
 
     let upstream_url = match state.app.git_proxies().check_authorization(
         auth,
@@ -285,38 +277,12 @@ async fn handle(
         refs_in_request,
     ) {
         Ok(entry) => entry.upstream_url.clone(),
-        Err(err) => return render_authz_error(state, auth, &coord, service, err).await,
+        Err(err) => return finish_authz_reject(err),
     };
 
-    let attempt_id = match state
-        .app
-        .git_proxies()
-        .audit()
-        .record_attempt(
-            auth.acting_agent_id(),
-            auth.project_id(),
-            &coord.owner,
-            &coord.repo,
-            service,
-            serde_json::Value::Array(
-                refs_in_request
-                    .iter()
-                    .map(|r| serde_json::Value::String(r.clone()))
-                    .collect(),
-            ),
-            GitProxyDecision::Accepted,
-            None,
-        )
-        .await
-    {
-        Ok(id) => Some(id),
-        Err(e) => {
-            tracing::error!(error = %e, "audit accept insert failed");
-            None
-        }
-    };
-
-    forward_to_backend(state, &coord, &upstream_url, fwd, attempt_id).await
+    let response = forward_to_backend(state, &coord, &upstream_url, fwd).await;
+    finish_audit(&response);
+    response
 }
 
 async fn forward_to_backend(
@@ -324,12 +290,11 @@ async fn forward_to_backend(
     coord: &RepoCoord,
     upstream_url: &str,
     fwd: Forward<'_>,
-    attempt_id: Option<uuid::Uuid>,
 ) -> Response {
     let proxies = state.app.git_proxies();
     let Some(mirror) = proxies.mirror() else {
         tracing::warn!("git-proxy: mirror manager not configured");
-        return reject_response(StatusCode::SERVICE_UNAVAILABLE, "mirror_disabled");
+        return reject_status(StatusCode::SERVICE_UNAVAILABLE, "mirror_disabled");
     };
     // file:// upstreams (test fixtures) don't need credentials; production
     // https:// upstreams must have a credential provider configured.
@@ -343,7 +308,7 @@ async fn forward_to_backend(
                 Some(c) => c,
                 None => {
                     tracing::warn!("git-proxy: upstream credentials not configured");
-                    return reject_response(
+                    return reject_status(
                         StatusCode::SERVICE_UNAVAILABLE,
                         "upstream_credentials_missing",
                     );
@@ -355,7 +320,7 @@ async fn forward_to_backend(
         Ok(p) => p,
         Err(e) => {
             tracing::warn!(error = %e, "git-proxy: mirror ensure failed");
-            return reject_response(StatusCode::BAD_GATEWAY, "mirror_unavailable");
+            return reject_status(StatusCode::BAD_GATEWAY, "mirror_unavailable");
         }
     };
 
@@ -376,25 +341,21 @@ async fn forward_to_backend(
         content_encoding,
         body: fwd.body,
     };
-    let bytes_received = req_in.body.len() as i64;
+    let bytes_received = req_in.body.len() as u64;
+    tracing::Span::current().record("bytes_received", bytes_received);
 
     let cgi_resp = match spawn_http_backend(&mirror_path, &req_in).await {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!(error = %e, "git-proxy: http-backend spawn failed");
-            return reject_response(StatusCode::BAD_GATEWAY, "backend_spawn_failed");
+            return reject_status(StatusCode::BAD_GATEWAY, "backend_spawn_failed");
         }
     };
 
-    if let Some(id) = attempt_id {
-        let bytes_sent = cgi_resp.body.len() as i64;
-        let upstream_status = Some(cgi_resp.status.as_u16() as i32);
-        let _ = proxies
-            .audit()
-            .record_completion(id, bytes_sent, bytes_received, upstream_status)
-            .await
-            .map_err(|e| tracing::error!(error = %e, "audit completion update failed"));
-    }
+    let bytes_sent = cgi_resp.body.len() as u64;
+    let upstream_status = cgi_resp.status.as_u16();
+    tracing::Span::current().record("bytes_sent", bytes_sent);
+    tracing::Span::current().record("upstream_status", upstream_status);
 
     let mut response = Response::builder().status(cgi_resp.status);
     if let Some(headers_mut) = response.headers_mut() {
@@ -410,23 +371,50 @@ async fn forward_to_backend(
         })
 }
 
-async fn render_authz_error(
-    state: &AppState,
-    auth: &AuthSubject,
-    coord: &RepoCoord,
-    service: GitService,
-    err: GitProxyError,
-) -> Response {
+/// Sets up the global `Audit` context for a request — subject,
+/// project_id (attribution), action, and metadata. Called once per
+/// request as soon as the (auth, coord, service, refs) tuple is
+/// known. Pair with [`finish_audit`] / [`finish_authz_reject`] /
+/// [`finish_audit_reject`] which apply the outcome and persist.
+fn seed_audit_context(auth: &AuthSubject, coord: &RepoCoord, service: GitService, refs: &[String]) {
+    Audit::record_subject(auth);
+    if let Some(project_id) = auth.project_id() {
+        Audit::record_project_id(project_id);
+    }
+    if let Some(agent_id) = auth.acting_agent_id() {
+        Audit::record_agent_id(agent_id);
+    }
+    Audit::record_entrypoint(format!("api: git-proxy.{}", service.as_str()));
+    Audit::record_action(format!("git_proxy.{}", service.as_str()));
+    Audit::record_metadata(serde_json::json!({
+        "owner": coord.owner,
+        "repo": coord.repo,
+        "service": service.as_str(),
+        "refs": refs,
+    }));
+}
+
+/// Sets the audit outcome from the response status (the global
+/// `audit_middleware` persists). 2xx → Success; anything else → Error
+/// with the status code as the message (handler-side `reject_*`
+/// helpers seed a more specific reject_code via
+/// [`finish_authz_reject`] / [`finish_audit_reject`] first).
+fn finish_audit(response: &Response) {
+    let status = response.status();
+    if status.is_success() {
+        Audit::record_outcome_if_unset(InteractionOutcome::Success);
+    } else {
+        Audit::record_outcome_if_unset(InteractionOutcome::Error {
+            message: status.as_u16().to_string(),
+        });
+    }
+}
+
+/// Authorisation reject path: takes the typed error, maps to a status
+/// + reject_code, records the audit outcome, and renders the response.
+fn finish_authz_reject(err: GitProxyError) -> Response {
     let code = err.reject_code();
-    tracing::warn!(
-        error = %err,
-        owner = %coord.owner,
-        repo = %coord.repo,
-        service = service.as_str(),
-        code = code,
-        "git-proxy rejected request"
-    );
-    let _ = audit_reject(state, auth, coord, service, code).await;
+    tracing::warn!(error = %err, code = code, "git-proxy rejected request");
     let status = match err {
         GitProxyError::Authorization(_) => StatusCode::UNAUTHORIZED,
         GitProxyError::Allowlist(drua_core::git_proxy::AllowlistError::RepoNotAllowed {
@@ -442,36 +430,38 @@ async fn render_authz_error(
         | GitProxyError::Allowlist(drua_core::git_proxy::AllowlistError::InvalidRefPattern(_)) => {
             StatusCode::BAD_REQUEST
         }
-        GitProxyError::Sqlx(_) => StatusCode::INTERNAL_SERVER_ERROR,
     };
-    reject_response(status, code)
+    finish_audit_reject(status, code)
 }
 
-async fn audit_reject(
-    state: &AppState,
-    auth: &AuthSubject,
-    coord: &RepoCoord,
-    service: GitService,
-    reason: &str,
-) -> Result<uuid::Uuid, sqlx::Error> {
-    state
-        .app
-        .git_proxies()
-        .audit()
-        .record_attempt(
-            auth.acting_agent_id(),
-            auth.project_id(),
-            &coord.owner,
-            &coord.repo,
-            service,
-            serde_json::Value::Array(vec![]),
-            GitProxyDecision::Rejected,
-            Some(reason),
-        )
-        .await
+/// Records a reject outcome with the given `reject_code` and renders
+/// the HTTP response. Persistence happens in `audit_middleware`.
+fn finish_audit_reject(status: StatusCode, code: &'static str) -> Response {
+    Audit::record_outcome(InteractionOutcome::Error {
+        message: code.to_string(),
+    });
+    reject_status(status, code)
 }
 
-fn reject_response(status: StatusCode, code: &'static str) -> Response {
+/// Pre-context-seed reject — used for failures that happen before we
+/// know enough about the request to seed an audit row (e.g. malformed
+/// URL coord, body-read failure, missing service= query). Records a
+/// minimal audit context from whatever subject we have so the rejection
+/// is still visible.
+fn reject_response(auth: &AuthSubject, status: StatusCode, code: &'static str) -> Response {
+    Audit::record_subject(auth);
+    if let Some(project_id) = auth.project_id() {
+        Audit::record_project_id(project_id);
+    }
+    Audit::record_entrypoint("api: git-proxy");
+    Audit::record_action("git_proxy.reject");
+    Audit::record_outcome(InteractionOutcome::Error {
+        message: code.to_string(),
+    });
+    reject_status(status, code)
+}
+
+fn reject_status(status: StatusCode, code: &'static str) -> Response {
     (
         status,
         [(axum::http::header::CONTENT_TYPE, "text/plain")],
