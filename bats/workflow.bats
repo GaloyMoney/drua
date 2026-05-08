@@ -135,6 +135,12 @@ extract_id_field() {
   local run_id_from_step1
   run_id_from_step1="$(echo "$step1_output" | jq -r '.workflow_run_id')"
   [ "$run_id_from_step1" = "$run_id" ]
+  # Definition id is part of the WorkflowExecutor identity — audit
+  # + observability link the dispatch back without a join through
+  # `workflow_runs`.
+  local def_id_from_step1
+  def_id_from_step1="$(echo "$step1_output" | jq -r '.workflow_definition_id')"
+  [ "$def_id_from_step1" = "$def_id" ]
 
   # 7. Step 2 (notes store) — proves that `${{ trigger.* }}` and
   #    `${{ steps.<n>.outputs.* }}` references substituted at run

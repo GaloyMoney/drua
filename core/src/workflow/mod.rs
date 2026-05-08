@@ -325,15 +325,13 @@ impl Workflows {
                         )));
                     }
 
+                    // `validate_ref_against_prior_steps` runs
+                    // `template::validate_root` internally — no need
+                    // to repeat it here.
                     let refs = template::extract_refs_in_value(params).map_err(|e| {
                         WorkflowError::InvalidTemplateRef(format!("tool_step '{name}': {e}"))
                     })?;
                     for r in &refs {
-                        if let Err(e) = template::validate_root(r) {
-                            return Err(WorkflowError::InvalidTemplateRef(format!(
-                                "tool_step '{name}': {e}"
-                            )));
-                        }
                         validate_ref_against_prior_steps(name, r, &seen_step_names)?;
                     }
                 }

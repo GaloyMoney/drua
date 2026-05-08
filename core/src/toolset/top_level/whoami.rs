@@ -44,6 +44,8 @@ struct WhoAmIOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    workflow_definition_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     workflow_run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     scopes: Option<Vec<String>>,
@@ -116,13 +118,16 @@ impl TopLevelTool for WhoAmI {
                     ..Default::default()
                 }
             }
-            AuthSubject::WorkflowExecutor(project_id, run_id, scopes) => WhoAmIOutput {
-                identity_type: "workflow_executor".into(),
-                project_id: Some(project_id.to_string()),
-                workflow_run_id: Some(run_id.to_string()),
-                scopes: Some(scopes_list(scopes)),
-                ..Default::default()
-            },
+            AuthSubject::WorkflowExecutor(project_id, definition_id, run_id, scopes) => {
+                WhoAmIOutput {
+                    identity_type: "workflow_executor".into(),
+                    project_id: Some(project_id.to_string()),
+                    workflow_definition_id: Some(definition_id.to_string()),
+                    workflow_run_id: Some(run_id.to_string()),
+                    scopes: Some(scopes_list(scopes)),
+                    ..Default::default()
+                }
+            }
             AuthSubject::Anonymous => WhoAmIOutput {
                 identity_type: "anonymous".into(),
                 ..Default::default()

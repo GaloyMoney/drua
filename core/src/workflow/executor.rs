@@ -449,24 +449,37 @@ impl Executor {
                 let arguments = serde_json::to_string_pretty(trigger_context)
                     .unwrap_or_else(|_| trigger_context.to_string());
                 let sandbox_id = attach_sandbox.map(|(id, _)| id);
-                let raw_prompt = self
+
+                // Two-pass interpolation, ORDER MATTERS for security:
+                //
+                //   1. Resolve `${{ trigger.X }}` / `${{ steps.<n>.outputs.Y }}`
+                //      against the raw skill body. The skill author's
+                //      template references resolve here.
+                //   2. Then expand `$ARGUMENTS` / `$N` — the JSON-
+                //      serialised trigger payload is spliced in as
+                //      OPAQUE text. A literal `${{ … }}` in user-
+                //      controlled payload content (a commit message,
+                //      a webhook field, …) survives this expansion
+                //      but is no longer re-evaluated, so an attacker
+                //      cannot leak prior step outputs into the
+                //      prompt by smuggling templates through the
+                //      trigger.
+                let raw_body: String = self
                     .skills
-                    .interpolate_skill(skill, Some(project_id), sandbox_id, Some(&arguments))
+                    .find_by_name(skill, Some(project_id), sandbox_id)
                     .await
                     .map_err(|e| WorkflowError::Skill(e.to_string()))?
-                    .ok_or_else(|| WorkflowError::SkillNotFound(skill.clone()))?;
-
-                // Layer `${{ trigger.X }}` / `${{ steps.<n>.outputs.Y }}`
-                // substitution on top of the existing `$ARGUMENTS` /
-                // `$N` handling that `interpolate_skill` already
-                // applied. Errors propagate as `Skill` failures
-                // (template syntax is the skill body author's concern).
+                    .ok_or_else(|| WorkflowError::SkillNotFound(skill.clone()))?
+                    .into();
                 let template_ctx = TemplateContext {
                     trigger: trigger_context,
                     steps: step_outputs,
                 };
-                let prompt = super::template::substitute_in_string(&raw_prompt, &template_ctx)
-                    .map_err(|e| WorkflowError::Skill(e.to_string()))?;
+                let templated_body =
+                    super::template::substitute_in_string(&raw_body, &template_ctx)
+                        .map_err(|e| WorkflowError::Skill(e.to_string()))?;
+                let prompt =
+                    crate::skill::SkillBody::new(templated_body).interpolate(Some(&arguments));
 
                 let agent_name = format!("workflow-{}-{name}", run_id.short());
                 let mut op = self
@@ -559,6 +572,7 @@ impl Executor {
             } => {
                 self.execute_tool_step(
                     project_id,
+                    workflow_id,
                     run_id,
                     name,
                     tool,
@@ -704,6 +718,7 @@ impl Executor {
     async fn execute_tool_step(
         &self,
         project_id: ProjectId,
+        workflow_id: WorkflowDefinitionId,
         run_id: WorkflowRunId,
         step_name: &str,
         tool_name: &str,
@@ -756,7 +771,7 @@ impl Executor {
             }
         };
 
-        let subject = AuthSubject::workflow_executor(project_id, run_id);
+        let subject = AuthSubject::workflow_executor(project_id, workflow_id, run_id);
         let timeout =
             Duration::from_secs(timeout_seconds.unwrap_or(DEFAULT_TOOL_STEP_TIMEOUT_SECS));
 

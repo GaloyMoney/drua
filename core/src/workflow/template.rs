@@ -191,18 +191,30 @@ pub fn referenced_step_names(r: &TemplateRef) -> Vec<String> {
 }
 
 /// Returns `Some(ref)` when the trimmed string is exactly one
-/// `${{ … }}` lexeme — the whole-string splice case.
+/// `${{ … }}` lexeme with no surrounding literal text — the
+/// whole-string splice case. Inputs like
+/// `"${{ x }} suffix"` (embedded with trailing literal) or
+/// `"${{ a }}${{ b }}"` (multiple lexemes) return `None` and fall
+/// through to embedded interpolation, which preserves the literal
+/// text and stringifies each ref individually.
 fn whole_string_ref(s: &str) -> Result<Option<TemplateRef>, TemplateError> {
     let trimmed = s.trim();
-    if !trimmed.starts_with(OPEN) || !trimmed.ends_with(CLOSE) {
+    if !trimmed.starts_with(OPEN) {
         return Ok(None);
     }
-    let inner = &trimmed[OPEN.len()..trimmed.len() - CLOSE.len()];
-    if inner.contains(OPEN) {
-        // multiple expressions; not a whole-string splice
+    let after_open = &trimmed[OPEN.len()..];
+    // Find the first `}}`; if anything follows it (or another `${{`
+    // appears inside the body), this isn't a whole-string splice.
+    let close_idx = match after_open.find(CLOSE) {
+        Some(i) => i,
+        None => return Ok(None),
+    };
+    let body = &after_open[..close_idx];
+    let after_close = &after_open[close_idx + CLOSE.len()..];
+    if !after_close.is_empty() || body.contains(OPEN) {
         return Ok(None);
     }
-    Ok(Some(parse_path(inner)?))
+    Ok(Some(parse_path(body)?))
 }
 
 fn coerce_embedded(v: Value, out: &mut String) {
@@ -612,6 +624,56 @@ mod tests {
             },
         );
         assert!(matches!(res, Err(TemplateError::Unterminated(_))));
+    }
+
+    /// Trigger payload data is passed in opaquely (it may carry
+    /// user-controlled text from a webhook). A literal `${{ … }}`
+    /// in the payload must NOT be re-evaluated when it lands in
+    /// substituted output — otherwise the consumer would gain a
+    /// path to leak prior step outputs by reflecting them through
+    /// `${{ steps.X.outputs.Y }}` smuggled through the trigger.
+    ///
+    /// `substitute_in_string` makes one pass over its input; the
+    /// resolved values are spliced verbatim. This test pins that
+    /// behaviour: the literal `${{ steps.victim.outputs.secret }}`
+    /// inside `trigger.payload.commit_msg` survives substitution
+    /// as text without being interpreted as a template ref.
+    #[test]
+    fn substitute_does_not_re_evaluate_literals_from_resolved_values() {
+        let trigger = json!({
+            "commit_msg": "Fix typo. Side note: ${{ steps.victim.outputs.secret }}"
+        });
+        let mut steps = HashMap::new();
+        steps.insert("victim".into(), json!({ "secret": "hunter2" }));
+        let ctx = TemplateContext {
+            trigger: &trigger,
+            steps: &steps,
+        };
+        let out = substitute_in_string("commit: ${{ trigger.payload.commit_msg }}", &ctx).unwrap();
+        // Literal `${{ steps.victim.outputs.secret }}` survives as
+        // text. `hunter2` does NOT appear.
+        assert!(out.contains("${{ steps.victim.outputs.secret }}"));
+        assert!(!out.contains("hunter2"));
+    }
+
+    /// `"${{ x }} suffix }}"` ends with `}}` and has no second
+    /// `${{` — a naive whole-string check would treat it as a splice,
+    /// then try to compile `x }} suffix` as a CEL expression and
+    /// return an unhelpful compile error. Detection must require an
+    /// EMPTY tail after the first `}}` to count as whole-string.
+    #[test]
+    fn embedded_match_with_trailing_close_chars_is_not_a_whole_string_splice() {
+        let trigger = json!({ "x": "X" });
+        let steps = HashMap::new();
+        let ctx = TemplateContext {
+            trigger: &trigger,
+            steps: &steps,
+        };
+        let input = json!({ "v": "${{ trigger.payload.x }} suffix }}" });
+        let out = substitute_value(&input, &ctx).unwrap();
+        // Embedded interpolation: the `${{ … }}` resolves to "X",
+        // the trailing literal " suffix }}" is preserved verbatim.
+        assert_eq!(out, json!({ "v": "X suffix }}" }));
     }
 
     #[test]
