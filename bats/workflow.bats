@@ -75,7 +75,7 @@ extract_id_field() {
       { type: "tool_step", name: "identify", tool: "whoami", params: {} },
       {
         type: "tool_step",
-        name: "store-note",
+        name: "store_note",
         tool: "notes",
         params: {
           command: "store",
@@ -199,7 +199,7 @@ extract_id_field() {
       { type: "tool_step", name: "identify", tool: "whoami", params: {} },
       {
         type: "tool_step",
-        name: "store-note",
+        name: "store_note",
         tool: "notes",
         params: {
           command: "store",

@@ -184,13 +184,22 @@ pub fn validate_root(r: &TemplateRef) -> Result<(), TemplateError> {
 
 /// Names of every step referenced via `steps.<name>` in the
 /// expression body. Used by parse-time forward-reference checking;
-/// extracts via lexical scan rather than CEL AST walking (which would
-/// require depending on the crate's internal `Expr` types). Ignores
-/// bracket-style indexing (`steps["x"]`) — workflows must use
-/// dot-syntax for static analyzability.
+/// extracts via lexical scan rather than CEL AST walking (which
+/// would require depending on the crate's internal `Expr` types).
+/// Ignores bracket-style indexing (`steps["x"]`) — workflows must
+/// use dot-syntax for static analyzability.
+///
+/// Pattern matches CEL identifier shape exactly
+/// (`[A-Za-z_][A-Za-z0-9_]*`). Hyphens are NOT included: CEL parses
+/// `steps.store-note.outputs.x` as `(steps.store) - (note.outputs.x)`,
+/// so a hyphenated step name could never resolve at runtime even if
+/// the regex accepted it. `Workflows::validate_steps` rejects step
+/// names that violate this shape at create time so the regex never
+/// sees hyphens in practice — narrow regex stays as a belt-and-
+/// braces match against the validation contract.
 pub fn referenced_step_names(r: &TemplateRef) -> Vec<String> {
     static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| Regex::new(r"\bsteps\.([A-Za-z_][A-Za-z0-9_-]*)").unwrap());
+    let re = RE.get_or_init(|| Regex::new(r"\bsteps\.([A-Za-z_][A-Za-z0-9_]*)").unwrap());
     let mut out: Vec<String> = Vec::new();
     let mut seen = HashSet::new();
     for cap in re.captures_iter(&r.body) {
@@ -770,5 +779,28 @@ mod tests {
     fn referenced_step_names_ignores_trigger() {
         let r = parse_path("trigger.payload.build").unwrap();
         assert!(referenced_step_names(&r).is_empty());
+    }
+
+    /// Hyphens fall outside the CEL identifier alphabet, so the
+    /// regex stops at `steps.store` rather than capturing
+    /// `store-note`. CEL would parse the full ref as subtraction;
+    /// `Workflows::validate_steps` rejects hyphenated step names
+    /// at create time, so this case is unreachable in practice —
+    /// the test pins the narrow extraction behaviour as a
+    /// belt-and-braces match against that validation contract.
+    #[test]
+    fn referenced_step_names_stops_at_hyphen() {
+        // We can't `parse_path("steps.store-note.outputs.x")`
+        // because CEL itself would parse it as subtraction and the
+        // CEL parse would still succeed (`-` is a valid op). Build
+        // a synthetic `TemplateRef` that bypasses parse-time CEL
+        // validation to exercise the lexical regex directly.
+        let r = TemplateRef {
+            raw: "${{ steps.store-note.outputs.x }}".to_string(),
+            body: "steps.store-note.outputs.x".to_string(),
+        };
+        // `store` is captured (the prefix up to the hyphen). The
+        // hyphen + suffix are NOT mistakenly attached to it.
+        assert_eq!(referenced_step_names(&r), vec!["store".to_string()]);
     }
 }

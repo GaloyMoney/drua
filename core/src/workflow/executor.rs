@@ -727,23 +727,14 @@ impl Executor {
         trigger_context: &serde_json::Value,
         step_outputs: &HashMap<String, serde_json::Value>,
     ) -> Result<serde_json::Value, WorkflowError> {
-        let tool = self
-            .toolsets
-            .find_top_level_tool(tool_name)
-            .ok_or_else(|| WorkflowError::ToolNotFound(tool_name.to_string()))?;
-
-        if !tool.composable() {
-            return Err(WorkflowError::InvalidStep(format!(
-                "tool_step '{step_name}': tool '{tool_name}' is not composable; \
-                 only `composable: true` tools can be called from a workflow step"
-            )));
-        }
-        if tool.output_schema().is_none() {
-            return Err(WorkflowError::InvalidStep(format!(
-                "tool_step '{step_name}': tool '{tool_name}' does not declare an \
-                 output_schema; tool_step requires structured output"
-            )));
-        }
+        // Workflow contract is enforced by `find_for_workflow`
+        // (registered + composable + declares output_schema). The
+        // same check runs at workflow-create / update time in
+        // `Workflows::validate_steps`, so this branch is defensive
+        // — top-level tool registration is build-time only.
+        self.toolsets
+            .find_for_workflow(tool_name)
+            .map_err(|e| WorkflowError::ToolNotFound(format!("tool_step '{step_name}': {e}")))?;
 
         let template_ctx = TemplateContext {
             trigger: trigger_context,

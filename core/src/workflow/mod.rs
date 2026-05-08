@@ -40,6 +40,19 @@ use repo::WorkflowDefinitionRepo;
 use run::entity::NewWorkflowRun;
 use template::TemplateRef;
 
+/// CEL identifier shape — `[A-Za-z_][A-Za-z0-9_]*`. Step names
+/// must conform so `${{ steps.<name>.outputs.… }}` parses as a
+/// field path rather than an arithmetic expression. Mirrors the
+/// regex in `template::referenced_step_names`.
+fn is_cel_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Reject `${{ steps.X.outputs.… }}` refs whose `X` hasn't been
 /// validated yet. Trigger refs always pass (provider payload schema
 /// validation deferred — memo `019e01a4` open Q6).
@@ -264,6 +277,25 @@ impl Workflows {
         let mut seen_step_names: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
+        // Step names appear inside `${{ steps.<name>.outputs.… }}`
+        // and must therefore be valid CEL identifiers — anything
+        // else (hyphens, spaces, leading digits, …) is parsed by
+        // CEL as a different expression entirely (e.g.
+        // `steps.store-note.outputs.x` becomes
+        // `(steps.store) - (note.outputs.x)`). Reject at parse time
+        // so authors learn at create time, not when a downstream
+        // template silently fails to resolve.
+        for step in steps {
+            if !is_cel_identifier(step.name()) {
+                return Err(WorkflowError::InvalidStep(format!(
+                    "step '{}': name must be a CEL identifier (letters, digits, \
+                     underscores; first char a letter or underscore) so it can be \
+                     referenced via `${{{{ steps.<name>.outputs.… }}}}`",
+                    step.name()
+                )));
+            }
+        }
+
         for step in steps {
             match step {
                 WorkflowStepDef::AgentStep {
@@ -302,28 +334,15 @@ impl Workflows {
                 WorkflowStepDef::ToolStep {
                     name, tool, params, ..
                 } => {
-                    if tool.trim().is_empty() {
-                        return Err(WorkflowError::InvalidStep(format!(
-                            "tool_step '{name}': `tool` is required and must be non-empty"
-                        )));
-                    }
-                    let resolved = self.toolsets.find_top_level_tool(tool).ok_or_else(|| {
-                        WorkflowError::ToolNotFound(format!(
-                            "tool_step '{name}': tool '{tool}' is not registered"
-                        ))
+                    // The lookup enforces every workflow `tool_step`
+                    // contract in one place: registered, composable,
+                    // declares an output_schema. The runtime
+                    // executor calls the same helper, so a workflow
+                    // that passes `validate_steps` cannot fail
+                    // dispatch on these checks at run time.
+                    self.toolsets.find_for_workflow(tool).map_err(|e| {
+                        WorkflowError::InvalidStep(format!("tool_step '{name}': {e}"))
                     })?;
-                    if !resolved.composable() {
-                        return Err(WorkflowError::InvalidStep(format!(
-                            "tool_step '{name}': tool '{tool}' is not composable; \
-                             only `composable: true` tools can be called from a workflow step"
-                        )));
-                    }
-                    if resolved.output_schema().is_none() {
-                        return Err(WorkflowError::InvalidStep(format!(
-                            "tool_step '{name}': tool '{tool}' does not declare an \
-                             output_schema; tool_step requires structured output"
-                        )));
-                    }
 
                     // `validate_ref_against_prior_steps` runs
                     // `template::validate_root` internally — no need
@@ -826,5 +845,21 @@ mod tests {
         let seen = std::collections::HashSet::new();
         let err = validate_ref_against_prior_steps("any", &r, &seen).unwrap_err();
         assert!(matches!(err, WorkflowError::InvalidTemplateRef(_)));
+    }
+
+    #[test]
+    fn cel_identifier_accepts_underscore_and_alphanumerics() {
+        assert!(is_cel_identifier("step1"));
+        assert!(is_cel_identifier("_leading_underscore"));
+        assert!(is_cel_identifier("Camel_Snake_42"));
+    }
+
+    #[test]
+    fn cel_identifier_rejects_hyphen_leading_digit_and_empty() {
+        assert!(!is_cel_identifier(""));
+        assert!(!is_cel_identifier("store-note"));
+        assert!(!is_cel_identifier("1step"));
+        assert!(!is_cel_identifier("has space"));
+        assert!(!is_cel_identifier("dot.in.middle"));
     }
 }

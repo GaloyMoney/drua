@@ -383,13 +383,33 @@ impl ToolSets {
             .into_iter()
     }
 
-    /// Direct lookup by name, bypassing visibility. Used by the
-    /// workflow executor + parse-time validator to resolve a
-    /// `tool_step.tool` reference; the dispatch path still routes
-    /// through `call_top_level_tool` which threads `subject`.
-    pub fn find_top_level_tool(&self, name: &str) -> Option<Arc<dyn TopLevelTool>> {
-        let map = self.top_level.read().expect("top_level lock poisoned");
-        map.get(name).cloned()
+    /// Resolve a top-level tool that satisfies the workflow
+    /// `tool_step` contract: must be registered, `composable:
+    /// true`, and declare an `output_schema()`. Both parse-time
+    /// validation (`Workflows::validate_steps`) and the runtime
+    /// executor (`Executor::execute_tool_step`) call this so the
+    /// rules are declared in one place — tool authors changing
+    /// `composable()` or dropping `output_schema()` ripple
+    /// identically through both layers.
+    ///
+    /// Bypasses [`TopLevelTool::is_visible`] — visibility is for
+    /// catalogue listing, not for workflow dispatch.
+    pub fn find_for_workflow(
+        &self,
+        name: &str,
+    ) -> Result<Arc<dyn TopLevelTool>, WorkflowToolLookupError> {
+        let tool = {
+            let map = self.top_level.read().expect("top_level lock poisoned");
+            map.get(name).cloned()
+        }
+        .ok_or_else(|| WorkflowToolLookupError::NotRegistered(name.to_string()))?;
+        if !tool.composable() {
+            return Err(WorkflowToolLookupError::NotComposable(name.to_string()));
+        }
+        if tool.output_schema().is_none() {
+            return Err(WorkflowToolLookupError::NoOutputSchema(name.to_string()));
+        }
+        Ok(tool)
     }
 
     /// Visible top-level tools converted to wire `ToolDefinition`s
@@ -836,5 +856,91 @@ mod tests {
             required, props,
             "every key in properties must appear in required for strict mode"
         );
+    }
+
+    /// Stub TopLevelTool used to exercise `find_for_workflow`'s
+    /// gates without standing up a real tool. The `composable` and
+    /// `output_schema` flags are pulled into individual fields so
+    /// each test case can flip exactly the bit under test.
+    struct StubTopLevelTool {
+        name: String,
+        composable: bool,
+        output_schema: Option<serde_json::Value>,
+    }
+
+    impl StubTopLevelTool {
+        fn new(name: &str, composable: bool, has_output_schema: bool) -> Self {
+            Self {
+                name: name.to_string(),
+                composable,
+                output_schema: has_output_schema.then(|| serde_json::json!({ "type": "object" })),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TopLevelTool for StubTopLevelTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn description(&self) -> &str {
+            "stub"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static EMPTY: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            EMPTY.get_or_init(|| serde_json::json!({ "type": "object" }))
+        }
+        fn output_schema(&self) -> Option<&serde_json::Value> {
+            self.output_schema.as_ref()
+        }
+        fn composable(&self) -> bool {
+            self.composable
+        }
+        async fn call(
+            &self,
+            _subject: &AuthSubject,
+            _arguments: Option<JsonObject>,
+        ) -> Result<CallToolResult, ToolSetsError> {
+            unreachable!("stub tool not invoked in find_for_workflow tests")
+        }
+    }
+
+    #[test]
+    fn find_for_workflow_accepts_composable_tool_with_output_schema() {
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_top_level(StubTopLevelTool::new("ok", true, true));
+        let resolved = toolsets.find_for_workflow("ok").expect("accepted");
+        assert_eq!(resolved.name(), "ok");
+    }
+
+    #[test]
+    fn find_for_workflow_rejects_unregistered_tool() {
+        let toolsets = ToolSets::empty_for_test();
+        match toolsets.find_for_workflow("ghost") {
+            Err(WorkflowToolLookupError::NotRegistered(name)) => assert_eq!(name, "ghost"),
+            _ => panic!("expected NotRegistered"),
+        }
+    }
+
+    #[test]
+    fn find_for_workflow_rejects_non_composable_tool() {
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_top_level(StubTopLevelTool::new("non_composable", false, true));
+        match toolsets.find_for_workflow("non_composable") {
+            Err(WorkflowToolLookupError::NotComposable(name)) => {
+                assert_eq!(name, "non_composable")
+            }
+            _ => panic!("expected NotComposable"),
+        }
+    }
+
+    #[test]
+    fn find_for_workflow_rejects_tool_without_output_schema() {
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_top_level(StubTopLevelTool::new("no_schema", true, false));
+        match toolsets.find_for_workflow("no_schema") {
+            Err(WorkflowToolLookupError::NoOutputSchema(name)) => assert_eq!(name, "no_schema"),
+            _ => panic!("expected NoOutputSchema"),
+        }
     }
 }

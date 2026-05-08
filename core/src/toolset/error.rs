@@ -49,3 +49,20 @@ pub enum ToolSetsError {
     #[error("ToolSetsError - Unauthorized")]
     Unauthorized,
 }
+
+/// Why a top-level tool can't be invoked from a workflow `tool_step`.
+/// Returned by [`super::ToolSets::find_for_workflow`]; both
+/// parse-time validation (`workflow create`/`update`) and runtime
+/// dispatch (`Executor::execute_tool_step`) route through that
+/// helper so the contract is declared in exactly one place.
+#[derive(Error, Debug)]
+pub enum WorkflowToolLookupError {
+    #[error("tool '{0}' is not registered")]
+    NotRegistered(String),
+    #[error(
+        "tool '{0}' is not composable; only `composable: true` tools can be called from a workflow step"
+    )]
+    NotComposable(String),
+    #[error("tool '{0}' does not declare an output_schema; tool_step requires structured output")]
+    NoOutputSchema(String),
+}
