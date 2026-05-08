@@ -14,6 +14,7 @@ use rmcp::model::CallToolResult;
 use serde::{Deserialize, Serialize};
 
 mod concourse;
+mod walker;
 
 pub use concourse::{
     ConcourseBuildLogClassifier, ConcourseBuildLogSummary, ConcourseBuildStatus, NixBuildFailure,
@@ -26,11 +27,10 @@ pub use concourse::{
 /// constructing `GenericFallback` with a custom `threshold_bytes`.
 pub const DEFAULT_GENERIC_THRESHOLD_BYTES: usize = 4096;
 
-/// Lines kept from the head and tail when generic-eliding. Picked to mirror
-/// the Cline / OpenHands shipping behaviour (preserve both ends; drop
-/// middle).
-const GENERIC_HEAD_LINES: usize = 50;
-const GENERIC_TAIL_LINES: usize = 150;
+// Pre-walker line-budget constants are gone — the walker uses
+// char-budget string elision instead, which doesn't suffer the
+// head/tail overlap class of bug. See `walker::STRING_ELIDE_*` for
+// the new caps.
 
 /// What the classifier produces. The dispatcher branches on the variant.
 ///
@@ -232,8 +232,22 @@ impl Default for ClassifierRegistry {
     }
 }
 
-/// Last-resort classifier. Always matches; threshold-gates between
-/// `Passthrough` (fast path) and `Generic` (head + tail, middle elided).
+/// Last-resort classifier. Always matches; runs the JSON-aware
+/// walker over a `Value` reconstructed from the call result.
+///
+/// The walker handles both shapes uniformly:
+/// - Plain-text tools (bash, k8s logs) arrive with no
+///   `structured_content`; the helper wraps `content[].text` as
+///   `Value::String(text)`. The walker's string branch byte-elides
+///   in place — the kept value is still a `String`, agents reading
+///   `summary.value.as_str()` keep working.
+/// - Structured tools (compose, github_get_pr) carry
+///   `structured_content` directly. The walker descends, byte-eliding
+///   leaf strings and sentinel-replacing oversize collections only
+///   after recursion has had a chance to shrink them.
+///
+/// `output_schema` is irrelevant at runtime — declared shape is for
+/// registration-time contracts (workflow `ToolStep` validator).
 pub struct GenericFallback {
     pub threshold_bytes: usize,
 }
@@ -248,7 +262,7 @@ impl Default for GenericFallback {
 
 impl ResultClassifier for GenericFallback {
     fn name(&self) -> &str {
-        "generic::v1"
+        "default::v1"
     }
 
     fn matches(&self, _tool_name: &str, _args: &serde_json::Value) -> bool {
@@ -256,55 +270,45 @@ impl ResultClassifier for GenericFallback {
     }
 
     fn classify(&self, ctx: &ClassifierContext<'_>) -> Result<Classification, ClassifierError> {
-        let raw = extract_text(ctx.raw);
-        let lines: Vec<&str> = raw.lines().collect();
-
-        // Bail to Passthrough whenever elision wouldn't actually shrink:
-        //   1. Below the byte threshold — agent already has every byte.
-        //   2. Line count <= HEAD + TAIL — the elided form would
-        //      contain all lines anyway, with the head 50 duplicated.
-        //      This is the bug from cursor review #3207213787 — without
-        //      the guard, `tail_start` saturates to 0, head and tail
-        //      overlap, kept_bytes > total_bytes.
-        // Honest contract: the envelope only exists when something is
-        // genuinely elided.
-        if raw.len() < self.threshold_bytes
-            || lines.len() <= GENERIC_HEAD_LINES + GENERIC_TAIL_LINES
-        {
-            return Ok(Classification {
-                summary: ToolResultSummary::Passthrough {
-                    value: serde_json::Value::String(raw.clone()),
-                },
-                canonical_text: raw,
-            });
-        }
-
-        // Disjoint by construction: tail_start is forced past head_end,
-        // so even pathological line distributions never produce
-        // overlapping slices.
-        let head_end = GENERIC_HEAD_LINES.min(lines.len());
-        let tail_start = lines.len().saturating_sub(GENERIC_TAIL_LINES).max(head_end);
-        let head = lines[..head_end].join("\n");
-        let tail = lines[tail_start..].join("\n");
-        let kept_bytes = (head.len() + tail.len()) as u32;
-
-        debug_assert!(
-            (kept_bytes as u64) <= raw.len() as u64,
-            "elision invariant violated: kept_bytes ({kept_bytes}) > total_bytes ({})",
-            raw.len(),
-        );
-
-        Ok(Classification {
-            summary: ToolResultSummary::Generic {
-                head,
-                tail,
-                total_bytes: raw.len() as u64,
+        let value = canonical_value(ctx.raw);
+        // canonical_text is the bytes `tool_output_fetch` will operate
+        // on. For Value::String we persist the inner string content
+        // (no JSON quotes) so bash-style fetches grep over the
+        // original bytes, not their stringified form. For everything
+        // else we serialize compactly.
+        let canonical_text = match &value {
+            serde_json::Value::String(s) => s.clone(),
+            other => serde_json::to_string(other).unwrap_or_default(),
+        };
+        let summary = match walker::classify_value(&value, self.threshold_bytes) {
+            walker::WalkOutcome::Passthrough(v) => ToolResultSummary::Passthrough { value: v },
+            walker::WalkOutcome::Elided {
+                kept,
+                elided_paths,
+                total_bytes,
                 kept_bytes,
-                classifier_hint: None,
+            } => ToolResultSummary::StructuredElision {
+                kept,
+                elided_paths,
+                total_bytes,
+                kept_bytes,
             },
-            canonical_text: raw,
+        };
+        Ok(Classification {
+            summary,
+            canonical_text,
         })
     }
+}
+
+/// Build a `Value` from the call result. `structured_content` wins
+/// when set; otherwise the joined content text is wrapped as
+/// `Value::String` so the walker has a single uniform input shape.
+fn canonical_value(result: &CallToolResult) -> serde_json::Value {
+    if let Some(sc) = result.structured_content.as_ref() {
+        return sc.clone();
+    }
+    serde_json::Value::String(extract_text(result))
 }
 
 /// Extract concatenated text content from a `CallToolResult`. Mirrors the
@@ -357,7 +361,12 @@ mod tests {
     }
 
     #[test]
-    fn large_output_falls_to_generic_with_head_and_tail() {
+    fn large_text_input_emits_structured_elision_with_string_kept() {
+        // Plain-text tools (no `structured_content`) arrive as
+        // `Value::String(text)` after `canonical_value`. The walker
+        // keeps the type as `String` — head + ellipsis + tail in
+        // place — so agents reading `summary.kept.as_str()` keep
+        // working.
         let lines: Vec<String> = (0..500).map(|i| format!("line-{i:04}")).collect();
         let body = lines.join("\n");
         assert!(
@@ -371,21 +380,51 @@ mod tests {
         // exactly what the dispatcher will persist.
         assert_eq!(classification.canonical_text, body);
         match classification.summary {
-            ToolResultSummary::Generic {
-                head,
-                tail,
+            ToolResultSummary::StructuredElision {
+                kept,
+                elided_paths,
                 total_bytes,
                 kept_bytes,
-                ..
             } => {
-                assert_eq!(total_bytes, body.len() as u64);
-                assert!(kept_bytes > 0);
-                assert!(head.starts_with("line-0000"));
-                assert!(tail.ends_with("line-0499"));
-                assert_eq!(head.lines().count(), GENERIC_HEAD_LINES);
-                assert_eq!(tail.lines().count(), GENERIC_TAIL_LINES);
+                assert!((kept_bytes as u64) < total_bytes);
+                let kept_str = kept.as_str().expect("string-typed kept");
+                assert!(kept_str.starts_with("line-0000"));
+                assert!(kept_str.ends_with("line-0499"));
+                assert_eq!(elided_paths.len(), 1);
+                assert_eq!(elided_paths[0].path, "$");
+                assert!(matches!(elided_paths[0].kind, ElisionKind::String));
             }
-            other => panic!("expected Generic, got {other:?}"),
+            other => panic!("expected StructuredElision, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn structured_object_walks_into_oversized_string_field() {
+        // Bash-shape: `{"output": "<huge text>"}`. The walker keeps
+        // the wrapper object verbatim; the inner string is byte-elided
+        // in place so `kept.output` is still a JSON string.
+        let huge = "x".repeat(10_000);
+        let mut sc = serde_json::Map::new();
+        sc.insert("output".into(), serde_json::Value::String(huge.clone()));
+        let mut raw = CallToolResult::success(vec![Content::text("ignored")]);
+        raw.structured_content = Some(serde_json::Value::Object(sc));
+
+        let registry = ClassifierRegistry::with_default();
+        let classification = registry.classify(&ctx("bash", &raw));
+        match classification.summary {
+            ToolResultSummary::StructuredElision {
+                kept, elided_paths, ..
+            } => {
+                let output = kept
+                    .get("output")
+                    .and_then(|v| v.as_str())
+                    .expect("output key still a JSON string");
+                assert!(output.len() < huge.len(), "output should be byte-elided");
+                assert_eq!(elided_paths.len(), 1);
+                assert_eq!(elided_paths[0].path, "$.output");
+                assert!(matches!(elided_paths[0].kind, ElisionKind::String));
+            }
+            other => panic!("expected StructuredElision, got {other:?}"),
         }
     }
 
@@ -418,101 +457,18 @@ mod tests {
         assert!(classification.summary.is_passthrough());
     }
 
-    /// Regression for cursor review #3207213787. Before the fix:
-    /// 100 lines × ~50 chars trips the byte threshold but the line
-    /// count is below HEAD + TAIL (200). Old code: `tail_start =
-    /// 100 - 150 saturates to 0`, head + tail overlap, kept_bytes
-    /// exceeds total_bytes. New behaviour: bail to Passthrough.
-    #[test]
-    fn elision_never_inflates_when_line_count_below_head_plus_tail() {
-        let body: String = (0..100)
-            .map(|i| format!("line-{i:04} {}", "x".repeat(40)))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            body.len() >= DEFAULT_GENERIC_THRESHOLD_BYTES,
-            "test body must trip the byte threshold"
-        );
-        assert!(
-            body.lines().count() <= GENERIC_HEAD_LINES + GENERIC_TAIL_LINES,
-            "test body must NOT trip the line threshold"
-        );
-
-        let raw = result_with(&body);
-        let registry = ClassifierRegistry::with_default();
-        let classification = registry.classify(&ctx("bash", &raw));
-        match classification.summary {
-            ToolResultSummary::Passthrough { value } => {
-                assert_eq!(value.as_str(), Some(body.as_str()))
-            }
-            ToolResultSummary::Generic {
-                kept_bytes,
-                total_bytes,
-                ..
-            } => panic!(
-                "must not Generic-elide when line count is below HEAD+TAIL — \
-                 kept_bytes={kept_bytes} total_bytes={total_bytes}"
-            ),
-            other => panic!("expected Passthrough, got {other:?}"),
-        }
-    }
-
-    /// Disjoint head + tail invariant — even at the boundary where
-    /// line count is exactly HEAD + TAIL + 1, the slices must not
-    /// overlap.
-    #[test]
-    fn elision_head_and_tail_are_disjoint_at_boundary() {
-        let lines: Vec<String> = (0..(GENERIC_HEAD_LINES + GENERIC_TAIL_LINES + 1))
-            .map(|i| format!("line-{i:04} {}", "y".repeat(60)))
-            .collect();
-        let body = lines.join("\n");
-        assert!(body.len() >= DEFAULT_GENERIC_THRESHOLD_BYTES);
-
-        let raw = result_with(&body);
-        let registry = ClassifierRegistry::with_default();
-        let classification = registry.classify(&ctx("bash", &raw));
-        match classification.summary {
-            ToolResultSummary::Generic {
-                head,
-                tail,
-                kept_bytes,
-                total_bytes,
-                ..
-            } => {
-                assert!(
-                    (kept_bytes as u64) <= total_bytes,
-                    "kept_bytes ({kept_bytes}) must not exceed total_bytes ({total_bytes})"
-                );
-                assert_eq!(head.lines().count(), GENERIC_HEAD_LINES);
-                assert_eq!(tail.lines().count(), GENERIC_TAIL_LINES);
-                // The two slices share no line.
-                let head_set: std::collections::HashSet<&str> = head.lines().collect();
-                let tail_set: std::collections::HashSet<&str> = tail.lines().collect();
-                assert!(
-                    head_set.is_disjoint(&tail_set),
-                    "head and tail must not share any line"
-                );
-            }
-            other => panic!("expected Generic, got {other:?}"),
-        }
-    }
-
     #[test]
     fn threshold_is_configurable() {
-        // Both gates must fire: byte threshold (custom 4) AND line
-        // count above HEAD + TAIL (so elision actually shrinks). A
-        // single line of 10 chars would now Passthrough — give it
-        // enough lines to clear both gates.
+        // A custom 4-byte threshold makes any non-trivial input trip
+        // elision; the walker emits StructuredElision when the post-
+        // walk form is smaller than the input.
         let registry = ClassifierRegistry::new().register(GenericFallback { threshold_bytes: 4 });
-        let body: String = (0..(GENERIC_HEAD_LINES + GENERIC_TAIL_LINES + 1))
-            .map(|i| format!("l{i}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let body: String = "x".repeat(2000);
         let raw = result_with(&body);
         let classification = registry.classify(&ctx("bash", &raw));
         assert!(matches!(
             classification.summary,
-            ToolResultSummary::Generic { .. }
+            ToolResultSummary::StructuredElision { .. }
         ));
     }
 }
