@@ -621,7 +621,10 @@ mod tests {
         // A custom 4-byte threshold makes any non-trivial input trip
         // elision; the walker emits StructuredElision when the post-
         // walk form is smaller than the input.
-        let registry = ClassifierRegistry::new().register(GenericFallback { threshold_bytes: 4 });
+        let registry = ClassifierRegistry::new().register(GenericFallback {
+            threshold_bytes: 4,
+            string_classifiers: None,
+        });
         let body: String = "x".repeat(2000);
         let raw = result_with(&body);
         let classification = registry.classify(&ctx("bash", &raw));
