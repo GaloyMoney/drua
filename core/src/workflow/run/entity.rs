@@ -236,6 +236,13 @@ impl WorkflowRun {
     /// `condition_body` is the raw CEL expression — kept on the
     /// event so `runs --include=steps` can render which gate fired.
     ///
+    /// The executor calls this directly (without a prior
+    /// `step_started`) when the gate evaluates false, so this method
+    /// must drive the same Pending → Running state transition that
+    /// `step_started` does — otherwise a run with every step gated
+    /// out would jump from Pending straight to Succeeded at
+    /// `run_completed`, with no `Running` phase in its event log.
+    ///
     /// No-op if the step already terminated.
     pub fn step_skipped(&mut self, step_name: String, condition_body: String) -> Idempotent<()> {
         idempotency_guard!(
@@ -259,6 +266,9 @@ impl WorkflowRun {
                 completed_at: Some(now),
                 skipped: Some(condition_body.clone()),
             });
+        }
+        if self.state == WorkflowRunState::Pending {
+            self.state = WorkflowRunState::Running;
         }
         self.events.push(WorkflowRunEvent::StepSkipped {
             step_name,
@@ -406,6 +416,7 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
                     condition_body,
                     completed_at: ts,
                 } => {
+                    state = WorkflowRunState::Running;
                     if let Some(r) = results.iter_mut().find(|r| &r.name == step_name) {
                         r.skipped = Some(condition_body.clone());
                         r.completed_at = Some(*ts);
@@ -656,20 +667,53 @@ mod tests {
         );
     }
 
+    /// Production calls `step_skipped` directly (no prior
+    /// `step_started`) when the condition gate evaluates false —
+    /// the executor's "skipped steps never enter Running state"
+    /// invariant. This test mirrors that path: the `else` branch in
+    /// `step_skipped` (push fresh `StepResult`) is the production
+    /// path; the `if let Some` branch only fires on hydration replay.
     #[test]
     fn run_state_succeeded_when_only_step_was_skipped() {
-        // Skipped steps fold into the Succeeded classification: a
-        // run whose every step was gated out is a clean "no-op".
         let mut run = fresh_run(&["only"]);
-        start(&mut run, "only");
         skip(&mut run, "only", "trigger.payload.flag == true");
         assert_eq!(finalize(&mut run), WorkflowRunState::Succeeded);
+    }
+
+    /// `step_skipped` mirrors `step_started`'s Pending → Running
+    /// transition. Without it, an all-skipped run would stay
+    /// Pending throughout the executor loop and only flip to a
+    /// terminal state at `run_completed` — leaving no `Running`
+    /// phase in the event log. This test pins the transition.
+    #[test]
+    fn step_skipped_transitions_pending_to_running() {
+        let mut run = fresh_run(&["only"]);
+        assert_eq!(run.state, WorkflowRunState::Pending);
+        skip(&mut run, "only", "trigger.payload.flag == true");
+        assert_eq!(run.state, WorkflowRunState::Running);
+    }
+
+    /// The production path creates a fresh `StepResult` (the `else`
+    /// branch of `step_skipped`) since the executor never called
+    /// `step_started` for a gated-out step. Verify the new entry
+    /// is well-formed: condition body recorded, no output, no
+    /// error, `completed_at` set.
+    #[test]
+    fn step_skipped_creates_fresh_step_result() {
+        let mut run = fresh_run(&["only"]);
+        skip(&mut run, "only", "trigger.payload.flag == true");
+        assert_eq!(run.step_results.len(), 1);
+        let r = &run.step_results[0];
+        assert_eq!(r.name, "only");
+        assert_eq!(r.skipped.as_deref(), Some("trigger.payload.flag == true"));
+        assert!(r.output.is_none());
+        assert!(r.error.is_none());
+        assert!(r.completed_at.is_some());
     }
 
     #[test]
     fn run_state_succeeded_when_skip_mixes_with_success() {
         let mut run = fresh_run(&["a", "b"]);
-        start(&mut run, "a");
         skip(&mut run, "a", "trigger.payload.flag == true");
         start(&mut run, "b");
         complete(
@@ -683,7 +727,6 @@ mod tests {
     #[test]
     fn run_state_failed_when_skip_mixes_with_agent_failure() {
         let mut run = fresh_run(&["a", "b"]);
-        start(&mut run, "a");
         skip(&mut run, "a", "trigger.payload.flag == true");
         start(&mut run, "b");
         complete(
@@ -697,7 +740,6 @@ mod tests {
     #[test]
     fn run_state_errored_when_skip_mixes_with_infra_error() {
         let mut run = fresh_run(&["a", "b"]);
-        start(&mut run, "a");
         skip(&mut run, "a", "trigger.payload.flag == true");
         start(&mut run, "b");
         error(&mut run, "b", "sandbox not ready");
@@ -707,7 +749,6 @@ mod tests {
     #[test]
     fn step_skipped_is_idempotent_against_retry() {
         let mut run = fresh_run(&["only"]);
-        start(&mut run, "only");
         skip(&mut run, "only", "x == 'y'");
         // Replay the same event — should be a no-op.
         let outcome = run.step_skipped("only".into(), "x == 'y'".into());
@@ -717,7 +758,6 @@ mod tests {
     #[test]
     fn step_skipped_blocks_subsequent_completed_or_errored() {
         let mut run = fresh_run(&["only"]);
-        start(&mut run, "only");
         skip(&mut run, "only", "x == 'y'");
         // Subsequent terminal mutations are no-ops.
         let outcome = run.step_completed("only".into(), json!({ "success": true }));
@@ -729,7 +769,6 @@ mod tests {
     #[test]
     fn step_skipped_hydrates_from_events() {
         let mut run = fresh_run(&["only"]);
-        start(&mut run, "only");
         skip(&mut run, "only", "trigger.payload.x == 'y'");
         let events = run.events;
         let rehydrated = WorkflowRun::try_from_events(events).unwrap();
@@ -741,5 +780,9 @@ mod tests {
         assert!(rehydrated.step_results[0].output.is_none());
         assert!(rehydrated.step_results[0].error.is_none());
         assert!(rehydrated.step_results[0].completed_at.is_some());
+        // Pending → Running transition replays from the StepSkipped
+        // event in the same way StepStarted drives it, so a run
+        // hydrated mid-flight reflects the live state.
+        assert_eq!(rehydrated.state, WorkflowRunState::Running);
     }
 }
