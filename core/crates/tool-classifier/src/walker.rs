@@ -68,11 +68,20 @@ pub fn classify_value(
     if typed_replacements == 0 && kept_bytes >= total_bytes {
         return WalkOutcome::Passthrough(value.clone());
     }
+    // A typed substitution can produce a kept value larger than the
+    // raw input (small nix snippet → typed sentinel with summary
+    // metadata). Clamp `kept_bytes` at `total_bytes` so the envelope
+    // text and compression-ratio metric stay sensible — the agent's
+    // view is *strictly more useful* than the raw bytes regardless of
+    // byte count, but reporting `kept_bytes > total_bytes` would
+    // render nonsense like "[json elided: 500/200 bytes kept]" and a
+    // negative compression ratio (cursor bugbot review #3210144802).
+    let reported_kept = kept_bytes.min(total_bytes);
     WalkOutcome::Elided {
         kept,
         elided_paths: paths,
         total_bytes: total_bytes as u64,
-        kept_bytes: kept_bytes.min(u32::MAX as usize) as u32,
+        kept_bytes: reported_kept.min(u32::MAX as usize) as u32,
     }
 }
 
@@ -108,14 +117,30 @@ fn walk(
             if bytes < threshold {
                 return value.clone();
             }
-            walk_array(items, threshold, chain, &path, paths, bytes, typed_replacements)
+            walk_array(
+                items,
+                threshold,
+                chain,
+                &path,
+                paths,
+                bytes,
+                typed_replacements,
+            )
         }
         Value::Object(map) => {
             let bytes = json_size(value);
             if bytes < threshold {
                 return value.clone();
             }
-            walk_object(map, threshold, chain, &path, paths, bytes, typed_replacements)
+            walk_object(
+                map,
+                threshold,
+                chain,
+                &path,
+                paths,
+                bytes,
+                typed_replacements,
+            )
         }
         // Numbers, booleans, null can't be over-threshold in practice.
         _ => value.clone(),

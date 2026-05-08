@@ -3,7 +3,9 @@ mod config;
 mod error;
 mod inspect;
 pub mod searchable;
-pub mod tool_invocations;
+pub use drua_tool_cache as tool_invocations;
+mod cache_owner;
+pub use cache_owner::invocation_owner;
 pub mod top_level;
 mod traits;
 
@@ -17,8 +19,8 @@ pub use config::*;
 pub use error::*;
 pub use searchable::*;
 pub use tool_invocations::{
-    FetchQuery, FetchResult, NewToolInvocation, ToolInvocation, ToolInvocationError,
-    ToolInvocationOwner, ToolInvocations,
+    FetchQuery, FetchResult, InvocationOwner, NewToolInvocation, ToolInvocation,
+    ToolInvocationError, ToolInvocationId, ToolInvocationOwnerId, ToolInvocations,
 };
 pub use top_level::{
     Bash, CallCatalogTool, ComposeTool, ComposeTypes, Delete, DescribeCatalogTool, GlobTool, Grep,
@@ -536,8 +538,8 @@ impl ToolSets {
             // notably `AuthSubject::WorkflowExecutor`, whose dispatched
             // tool's `structured_content` is the workflow step's typed
             // output and would be corrupted by an envelope.
-            let bypass_pipeline = tool.bypass_universal_pipeline()
-                || ToolInvocationOwner::from_subject(subject).is_none();
+            let bypass_pipeline =
+                tool.bypass_universal_pipeline() || invocation_owner(subject).is_none();
             let start = std::time::Instant::now();
             let raw_result = tool.call(subject, arguments).await;
             let duration_ms = start.elapsed().as_millis() as u64;
@@ -572,27 +574,28 @@ impl ToolSets {
                     let kept_bytes = summary_kept_bytes(&classification.summary, raw_bytes);
                     let summary_is_passthrough = classification.summary.is_passthrough();
 
-                    let (wrapped, persisted) = if summary_is_passthrough {
-                        (raw, false)
-                    } else if let Some(invocations) = tool_invocations.as_ref() {
-                        match invocations
-                            .persist_and_envelope(
-                                subject,
-                                name,
-                                &args_for_classify,
-                                classification,
-                                &raw,
-                                duration_ms,
-                                started_at,
-                            )
-                            .await
-                        {
-                            Some(wrapped) => (wrapped, true),
-                            None => (raw, false),
-                        }
-                    } else {
-                        (raw, false)
-                    };
+                    let owner = invocation_owner(subject);
+                    let (wrapped, persisted) =
+                        match (summary_is_passthrough, owner, tool_invocations.as_ref()) {
+                            (false, Some(owner), Some(invocations)) => {
+                                match invocations
+                                    .persist_and_envelope(
+                                        owner,
+                                        name,
+                                        &args_for_classify,
+                                        classification,
+                                        &raw,
+                                        duration_ms,
+                                        started_at,
+                                    )
+                                    .await
+                                {
+                                    Some(wrapped) => (wrapped, true),
+                                    None => (raw, false),
+                                }
+                            }
+                            _ => (raw, false),
+                        };
 
                     // When persistence didn't happen (subject had no
                     // owner, or persist_classification logged-and-

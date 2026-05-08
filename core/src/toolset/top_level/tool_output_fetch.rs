@@ -24,7 +24,7 @@ use std::sync::{Arc, LazyLock};
 use rmcp::model::{CallToolResult, Content, JsonObject};
 
 use crate::auth::AuthSubject;
-use crate::primitives::ToolInvocationId;
+use drua_tool_cache::ToolInvocationId;
 
 use super::super::error::ToolSetsError;
 use super::super::tool_invocations::{FetchQuery, FetchResult, ToolInvocations};
@@ -126,7 +126,7 @@ impl TopLevelTool for ToolOutputFetch {
         // and required a readable sandbox; an agent without one would
         // see envelopes pointing at this tool but not be able to call
         // it.
-        crate::toolset::tool_invocations::ToolInvocationOwner::from_subject(subject).is_some()
+        crate::toolset::invocation_owner(subject).is_some()
     }
 
     fn bypass_universal_pipeline(&self) -> bool {
@@ -153,9 +153,7 @@ impl TopLevelTool for ToolOutputFetch {
         // (`Anonymous`, `WorkflowExecutor`) can't fetch at all;
         // others can only fetch invocations whose persisted
         // `owner` matches their derived owner.
-        let Some(subject_owner) =
-            crate::toolset::tool_invocations::ToolInvocationOwner::from_subject(subject)
-        else {
+        let Some(subject_owner) = crate::toolset::invocation_owner(subject) else {
             return Ok(CallToolResult::error(vec![Content::text(
                 "tool_output_fetch failed: subject has no fetch scope".to_string(),
             )]));
@@ -170,7 +168,7 @@ impl TopLevelTool for ToolOutputFetch {
             }
         };
 
-        if invocation.owner != subject_owner {
+        if !invocation.owner.matches(&subject_owner) {
             return Ok(CallToolResult::error(vec![Content::text(
                 "tool_output_fetch failed: invocation_id is not in your scope".to_string(),
             )]));

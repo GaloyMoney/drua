@@ -252,20 +252,25 @@ impl TopLevelTool for ComposeTool {
                     // returns the same Value the script returned,
                     // not the curated/elided form.
                     let original_structured = Some(result.value.clone());
-                    let persisted = invocations
-                        .persist_classification(
-                            subject,
-                            "compose",
-                            &recorded_args,
-                            Classification {
-                                summary,
-                                canonical_text,
-                            },
-                            original_structured,
-                            result.execution_time.as_millis() as u64,
-                            started_at,
-                        )
-                        .await;
+                    let persisted = match super::super::invocation_owner(subject) {
+                        Some(owner) => {
+                            invocations
+                                .persist_classification(
+                                    owner,
+                                    "compose",
+                                    &recorded_args,
+                                    Classification {
+                                        summary,
+                                        canonical_text,
+                                    },
+                                    original_structured,
+                                    result.execution_time.as_millis() as u64,
+                                    started_at,
+                                )
+                                .await
+                        }
+                        None => None,
+                    };
                     let invocation_id = persisted.map(|p| uuid::Uuid::from(p.invocation_id));
                     (curated, invocation_id)
                 }
@@ -644,9 +649,12 @@ impl CatalogDispatcherShared {
         .map(|s| s.len() as u64)
         .unwrap_or(0);
 
+        let Some(owner) = super::super::invocation_owner(&self.subject) else {
+            return;
+        };
         let Some(persisted): Option<PersistedClassification> = invocations
             .persist_classification(
-                &self.subject,
+                owner,
                 tool_name,
                 args,
                 classification,

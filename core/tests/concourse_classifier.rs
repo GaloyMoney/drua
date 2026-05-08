@@ -141,7 +141,11 @@ fn build_609_failed_inner_carries_clippy_rust_diagnostic() {
         .get("failures")
         .and_then(|v| v.as_array())
         .expect("nix inner should expose failures");
-    assert_eq!(failures.len(), 1, "exactly one failed derivation in fixture");
+    assert_eq!(
+        failures.len(),
+        1,
+        "exactly one failed derivation in fixture"
+    );
 
     let f = &failures[0];
     let drv = f

@@ -488,20 +488,23 @@ impl TopLevelTool for CallCatalogTool {
         let Some(invocations) = self.tool_invocations.as_ref() else {
             return Ok(result);
         };
-        let classification = self
-            .classifiers
-            .classify(&super::super::classifier::ClassifierContext {
-                tool_name: &tool_name,
-                args: &recorded_args,
-                raw: &result,
-                exit_code: None,
-            });
+        let classification =
+            self.classifiers
+                .classify(&super::super::classifier::ClassifierContext {
+                    tool_name: &tool_name,
+                    args: &recorded_args,
+                    raw: &result,
+                    exit_code: None,
+                });
         if classification.summary.is_passthrough() {
             return Ok(result);
         }
+        let Some(owner) = super::super::invocation_owner(subject) else {
+            return Ok(result);
+        };
         match invocations
             .persist_and_envelope(
-                subject,
+                owner,
                 &tool_name,
                 &recorded_args,
                 classification,

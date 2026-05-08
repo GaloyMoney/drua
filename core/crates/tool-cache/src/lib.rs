@@ -1,5 +1,5 @@
 //! Persistent layer for the tool-output universal pipeline. The dispatcher
-//! calls into [`ToolInvocations`] when a [`ResultClassifier`] emits anything
+//! calls into [`ToolInvocations`] when a `ResultClassifier` emits anything
 //! other than `Passthrough`; the captured raw output is persisted so the
 //! agent can recover detail later via the `tool_output_fetch` MCP tool.
 //!
@@ -7,14 +7,19 @@
 //! sweeper, no compression. The PG row is the single source of truth and is
 //! cheap enough that every `tool_output_fetch` is a SELECT round-trip.
 //!
-//! [`ResultClassifier`]: super::classifier::ResultClassifier
+//! No coupling to the auth or audit subsystems: callers pass in an
+//! [`InvocationOwner`] (a flat `(agent_id, user_id)` pair derived from
+//! whatever subject model they use) and receive a `Persisted...` shape;
+//! audit-log writes are the caller's job.
 
 mod entity;
 mod error;
 mod grep;
 mod repo;
 
-pub use entity::{NewToolInvocation, ToolInvocation, ToolInvocationOwner};
+pub use entity::{
+    InvocationOwner, NewToolInvocation, ToolInvocation, ToolInvocationId, ToolInvocationOwnerId,
+};
 pub use error::ToolInvocationError;
 
 use rmcp::model::{CallToolResult, Content};
@@ -22,11 +27,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::instrument;
 
-use crate::audit::Audit;
-use crate::auth::AuthSubject;
-use crate::primitives::ToolInvocationId;
-
-use super::classifier::{Classification, ToolResultSummary};
+use drua_tool_classifier::{Classification, ToolResultSummary};
 use repo::ToolInvocationRepo;
 
 /// What the agent asked to retrieve from a persisted invocation. Exactly one
@@ -176,30 +177,28 @@ impl ToolInvocations {
     #[instrument(name = "core.tool_invocations.find_for_diff", skip(self))]
     pub async fn find_for_diff(
         &self,
-        owner: ToolInvocationOwner,
+        owner: InvocationOwner,
         args_hash: &[u8],
     ) -> Result<Option<ToolInvocation>, ToolInvocationError> {
         Ok(self.repo.find_latest_by_args_hash(owner, args_hash).await?)
     }
 
-    /// Persist the classifier's output as a `tool_invocations` row and
-    /// record the resulting id on the audit row. Pure persistence — no
-    /// CallToolResult mutation, no envelope construction. Used by both
-    /// `persist_and_envelope` (which wraps the model-facing result
-    /// after) and compose's CatalogDispatcher (which tracks the
-    /// invocation_id in `sub_invocations` while leaving the JS-facing
-    /// result un-wrapped).
+    /// Persist the classifier's output as a `tool_invocations` row.
+    /// Pure persistence — no `CallToolResult` mutation, no envelope
+    /// construction, no audit-log write (callers wire that themselves
+    /// after observing the returned `invocation_id`).
     ///
     /// Returns `None` when:
-    /// - the subject doesn't yield an owner (`Anonymous`,
-    ///   `WorkflowExecutor` — see `ToolInvocationOwner::from_subject`);
     /// - summary or args fail to serialize (logged + skipped);
     /// - the PG insert errors (logged + skipped).
-    #[instrument(name = "core.tool_invocations.persist_classification", skip_all)]
+    ///
+    /// Callers gate on owner-availability themselves: `Anonymous` /
+    /// workflow-executor subjects in drua-core never reach this fn.
+    #[instrument(name = "tool_cache.persist_classification", skip_all)]
     #[allow(clippy::too_many_arguments)]
     pub async fn persist_classification(
         &self,
-        subject: &AuthSubject,
+        owner: impl Into<InvocationOwner>,
         tool_name: &str,
         args: &serde_json::Value,
         classification: Classification,
@@ -207,7 +206,7 @@ impl ToolInvocations {
         duration_ms: u64,
         started_at: chrono::DateTime<chrono::Utc>,
     ) -> Option<PersistedClassification> {
-        let owner = ToolInvocationOwner::from_subject(subject)?;
+        let owner = owner.into();
         let Classification {
             summary,
             canonical_text,
@@ -262,8 +261,6 @@ impl ToolInvocations {
             }
         };
 
-        Audit::record_tool_invocation_id(persisted.id);
-
         Some(PersistedClassification {
             invocation_id: persisted.id,
             summary,
@@ -277,11 +274,11 @@ impl ToolInvocations {
     /// can recover detail through `tool_output_fetch`. Returns the
     /// original raw result on persistence failure (the model still
     /// gets a usable result; the failure is logged).
-    #[instrument(name = "core.tool_invocations.persist_and_envelope", skip_all)]
+    #[instrument(name = "tool_cache.persist_and_envelope", skip_all)]
     #[allow(clippy::too_many_arguments)]
     pub async fn persist_and_envelope(
         &self,
-        subject: &AuthSubject,
+        owner: impl Into<InvocationOwner>,
         tool_name: &str,
         args: &serde_json::Value,
         classification: Classification,
@@ -291,7 +288,7 @@ impl ToolInvocations {
     ) -> Option<CallToolResult> {
         let persisted = self
             .persist_classification(
-                subject,
+                owner,
                 tool_name,
                 args,
                 classification,
@@ -363,9 +360,9 @@ fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId) -> String {
                 out.push_str("=== elided paths ===\n");
                 for p in elided_paths {
                     let kind_str = match p.kind {
-                        crate::toolset::ElisionKind::String => "string",
-                        crate::toolset::ElisionKind::Array => "array",
-                        crate::toolset::ElisionKind::Object => "object",
+                        drua_tool_classifier::ElisionKind::String => "string",
+                        drua_tool_classifier::ElisionKind::Array => "array",
+                        drua_tool_classifier::ElisionKind::Object => "object",
                     };
                     let length_str = p
                         .length
@@ -421,15 +418,14 @@ fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId) -> String {
                 }
             }
             out
-        }
-        // (Top-level `NixBuild` summaries used to land here; Nix is now
-        // a `StringClassifier` only and lives inside StructuredElision
-        // typed sentinels — rendered through the StructuredElision arm
-        // above as part of `kept`.)
+        } // (Top-level `NixBuild` summaries used to land here; Nix is now
+          // a `StringClassifier` only and lives inside StructuredElision
+          // typed sentinels — rendered through the StructuredElision arm
+          // above as part of `kept`.)
     }
 }
 
-pub(crate) fn apply_fetch_query(
+pub fn apply_fetch_query(
     raw: &str,
     query: &FetchQuery,
 ) -> Result<FetchResult, ToolInvocationError> {

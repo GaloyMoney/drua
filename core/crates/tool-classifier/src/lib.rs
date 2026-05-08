@@ -192,9 +192,8 @@ impl ClassifierRegistry {
     /// future Cargo / Nextest / cpp-compile) consulted at every string
     /// leaf during walk.
     pub fn with_default() -> Self {
-        let string_chain = std::sync::Arc::new(
-            StringClassifierChain::new().register(NixStringClassifier),
-        );
+        let string_chain =
+            std::sync::Arc::new(StringClassifierChain::new().register(NixStringClassifier));
         Self::new()
             .register(ConcourseBuildLogClassifier::new(std::sync::Arc::clone(
                 &string_chain,
@@ -529,9 +528,7 @@ error: builder for '/nix/store/aaaa-foo.drv' failed with exit code 1; last 10 lo
         let classification = registry.classify(&ctx("bash", &raw));
         let kept = match classification.summary {
             ToolResultSummary::StructuredElision { kept, .. } => kept,
-            other => panic!(
-                "expected StructuredElision with typed-sentinel kept, got {other:?}"
-            ),
+            other => panic!("expected StructuredElision with typed-sentinel kept, got {other:?}"),
         };
         // The walker chain should have substituted the root string
         // with a Nix-typed sentinel.
@@ -550,9 +547,7 @@ error: builder for '/nix/store/aaaa-foo.drv' failed with exit code 1; last 10 lo
             Some(1)
         );
         assert_eq!(
-            summary
-                .get("cache_paths_copied")
-                .and_then(|v| v.as_u64()),
+            summary.get("cache_paths_copied").and_then(|v| v.as_u64()),
             Some(2)
         );
     }

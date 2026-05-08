@@ -1,8 +1,6 @@
 use sqlx::PgPool;
 
-use crate::primitives::{AgentId, ToolInvocationId, UserId};
-
-use super::entity::*;
+use crate::entity::*;
 
 #[derive(Clone)]
 pub struct ToolInvocationRepo {
@@ -17,8 +15,8 @@ impl ToolInvocationRepo {
     pub async fn create(&self, new: NewToolInvocation) -> Result<ToolInvocation, sqlx::Error> {
         let id = ToolInvocationId::new();
         let id_uuid: uuid::Uuid = id.into();
-        let agent_uuid: Option<uuid::Uuid> = new.owner.agent_id().map(Into::into);
-        let user_uuid: Option<uuid::Uuid> = new.owner.user_id().map(Into::into);
+        let agent_uuid: Option<uuid::Uuid> = new.owner.agent_id.map(Into::into);
+        let user_uuid: Option<uuid::Uuid> = new.owner.user_id.map(Into::into);
 
         let row = sqlx::query!(
             r#"
@@ -102,29 +100,27 @@ impl ToolInvocationRepo {
     }
 
     /// Most-recent matching invocation for `(owner, args_hash)` — the
-    /// cache-aware-diff probe. Walks the agent or user partial index
-    /// depending on the owner shape.
+    /// cache-aware-diff probe. Walks whichever owner column is set on
+    /// the lookup `owner`.
     pub async fn find_latest_by_args_hash(
         &self,
-        owner: ToolInvocationOwner,
+        owner: InvocationOwner,
         args_hash: &[u8],
     ) -> Result<Option<ToolInvocation>, sqlx::Error> {
-        match owner {
-            ToolInvocationOwner::Agent { agent_id } => {
-                self.find_latest_by_agent(agent_id, args_hash).await
-            }
-            ToolInvocationOwner::User { user_id } => {
-                self.find_latest_by_user(user_id, args_hash).await
-            }
+        if let Some(agent_id) = owner.agent_id {
+            self.find_latest_by_agent(agent_id.into(), args_hash).await
+        } else if let Some(user_id) = owner.user_id {
+            self.find_latest_by_user(user_id.into(), args_hash).await
+        } else {
+            Ok(None)
         }
     }
 
     async fn find_latest_by_agent(
         &self,
-        agent_id: AgentId,
+        agent_id: uuid::Uuid,
         args_hash: &[u8],
     ) -> Result<Option<ToolInvocation>, sqlx::Error> {
-        let agent_uuid: uuid::Uuid = agent_id.into();
         let row = sqlx::query!(
             r#"
             SELECT
@@ -136,7 +132,7 @@ impl ToolInvocationRepo {
             ORDER BY created_at DESC
             LIMIT 1
             "#,
-            agent_uuid,
+            agent_id,
             args_hash,
         )
         .fetch_optional(&self.pool)
@@ -165,10 +161,9 @@ impl ToolInvocationRepo {
 
     async fn find_latest_by_user(
         &self,
-        user_id: UserId,
+        user_id: uuid::Uuid,
         args_hash: &[u8],
     ) -> Result<Option<ToolInvocation>, sqlx::Error> {
-        let user_uuid: uuid::Uuid = user_id.into();
         let row = sqlx::query!(
             r#"
             SELECT
@@ -180,7 +175,7 @@ impl ToolInvocationRepo {
             ORDER BY created_at DESC
             LIMIT 1
             "#,
-            user_uuid,
+            user_id,
             args_hash,
         )
         .fetch_optional(&self.pool)
@@ -226,19 +221,9 @@ fn hydrate_row(
     started_at: chrono::DateTime<chrono::Utc>,
     created_at: chrono::DateTime<chrono::Utc>,
 ) -> ToolInvocation {
-    let owner = match (agent_id, user_id) {
-        (Some(a), None) => ToolInvocationOwner::Agent {
-            agent_id: AgentId::from(a),
-        },
-        (None, Some(u)) => ToolInvocationOwner::User {
-            user_id: UserId::from(u),
-        },
-        // The DB-level CHECK constraint guarantees exactly-one is set;
-        // if we observe both/neither it's a schema violation, not a
-        // runtime case to silently paper over.
-        (a, u) => {
-            panic!("tool_invocations row violates owner CHECK: agent_id={a:?}, user_id={u:?}")
-        }
+    let owner = InvocationOwner {
+        agent_id: agent_id.map(Into::into),
+        user_id: user_id.map(Into::into),
     };
     ToolInvocation {
         id: ToolInvocationId::from(id),
