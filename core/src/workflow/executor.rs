@@ -17,9 +17,7 @@ use super::definition::{WorkflowSandboxDecl, WorkflowStepDef};
 use super::error::WorkflowError;
 use super::repo::WorkflowDefinitionRepo;
 use super::run::{StepResult, WorkflowRunRepo, WorkflowRunState};
-use super::template::{
-    format_template_diagnostics, substitute_value, template_diagnostics, TemplateContext,
-};
+use super::template::{format_template_diagnostics, template_diagnostics, TemplateContext};
 
 /// Hard cap on the pre-flight per-sandbox readiness wait. Protects the
 /// queue from a stuck infrastructure step.
@@ -475,9 +473,9 @@ impl Executor {
                     trigger: trigger_context,
                     steps: step_outputs,
                 };
-                let templated_body =
-                    super::template::substitute_in_string(&raw_body, &template_ctx)
-                        .map_err(|e| WorkflowError::Skill(e.to_string()))?;
+                let templated_body = template_ctx
+                    .substitute_in_string(&raw_body)
+                    .map_err(|e| WorkflowError::Skill(e.to_string()))?;
                 let prompt =
                     crate::skill::SkillBody::new(templated_body).interpolate(Some(&arguments));
 
@@ -740,7 +738,8 @@ impl Executor {
             trigger: trigger_context,
             steps: step_outputs,
         };
-        let resolved_params = substitute_value(params, &template_ctx)
+        let resolved_params = template_ctx
+            .substitute(params)
             .map_err(|e| WorkflowError::InvalidTemplateRef(e.to_string()))?;
         // Walk the params/resolved trees once up front so the
         // happy path drops `resolved_params` cleanly into the

@@ -74,8 +74,8 @@ pub struct TemplateContext<'a> {
 }
 
 /// CEL context built from a [`TemplateContext`], cached so a single
-/// `substitute_value` / `substitute_in_string` pass binds `trigger`
-/// and `steps` exactly once instead of cloning the whole map per
+/// `substitute` / `substitute_in_string` pass binds `trigger` and
+/// `steps` exactly once instead of cloning the whole map per
 /// reference. Held only for the duration of a substitution call —
 /// no shared state across passes.
 struct BuiltContext {
@@ -138,6 +138,24 @@ impl TemplateContext<'_> {
     pub fn resolve(&self, r: &TemplateRef) -> Option<Value> {
         let built = self.build_cel_context().ok()?;
         resolve_with_built(&built, r)
+    }
+
+    /// Walk a JSON tree and substitute every string leaf.
+    /// Whole-string `${{ x }}` matches splice; embedded matches
+    /// stringify. Builds the CEL context once and threads it
+    /// through the recursion.
+    pub fn substitute(&self, value: &Value) -> Result<Value, TemplateError> {
+        let built = self.build_cel_context()?;
+        substitute_value_with_built(value, &built)
+    }
+
+    /// String-only substitution — used for skill bodies, where the
+    /// surrounding container is itself text. Non-scalar resolved
+    /// values are JSON-encoded. Builds the CEL context once and
+    /// threads it through the scan.
+    pub fn substitute_in_string(&self, s: &str) -> Result<String, TemplateError> {
+        let built = self.build_cel_context()?;
+        substitute_in_string_with_built(s, &built)
     }
 }
 
@@ -253,13 +271,6 @@ fn coerce_embedded(v: Value, out: &mut String) {
     }
 }
 
-/// Walk a JSON tree and substitute every string leaf. Whole-string
-/// `${{ x }}` matches splice; embedded matches stringify.
-pub fn substitute_value(value: &Value, ctx: &TemplateContext) -> Result<Value, TemplateError> {
-    let built = ctx.build_cel_context()?;
-    substitute_value_with_built(value, &built)
-}
-
 fn substitute_value_with_built(
     value: &Value,
     built: &BuiltContext,
@@ -287,14 +298,6 @@ fn substitute_value_with_built(
         }
         other => Ok(other.clone()),
     }
-}
-
-/// String-only substitution — used for skill bodies, where the
-/// surrounding container is itself text. Non-scalar resolved values
-/// are JSON-encoded.
-pub fn substitute_in_string(s: &str, ctx: &TemplateContext) -> Result<String, TemplateError> {
-    let built = ctx.build_cel_context()?;
-    substitute_in_string_with_built(s, &built)
 }
 
 fn substitute_in_string_with_built(s: &str, built: &BuiltContext) -> Result<String, TemplateError> {
@@ -364,10 +367,10 @@ pub fn extract_refs_in_string(s: &str) -> Result<Vec<TemplateRef>, TemplateError
     Ok(refs)
 }
 
-/// One template substitution captured during a `substitute_value`
-/// pass — used by callers that want to report which `${{ … }}`
-/// reference produced which value when downstream consumers reject
-/// the resolved tree.
+/// One template substitution captured during a `substitute` pass
+/// — used by callers that want to report which `${{ … }}` reference
+/// produced which value when downstream consumers reject the
+/// resolved tree.
 #[derive(Debug, Clone)]
 pub struct TemplateDiagnostic {
     /// JSON-pointer-style path into the params tree (e.g.
@@ -522,7 +525,7 @@ mod tests {
             steps: &steps,
         };
         let input = json!({ "payload": "${{ steps.triage.outputs.args }}" });
-        let out = substitute_value(&input, &ctx).unwrap();
+        let out = ctx.substitute(&input).unwrap();
         // CEL surfaces the inner map; we splice it as the JSON object
         // it represents. Field names round-trip; numeric types might
         // become integer-typed even if the input was an i64 literal.
@@ -548,7 +551,7 @@ mod tests {
         let input = json!({
             "note": "Build ${{ trigger.payload.build }} failed in ${{ trigger.payload.pipeline }}."
         });
-        let out = substitute_value(&input, &ctx).unwrap();
+        let out = ctx.substitute(&input).unwrap();
         assert_eq!(out, json!({ "note": "Build 1234 failed in galoy-bank." }));
     }
 
@@ -560,7 +563,7 @@ mod tests {
             trigger: &trigger,
             steps: &steps,
         };
-        let s = substitute_in_string("ids=${{ trigger.payload.list }}", &ctx).unwrap();
+        let s = ctx.substitute_in_string("ids=${{ trigger.payload.list }}").unwrap();
         assert_eq!(s, "ids=[1,2,3]");
     }
 
@@ -573,7 +576,7 @@ mod tests {
             steps: &steps,
         };
         let input = json!({ "x": "${{ trigger.payload.absent }}" });
-        let out = substitute_value(&input, &ctx).unwrap();
+        let out = ctx.substitute(&input).unwrap();
         assert_eq!(out, json!({ "x": null }));
     }
 
@@ -586,7 +589,7 @@ mod tests {
             steps: &steps,
         };
         assert_eq!(
-            substitute_in_string("[${{ trigger.payload.x }}]", &ctx).unwrap(),
+            ctx.substitute_in_string("[${{ trigger.payload.x }}]").unwrap(),
             "[]"
         );
     }
@@ -604,7 +607,7 @@ mod tests {
             steps: &steps,
         };
         let input = json!({ "x": "${{ trigger.payload.pipeline }}" });
-        let out = substitute_value(&input, &ctx).unwrap();
+        let out = ctx.substitute(&input).unwrap();
         assert_eq!(out, json!({ "x": null }));
     }
 
@@ -616,7 +619,7 @@ mod tests {
             trigger: &trigger,
             steps: &steps,
         };
-        let s = substitute_in_string("build-${{ trigger.payload.build }}", &ctx).unwrap();
+        let s = ctx.substitute_in_string("build-${{ trigger.payload.build }}").unwrap();
         assert_eq!(s, "build-");
     }
 
@@ -632,7 +635,9 @@ mod tests {
             trigger: &trigger,
             steps: &steps,
         };
-        let s = substitute_in_string("${{ steps.s.outputs.items[1].name }}", &ctx).unwrap();
+        let s = ctx
+            .substitute_in_string("${{ steps.s.outputs.items[1].name }}")
+            .unwrap();
         assert_eq!(s, "b");
     }
 
@@ -653,13 +658,13 @@ mod tests {
 
     #[test]
     fn unterminated_template_errors() {
-        let res = substitute_in_string(
-            "build ${{ trigger.x is unterminated",
-            &TemplateContext {
-                trigger: &json!({}),
-                steps: &HashMap::new(),
-            },
-        );
+        let trigger = json!({});
+        let steps = HashMap::new();
+        let ctx = TemplateContext {
+            trigger: &trigger,
+            steps: &steps,
+        };
+        let res = ctx.substitute_in_string("build ${{ trigger.x is unterminated");
         assert!(matches!(res, Err(TemplateError::Unterminated(_))));
     }
 
@@ -686,7 +691,9 @@ mod tests {
             trigger: &trigger,
             steps: &steps,
         };
-        let out = substitute_in_string("commit: ${{ trigger.payload.commit_msg }}", &ctx).unwrap();
+        let out = ctx
+            .substitute_in_string("commit: ${{ trigger.payload.commit_msg }}")
+            .unwrap();
         // Literal `${{ steps.victim.outputs.secret }}` survives as
         // text. `hunter2` does NOT appear.
         assert!(out.contains("${{ steps.victim.outputs.secret }}"));
@@ -707,7 +714,7 @@ mod tests {
             steps: &steps,
         };
         let input = json!({ "v": "${{ trigger.payload.x }} suffix }}" });
-        let out = substitute_value(&input, &ctx).unwrap();
+        let out = ctx.substitute(&input).unwrap();
         // Embedded interpolation: the `${{ … }}` resolves to "X",
         // the trailing literal " suffix }}" is preserved verbatim.
         assert_eq!(out, json!({ "v": "X suffix }}" }));
@@ -722,7 +729,7 @@ mod tests {
             steps: &steps,
         };
         let v = json!({ "k": "no templates here" });
-        assert_eq!(substitute_value(&v, &ctx).unwrap(), v);
+        assert_eq!(ctx.substitute(&v).unwrap(), v);
     }
 
     #[test]
@@ -754,7 +761,7 @@ mod tests {
                 "build-${{ trigger.payload.build }}"
             ]
         });
-        let resolved = substitute_value(&original, &ctx).unwrap();
+        let resolved = ctx.substitute(&original).unwrap();
         let diags = template_diagnostics(&original, &resolved);
         assert_eq!(diags.len(), 3);
 
