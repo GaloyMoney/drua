@@ -221,11 +221,17 @@ impl ClassifierRegistry {
     /// most-specific → fallback order. New classifiers slot in here.
     /// Identity-matchers (concourse) run first; content-sniff
     /// classifiers (Nix) run between identity and `GenericFallback`.
+    /// `GenericFallback` carries a `StringClassifierChain` (NixString,
+    /// future Cargo / Nextest / cpp-compile) consulted at every string
+    /// leaf during walk.
     pub fn with_default() -> Self {
+        let string_chain = std::sync::Arc::new(
+            StringClassifierChain::new().register(NixStringClassifier),
+        );
         Self::new()
             .register(ConcourseBuildLogClassifier)
             .register(NixBuildClassifier)
-            .register(GenericFallback::default())
+            .register(GenericFallback::default().with_string_classifiers(string_chain))
     }
 
     pub fn register(mut self, classifier: impl ResultClassifier) -> Self {
@@ -359,13 +365,27 @@ impl Default for ClassifierRegistry {
 /// registration-time contracts (workflow `ToolStep` validator).
 pub struct GenericFallback {
     pub threshold_bytes: usize,
+    /// Consulted at every string leaf in the walker. First match
+    /// substitutes the string with a typed sentinel (`{"_typed": ...,
+    /// "summary": ...}`); no match falls through to the existing
+    /// byte-elision behaviour. `None` keeps the legacy behaviour
+    /// (no typed strings).
+    pub string_classifiers: Option<std::sync::Arc<StringClassifierChain>>,
 }
 
 impl Default for GenericFallback {
     fn default() -> Self {
         Self {
             threshold_bytes: DEFAULT_GENERIC_THRESHOLD_BYTES,
+            string_classifiers: None,
         }
+    }
+}
+
+impl GenericFallback {
+    pub fn with_string_classifiers(mut self, chain: std::sync::Arc<StringClassifierChain>) -> Self {
+        self.string_classifiers = Some(chain);
+        self
     }
 }
 
@@ -400,7 +420,8 @@ impl ResultClassifier for GenericFallback {
         //   on keys + values; less optimal than a typed classifier
         //   but useful as a fallback.
         let canonical_text = canonical_text_for(&value);
-        let summary = match walker::classify_value(&value, self.threshold_bytes) {
+        let chain = self.string_classifiers.as_deref();
+        let summary = match walker::classify_value(&value, self.threshold_bytes, chain) {
             walker::WalkOutcome::Passthrough(v) => ToolResultSummary::Passthrough { value: v },
             walker::WalkOutcome::Elided {
                 kept,

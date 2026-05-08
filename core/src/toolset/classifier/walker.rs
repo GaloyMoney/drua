@@ -10,6 +10,7 @@
 
 use serde_json::{Map, Value};
 
+use super::string_classifier::StringClassifierChain;
 use super::{ElidedPath, ElisionKind};
 
 /// Per-string head/tail char count when byte-eliding. Picked to keep
@@ -39,14 +40,21 @@ pub enum WalkOutcome {
     },
 }
 
-pub fn classify_value(value: &Value, threshold: usize) -> WalkOutcome {
+pub fn classify_value(
+    value: &Value,
+    threshold: usize,
+    chain: Option<&StringClassifierChain>,
+) -> WalkOutcome {
     let total_bytes = json_size(value);
-    if total_bytes < threshold {
+    let mut paths = Vec::new();
+    let kept = walk(value, threshold, chain, "$".to_string(), &mut paths);
+    let kept_bytes = json_size(&kept);
+    // The walk produced something different from the input only when a
+    // string classifier matched (typed embedding), or elision actually
+    // shrank a payload. If neither happened, passthrough.
+    if kept == *value {
         return WalkOutcome::Passthrough(value.clone());
     }
-    let mut paths = Vec::new();
-    let kept = walk(value, threshold, "$".to_string(), &mut paths);
-    let kept_bytes = json_size(&kept);
     if kept_bytes >= total_bytes {
         // Walk didn't help — bail.
         return WalkOutcome::Passthrough(value.clone());
@@ -59,15 +67,45 @@ pub fn classify_value(value: &Value, threshold: usize) -> WalkOutcome {
     }
 }
 
-fn walk(value: &Value, threshold: usize, path: String, paths: &mut Vec<ElidedPath>) -> Value {
-    let bytes = json_size(value);
-    if bytes < threshold {
-        return value.clone();
-    }
+fn walk(
+    value: &Value,
+    threshold: usize,
+    chain: Option<&StringClassifierChain>,
+    path: String,
+    paths: &mut Vec<ElidedPath>,
+) -> Value {
     match value {
-        Value::String(s) => byte_elide_string(s, &path, paths, bytes),
-        Value::Array(items) => walk_array(items, threshold, &path, paths, bytes),
-        Value::Object(map) => walk_object(map, threshold, &path, paths, bytes),
+        // Strings always get the chain offered, regardless of size —
+        // a 200-byte cargo-error region is worth typing even when no
+        // elision is needed. If no classifier claims it, fall through
+        // to byte-elision (only fires when over-threshold).
+        Value::String(s) => {
+            if let Some(c) = chain {
+                if let Some(typed) = c.classify(s) {
+                    return typed;
+                }
+            }
+            let bytes = json_size(value);
+            if bytes >= threshold {
+                byte_elide_string(s, &path, paths, bytes)
+            } else {
+                value.clone()
+            }
+        }
+        Value::Array(items) => {
+            let bytes = json_size(value);
+            if bytes < threshold {
+                return value.clone();
+            }
+            walk_array(items, threshold, chain, &path, paths, bytes)
+        }
+        Value::Object(map) => {
+            let bytes = json_size(value);
+            if bytes < threshold {
+                return value.clone();
+            }
+            walk_object(map, threshold, chain, &path, paths, bytes)
+        }
         // Numbers, booleans, null can't be over-threshold in practice.
         _ => value.clone(),
     }
@@ -112,6 +150,7 @@ fn byte_elide_string(
 fn walk_array(
     items: &[Value],
     threshold: usize,
+    chain: Option<&StringClassifierChain>,
     path: &str,
     paths: &mut Vec<ElidedPath>,
     original_bytes: usize,
@@ -125,7 +164,7 @@ fn walk_array(
     let walked: Vec<Value> = items
         .iter()
         .enumerate()
-        .map(|(i, v)| walk(v, threshold, format!("{path}[{i}]"), paths))
+        .map(|(i, v)| walk(v, threshold, chain, format!("{path}[{i}]"), paths))
         .collect();
     let walked_value = Value::Array(walked.clone());
     if json_size(&walked_value) < threshold {
@@ -204,6 +243,7 @@ fn make_array_sentinel(
 fn walk_object(
     map: &Map<String, Value>,
     threshold: usize,
+    chain: Option<&StringClassifierChain>,
     path: &str,
     paths: &mut Vec<ElidedPath>,
     _original_bytes: usize,
@@ -218,7 +258,7 @@ fn walk_object(
     let mut per_key_paths: Vec<(String, Vec<ElidedPath>)> = Vec::with_capacity(map.len());
     for (k, v) in map.iter() {
         let mut child_paths = Vec::new();
-        let walked_v = walk(v, threshold, format!("{path}.{k}"), &mut child_paths);
+        let walked_v = walk(v, threshold, chain, format!("{path}.{k}"), &mut child_paths);
         per_key_paths.push((k.clone(), child_paths));
         walked.insert(k.clone(), walked_v);
     }
@@ -357,7 +397,7 @@ mod tests {
     fn walker_never_inflates_serialized_form() {
         let v = serde_json::json!((0..400).collect::<Vec<_>>());
         let raw_bytes = json_size(&v);
-        let outcome = classify_value(&v, 4096);
+        let outcome = classify_value(&v, 4096, None);
         match outcome {
             WalkOutcome::Passthrough(passed) => assert_eq!(passed, v),
             WalkOutcome::Elided { kept_bytes, .. } => {
@@ -378,7 +418,7 @@ mod tests {
         let v = serde_json::json!({
             "a": { "b": { "c": { "d": huge } } }
         });
-        let outcome = classify_value(&v, 4096);
+        let outcome = classify_value(&v, 4096, None);
         let WalkOutcome::Elided {
             kept,
             elided_paths,
@@ -410,7 +450,7 @@ mod tests {
     fn walker_string_elision_preserves_type() {
         let huge = "y".repeat(10_000);
         let v = serde_json::json!({ "output": huge });
-        let outcome = classify_value(&v, 4096);
+        let outcome = classify_value(&v, 4096, None);
         let WalkOutcome::Elided { kept, .. } = outcome else {
             panic!("expected Elided");
         };
@@ -436,7 +476,7 @@ mod tests {
             .map(|i| Value::String(format!("item-{i:03}-{}", "z".repeat(20))))
             .collect();
         let v = Value::Array(items);
-        let outcome = classify_value(&v, 4096);
+        let outcome = classify_value(&v, 4096, None);
         let WalkOutcome::Elided {
             kept, elided_paths, ..
         } = outcome
@@ -469,7 +509,7 @@ mod tests {
             "huge_array": huge_items,
             "summary": {"count": 200},
         });
-        let outcome = classify_value(&v, 4096);
+        let outcome = classify_value(&v, 4096, None);
         let WalkOutcome::Elided {
             kept, elided_paths, ..
         } = outcome
@@ -499,7 +539,7 @@ mod tests {
     #[test]
     fn walker_passthroughs_below_threshold() {
         let v = serde_json::json!({"hi": "world"});
-        let outcome = classify_value(&v, 4096);
+        let outcome = classify_value(&v, 4096, None);
         match outcome {
             WalkOutcome::Passthrough(passed) => assert_eq!(passed, v),
             WalkOutcome::Elided { .. } => panic!("small input must Passthrough"),
@@ -523,7 +563,7 @@ mod tests {
         let v = Value::Array(items);
         let WalkOutcome::Elided {
             kept, elided_paths, ..
-        } = classify_value(&v, 4096)
+        } = classify_value(&v, 4096, None)
         else {
             panic!("expected Elided");
         };
@@ -553,7 +593,7 @@ mod tests {
         });
         let WalkOutcome::Elided {
             kept, elided_paths, ..
-        } = classify_value(&v, 4096)
+        } = classify_value(&v, 4096, None)
         else {
             panic!("expected Elided");
         };
