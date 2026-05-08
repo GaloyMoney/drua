@@ -196,6 +196,11 @@ enum WorkflowStepParam {
         /// `{success, output, reason}` schema.
         #[serde(default)]
         output_schema: Option<serde_json::Value>,
+        /// Bare CEL boolean expression — when present and false, the
+        /// step is skipped (run continues to the next step). Evaluated
+        /// against `(trigger, steps)` like `${{ … }}` substitution.
+        #[serde(default)]
+        condition: Option<String>,
     },
     ToolStep {
         name: String,
@@ -208,6 +213,9 @@ enum WorkflowStepParam {
         params: serde_json::Value,
         #[serde(default)]
         timeout_seconds: Option<u64>,
+        /// See `AgentStep::condition` — same semantics for ToolSteps.
+        #[serde(default)]
+        condition: Option<String>,
     },
 }
 
@@ -222,6 +230,7 @@ impl WorkflowStepParam {
                 timeout_seconds,
                 model_chain,
                 output_schema,
+                condition,
             } => {
                 let output_schema = match output_schema {
                     Some(value) => serde_json::from_value(value).map_err(|e| {
@@ -239,6 +248,7 @@ impl WorkflowStepParam {
                     timeout_seconds,
                     model_chain,
                     output_schema: Box::new(output_schema),
+                    condition,
                 })
             }
             WorkflowStepParam::ToolStep {
@@ -246,11 +256,13 @@ impl WorkflowStepParam {
                 tool,
                 params,
                 timeout_seconds,
+                condition,
             } => Ok(WorkflowStepDef::ToolStep {
                 name,
                 tool,
                 params,
                 timeout_seconds,
+                condition,
             }),
         }
     }
@@ -395,6 +407,11 @@ struct StepResultOutput {
     error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     completed_at: Option<String>,
+    /// `Some(<cel-body>)` when the step was skipped because its
+    /// `condition:` evaluated to false. Mutually exclusive with
+    /// `output` and `error`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skipped: Option<String>,
 }
 
 pub struct WorkflowTool {
@@ -669,6 +686,7 @@ impl TopLevelTool for WorkflowTool {
                         timeout_seconds,
                         model_chain: None,
                         output_schema: Box::new(crate::workflow::default_output_schema()),
+                        condition: None,
                     }]
                 };
 
@@ -1021,6 +1039,7 @@ fn step_result_to_output(sr: &StepResult) -> StepResultOutput {
         output: sr.output.clone(),
         error: sr.error.clone(),
         completed_at: sr.completed_at.map(|t| t.to_rfc3339()),
+        skipped: sr.skipped.clone(),
     }
 }
 
@@ -1286,6 +1305,8 @@ fn format_run_text(r: &WorkflowRun) -> String {
     for (i, sr) in r.step_results.iter().enumerate() {
         let state = if sr.error.is_some() {
             "FAILED"
+        } else if sr.skipped.is_some() {
+            "SKIPPED"
         } else if sr.completed_at.is_some() {
             "OK"
         } else {
@@ -1297,6 +1318,9 @@ fn format_run_text(r: &WorkflowRun) -> String {
         }
         if let Some(err) = &sr.error {
             out.push_str(&format!("error: {err}\n"));
+        }
+        if let Some(body) = &sr.skipped {
+            out.push_str(&format!("condition (false): {body}\n"));
         }
         if let Some(v) = &sr.output {
             let text = match v {

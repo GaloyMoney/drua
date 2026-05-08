@@ -134,6 +134,17 @@ pub enum WorkflowStepDef {
         /// `large_enum_variant`).
         #[serde(default = "default_output_schema_boxed")]
         output_schema: Box<OutputSchema>,
+        /// Bare CEL boolean expression evaluated against the same
+        /// `(trigger, steps)` context as `${{ … }}` substitution.
+        /// `None` → step always runs (back-compat). `Some(expr)` and
+        /// `expr` evaluates to `false` → step is skipped: emits
+        /// `WorkflowRunEvent::StepSkipped`, the run continues to the
+        /// next step. Downstream `${{ steps.<this>.outputs.X }}` refs
+        /// resolve to `null` (whole-string splice) or `""` (embedded)
+        /// per the existing CEL missing-key semantics. Compiled and
+        /// validated at workflow create/update time.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        condition: Option<String>,
     },
     /// Deterministic single-tool dispatch — no agent loop, no LLM.
     /// `params` is the raw `arguments` object handed to the named
@@ -155,6 +166,9 @@ pub enum WorkflowStepDef {
         params: serde_json::Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_seconds: Option<u64>,
+        /// See `AgentStep::condition` — same semantics for ToolSteps.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        condition: Option<String>,
     },
 }
 
@@ -180,6 +194,15 @@ impl WorkflowStepDef {
         match self {
             WorkflowStepDef::AgentStep { output_schema, .. } => Some(output_schema.as_ref()),
             WorkflowStepDef::ToolStep { .. } => None,
+        }
+    }
+
+    /// Bare CEL boolean expression that gates step execution. `None`
+    /// → step always runs.
+    pub fn condition(&self) -> Option<&str> {
+        match self {
+            WorkflowStepDef::AgentStep { condition, .. }
+            | WorkflowStepDef::ToolStep { condition, .. } => condition.as_deref(),
         }
     }
 }
@@ -342,6 +365,7 @@ mod tests {
             timeout_seconds: None,
             model_chain: None,
             output_schema: Box::new(custom),
+            condition: None,
         };
         let actual = serde_json::to_value(step.output_schema().expect("AgentStep")).unwrap();
         assert_eq!(actual, custom_value);
@@ -375,6 +399,7 @@ mod tests {
                 "payload": "${{ steps.triage.outputs.args }}"
             }),
             timeout_seconds: Some(60),
+            condition: None,
         };
         let value = serde_json::to_value(&step).unwrap();
         assert_eq!(
@@ -420,6 +445,7 @@ mod tests {
             timeout_seconds: None,
             model_chain: None,
             output_schema: Box::new(default_output_schema()),
+            condition: None,
         };
         let value = serde_json::to_value(&step).unwrap();
         assert!(

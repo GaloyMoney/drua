@@ -297,6 +297,16 @@ impl Workflows {
         }
 
         for step in steps {
+            // Compile + root-validate + forward-ref-check the
+            // optional `condition:` body. Lives on both step kinds,
+            // so factor the check out of the per-variant arms.
+            if let Some(body) = step.condition() {
+                let r = template::parse_condition(body).map_err(|e| {
+                    WorkflowError::InvalidCondition(format!("step '{}': {e}", step.name()))
+                })?;
+                validate_ref_against_prior_steps(step.name(), &r, &seen_step_names)?;
+            }
+
             match step {
                 WorkflowStepDef::AgentStep {
                     name,

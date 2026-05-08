@@ -17,7 +17,9 @@ use super::definition::{WorkflowSandboxDecl, WorkflowStepDef};
 use super::error::WorkflowError;
 use super::repo::WorkflowDefinitionRepo;
 use super::run::{StepResult, WorkflowRunRepo, WorkflowRunState};
-use super::template::{format_template_diagnostics, template_diagnostics, TemplateContext};
+use super::template::{
+    format_template_diagnostics, template_diagnostics, ConditionOutcome, TemplateContext,
+};
 
 /// Hard cap on the pre-flight per-sandbox readiness wait. Protects the
 /// queue from a stuck infrastructure step.
@@ -28,13 +30,26 @@ const SANDBOX_READY_TIMEOUT: Duration = Duration::from_secs(180);
 const DEFAULT_TOOL_STEP_TIMEOUT_SECS: u64 = 300;
 
 /// Build the `steps` slice of the template context from the run's
-/// completed-step outputs. Skips entries with no recorded output
-/// (pending or failed steps).
+/// recorded step results. Completed steps surface their structured
+/// `output`; skipped / errored / pending steps surface as
+/// `Value::Null`. Including the latter keeps CEL from raising
+/// `NoSuchKey` when a downstream `${{ steps.<skipped>.outputs.X }}`
+/// or `condition: steps.<skipped>.outputs.X` refers to a step that
+/// didn't produce one — the access becomes `null.outputs.X` which
+/// CEL coerces to `false` per the same quirk documented at
+/// `template::TemplateContext::build_cel_context`. Net effect: the
+/// "downstream null-coalesce" contract documented in memo
+/// `019e06a1` falls out for free.
 fn collect_step_outputs(results: &[StepResult]) -> HashMap<String, serde_json::Value> {
     let mut out = HashMap::with_capacity(results.len());
     for r in results {
-        if let Some(value) = &r.output {
-            out.insert(r.name.clone(), value.clone());
+        match &r.output {
+            Some(value) => {
+                out.insert(r.name.clone(), value.clone());
+            }
+            None => {
+                out.insert(r.name.clone(), serde_json::Value::Null);
+            }
         }
     }
     out
@@ -171,6 +186,50 @@ impl Executor {
 
             if cancel.load(Ordering::Relaxed) {
                 return Err(WorkflowError::Cancelled);
+            }
+
+            // Condition gate. Evaluated BEFORE `step_started`: a
+            // skipped step never enters Running state — it's
+            // terminally Skipped from the start. `evaluate_condition`
+            // folds parse + execute into one call; create-time
+            // validation guarantees the body compiles, so an `Err`
+            // here is a CEL runtime error (type mismatch, etc.).
+            if let Some(body) = step.condition() {
+                let step_outputs = collect_step_outputs(&run.step_results);
+                let ctx = TemplateContext {
+                    trigger: &trigger_context,
+                    steps: &step_outputs,
+                };
+                match ctx.evaluate_condition(body) {
+                    Ok(ConditionOutcome::True) => {
+                        // Fall through to step_started + execute_step.
+                    }
+                    Ok(ConditionOutcome::False) => {
+                        if run.step_skipped(step_name, body.to_string()).did_execute() {
+                            self.runs.update(&mut run).await?;
+                        }
+                        continue;
+                    }
+                    Ok(ConditionOutcome::NotBoolean(rendered)) => {
+                        let err = WorkflowError::ConditionNotBoolean {
+                            step: step_name.clone(),
+                            body: body.to_string(),
+                            value: rendered,
+                        };
+                        if run.step_errored(step_name, err.to_string()).did_execute() {
+                            self.runs.update(&mut run).await?;
+                        }
+                        break;
+                    }
+                    Err(e) => {
+                        let err =
+                            WorkflowError::InvalidCondition(format!("step '{step_name}': {e}"));
+                        if run.step_errored(step_name, err.to_string()).did_execute() {
+                            self.runs.update(&mut run).await?;
+                        }
+                        break;
+                    }
+                }
             }
 
             if run.step_started(step_name.clone()).did_execute() {
@@ -567,6 +626,7 @@ impl Executor {
                 tool,
                 params,
                 timeout_seconds,
+                ..
             } => {
                 self.execute_tool_step(
                     project_id,

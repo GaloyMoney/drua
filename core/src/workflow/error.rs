@@ -39,6 +39,14 @@ pub enum WorkflowError {
     InvalidStep(String),
     #[error("WorkflowError - InvalidTemplateRef: {0}")]
     InvalidTemplateRef(String),
+    #[error("WorkflowError - InvalidCondition: {0}")]
+    InvalidCondition(String),
+    #[error("WorkflowError - ConditionNotBoolean: step '{step}' condition `{body}` evaluated to {value} (expected bool)")]
+    ConditionNotBoolean {
+        step: String,
+        body: String,
+        value: String,
+    },
     #[error("WorkflowError - ToolNotFound: {0}")]
     ToolNotFound(String),
     #[error("WorkflowError - ToolDispatch: {0}")]

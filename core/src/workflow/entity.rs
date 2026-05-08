@@ -426,6 +426,7 @@ mod tests {
             timeout_seconds: Some(60),
             model_chain: None,
             output_schema: Box::new(default_output_schema()),
+            condition: None,
         }
     }
 
@@ -466,6 +467,7 @@ mod tests {
             timeout_seconds: None,
             model_chain: Some(step_chain.clone()),
             output_schema: Box::new(default_output_schema()),
+            condition: None,
         }];
         assert_eq!(
             def.resolve_step_chain(&def.steps[0]).unwrap().primary.name,
@@ -480,6 +482,7 @@ mod tests {
             timeout_seconds: None,
             model_chain: None,
             output_schema: Box::new(default_output_schema()),
+            condition: None,
         }];
         assert_eq!(
             def.resolve_step_chain(&def.steps[0]).unwrap().primary.name,
