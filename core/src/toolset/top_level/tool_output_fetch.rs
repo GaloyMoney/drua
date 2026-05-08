@@ -12,6 +12,12 @@
 //! returns the typed classifier summary as `structured_content` instead
 //! of the original — useful when callers want the post-elision shape
 //! without re-deriving it.
+//!
+//! The persisted envelopes don't ship a duplicate fetch-shape hint —
+//! `tool_output_fetch` is a visible top-level tool and its
+//! [`TopLevelTool::description`] is the canonical advertisement; the
+//! per-row envelope just carries the `invocation_id` and a short
+//! pointer at this tool in `content[].text`.
 
 use std::sync::{Arc, LazyLock};
 
@@ -74,17 +80,22 @@ enum FetchView {
 static INPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<FetchInput>);
 static OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<FetchResult>);
 
-/// Shape hint embedded in the universal-pipeline envelope so the agent
-/// can call this tool without re-fetching its schema. Single source of
-/// truth — drift between the hint and the actual `FetchInput` shape is
-/// a real bug (the agent follows the hint literally and hits a
-/// `deny_unknown_fields` rejection). Locked in by
-/// `fetch_hint_matches_schema`.
-pub(crate) const FETCH_HINT: &str =
-    "tool_output_fetch({invocation_id, view?: 'original'|'summary', \
-     query?: {mode: 'tail'|'head'|'range'|'grep', ...}}) — \
-     default `view: original` returns the upstream tool's structured_content; \
-     `query` slices the persisted text into content[].text";
+/// The agent-facing advertisement for this tool. Lives next to
+/// `FetchInput`'s `deny_unknown_fields` so the description and the
+/// accepted schema stay aligned — drift is a real bug since agents
+/// follow the description literally. Locked-in by
+/// `description_documents_view_and_each_query_mode`.
+const DESCRIPTION: &str = "Fetch a previously-persisted tool result. Same response shape \
+     as calling the original tool: `structured_content` carries the \
+     original tool's verbatim structured output. \
+     Call shape: `{invocation_id, view?, query?}`. \
+     `view: 'original'` (default) returns the upstream tool's \
+     structured_content; `view: 'summary'` returns the typed \
+     classifier summary instead. \
+     `query` is optional — when present, content[].text carries a \
+     slice (`tail`/`head`/`range`/`grep`); when absent, no slicing. \
+     Per-mode args: `tail`/`head` take `lines`; `range` takes \
+     `offset` + `len`; `grep` takes `pattern` + optional `context`.";
 
 #[async_trait::async_trait]
 impl TopLevelTool for ToolOutputFetch {
@@ -93,17 +104,7 @@ impl TopLevelTool for ToolOutputFetch {
     }
 
     fn description(&self) -> &str {
-        "Fetch a previously-persisted tool result. Same response shape \
-         as calling the original tool: `structured_content` carries the \
-         original tool's verbatim structured output. \
-         Call shape: `{invocation_id, view?, query?}`. \
-         `view: 'original'` (default) returns the upstream tool's \
-         structured_content; `view: 'summary'` returns the typed \
-         classifier summary instead. \
-         `query` is optional — when present, content[].text carries a \
-         slice (`tail`/`head`/`range`/`grep`); when absent, no slicing. \
-         Per-mode args: `tail`/`head` take `lines`; `range` takes \
-         `offset` + `len`; `grep` takes `pattern` + optional `context`."
+        DESCRIPTION
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -250,21 +251,16 @@ mod tests {
         assert!(matches!(parsed.query, Some(FetchQuery::Tail { lines: 10 })));
     }
 
-    /// Bugbot review on PR #309 (medium): the envelope's `fetch_hint`
-    /// previously drifted from the schema. The hint and the schema
-    /// must stay aligned — agents follow the hint literally.
+    /// `tool_output_fetch`'s `description()` is now the only
+    /// agent-facing advertisement of the call shape (the per-envelope
+    /// `fetch_hint` was retired in favour of delegating to
+    /// `describe_tool` / the catalog). Drift between the description
+    /// and the schema is still a real bug — agents follow the
+    /// description literally and hit `deny_unknown_fields` rejections.
     #[test]
-    fn fetch_hint_mentions_view_and_query() {
-        assert!(
-            FETCH_HINT.contains("view"),
-            "hint should mention the new `view` parameter"
-        );
-        assert!(
-            FETCH_HINT.contains("query"),
-            "hint should mention the optional `query` parameter"
-        );
-        // Each mode listed in the hint must round-trip through
-        // `FetchInput`.
+    fn description_documents_view_and_each_query_mode() {
+        assert!(DESCRIPTION.contains("view"), "description should mention `view`");
+        assert!(DESCRIPTION.contains("query"), "description should mention `query`");
         for (mode, sample_args) in [
             ("tail", serde_json::json!({"mode": "tail", "lines": 5})),
             ("head", serde_json::json!({"mode": "head", "lines": 5})),
@@ -278,15 +274,15 @@ mod tests {
             ),
         ] {
             assert!(
-                FETCH_HINT.contains(&format!("'{mode}'")),
-                "hint must list mode `{mode}`",
+                DESCRIPTION.contains(&format!("`{mode}`")),
+                "description must list mode `{mode}`",
             );
             let raw = serde_json::json!({
                 "invocation_id": "00000000-0000-0000-0000-000000000000",
                 "query": sample_args,
             });
             serde_json::from_value::<FetchInput>(raw)
-                .unwrap_or_else(|e| panic!("hint-shaped `{mode}` request must parse: {e}"));
+                .unwrap_or_else(|e| panic!("description-shaped `{mode}` request must parse: {e}"));
         }
     }
 }

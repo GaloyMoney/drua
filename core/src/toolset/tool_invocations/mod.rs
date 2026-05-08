@@ -26,7 +26,6 @@ use crate::auth::AuthSubject;
 use crate::primitives::ToolInvocationId;
 
 use super::classifier::{Classification, ToolResultSummary};
-use super::top_level::FETCH_HINT;
 use repo::ToolInvocationRepo;
 
 /// What the agent asked to retrieve from a persisted invocation. Exactly one
@@ -236,14 +235,16 @@ impl ToolInvocations {
             )
             .await?;
 
+        // No `fetch_hint` here — `tool_output_fetch` is a visible
+        // top-level tool, so its `description()` already carries the
+        // call shape and per-mode args. The terse `fetch via
+        // tool_output_fetch(invocation_id="…")` line emitted by
+        // `envelope_text` is enough to point the agent at recovery;
+        // duplicating the schema in every persisted envelope is
+        // pure context noise.
         let envelope = serde_json::json!({
             "invocation_id": uuid::Uuid::from(persisted.invocation_id).to_string(),
             "summary": persisted.summary_value,
-            // Single source of truth for the call shape — `FETCH_HINT` lives
-            // next to `FetchInput`'s definition so the hint and the
-            // `deny_unknown_fields` schema stay aligned (locked-in by
-            // `fetch_hint_matches_schema`).
-            "fetch_hint": FETCH_HINT,
         });
 
         let mut wrapped = raw.clone();

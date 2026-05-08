@@ -369,13 +369,16 @@ fn render_curated_result(summary: &ToolResultSummary) -> serde_json::Value {
     }
 }
 
-/// Single source of truth for compose's fetch instruction — embedded
-/// once in the envelope and once in the prose so the agent doesn't
-/// have to look it up separately.
+/// Compose-specific disambiguator. The `tool_output_fetch` call
+/// shape itself lives in that tool's `description()` — agents have
+/// it via the catalog and don't need it duplicated here. What's
+/// unique to compose is *which* invocation id to pass: compose
+/// emits both `result_invocation_id` (the full JS return) and a
+/// per-sub-call `sub_invocations[].invocation_id` directory.
 const COMPOSE_FETCH_HINT: &str =
-    "tool_output_fetch({invocation_id, query: {mode: 'tail'|'head'|'range'|'grep', ...}}) — \
-     invocation_id can be `result_invocation_id` (full JS return) or any \
-     `sub_invocations[].invocation_id` (specific sub-call's persisted output)";
+    "invocation_id is either `result_invocation_id` (full JS return) \
+     or any `sub_invocations[].invocation_id` (specific sub-call's \
+     persisted output) — see `tool_output_fetch` for the full call shape.";
 
 /// One sub-tool dispatch's worth of recovery metadata. Accumulated by
 /// `CatalogDispatcher` while the JS script runs; surfaced in compose's

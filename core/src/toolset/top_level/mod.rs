@@ -176,7 +176,6 @@ pub use spaces::SpacesTool;
 pub use submit_output::SubmitOutputTool;
 pub use text_editor::TextEditor;
 pub use tool_output_fetch::ToolOutputFetch;
-pub(crate) use tool_output_fetch::FETCH_HINT;
 pub use use_skill::UseSkillTool;
 pub use whoami::WhoAmI;
 pub use workflow::WorkflowTool;
