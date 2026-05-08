@@ -16,11 +16,17 @@ mod repo;
 pub use entity::{NewToolInvocation, ToolInvocation};
 pub use error::ToolInvocationError;
 
+use rmcp::model::{CallToolResult, Content};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::instrument;
 
+use crate::audit::Audit;
+use crate::auth::AuthSubject;
 use crate::primitives::{AgentId, ToolInvocationId};
 
+use super::classifier::ToolResultSummary;
+use super::top_level::FETCH_HINT;
 use repo::ToolInvocationRepo;
 
 /// What the agent asked to retrieve from a persisted invocation. Exactly one
@@ -112,6 +118,167 @@ impl ToolInvocations {
             .repo
             .find_latest_by_args_hash(agent_id, args_hash)
             .await?)
+    }
+
+    /// Persist the captured raw output and decorate the original
+    /// `CallToolResult` with an `envelope.invocation_id` so the agent
+    /// can recover detail through `tool_output_fetch`. Returns the
+    /// original raw result on persistence failure (the model still
+    /// gets a usable result; the failure is logged).
+    ///
+    /// Returns `None` when the subject doesn't carry an agent (no
+    /// scope key for the persisted row); the dispatcher then falls
+    /// back to raw passthrough.
+    #[instrument(name = "core.tool_invocations.persist_and_envelope", skip_all)]
+    #[allow(clippy::too_many_arguments)]
+    pub async fn persist_and_envelope(
+        &self,
+        subject: &AuthSubject,
+        tool_name: &str,
+        args: &serde_json::Value,
+        summary: ToolResultSummary,
+        raw: &CallToolResult,
+        duration_ms: u64,
+        started_at: chrono::DateTime<chrono::Utc>,
+    ) -> Option<CallToolResult> {
+        let agent_id = subject.acting_agent_id()?;
+
+        let raw_text = raw
+            .content
+            .iter()
+            .filter_map(|c| match &c.raw {
+                rmcp::model::RawContent::Text(t) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let raw_size_bytes = raw_text.len() as i64;
+
+        let summary_value = match serde_json::to_value(&summary) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to serialise summary; skipping persistence");
+                return None;
+            }
+        };
+
+        let canonical = match serde_json::to_string(args) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to canonicalise args; skipping persistence");
+                return None;
+            }
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(canonical.as_bytes());
+        let args_hash = hasher.finalize().to_vec();
+
+        let new = NewToolInvocation {
+            agent_id,
+            tool_name: tool_name.to_string(),
+            args: args.clone(),
+            args_hash,
+            classifier: summary.kind().to_string(),
+            summary: summary_value.clone(),
+            raw_text,
+            raw_size_bytes,
+            exit_code: None,
+            duration_ms: duration_ms.min(i32::MAX as u64) as i32,
+            started_at,
+        };
+
+        let persisted = match self.persist(new).await {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "failed to persist tool invocation; falling back to raw result"
+                );
+                return None;
+            }
+        };
+
+        Audit::record_tool_invocation_id(persisted.id);
+
+        let envelope = serde_json::json!({
+            "invocation_id": uuid::Uuid::from(persisted.id).to_string(),
+            "summary": summary_value,
+            // Single source of truth for the call shape — `FETCH_HINT` lives
+            // next to `FetchInput`'s definition so the hint and the
+            // `deny_unknown_fields` schema stay aligned (locked-in by
+            // `fetch_hint_matches_schema`).
+            "fetch_hint": FETCH_HINT,
+        });
+
+        let mut wrapped = raw.clone();
+        wrapped.content = vec![Content::text(envelope_text(&summary, persisted.id))];
+        wrapped.structured_content = Some(envelope);
+        Some(wrapped)
+    }
+}
+
+fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId) -> String {
+    match summary {
+        ToolResultSummary::Passthrough { text } => text.clone(),
+        ToolResultSummary::Generic {
+            head,
+            tail,
+            total_bytes,
+            kept_bytes,
+            ..
+        } => format!(
+            "[output elided: {kept_bytes}/{total_bytes} bytes kept; \
+             fetch the rest via tool_output_fetch(invocation_id=\"{id}\")]\n\
+             === head ===\n{head}\n=== tail ===\n{tail}",
+        ),
+        ToolResultSummary::Concourse(s) => {
+            let mut out = String::new();
+            out.push_str(&format!(
+                "[concourse build log: status={:?}, {} lines / {} bytes; \
+                 fetch the raw stream via tool_output_fetch(invocation_id=\"{}\")]\n",
+                s.status, s.total_lines, s.total_bytes, id
+            ));
+            out.push_str(&format!(
+                "tasks: {} | nix paths copied: {} | derivations: {} | \
+                 cache files pruned: {}\n",
+                s.task_phases.len(),
+                s.nix_paths_copied,
+                s.derivations_checked,
+                s.cache_files_pruned,
+            ));
+            if !s.warnings.is_empty() {
+                out.push_str("=== warnings ===\n");
+                for w in &s.warnings {
+                    out.push_str(&format!("[{}] {}\n", w.timestamp, w.message));
+                }
+            }
+            if !s.errors.is_empty() {
+                out.push_str("=== errors ===\n");
+                for e in &s.errors {
+                    out.push_str(&format!("[{}] {}\n", e.timestamp, e.message));
+                }
+            }
+            for f in &s.failures {
+                out.push_str(&format!("=== failure: {} ===\n", f.attribute,));
+                if let Some(reason) = &f.reason {
+                    out.push_str(&format!("reason: {reason}\n"));
+                }
+                if !f.log_tail.is_empty() {
+                    out.push_str("log_tail:\n");
+                    for l in &f.log_tail {
+                        out.push_str(&format!("  > {l}\n"));
+                    }
+                }
+            }
+            if !s.final_lines.is_empty() {
+                out.push_str("=== final lines ===\n");
+                for l in &s.final_lines {
+                    out.push_str(l);
+                    out.push('\n');
+                }
+            }
+            out
+        }
     }
 }
 
