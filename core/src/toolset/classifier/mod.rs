@@ -205,23 +205,41 @@ impl ResultClassifier for GenericFallback {
 
     fn classify(&self, ctx: &ClassifierContext<'_>) -> Result<Classification, ClassifierError> {
         let raw = extract_text(ctx.raw);
-        if raw.len() < self.threshold_bytes {
+        let lines: Vec<&str> = raw.lines().collect();
+
+        // Bail to Passthrough whenever elision wouldn't actually shrink:
+        //   1. Below the byte threshold — agent already has every byte.
+        //   2. Line count <= HEAD + TAIL — the elided form would
+        //      contain all lines anyway, with the head 50 duplicated.
+        //      This is the bug from cursor review #3207213787 — without
+        //      the guard, `tail_start` saturates to 0, head and tail
+        //      overlap, kept_bytes > total_bytes.
+        // Honest contract: the envelope only exists when something is
+        // genuinely elided.
+        if raw.len() < self.threshold_bytes
+            || lines.len() <= GENERIC_HEAD_LINES + GENERIC_TAIL_LINES
+        {
             return Ok(Classification {
                 summary: ToolResultSummary::Passthrough { text: raw.clone() },
                 canonical_text: raw,
             });
         }
 
-        let lines: Vec<&str> = raw.lines().collect();
-        let head = lines
-            .iter()
-            .take(GENERIC_HEAD_LINES)
-            .copied()
-            .collect::<Vec<_>>()
-            .join("\n");
-        let tail_start = lines.len().saturating_sub(GENERIC_TAIL_LINES);
+        // Disjoint by construction: tail_start is forced past head_end,
+        // so even pathological line distributions never produce
+        // overlapping slices.
+        let head_end = GENERIC_HEAD_LINES.min(lines.len());
+        let tail_start = lines.len().saturating_sub(GENERIC_TAIL_LINES).max(head_end);
+        let head = lines[..head_end].join("\n");
         let tail = lines[tail_start..].join("\n");
         let kept_bytes = (head.len() + tail.len()) as u32;
+
+        debug_assert!(
+            (kept_bytes as u64) <= raw.len() as u64,
+            "elision invariant violated: kept_bytes ({kept_bytes}) > total_bytes ({})",
+            raw.len(),
+        );
+
         Ok(Classification {
             summary: ToolResultSummary::Generic {
                 head,
@@ -346,10 +364,95 @@ mod tests {
         assert!(classification.summary.is_passthrough());
     }
 
+    /// Regression for cursor review #3207213787. Before the fix:
+    /// 100 lines × ~50 chars trips the byte threshold but the line
+    /// count is below HEAD + TAIL (200). Old code: `tail_start =
+    /// 100 - 150 saturates to 0`, head + tail overlap, kept_bytes
+    /// exceeds total_bytes. New behaviour: bail to Passthrough.
+    #[test]
+    fn elision_never_inflates_when_line_count_below_head_plus_tail() {
+        let body: String = (0..100)
+            .map(|i| format!("line-{i:04} {}", "x".repeat(40)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            body.len() >= DEFAULT_GENERIC_THRESHOLD_BYTES,
+            "test body must trip the byte threshold"
+        );
+        assert!(
+            body.lines().count() <= GENERIC_HEAD_LINES + GENERIC_TAIL_LINES,
+            "test body must NOT trip the line threshold"
+        );
+
+        let raw = result_with(&body);
+        let registry = ClassifierRegistry::with_default();
+        let classification = registry.classify(&ctx("bash", &raw));
+        match classification.summary {
+            ToolResultSummary::Passthrough { text } => assert_eq!(text, body),
+            ToolResultSummary::Generic {
+                kept_bytes,
+                total_bytes,
+                ..
+            } => panic!(
+                "must not Generic-elide when line count is below HEAD+TAIL — \
+                 kept_bytes={kept_bytes} total_bytes={total_bytes}"
+            ),
+            other => panic!("expected Passthrough, got {other:?}"),
+        }
+    }
+
+    /// Disjoint head + tail invariant — even at the boundary where
+    /// line count is exactly HEAD + TAIL + 1, the slices must not
+    /// overlap.
+    #[test]
+    fn elision_head_and_tail_are_disjoint_at_boundary() {
+        let lines: Vec<String> = (0..(GENERIC_HEAD_LINES + GENERIC_TAIL_LINES + 1))
+            .map(|i| format!("line-{i:04} {}", "y".repeat(60)))
+            .collect();
+        let body = lines.join("\n");
+        assert!(body.len() >= DEFAULT_GENERIC_THRESHOLD_BYTES);
+
+        let raw = result_with(&body);
+        let registry = ClassifierRegistry::with_default();
+        let classification = registry.classify(&ctx("bash", &raw));
+        match classification.summary {
+            ToolResultSummary::Generic {
+                head,
+                tail,
+                kept_bytes,
+                total_bytes,
+                ..
+            } => {
+                assert!(
+                    (kept_bytes as u64) <= total_bytes,
+                    "kept_bytes ({kept_bytes}) must not exceed total_bytes ({total_bytes})"
+                );
+                assert_eq!(head.lines().count(), GENERIC_HEAD_LINES);
+                assert_eq!(tail.lines().count(), GENERIC_TAIL_LINES);
+                // The two slices share no line.
+                let head_set: std::collections::HashSet<&str> = head.lines().collect();
+                let tail_set: std::collections::HashSet<&str> = tail.lines().collect();
+                assert!(
+                    head_set.is_disjoint(&tail_set),
+                    "head and tail must not share any line"
+                );
+            }
+            other => panic!("expected Generic, got {other:?}"),
+        }
+    }
+
     #[test]
     fn threshold_is_configurable() {
+        // Both gates must fire: byte threshold (custom 4) AND line
+        // count above HEAD + TAIL (so elision actually shrinks). A
+        // single line of 10 chars would now Passthrough — give it
+        // enough lines to clear both gates.
         let registry = ClassifierRegistry::new().register(GenericFallback { threshold_bytes: 4 });
-        let raw = result_with("ten chars\n");
+        let body: String = (0..(GENERIC_HEAD_LINES + GENERIC_TAIL_LINES + 1))
+            .map(|i| format!("l{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let raw = result_with(&body);
         let classification = registry.classify(&ctx("bash", &raw));
         assert!(matches!(
             classification.summary,
