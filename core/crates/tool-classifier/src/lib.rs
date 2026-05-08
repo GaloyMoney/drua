@@ -26,7 +26,7 @@ pub use concourse::{
 pub use git::GitCloneProgress;
 pub use nix::{NixBuildingRun, NixCacheActivity, NixCopyRun, NixDrvList, NixFetchList};
 pub use string_summarizer::{
-    build_marker, close_tag, open_tag, BulkElide, LogContext, StringSummarizer,
+    build_marker, close_tag, open_tag, BulkElide, SegmentedText, StringSummarizer,
     StringSummarizerChain, VerbatimRegion,
 };
 
@@ -287,10 +287,7 @@ impl Default for GenericFallback {
 }
 
 impl GenericFallback {
-    pub fn with_summarizer_chain(
-        mut self,
-        chain: std::sync::Arc<StringSummarizerChain>,
-    ) -> Self {
+    pub fn with_summarizer_chain(mut self, chain: std::sync::Arc<StringSummarizerChain>) -> Self {
         self.summarizer_chain = Some(chain);
         self
     }

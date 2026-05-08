@@ -10,7 +10,7 @@
 
 use serde_json::{Map, Value};
 
-use super::string_summarizer::{LogContext, StringSummarizerChain};
+use super::string_summarizer::{SegmentedText, StringSummarizerChain};
 use super::{ElidedPath, ElisionKind};
 
 /// Per-string head/tail char count when byte-eliding. Picked to keep
@@ -106,7 +106,7 @@ fn walk(
         // safety net.
         Value::String(s) => {
             if let Some(c) = chain {
-                let mut ctx = LogContext::from_initial(s);
+                let mut ctx = SegmentedText::from_initial(s);
                 let modified = c.run(&mut ctx);
                 let current = ctx.into_log();
                 if modified {

@@ -10,7 +10,7 @@
 
 use std::ops::Range;
 
-use crate::string_summarizer::{build_marker, LogContext, StringSummarizer};
+use crate::string_summarizer::{build_marker, SegmentedText, StringSummarizer};
 
 pub struct GitCloneProgress;
 
@@ -19,12 +19,12 @@ impl StringSummarizer for GitCloneProgress {
         "git-clone"
     }
 
-    fn can_summarize(&self, ctx: &LogContext) -> bool {
+    fn can_summarize(&self, ctx: &SegmentedText) -> bool {
         ctx.verbatim_regions()
             .any(|r| r.text.lines().any(is_git_progress))
     }
 
-    fn apply(&self, ctx: &mut LogContext) -> bool {
+    fn apply(&self, ctx: &mut SegmentedText) -> bool {
         let mut runs: Vec<Range<u32>> = Vec::new();
         for region in ctx.verbatim_regions() {
             let lines: Vec<&str> = region.text.lines().collect();
@@ -50,20 +50,18 @@ impl StringSummarizer for GitCloneProgress {
         if runs.is_empty() {
             return false;
         }
-        let bytes_per_run: Vec<u64> = runs
+        let metas: Vec<(Range<u32>, Range<u32>, u64)> = runs
             .iter()
-            .map(|r| ctx.byte_len_of_lines(r.clone()))
+            .map(|r| {
+                let orig = ctx.current_to_original_range(r);
+                let bytes = ctx.byte_len_of_lines(r.clone());
+                (r.clone(), orig, bytes)
+            })
             .collect();
-        for (run, original_bytes) in runs.into_iter().zip(bytes_per_run).rev() {
+        for (run, original_range, original_bytes) in metas.into_iter().rev() {
             let count = run.end - run.start;
             let body = format!("{count} progress lines\n");
-            let marker = build_marker(
-                "git-clone",
-                run.start..run.start + count,
-                original_bytes,
-                &body,
-                &[],
-            );
+            let marker = build_marker("git-clone", original_range, original_bytes, &body, &[]);
             ctx.replace_with_summary(run, &marker, "git-clone");
         }
         true
@@ -85,8 +83,8 @@ mod tests {
     use super::*;
     use crate::string_summarizer::StringSummarizerChain;
 
-    fn run_chain(raw: &str) -> LogContext {
-        let mut ctx = LogContext::from_initial(raw);
+    fn run_chain(raw: &str) -> SegmentedText {
+        let mut ctx = SegmentedText::from_initial(raw);
         let chain = StringSummarizerChain::new().register(GitCloneProgress);
         chain.run(&mut ctx);
         ctx

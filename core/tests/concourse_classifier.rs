@@ -128,8 +128,7 @@ fn nix_summarizers_fire_on_bash_output_via_walker() {
             "copying path '/nix/store/bbb{i:02}-bar' from 'https://cache.nixos.org/'\n"
         ));
     }
-    nix_output
-        .push_str("error: builder for '/nix/store/aaaa-foo.drv' failed with exit code 1\n");
+    nix_output.push_str("error: builder for '/nix/store/aaaa-foo.drv' failed with exit code 1\n");
     nix_output.push_str("       > some compiler error\n");
     nix_output.push_str("       > another diagnostic line\n");
 

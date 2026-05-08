@@ -10,9 +10,7 @@
 
 use std::ops::Range;
 
-use crate::string_summarizer::{
-    build_marker, LogContext, StringSummarizer, VerbatimRegion,
-};
+use crate::string_summarizer::{build_marker, SegmentedText, StringSummarizer, VerbatimRegion};
 
 pub struct NixCopyRun;
 pub struct NixDrvList;
@@ -41,11 +39,11 @@ impl StringSummarizer for NixCopyRun {
     fn name(&self) -> &'static str {
         "nix-copy"
     }
-    fn can_summarize(&self, ctx: &LogContext) -> bool {
+    fn can_summarize(&self, ctx: &SegmentedText) -> bool {
         ctx.verbatim_regions()
             .any(|r| r.text.lines().any(|l| l.starts_with(COPYING_PREFIX)))
     }
-    fn apply(&self, ctx: &mut LogContext) -> bool {
+    fn apply(&self, ctx: &mut SegmentedText) -> bool {
         let runs = collect_runs(ctx, |line| line.starts_with(COPYING_PREFIX));
         apply_runs(ctx, runs, "nix-copy", |count, _bytes| {
             format!("{count} paths\n")
@@ -57,11 +55,11 @@ impl StringSummarizer for NixBuildingRun {
     fn name(&self) -> &'static str {
         "nix-building"
     }
-    fn can_summarize(&self, ctx: &LogContext) -> bool {
+    fn can_summarize(&self, ctx: &SegmentedText) -> bool {
         ctx.verbatim_regions()
             .any(|r| r.text.lines().any(|l| l.starts_with(BUILDING_PREFIX)))
     }
-    fn apply(&self, ctx: &mut LogContext) -> bool {
+    fn apply(&self, ctx: &mut SegmentedText) -> bool {
         let runs = collect_runs(ctx, |line| line.starts_with(BUILDING_PREFIX));
         apply_runs(ctx, runs, "nix-building", |count, _bytes| {
             format!("{count} derivations built\n")
@@ -73,11 +71,11 @@ impl StringSummarizer for NixCacheActivity {
     fn name(&self) -> &'static str {
         "nix-cache"
     }
-    fn can_summarize(&self, ctx: &LogContext) -> bool {
+    fn can_summarize(&self, ctx: &SegmentedText) -> bool {
         ctx.verbatim_regions()
             .any(|r| r.text.lines().any(|l| l.starts_with(NIX_CACHE_PREFIX)))
     }
-    fn apply(&self, ctx: &mut LogContext) -> bool {
+    fn apply(&self, ctx: &mut SegmentedText) -> bool {
         let runs = collect_runs(ctx, |line| line.starts_with(NIX_CACHE_PREFIX));
         apply_runs(ctx, runs, "nix-cache", |count, _bytes| {
             format!("{count} cache activity lines\n")
@@ -89,11 +87,11 @@ impl StringSummarizer for NixDrvList {
     fn name(&self) -> &'static str {
         "nix-drv-list"
     }
-    fn can_summarize(&self, ctx: &LogContext) -> bool {
+    fn can_summarize(&self, ctx: &SegmentedText) -> bool {
         ctx.verbatim_regions()
             .any(|r| r.text.lines().any(is_drv_list_header))
     }
-    fn apply(&self, ctx: &mut LogContext) -> bool {
+    fn apply(&self, ctx: &mut SegmentedText) -> bool {
         let runs: Vec<Range<u32>> = ctx
             .verbatim_regions()
             .flat_map(|r| collect_list_block(&r, is_drv_list_header, |body| body.ends_with(".drv")))
@@ -109,11 +107,11 @@ impl StringSummarizer for NixFetchList {
     fn name(&self) -> &'static str {
         "nix-fetch-list"
     }
-    fn can_summarize(&self, ctx: &LogContext) -> bool {
+    fn can_summarize(&self, ctx: &SegmentedText) -> bool {
         ctx.verbatim_regions()
             .any(|r| r.text.lines().any(is_fetch_list_header))
     }
-    fn apply(&self, ctx: &mut LogContext) -> bool {
+    fn apply(&self, ctx: &mut SegmentedText) -> bool {
         let runs: Vec<Range<u32>> = ctx
             .verbatim_regions()
             .flat_map(|r| collect_list_block(&r, is_fetch_list_header, |_| true))
@@ -128,11 +126,7 @@ impl StringSummarizer for NixFetchList {
 /// Collect "header line + indented store-path body" blocks. The
 /// `body_ok` predicate gates which `/nix/store/...` lines count as
 /// part of the body — `.drv` for drv-list, anything for fetch-list.
-fn collect_list_block<HF, BF>(
-    r: &VerbatimRegion<'_>,
-    is_header: HF,
-    body_ok: BF,
-) -> Vec<Range<u32>>
+fn collect_list_block<HF, BF>(r: &VerbatimRegion<'_>, is_header: HF, body_ok: BF) -> Vec<Range<u32>>
 where
     HF: Fn(&str) -> bool,
     BF: Fn(&str) -> bool,
@@ -164,7 +158,7 @@ where
     runs
 }
 
-fn collect_runs<F: Fn(&str) -> bool>(ctx: &LogContext, pred: F) -> Vec<Range<u32>> {
+fn collect_runs<F: Fn(&str) -> bool>(ctx: &SegmentedText, pred: F) -> Vec<Range<u32>> {
     let mut runs = Vec::new();
     for region in ctx.verbatim_regions() {
         let lines: Vec<&str> = region.text.lines().collect();
@@ -191,7 +185,7 @@ fn collect_runs<F: Fn(&str) -> bool>(ctx: &LogContext, pred: F) -> Vec<Range<u32
 }
 
 fn apply_runs<F: Fn(u32, u64) -> String>(
-    ctx: &mut LogContext,
+    ctx: &mut SegmentedText,
     runs: Vec<Range<u32>>,
     tag: &'static str,
     body_for: F,
@@ -199,14 +193,22 @@ fn apply_runs<F: Fn(u32, u64) -> String>(
     if runs.is_empty() {
         return false;
     }
-    let bytes_per_run: Vec<u64> = runs
+    // Translate runs (current coords) to original coords BEFORE we
+    // start splicing — replace_with_summary mutates segment ranges,
+    // so consecutive lookups would race ahead of themselves. Pair
+    // with byte counts here too so all metadata is gathered up front.
+    let metas: Vec<(Range<u32>, Range<u32>, u64)> = runs
         .iter()
-        .map(|r| ctx.byte_len_of_lines(r.clone()))
+        .map(|r| {
+            let orig = ctx.current_to_original_range(r);
+            let bytes = ctx.byte_len_of_lines(r.clone());
+            (r.clone(), orig, bytes)
+        })
         .collect();
-    for (run, original_bytes) in runs.into_iter().zip(bytes_per_run).rev() {
+    for (run, original_range, original_bytes) in metas.into_iter().rev() {
         let count = run.end - run.start;
         let body = body_for(count, original_bytes);
-        let marker = build_marker(tag, run.start..run.start + count, original_bytes, &body, &[]);
+        let marker = build_marker(tag, original_range, original_bytes, &body, &[]);
         ctx.replace_with_summary(run, &marker, tag);
     }
     true
@@ -217,8 +219,8 @@ mod tests {
     use super::*;
     use crate::string_summarizer::StringSummarizerChain;
 
-    fn run_chain(raw: &str) -> LogContext {
-        let mut ctx = LogContext::from_initial(raw);
+    fn run_chain(raw: &str) -> SegmentedText {
+        let mut ctx = SegmentedText::from_initial(raw);
         let chain = StringSummarizerChain::new()
             .register(NixDrvList)
             .register(NixFetchList)
@@ -368,6 +370,50 @@ final
         assert!(log.contains("<nix-cache"));
         assert!(log.contains("+ cd repo"));
         assert!(log.contains("final"));
+    }
+
+    #[test]
+    fn original_lines_attribute_refers_to_input_coords_across_passes() {
+        // Regression: when an early pass shrinks the log, a later
+        // pass's current line numbers diverge from the original.
+        // Marker `original-lines` must always be input coords.
+        let mut raw = String::new();
+        // Lines 1-50 of the input: a copy run that NixCopyRun will
+        // collapse to a single 3-line marker.
+        for i in 0..50 {
+            raw.push_str(&format!(
+                "copying path '/nix/store/p{i:03}-thing' from 'cache'\n"
+            ));
+        }
+        // Lines 51-58: spacer.
+        for i in 0..8 {
+            raw.push_str(&format!("spacer line {i}\n"));
+        }
+        // Lines 59-70: a building run that NixBuildingRun
+        // collapses. After NixCopyRun ran, this content's CURRENT
+        // line numbers are 4..16-ish, but its ORIGINAL line range
+        // is 59..70.
+        for i in 0..12 {
+            raw.push_str(&format!("building '/nix/store/b{i:02}-foo.drv'...\n"));
+        }
+        let ctx = run_chain(&raw);
+        let log = ctx.log();
+        // The nix-building marker's `original-lines` must reflect
+        // input lines 59..70 — not whatever current coords it had
+        // when NixBuildingRun ran.
+        let buildings: Vec<&str> = log
+            .lines()
+            .filter(|l| l.starts_with("<nix-building"))
+            .collect();
+        assert_eq!(buildings.len(), 1, "exactly one building marker");
+        let attr = buildings[0]
+            .split_whitespace()
+            .find(|s| s.starts_with("original-lines="))
+            .expect("original-lines present");
+        assert_eq!(
+            attr, "original-lines=\"59-70\"",
+            "marker must reference input coords (1-indexed); got: {attr}",
+        );
     }
 
     #[test]

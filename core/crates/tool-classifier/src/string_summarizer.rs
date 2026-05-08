@@ -1,6 +1,6 @@
 //! String → string compaction passes that operate on log-shaped text
 //! while preserving the value's JSON type. Each pass mutates a
-//! [`LogContext`] (the current text plus a line-segment map back to
+//! [`SegmentedText`] (the current text plus a line-segment map back to
 //! the original) and substitutes runs of "boring" lines with XML-tag
 //! marker blocks. The walker invokes the registered chain at every
 //! `Value::String` leaf so the schema stays faithful — a string goes
@@ -21,7 +21,7 @@
 
 use std::ops::Range;
 
-/// Ordered, contiguous coverage of `LogContext::log` by line index.
+/// Ordered, contiguous coverage of `SegmentedText::log` by line index.
 /// Each segment knows which lines of the *current* string it spans
 /// (`current`) and which lines of the *original* (pre-chain) string
 /// they came from (`original`). `Summary` segments are synthetic —
@@ -45,13 +45,13 @@ pub(crate) enum SegmentKind {
 }
 
 /// One run of original text that a pass may inspect. Yielded by
-/// [`LogContext::verbatim_regions`]; bodies sit on whole-line
+/// [`SegmentedText::verbatim_regions`]; bodies sit on whole-line
 /// boundaries so passes can do line-by-line scanning without
 /// worrying about partial lines.
 #[derive(Debug, Clone)]
 pub struct VerbatimRegion<'a> {
     pub text: &'a str,
-    /// Line index in the *current* `LogContext::log`.
+    /// Line index in the *current* `SegmentedText::log`.
     pub current: Range<u32>,
     /// Line index in the *original* (pre-chain) log.
     pub original: Range<u32>,
@@ -60,7 +60,7 @@ pub struct VerbatimRegion<'a> {
 /// State carried through the [`StringSummarizerChain`]. Owns the
 /// current text and the segment map back to the original.
 #[derive(Debug, Clone)]
-pub struct LogContext {
+pub struct SegmentedText {
     log: String,
     segments: Vec<Segment>,
     original_lines: u32,
@@ -71,7 +71,7 @@ pub struct LogContext {
     line_offsets: Vec<usize>,
 }
 
-impl LogContext {
+impl SegmentedText {
     pub fn from_initial(s: &str) -> Self {
         let line_offsets = compute_line_offsets(s);
         let lines = line_offsets.len().saturating_sub(1) as u32;
@@ -127,6 +127,42 @@ impl LogContext {
         (end - start) as u64
     }
 
+    /// Translate a current line range to its original line range.
+    /// Required by passes when emitting markers — the
+    /// `original-lines="…"` attribute MUST refer to original input
+    /// coordinates, not the current (post-prior-passes) coordinates.
+    /// `current` must lie wholly inside one `Verbatim` segment;
+    /// returns the identity range if no covering segment found
+    /// (defensive — shouldn't happen in practice).
+    pub fn current_to_original_range(&self, current: &Range<u32>) -> Range<u32> {
+        if let Some(i) = self.find_verbatim_covering(current) {
+            let seg = &self.segments[i];
+            let start = seg.original.start + (current.start - seg.current.start);
+            let end = seg.original.start + (current.end - seg.current.start);
+            return start..end;
+        }
+        current.clone()
+    }
+
+    /// Translate a single current line index to original. Used by
+    /// terminal passes (`BulkElide`) that touch ranges spanning
+    /// multiple segments. For a current line inside a `Summary`
+    /// segment, returns the start of that segment's original
+    /// range — points within a synthetic marker don't map cleanly.
+    pub fn current_to_original_line(&self, current_line: u32) -> u32 {
+        for seg in &self.segments {
+            if current_line >= seg.current.start && current_line < seg.current.end {
+                return match seg.kind {
+                    SegmentKind::Verbatim => {
+                        seg.original.start + (current_line - seg.current.start)
+                    }
+                    SegmentKind::Summary { .. } => seg.original.start,
+                };
+            }
+        }
+        self.original_lines
+    }
+
     /// Terminal compaction primitive: discard every line before
     /// `keep_from_line` (current coords) and prepend a single
     /// `<bulk-elided>` marker covering the dropped range. Resets
@@ -140,11 +176,24 @@ impl LogContext {
         let cutoff_byte = self.line_offsets[keep_from_line as usize];
         let elided_bytes = cutoff_byte as u64;
         let kept_lines_count = self.current_lines() - keep_from_line;
+        // Original-line coords for the marker — the elided range
+        // covers original lines 0..(orig of the kept-tail's first
+        // line). Without this translation `original-lines` would
+        // be wrong for any log where earlier passes already
+        // collapsed content.
+        let original_keep_from = self.current_to_original_line(keep_from_line);
+        let elided_original_lines = original_keep_from;
         let body = format!(
             "{} lines · {} bytes elided · showing last {} lines\n",
-            keep_from_line, elided_bytes, kept_lines_count,
+            elided_original_lines, elided_bytes, kept_lines_count,
         );
-        let marker = build_marker("bulk-elided", 0..keep_from_line, elided_bytes, &body, &[]);
+        let marker = build_marker(
+            "bulk-elided",
+            0..original_keep_from,
+            elided_bytes,
+            &body,
+            &[],
+        );
         let marker_lines = count_lines(&marker);
 
         let mut new_log = String::with_capacity(marker.len() + (self.log.len() - cutoff_byte));
@@ -238,8 +287,7 @@ impl LogContext {
         let summary_current_end = summary_current_start + new_text_lines;
         let summary_current = summary_current_start..summary_current_end;
 
-        let tail_current_orig_start =
-            seg.original.start + (current_lines.end - seg.current.start);
+        let tail_current_orig_start = seg.original.start + (current_lines.end - seg.current.start);
         let tail_current_orig_end = seg.original.end;
         let tail_current_start = summary_current_end;
         let tail_current_end = tail_current_start + (seg.current.end - current_lines.end);
@@ -396,9 +444,9 @@ fn escape_attr(v: &str) -> String {
 
 pub trait StringSummarizer: Send + Sync + 'static {
     fn name(&self) -> &'static str;
-    fn can_summarize(&self, ctx: &LogContext) -> bool;
+    fn can_summarize(&self, ctx: &SegmentedText) -> bool;
     /// Mutate `ctx` in place. Returns `true` if any rewrite happened.
-    fn apply(&self, ctx: &mut LogContext) -> bool;
+    fn apply(&self, ctx: &mut SegmentedText) -> bool;
 }
 
 pub struct StringSummarizerChain {
@@ -418,7 +466,7 @@ impl StringSummarizerChain {
     /// Run every pass once, in registration order. Each pass may
     /// rewrite multiple regions in one `apply` call; running passes
     /// only once keeps the overall pipeline O(passes × content).
-    pub fn run(&self, ctx: &mut LogContext) -> bool {
+    pub fn run(&self, ctx: &mut SegmentedText) -> bool {
         let mut any = false;
         for pass in &self.passes {
             if pass.can_summarize(ctx) && pass.apply(ctx) {
@@ -475,11 +523,11 @@ impl StringSummarizer for BulkElide {
         "bulk-elide"
     }
 
-    fn can_summarize(&self, ctx: &LogContext) -> bool {
+    fn can_summarize(&self, ctx: &SegmentedText) -> bool {
         ctx.log().len() > self.max_total_bytes
     }
 
-    fn apply(&self, ctx: &mut LogContext) -> bool {
+    fn apply(&self, ctx: &mut SegmentedText) -> bool {
         let total = ctx.current_lines();
         if total <= self.tail_lines {
             return false;
@@ -503,14 +551,11 @@ mod tests {
         fn name(&self) -> &'static str {
             self.name
         }
-        fn can_summarize(&self, ctx: &LogContext) -> bool {
-            ctx.verbatim_regions().any(|r| {
-                r.text
-                    .lines()
-                    .any(|l| l.starts_with(self.prefix))
-            })
+        fn can_summarize(&self, ctx: &SegmentedText) -> bool {
+            ctx.verbatim_regions()
+                .any(|r| r.text.lines().any(|l| l.starts_with(self.prefix)))
         }
-        fn apply(&self, ctx: &mut LogContext) -> bool {
+        fn apply(&self, ctx: &mut SegmentedText) -> bool {
             // Find a single contiguous run in any verbatim region.
             let runs: Vec<(Range<u32>, Range<u32>)> = ctx
                 .verbatim_regions()
@@ -540,12 +585,7 @@ mod tests {
             }
             for (run, _orig) in runs.into_iter().rev() {
                 let original_lines_count = run.end - run.start;
-                let body_open = open_tag(
-                    self.marker_tag,
-                    0..original_lines_count,
-                    0,
-                    &[],
-                );
+                let body_open = open_tag(self.marker_tag, 0..original_lines_count, 0, &[]);
                 let body = format!("{} matched\n", original_lines_count);
                 let close = close_tag(self.marker_tag);
                 let marker = format!("{body_open}{body}{close}");
@@ -557,7 +597,7 @@ mod tests {
 
     #[test]
     fn from_initial_yields_one_verbatim_segment() {
-        let ctx = LogContext::from_initial("a\nb\nc\n");
+        let ctx = SegmentedText::from_initial("a\nb\nc\n");
         assert_eq!(ctx.original_lines(), 3);
         let regions: Vec<_> = ctx.verbatim_regions().collect();
         assert_eq!(regions.len(), 1);
@@ -568,7 +608,7 @@ mod tests {
 
     #[test]
     fn replace_in_middle_splits_into_three_segments() {
-        let mut ctx = LogContext::from_initial("a\nb\nc\nd\ne\n");
+        let mut ctx = SegmentedText::from_initial("a\nb\nc\nd\ne\n");
         ctx.replace_with_summary(1..3, "X\n", "test");
         let segs: Vec<_> = ctx.segments.clone();
         assert_eq!(segs.len(), 3);
@@ -584,7 +624,7 @@ mod tests {
 
     #[test]
     fn replace_at_start_keeps_only_summary_and_tail() {
-        let mut ctx = LogContext::from_initial("a\nb\nc\n");
+        let mut ctx = SegmentedText::from_initial("a\nb\nc\n");
         ctx.replace_with_summary(0..2, "X\n", "test");
         assert_eq!(ctx.segments.len(), 2);
         assert!(matches!(ctx.segments[0].kind, SegmentKind::Summary { .. }));
@@ -596,7 +636,7 @@ mod tests {
 
     #[test]
     fn replace_at_end_keeps_only_head_and_summary() {
-        let mut ctx = LogContext::from_initial("a\nb\nc\n");
+        let mut ctx = SegmentedText::from_initial("a\nb\nc\n");
         ctx.replace_with_summary(1..3, "X\n", "test");
         assert_eq!(ctx.segments.len(), 2);
         assert!(matches!(ctx.segments[0].kind, SegmentKind::Verbatim));
@@ -606,7 +646,7 @@ mod tests {
 
     #[test]
     fn replace_whole_log_yields_single_summary_segment() {
-        let mut ctx = LogContext::from_initial("a\nb\nc\n");
+        let mut ctx = SegmentedText::from_initial("a\nb\nc\n");
         ctx.replace_with_summary(0..3, "X\n", "test");
         assert_eq!(ctx.segments.len(), 1);
         assert!(matches!(ctx.segments[0].kind, SegmentKind::Summary { .. }));
@@ -615,7 +655,7 @@ mod tests {
 
     #[test]
     fn second_pass_skips_summary_segments() {
-        let mut ctx = LogContext::from_initial("a\nb\nfoo\nfoo\nfoo\nd\ne\n");
+        let mut ctx = SegmentedText::from_initial("a\nb\nfoo\nfoo\nfoo\nd\ne\n");
         ctx.replace_with_summary(2..5, "<test>3 matched</test>\n", "test1");
         // Now run a second pass that *would* match if it saw the
         // synthetic marker text — verbatim_regions skips it.
@@ -626,7 +666,7 @@ mod tests {
     #[test]
     fn original_line_mapping_survives_two_passes() {
         let raw = "a\nb\nfoo\nfoo\nfoo\nd\ne\nbar\nbar\nf\n";
-        let mut ctx = LogContext::from_initial(raw);
+        let mut ctx = SegmentedText::from_initial(raw);
         // Pass 1: collapse foo run (current 2..5) into a 1-line marker.
         ctx.replace_with_summary(2..5, "<one>3</one>\n", "p1");
         // After pass 1, current looks like:
@@ -652,7 +692,7 @@ mod tests {
     #[test]
     fn chain_runs_two_passes_in_order() {
         let raw = "a\nfoo\nfoo\nb\nbar\nbar\nc\n";
-        let mut ctx = LogContext::from_initial(raw);
+        let mut ctx = SegmentedText::from_initial(raw);
         let chain = StringSummarizerChain::new()
             .register(PrefixSummarizer {
                 name: "p_foo",
@@ -683,14 +723,17 @@ mod tests {
         assert!(open.contains("<nix-copy"));
         assert!(open.contains("original-lines=\"12-22\""));
         assert!(open.contains("original-bytes=\"945\""));
-        assert!(!open.contains("kept-bytes"), "kept-bytes was deliberately dropped");
+        assert!(
+            !open.contains("kept-bytes"),
+            "kept-bytes was deliberately dropped"
+        );
         let close = close_tag("nix-copy");
         assert_eq!(close, "</nix-copy>\n");
     }
 
     #[test]
     fn was_modified_false_until_first_replace() {
-        let mut ctx = LogContext::from_initial("a\nb\n");
+        let mut ctx = SegmentedText::from_initial("a\nb\n");
         assert!(!ctx.was_modified());
         ctx.replace_with_summary(0..1, "X\n", "p");
         assert!(ctx.was_modified());
@@ -699,7 +742,7 @@ mod tests {
     #[test]
     fn byte_len_of_lines_matches_slice() {
         let raw = "aaaa\nbbbb\ncccc\n";
-        let ctx = LogContext::from_initial(raw);
+        let ctx = SegmentedText::from_initial(raw);
         assert_eq!(ctx.byte_len_of_lines(0..3), 15);
         assert_eq!(ctx.byte_len_of_lines(1..2), 5); // "bbbb\n"
     }
@@ -710,7 +753,7 @@ mod tests {
         for i in 0..1000 {
             raw.push_str(&format!("line {i:04} of unstructured chatter\n"));
         }
-        let mut ctx = LogContext::from_initial(&raw);
+        let mut ctx = SegmentedText::from_initial(&raw);
         BulkElide {
             max_total_bytes: 2_048,
             tail_lines: 20,
@@ -719,7 +762,10 @@ mod tests {
         let log = ctx.log();
         assert!(log.starts_with("<bulk-elided"), "log starts: {log:.80}…");
         assert!(log.contains("</bulk-elided>"));
-        assert!(log.contains("980 lines"), "elided count in body: {log:.300}");
+        assert!(
+            log.contains("980 lines"),
+            "elided count in body: {log:.300}"
+        );
         // Last 20 lines survive in order.
         assert!(log.contains("line 0980 of unstructured chatter"));
         assert!(log.contains("line 0999 of unstructured chatter"));
@@ -732,7 +778,7 @@ mod tests {
     fn bulk_elide_skips_when_total_under_tail_lines() {
         // Log is small (5 lines, 10 bytes), well under the byte
         // budget *and* the tail_lines knob — so apply is a no-op.
-        let mut ctx = LogContext::from_initial("a\nb\nc\nd\ne\n");
+        let mut ctx = SegmentedText::from_initial("a\nb\nc\nd\ne\n");
         let pass = BulkElide {
             max_total_bytes: 4,
             tail_lines: 100,
@@ -745,7 +791,7 @@ mod tests {
 
     #[test]
     fn bulk_elide_skips_when_under_byte_budget() {
-        let mut ctx = LogContext::from_initial("a\nb\nc\n");
+        let mut ctx = SegmentedText::from_initial("a\nb\nc\n");
         let pass = BulkElide::default();
         assert!(!pass.can_summarize(&ctx));
         assert!(!pass.apply(&mut ctx));
@@ -757,7 +803,7 @@ mod tests {
         // doesn't care about segment kinds — it just keeps the last
         // N lines verbatim, including any markers that happen to be
         // there.
-        let mut ctx = LogContext::from_initial("a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n");
+        let mut ctx = SegmentedText::from_initial("a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n");
         ctx.replace_with_summary(7..10, "<sum>tail</sum>\n", "p");
         // current is now: a b c d e f g <sum> (8 lines)
         ctx.elide_head_keep_tail(5);

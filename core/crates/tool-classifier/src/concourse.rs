@@ -21,9 +21,11 @@ use std::sync::{Arc, OnceLock};
 
 use regex::Regex;
 
-use super::string_summarizer::{LogContext, StringSummarizerChain};
+use super::string_summarizer::StringSummarizerChain;
+use super::walker::{self, WalkOutcome};
 use super::{
     Classification, ClassifierContext, ClassifierError, ResultClassifier, ToolResultSummary,
+    DEFAULT_GENERIC_THRESHOLD_BYTES,
 };
 
 /// Build-status variants. Set only when an upstream API call gives
@@ -100,23 +102,29 @@ impl ResultClassifier for ConcourseBuildLogClassifier {
         let raw = extract_text(ctx.raw);
         let stripped = ConcourseBuildLogPreprocessor::run(&raw);
 
-        let compacted = match self.chain.as_deref() {
-            Some(chain) => {
-                let mut log_ctx = LogContext::from_initial(&stripped);
-                chain.run(&mut log_ctx);
-                log_ctx.into_log()
-            }
-            None => stripped.clone(),
+        // Concourse's only unique work is preprocessing. Hand the
+        // stripped log to the walker — it descends into
+        // `Value::String`, runs the same chain `GenericFallback`
+        // uses at every other string leaf, and returns a
+        // schema-faithful Value::String back.
+        let value = serde_json::Value::String(stripped.clone());
+        let kept_value = match walker::classify_value(
+            &value,
+            DEFAULT_GENERIC_THRESHOLD_BYTES,
+            self.chain.as_deref(),
+        ) {
+            WalkOutcome::Passthrough(v) => v,
+            WalkOutcome::Elided { kept, .. } => kept,
         };
+        let logs = kept_value.as_str().unwrap_or(&stripped).to_string();
 
-        let summary = ConcourseBuildLogSummary { logs: compacted };
+        let summary = ConcourseBuildLogSummary { logs };
 
         Ok(Classification {
             summary: ToolResultSummary::ConcourseLogs(summary),
-            // canonical_text is the bytes `tool_output_fetch` will
-            // operate on. Use the stripped log so marker
-            // `original-lines` attributes line up with what the
-            // agent gets back from a range/grep fetch.
+            // canonical_text is the bytes `tool_output_fetch`
+            // operates on; stripped log so marker `original-lines`
+            // attributes line up with the persisted bytes.
             canonical_text: stripped,
         })
     }

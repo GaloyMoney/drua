@@ -13,8 +13,8 @@ pub use classifier::{
     default_summarizer_chain, BulkElide, Classification, ClassifierContext, ClassifierError,
     ClassifierRegistry, ConcourseBuildLogClassifier, ConcourseBuildLogPreprocessor,
     ConcourseBuildLogSummary, ConcourseBuildStatus, ElidedPath, ElisionKind, GenericFallback,
-    GitCloneProgress, LogContext, NixBuildingRun, NixCacheActivity, NixCopyRun, NixDrvList,
-    NixFetchList, ResultClassifier, StringSummarizer, StringSummarizerChain, TimestampedLine,
+    GitCloneProgress, NixBuildingRun, NixCacheActivity, NixCopyRun, NixDrvList, NixFetchList,
+    ResultClassifier, SegmentedText, StringSummarizer, StringSummarizerChain, TimestampedLine,
     ToolResultSummary,
 };
 pub use config::*;
