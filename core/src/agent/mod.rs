@@ -1624,9 +1624,7 @@ async fn fan_out_tool_calls(
             let name = tu.name.clone();
             let id = tu.id.clone();
             let args = tu.input.as_object().cloned();
-            let res = toolsets
-                .call_top_level_tool(&subject, &name, args)
-                .await;
+            let res = toolsets.call_top_level_tool(&subject, &name, args).await;
             let result = match res {
                 Ok(r) => llm::ToolUseResult {
                     tool_use_id: id,

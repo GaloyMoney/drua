@@ -36,6 +36,7 @@ fn classify(raw: &str) -> ToolResultSummary {
     ConcourseBuildLogClassifier
         .classify(&ctx)
         .expect("classifier never errors on valid input")
+        .summary
 }
 
 #[test]
@@ -186,6 +187,6 @@ fn registry_routes_concourse_to_typed_classifier() {
         raw: &result,
         exit_code: None,
     };
-    let summary = registry.classify(&ctx);
-    assert_eq!(summary.kind(), "concourse_build_log");
+    let classification = registry.classify(&ctx);
+    assert_eq!(classification.summary.kind(), "concourse_build_log");
 }

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT\n                id, agent_id, tool_name, args, args_hash, classifier,\n                summary, raw_text, raw_size_bytes, exit_code,\n                duration_ms, started_at, created_at\n            FROM tool_invocations\n            WHERE agent_id = $1 AND args_hash = $2\n            ORDER BY created_at DESC\n            LIMIT 1\n            ",
+  "query": "\n            SELECT\n                id, agent_id, user_id, tool_name, args, args_hash, classifier,\n                summary, raw_text, raw_size_bytes, original_structured,\n                exit_code, duration_ms, started_at, created_at\n            FROM tool_invocations\n            WHERE id = $1\n            ",
   "describe": {
     "columns": [
       {
@@ -15,69 +15,79 @@
       },
       {
         "ordinal": 2,
+        "name": "user_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 3,
         "name": "tool_name",
         "type_info": "Text"
       },
       {
-        "ordinal": 3,
+        "ordinal": 4,
         "name": "args",
         "type_info": "Jsonb"
       },
       {
-        "ordinal": 4,
+        "ordinal": 5,
         "name": "args_hash",
         "type_info": "Bytea"
       },
       {
-        "ordinal": 5,
+        "ordinal": 6,
         "name": "classifier",
         "type_info": "Text"
       },
       {
-        "ordinal": 6,
+        "ordinal": 7,
         "name": "summary",
         "type_info": "Jsonb"
       },
       {
-        "ordinal": 7,
+        "ordinal": 8,
         "name": "raw_text",
         "type_info": "Text"
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "raw_size_bytes",
         "type_info": "Int8"
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
+        "name": "original_structured",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 11,
         "name": "exit_code",
         "type_info": "Int4"
       },
       {
-        "ordinal": 10,
+        "ordinal": 12,
         "name": "duration_ms",
         "type_info": "Int4"
       },
       {
-        "ordinal": 11,
+        "ordinal": 13,
         "name": "started_at",
         "type_info": "Timestamptz"
       },
       {
-        "ordinal": 12,
+        "ordinal": 14,
         "name": "created_at",
         "type_info": "Timestamptz"
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Bytea"
+        "Uuid"
       ]
     },
     "nullable": [
       false,
-      false,
+      true,
+      true,
       false,
       false,
       false,
@@ -86,10 +96,11 @@
       false,
       false,
       true,
+      true,
       false,
       false,
       false
     ]
   },
-  "hash": "ba74b9621889bbd881c3e4265ffcf400956eae6a314009d9378339d1eb4e363b"
+  "hash": "3f27c8e562341552a5a522d572dd84955b99d64a8a6b03966d47c19bdb431785"
 }

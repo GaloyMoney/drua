@@ -380,7 +380,7 @@ const COMPOSE_FETCH_HINT: &str =
 /// final `structured_content.sub_invocations` directory so the agent
 /// can `tool_output_fetch(invocation_id, ...)` on any specific
 /// sub-call's persisted output.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
 pub struct SubInvocation {
     /// Order within the script — `seq=0` is the first `tools.foo()`
     /// call, `seq=1` the second, etc. Stable across re-runs of the
