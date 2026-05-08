@@ -225,12 +225,15 @@ impl TopLevelTool for ComposeTool {
         // persist the full return so the agent can fetch it.
         let walker_classifier = GenericFallback::default();
         let walker_input = build_walker_input(&result.value);
+        let classifiers_for_region = Arc::clone(&self.classifiers);
+        let classify_region = |region: &str| classifiers_for_region.classify_region(region);
         let classification = walker_classifier
             .classify(&ClassifierContext {
                 tool_name: "compose",
                 args: &recorded_args,
                 raw: &walker_input,
                 exit_code: None,
+                classify_region: &classify_region,
             })
             .unwrap_or_else(|_| Classification {
                 summary: ToolResultSummary::Passthrough {
@@ -629,11 +632,14 @@ impl CatalogDispatcherShared {
         let Some(invocations) = self.tool_invocations.as_ref() else {
             return;
         };
+        let classifiers = Arc::clone(&self.classifiers);
+        let classify_region = |region: &str| classifiers.classify_region(region);
         let classification = self.classifiers.classify(&ClassifierContext {
             tool_name,
             args,
             raw,
             exit_code: None,
+            classify_region: &classify_region,
         });
         if classification.summary.is_passthrough() {
             return;

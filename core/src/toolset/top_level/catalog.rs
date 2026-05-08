@@ -488,6 +488,8 @@ impl TopLevelTool for CallCatalogTool {
         let Some(invocations) = self.tool_invocations.as_ref() else {
             return Ok(result);
         };
+        let classifiers = Arc::clone(&self.classifiers);
+        let classify_region = |region: &str| classifiers.classify_region(region);
         let classification = self
             .classifiers
             .classify(&super::super::classifier::ClassifierContext {
@@ -495,6 +497,7 @@ impl TopLevelTool for CallCatalogTool {
                 args: &recorded_args,
                 raw: &result,
                 exit_code: None,
+                classify_region: &classify_region,
             });
         if classification.summary.is_passthrough() {
             return Ok(result);

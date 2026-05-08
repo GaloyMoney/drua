@@ -133,6 +133,15 @@ pub struct ClassifierContext<'a> {
     pub args: &'a serde_json::Value,
     pub raw: &'a CallToolResult,
     pub exit_code: Option<i32>,
+    /// Re-enter the registry to classify a sub-region of `raw`. Parent
+    /// classifiers (e.g. `ConcourseLogsClassifier` extracting a failed
+    /// derivation's log_tail) call this on the substring; matching
+    /// inner classifiers fire via `matches_content` and produce a
+    /// nested `ToolResultSummary` for the parent to embed. `None` when
+    /// no inner classifier matched (the caller stores raw text). The
+    /// region recursion is bounded — each region is strictly smaller
+    /// than its parent's input.
+    pub classify_region: &'a dyn Fn(&str) -> Option<ToolResultSummary>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -160,7 +169,16 @@ pub struct Classification {
 
 pub trait ResultClassifier: Send + Sync + 'static {
     fn name(&self) -> &str;
+    /// Identity-based fast-path match. Cheap; runs first.
     fn matches(&self, tool_name: &str, args: &serde_json::Value) -> bool;
+    /// Content-sniff fallback. Runs only when no classifier matched
+    /// by identity, and when the parent is a sub-region recursion
+    /// (where there is no meaningful tool_name). Default: never.
+    /// Override to peek at the raw bytes via `ctx.raw` (e.g. regex
+    /// over `extract_text(ctx.raw)`).
+    fn matches_content(&self, _ctx: &ClassifierContext<'_>) -> bool {
+        false
+    }
     fn classify(&self, ctx: &ClassifierContext<'_>) -> Result<Classification, ClassifierError>;
 }
 
@@ -192,6 +210,7 @@ impl ClassifierRegistry {
     }
 
     pub fn classify(&self, ctx: &ClassifierContext<'_>) -> Classification {
+        // First pass — identity match (cheap, declarative).
         for classifier in &self.classifiers {
             if !classifier.matches(ctx.tool_name, ctx.args) {
                 continue;
@@ -207,8 +226,30 @@ impl ClassifierRegistry {
                 }
             }
         }
-        // Unreachable when GenericFallback is registered, but produce a
-        // safe default if someone hands us an empty registry.
+        // Second pass — content-sniff. `GenericFallback`'s
+        // `matches_content` stays false (it's the catch-all and would
+        // trip on every input here, defeating the more-specific
+        // sniff). Cargo / Nix / Nextest classifiers use this path to
+        // fire on bash-disguised content and on sub-region recursion.
+        for classifier in &self.classifiers {
+            if !classifier.matches_content(ctx) {
+                continue;
+            }
+            match classifier.classify(ctx) {
+                Ok(c) => return c,
+                Err(e) => {
+                    tracing::warn!(
+                        classifier = classifier.name(),
+                        error = %e,
+                        "content-sniff classifier failed; trying next",
+                    );
+                }
+            }
+        }
+        // Final fallback — `GenericFallback::matches` always returns
+        // true, so the first-pass loop should already have caught
+        // anything reaching here. Kept as a safety net for empty
+        // registries.
         let canonical_text = extract_text(ctx.raw);
         Classification {
             summary: ToolResultSummary::Passthrough {
@@ -216,6 +257,40 @@ impl ClassifierRegistry {
             },
             canonical_text,
         }
+    }
+
+    /// Classify a substring of a parent's `raw_text` as a candidate
+    /// embedded summary. Used by parent classifiers (Concourse →
+    /// failed derivation log tail → optional Cargo/Nix/etc. inner
+    /// summary). Only the content-sniff pass runs — identity-based
+    /// match is meaningless for an anonymous text region. Returns
+    /// `None` when no classifier matched (the parent stores the
+    /// region as raw text instead).
+    pub fn classify_region(&self, region: &str) -> Option<ToolResultSummary> {
+        // Synthesize a minimal CallToolResult so existing classifiers
+        // can read the region via their normal `extract_text(ctx.raw)`
+        // helper. structured_content is left None, mimicking a plain-
+        // text tool's call result.
+        use rmcp::model::Content;
+        let synthetic = CallToolResult::success(vec![Content::text(region.to_string())]);
+        let no_args = serde_json::Value::Object(serde_json::Map::new());
+        let nop_recurse: &dyn Fn(&str) -> Option<ToolResultSummary> = &|_| None;
+        let region_ctx = ClassifierContext {
+            tool_name: "",
+            args: &no_args,
+            raw: &synthetic,
+            exit_code: None,
+            classify_region: nop_recurse,
+        };
+        for classifier in &self.classifiers {
+            if !classifier.matches_content(&region_ctx) {
+                continue;
+            }
+            if let Ok(c) = classifier.classify(&region_ctx) {
+                return Some(c.summary);
+            }
+        }
+        None
     }
 }
 
@@ -349,11 +424,15 @@ mod tests {
         // tests the args value is just an empty object.
         static EMPTY_ARGS: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
         let args = EMPTY_ARGS.get_or_init(|| serde_json::json!({}));
+        // No-op region recursion — most tests don't care; the few that
+        // exercise nesting build their own context.
+        static NO_RECURSE: fn(&str) -> Option<ToolResultSummary> = |_| None;
         ClassifierContext {
             tool_name,
             args,
             raw,
             exit_code: None,
+            classify_region: &NO_RECURSE,
         }
     }
 

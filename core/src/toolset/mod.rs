@@ -555,11 +555,13 @@ impl ToolSets {
                     let args_for_classify = args_value
                         .clone()
                         .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+                    let classify_region = |region: &str| classifiers.classify_region(region);
                     let classification = classifiers.classify(&ClassifierContext {
                         tool_name: name,
                         args: &args_for_classify,
                         raw: &raw,
                         exit_code: None,
+                        classify_region: &classify_region,
                     });
 
                     // Capture pipeline metrics before classification is

@@ -27,11 +27,13 @@ fn classify(raw: &str) -> ToolResultSummary {
     let mut result = CallToolResult::success(vec![Content::text(raw.to_string())]);
     result.structured_content = Some(serde_json::json!({"logs": raw}));
     let args = serde_json::json!({"build_id": 7001970u64});
+    let no_recurse: &dyn Fn(&str) -> Option<ToolResultSummary> = &|_| None;
     let ctx = ClassifierContext {
         tool_name: "concourse_get_build_logs",
         args: &args,
         raw: &result,
         exit_code: None,
+        classify_region: no_recurse,
     };
     ConcourseBuildLogClassifier
         .classify(&ctx)
@@ -181,12 +183,14 @@ fn registry_routes_concourse_to_typed_classifier() {
     result.structured_content = Some(serde_json::json!({"logs": BUILD_610_SUCCEEDED}));
 
     let args = serde_json::json!({"build_id": 7001970u64});
+    let no_recurse: &dyn Fn(&str) -> Option<ToolResultSummary> = &|_| None;
     let ctx = ClassifierContext {
         tool_name: "concourse_get_build_logs",
         args: &args,
         raw: &result,
         exit_code: None,
+        classify_region: no_recurse,
     };
     let classification = registry.classify(&ctx);
-    assert_eq!(classification.summary.kind(), "concourse");
+    assert_eq!(classification.summary.kind(), "concourse_logs");
 }
