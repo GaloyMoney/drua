@@ -48,9 +48,9 @@ pub struct GitProxies {
 }
 
 impl GitProxies {
-    pub fn new(allowlist: Allowlist) -> Self {
+    pub fn new(allowlist: Arc<Allowlist>) -> Self {
         Self {
-            allowlist: Arc::new(allowlist),
+            allowlist,
             mirror: None,
             creds: None,
         }

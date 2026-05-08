@@ -85,6 +85,21 @@ impl RepoCoord {
             repo: repo.to_string(),
         })
     }
+
+    /// Parses a GitHub clone URL. Accepts the four forms `git clone`
+    /// understands (`https://`, `https://…/repo.git`, `git@github.com:…`,
+    /// `git@github.com:….git`); returns `None` for anything else
+    /// (self-hosted GHE, mirror.example.com, etc. — those would need
+    /// their own allow-list lookup path).
+    pub fn from_github_url(url: &str) -> Option<Self> {
+        let after_host = url
+            .strip_prefix("https://github.com/")
+            .or_else(|| url.strip_prefix("http://github.com/"))
+            .or_else(|| url.strip_prefix("git@github.com:"))?;
+        let after_host = after_host.trim_end_matches('/');
+        let (owner, repo) = after_host.split_once('/')?;
+        Self::parse(owner, repo)
+    }
 }
 
 #[cfg(test)]
@@ -114,6 +129,33 @@ mod tests {
             assert_eq!(GitService::from_query(s).unwrap().as_str(), s);
         }
         assert!(GitService::from_query("git-archive").is_none());
+    }
+
+    #[test]
+    fn from_github_url_handles_clone_url_forms() {
+        let cases = [
+            "https://github.com/GaloyMoney/drua",
+            "https://github.com/GaloyMoney/drua.git",
+            "https://github.com/GaloyMoney/drua/",
+            "http://github.com/GaloyMoney/drua",
+            "git@github.com:GaloyMoney/drua",
+            "git@github.com:GaloyMoney/drua.git",
+        ];
+        for url in cases {
+            let r = RepoCoord::from_github_url(url)
+                .unwrap_or_else(|| panic!("expected Some for {url}"));
+            assert_eq!(r.owner, "GaloyMoney");
+            assert_eq!(r.repo, "drua");
+        }
+    }
+
+    #[test]
+    fn from_github_url_rejects_non_github_hosts() {
+        assert!(RepoCoord::from_github_url("https://gitlab.com/x/y").is_none());
+        assert!(RepoCoord::from_github_url("https://example.com/x/y").is_none());
+        assert!(RepoCoord::from_github_url("not-a-url").is_none());
+        assert!(RepoCoord::from_github_url("https://github.com/").is_none());
+        assert!(RepoCoord::from_github_url("https://github.com/owner-only").is_none());
     }
 
     #[test]

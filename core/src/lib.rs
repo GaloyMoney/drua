@@ -187,15 +187,22 @@ impl App {
         let context_generation = ContextGeneration::new();
         spawn_context_generation_listener(pool.clone(), context_generation.clone());
 
-        let sandboxes = Arc::new(Sandboxes::init(pool, config.sandbox).await?);
-
         // Bad ref-pattern in YAML must crash boot, not silently fail every push.
-        let allowlist = drua_git_proxy::Allowlist::from_config(&config.git_proxy.allowlist)
-            .map_err(|e| AppError::GitProxy(format!("invalid allowlist config: {e}")))?;
+        // Built before `Sandboxes::init` because both services share it —
+        // `Sandboxes` pre-validates `mode: repo` against the allow-list at
+        // create time so failed clones don't leak `Errored` rows + child
+        // tool-server processes (PR review feedback).
+        let allowlist = Arc::new(
+            drua_git_proxy::Allowlist::from_config(&config.git_proxy.allowlist)
+                .map_err(|e| AppError::GitProxy(format!("invalid allowlist config: {e}")))?,
+        );
         tracing::info!(
             entries = allowlist.entries().len(),
             "git-proxy allow-list loaded"
         );
+
+        let sandboxes = Arc::new(Sandboxes::init(pool, config.sandbox, allowlist.clone()).await?);
+
         let mirror_root = config
             .git_proxy
             .mirror_root
