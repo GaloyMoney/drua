@@ -136,12 +136,13 @@ impl ToolSets {
     pub async fn init(
         config: ToolSetsConfig,
         audit: Option<Arc<Audit>>,
+        github_app: Option<Arc<github_app::GitHubAppTokenProvider>>,
     ) -> Result<Self, ToolSetsError> {
         let mut sets: Vec<Arc<dyn SearchableToolSet>> = Vec::new();
         let mut init_errors: Vec<(String, String)> = Vec::new();
 
         for upstream in &config.mcp_upstreams {
-            match UpstreamToolSet::init(upstream).await {
+            match UpstreamToolSet::init(upstream, github_app.as_ref()).await {
                 Ok(ts) => {
                     sets.push(Arc::new(ts));
                 }

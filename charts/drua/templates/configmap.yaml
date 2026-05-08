@@ -213,6 +213,9 @@ data:
           {{- if .internalOnly }}
           internal_only: true
           {{- end }}
+          {{- if .authMode }}
+          auth_mode: {{ .authMode | quote }}
+          {{- end }}
       {{- end }}
       {{- if and $k8sMcp $k8sMcp.enabled }}
         - name: "kubernetes"

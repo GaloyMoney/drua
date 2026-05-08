@@ -108,26 +108,13 @@ impl App {
             None
         };
 
-        let audit = Arc::new(Audit::new(pool));
-        let toolsets = ToolSets::init(config.toolsets, Some(Arc::clone(&audit))).await?;
-        toolsets.log_init_summary();
-        if let Some(ca) = code_assistant.as_ref() {
-            toolsets.register_searchable(CodeAssistantToolSet::new(Arc::clone(ca)));
-        }
-        toolsets.register_top_level(ProjectLog::new(Arc::clone(&audit)));
-
-        let (prompt_executor, prompt_tx) = PromptExecutor::init(config.prompt_executor).await;
-        let prompt_executor = Arc::new(prompt_executor);
-
-        let mcp_creds = McpCredentials::new(pool);
-
-        let encryption_key = config.encryption.encryption_key();
-        let project_secrets = ProjectSecrets::new(pool, encryption_key);
-
-        // Built before Sandboxes::init so the provider can mint a fresh
-        // installation token for `/initialize` to clone private repos.
-        // Verify by generating a token at startup — crash on failure rather
-        // than silently skip.
+        // Built before ToolSets::init / Sandboxes::init so:
+        //   - mcp upstreams with `auth_mode: github_app` can mint their
+        //     initial installation token at upstream init time
+        //   - sandboxes can mint a fresh installation token for
+        //     `/initialize` to clone private repos
+        // Verify by generating a token at startup — crash on failure
+        // rather than silently skip.
         let github_app = match config.github_app {
             Some(ref gh_config) => {
                 let provider = GitHubAppTokenProvider::new(gh_config)
@@ -144,6 +131,27 @@ impl App {
                 None
             }
         };
+
+        let audit = Arc::new(Audit::new(pool));
+        let toolsets = ToolSets::init(
+            config.toolsets,
+            Some(Arc::clone(&audit)),
+            github_app.clone(),
+        )
+        .await?;
+        toolsets.log_init_summary();
+        if let Some(ca) = code_assistant.as_ref() {
+            toolsets.register_searchable(CodeAssistantToolSet::new(Arc::clone(ca)));
+        }
+        toolsets.register_top_level(ProjectLog::new(Arc::clone(&audit)));
+
+        let (prompt_executor, prompt_tx) = PromptExecutor::init(config.prompt_executor).await;
+        let prompt_executor = Arc::new(prompt_executor);
+
+        let mcp_creds = McpCredentials::new(pool);
+
+        let encryption_key = config.encryption.encryption_key();
+        let project_secrets = ProjectSecrets::new(pool, encryption_key);
 
         let job_config = job::JobSvcConfig::builder()
             .pool(pool.clone())

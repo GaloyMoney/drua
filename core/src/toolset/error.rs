@@ -8,6 +8,10 @@ pub enum ToolSetsError {
     Service(#[from] rmcp::service::ServiceError),
     #[error("ToolSetsError - MissingAuthHeader: upstream '{name}' requires authentication — set {env_key}")]
     MissingAuthHeader { name: String, env_key: String },
+    #[error("ToolSetsError - GithubAppNotConfigured: upstream '{0}' requested auth_mode=github_app but no GitHub App is configured")]
+    GithubAppNotConfigured(String),
+    #[error("ToolSetsError - GithubApp: {0}")]
+    GithubApp(#[from] github_app::GitHubAppError),
     #[error("ToolSetsError - InvalidHeader: {0}")]
     InvalidHeader(String),
     #[error("ToolSetsError - ToolNotFound: {0}")]

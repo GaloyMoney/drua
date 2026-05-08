@@ -185,7 +185,7 @@ mod tests {
         Arc::new(
             tokio::runtime::Runtime::new()
                 .unwrap()
-                .block_on(ToolSets::init(Default::default(), None))
+                .block_on(ToolSets::init(Default::default(), None, None))
                 .unwrap(),
         )
     }

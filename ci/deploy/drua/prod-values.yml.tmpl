@@ -68,9 +68,15 @@ galoyAgents:
         url: https://mcp.honeycomb.io/mcp
         category: observability
         categoryDescription: "Distributed traces, SLOs, and query analysis"
+      # All three github upstreams use github-app installation tokens
+      # (auth_mode: github_app) instead of a long-lived PAT. The
+      # in-process refresh task rebuilds each rmcp client every ~50
+      # minutes against a freshly-minted 1-hour token. Locally, drua.yml
+      # keeps auth_mode: static + a developer PAT.
       - name: github
         url: https://api.githubcopilot.com/mcp/readonly
         toolPrefix: github
+        authMode: github_app
         category: source-control
         categoryDescription: "GitHub repositories, pull requests, issues, and code search"
         allowedTools:
@@ -89,6 +95,7 @@ galoyAgents:
       - name: github_actions
         url: https://api.githubcopilot.com/mcp/x/actions/readonly
         toolPrefix: github_actions
+        authMode: github_app
         category: ci
         categoryDescription: "GitHub Actions workflows, runs, jobs, and logs"
         allowedTools:
@@ -102,6 +109,7 @@ galoyAgents:
       - name: github_pull_requests
         url: https://api.githubcopilot.com/mcp/x/pull_requests
         toolPrefix: github_pr
+        authMode: github_app
         category: source-control-write
         categoryDescription: "GitHub PR mutations — create"
         internalOnly: true

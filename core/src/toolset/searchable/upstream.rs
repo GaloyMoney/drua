@@ -1,5 +1,8 @@
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
+use github_app::GitHubAppTokenProvider;
 use http::{HeaderName, HeaderValue};
 use rmcp::{
     model::{CallToolRequestParams, CallToolResult, JsonObject},
@@ -7,13 +10,22 @@ use rmcp::{
     transport::streamable_http_client::{
         StreamableHttpClientTransportConfig, StreamableHttpClientWorker,
     },
-    Peer, RoleClient, ServiceExt,
+    RoleClient, ServiceExt,
 };
+use tokio::sync::RwLock;
 
 use crate::auth::AuthSubject;
 use crate::primitives::AuthScope;
 
-use super::super::{McpUpstreamConfig, SearchableToolSet, ToolSetEntry, ToolSetsError};
+use super::super::{
+    McpAuthMode, McpUpstreamConfig, SearchableToolSet, ToolSetEntry, ToolSetsError,
+};
+
+/// Refresh App-minted installation tokens this often. Tokens nominally
+/// expire after 1 hour; the 10-minute safety margin absorbs clock skew
+/// and gives us one in-cycle retry window if the GitHub API is briefly
+/// unreachable when refresh fires.
+const GITHUB_APP_REFRESH_INTERVAL: Duration = Duration::from_secs(50 * 60);
 
 pub struct UpstreamToolSet {
     name: String,
@@ -26,37 +38,43 @@ pub struct UpstreamToolSet {
     /// Anonymous). See [`McpUpstreamConfig::internal_only`].
     internal_only: bool,
     tools: Vec<ToolSetEntry>,
-    client: RunningService<RoleClient, ()>,
+    /// `Arc<RwLock<...>>` so the optional refresh task can swap in a
+    /// freshly-built rmcp client when the github-app token expires
+    /// without dropping in-flight calls.
+    client: Arc<RwLock<RunningService<RoleClient, ()>>>,
+    /// Owned so the refresh task is aborted when the toolset is dropped.
+    _refresh_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl UpstreamToolSet {
     pub(in super::super) async fn init(
         upstream: &McpUpstreamConfig,
+        github_app: Option<&Arc<GitHubAppTokenProvider>>,
     ) -> Result<UpstreamToolSet, ToolSetsError> {
-        let mut headers = HashMap::new();
-        if upstream.auth_header.is_empty() {
-            if upstream.auth_required {
-                let env_key = format!("{}_AUTH_HEADER", upstream.name.to_uppercase());
-                return Err(ToolSetsError::MissingAuthHeader {
-                    name: upstream.name.clone(),
-                    env_key,
-                });
+        let header_value = match upstream.auth_mode {
+            McpAuthMode::Static => {
+                if upstream.auth_header.is_empty() {
+                    if upstream.auth_required {
+                        let env_key = format!("{}_AUTH_HEADER", upstream.name.to_uppercase());
+                        return Err(ToolSetsError::MissingAuthHeader {
+                            name: upstream.name.clone(),
+                            env_key,
+                        });
+                    }
+                    String::new()
+                } else {
+                    upstream.auth_header.clone()
+                }
             }
-        } else {
-            headers.insert(
-                HeaderName::from_bytes(upstream.auth_header_name.as_bytes())
-                    .map_err(|e| ToolSetsError::InvalidHeader(e.to_string()))?,
-                HeaderValue::from_str(&upstream.auth_header)
-                    .map_err(|e| ToolSetsError::InvalidHeader(e.to_string()))?,
-            );
-        }
+            McpAuthMode::GithubApp => {
+                let provider = github_app
+                    .ok_or_else(|| ToolSetsError::GithubAppNotConfigured(upstream.name.clone()))?;
+                let token = provider.generate_token().await?;
+                format!("Bearer {}", token.token)
+            }
+        };
 
-        let transport_config = StreamableHttpClientTransportConfig::with_uri(upstream.url.as_str())
-            .custom_headers(headers);
-
-        let worker = StreamableHttpClientWorker::new(reqwest::Client::new(), transport_config);
-
-        let client = ().serve(worker).await.map_err(Box::new)?;
+        let client = build_rmcp_client(upstream, &header_value).await?;
 
         let allowed = upstream.allowed_tools.as_ref();
         let tools: Vec<ToolSetEntry> = client
@@ -75,6 +93,24 @@ impl UpstreamToolSet {
             })
             .collect();
 
+        let client = Arc::new(RwLock::new(client));
+
+        // For github-app upstreams, the installation token expires in 1
+        // hour. Spawn a per-upstream task that pre-emptively rebuilds the
+        // rmcp client with a fresh token every 50 minutes. The handle is
+        // owned by the toolset so it's aborted on drop.
+        let refresh_task = match upstream.auth_mode {
+            McpAuthMode::GithubApp => {
+                let provider = Arc::clone(github_app.expect("checked above"));
+                let upstream = upstream.clone();
+                let client_for_task = Arc::clone(&client);
+                Some(tokio::spawn(async move {
+                    refresh_loop(upstream, provider, client_for_task).await;
+                }))
+            }
+            McpAuthMode::Static => None,
+        };
+
         let tool_prefix = upstream
             .tool_prefix
             .clone()
@@ -89,11 +125,64 @@ impl UpstreamToolSet {
             internal_only: upstream.internal_only,
             tools,
             client,
+            _refresh_task: refresh_task,
         })
     }
+}
 
-    fn peer(&self) -> &Peer<RoleClient> {
-        self.client.peer()
+async fn build_rmcp_client(
+    upstream: &McpUpstreamConfig,
+    header_value: &str,
+) -> Result<RunningService<RoleClient, ()>, ToolSetsError> {
+    let mut headers = HashMap::new();
+    if !header_value.is_empty() {
+        headers.insert(
+            HeaderName::from_bytes(upstream.auth_header_name.as_bytes())
+                .map_err(|e| ToolSetsError::InvalidHeader(e.to_string()))?,
+            HeaderValue::from_str(header_value)
+                .map_err(|e| ToolSetsError::InvalidHeader(e.to_string()))?,
+        );
+    }
+    let transport_config = StreamableHttpClientTransportConfig::with_uri(upstream.url.as_str())
+        .custom_headers(headers);
+    let worker = StreamableHttpClientWorker::new(reqwest::Client::new(), transport_config);
+    let client = ().serve(worker).await.map_err(Box::new)?;
+    Ok(client)
+}
+
+async fn refresh_loop(
+    upstream: McpUpstreamConfig,
+    provider: Arc<GitHubAppTokenProvider>,
+    client: Arc<RwLock<RunningService<RoleClient, ()>>>,
+) {
+    loop {
+        tokio::time::sleep(GITHUB_APP_REFRESH_INTERVAL).await;
+        let token = match provider.generate_token().await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(
+                    upstream = %upstream.name,
+                    error = %e,
+                    "github_app token refresh failed; will retry on next cycle"
+                );
+                continue;
+            }
+        };
+        let header_value = format!("Bearer {}", token.token);
+        match build_rmcp_client(&upstream, &header_value).await {
+            Ok(new_client) => {
+                *client.write().await = new_client;
+                tracing::info!(
+                    upstream = %upstream.name,
+                    "rebuilt mcp upstream client with refreshed github_app token"
+                );
+            }
+            Err(e) => tracing::warn!(
+                upstream = %upstream.name,
+                error = %e,
+                "failed to rebuild rmcp client after token refresh"
+            ),
+        }
     }
 }
 
@@ -134,7 +223,8 @@ impl SearchableToolSet for UpstreamToolSet {
         if let Some(args) = arguments {
             params = params.with_arguments(args);
         }
-        let result = self.peer().call_tool(params).await?;
+        let client = self.client.read().await;
+        let result = client.peer().call_tool(params).await?;
         Ok(result)
     }
 }
