@@ -121,7 +121,7 @@ async fn persist_round_trip_and_fetch_modes() {
         .await
         .expect("tail fetch");
     assert_eq!(tail.content, "line-0197\nline-0198\nline-0199");
-    assert!(!tail.truncated);
+    assert!(tail.elision.is_none());
     assert_eq!(tail.total_bytes, raw.len() as u64);
 
     // Head: first 2 lines.

@@ -94,9 +94,33 @@ fn default_true() -> bool {
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct FetchResult {
+    /// Model-facing slice. When the slice exceeded the response cap,
+    /// the head fits and a `[… N bytes elided …]` trailer is appended
+    /// with refinement guidance — `elision` carries the same info
+    /// structurally for programmatic callers.
     pub content: String,
-    pub truncated: bool,
+
+    /// Total size of the persisted `raw_text` for this invocation, in bytes.
+    /// Useful for budgeting follow-up `range` queries. Not the size of
+    /// `content` — `content` is the slice you asked for.
     pub total_bytes: u64,
+
+    /// `Some(...)` when the slice the query produced exceeded the
+    /// response cap. The persisted invocation is the canonical source
+    /// of truth, so we do NOT persist a new row for the elided slice;
+    /// agents refine against the original `invocation_id` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub elision: Option<FetchElision>,
+}
+
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct FetchElision {
+    /// Size in bytes the slice would have been if uncapped.
+    pub slice_bytes: u64,
+    /// Size in bytes actually returned in `content` (excluding trailer).
+    pub kept_bytes: u64,
+    /// Per-mode advice for narrowing the next query so the slice fits.
+    pub hint: String,
 }
 
 /// Maximum length of a `Grep` regex.
@@ -486,18 +510,81 @@ pub(crate) fn apply_fetch_query(
         }
     };
 
-    let (content, truncated) = if content.len() > MAX_FETCH_RESPONSE_BYTES {
+    let (content, elision) = if content.len() > MAX_FETCH_RESPONSE_BYTES {
+        let slice_bytes = content.len() as u64;
         let cut = floor_char_boundary(&content, MAX_FETCH_RESPONSE_BYTES);
-        (content[..cut].to_string(), true)
+        let kept = content[..cut].to_string();
+        let hint = refine_hint(query);
+        let trailer = format!(
+            "\n[… {} bytes of a {} byte slice elided (response cap {}). \
+             persisted raw is {} bytes — refine: {}]",
+            slice_bytes - cut as u64,
+            slice_bytes,
+            MAX_FETCH_RESPONSE_BYTES,
+            total_bytes,
+            hint,
+        );
+        (
+            format!("{kept}{trailer}"),
+            Some(FetchElision {
+                slice_bytes,
+                kept_bytes: cut as u64,
+                hint,
+            }),
+        )
     } else {
-        (content, false)
+        (content, None)
     };
 
     Ok(FetchResult {
         content,
-        truncated,
         total_bytes,
+        elision,
     })
+}
+
+/// Per-mode advice for narrowing a follow-up query when the previous
+/// slice exceeded the response cap. The persisted raw at the parent
+/// `invocation_id` is the source of truth — refinement always goes
+/// back to it, never to a slice-of-a-slice (which we deliberately
+/// don't persist).
+fn refine_hint(query: &FetchQuery) -> String {
+    match query {
+        FetchQuery::Tail { lines } => format!(
+            "lower `lines` (currently {lines}); or switch to `range` for a known byte window"
+        ),
+        FetchQuery::Head { lines } => format!(
+            "lower `lines` (currently {lines}); or switch to `range` for a known byte window"
+        ),
+        FetchQuery::Range { len, .. } => format!(
+            "lower `len` (currently {len}); or switch to `head`/`tail` for an end of the data"
+        ),
+        FetchQuery::Grep {
+            pattern,
+            head_limit,
+            before_context,
+            after_context,
+            context,
+            ..
+        } => {
+            let mut parts: Vec<String> = Vec::new();
+            match head_limit {
+                None => parts.push("set `head_limit` (e.g. 50)".to_string()),
+                Some(n) => parts.push(format!("lower `head_limit` (currently {n})")),
+            }
+            if before_context.is_some() || after_context.is_some() {
+                parts.push("reduce `-A`/`-B` context".to_string());
+            } else if let Some(c) = context {
+                if *c > 0 {
+                    parts.push(format!("reduce `-C` context (currently {c})"));
+                }
+            }
+            parts.push(format!(
+                "tighten the pattern (currently {pattern:?}) — anchors / specific keywords"
+            ));
+            parts.join("; ")
+        }
+    }
 }
 
 /// `str::floor_char_boundary` is unstable on stable Rust 1.x. Reimplement it
@@ -525,7 +612,7 @@ mod tests {
     fn tail_returns_last_n_lines() {
         let r = apply_fetch_query(sample(), &FetchQuery::Tail { lines: 2 }).unwrap();
         assert_eq!(r.content, "echo\nfoxtrot");
-        assert!(!r.truncated);
+        assert!(r.elision.is_none());
         assert_eq!(r.total_bytes, sample().len() as u64);
     }
 
@@ -630,7 +717,7 @@ mod tests {
     }
 
     #[test]
-    fn fetch_response_capped_at_max_bytes() {
+    fn oversize_slice_returns_head_with_elision_metadata() {
         let big = "x".repeat(MAX_FETCH_RESPONSE_BYTES + 1024);
         let r = apply_fetch_query(
             &big,
@@ -640,8 +727,48 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(r.truncated);
-        assert_eq!(r.content.len(), MAX_FETCH_RESPONSE_BYTES);
+        let elision = r.elision.expect("oversize slice should produce elision metadata");
+        assert_eq!(elision.kept_bytes, MAX_FETCH_RESPONSE_BYTES as u64);
+        assert_eq!(elision.slice_bytes, big.len() as u64);
+        assert!(elision.hint.contains("`len`"));
+        // content carries the kept head followed by the trailer.
+        assert!(r.content.starts_with(&"x".repeat(MAX_FETCH_RESPONSE_BYTES)));
+        assert!(r.content.contains("bytes elided"));
+        assert!(r.content.contains("refine:"));
+    }
+
+    #[test]
+    fn refine_hint_grep_unset_head_limit_suggests_setting_one() {
+        let q = FetchQuery::Grep {
+            pattern: "err".into(),
+            case_insensitive: false,
+            after_context: None,
+            before_context: None,
+            context: None,
+            line_numbers: false,
+            invert_match: false,
+            head_limit: None,
+        };
+        let h = refine_hint(&q);
+        assert!(h.contains("set `head_limit`"), "got: {h}");
+        assert!(h.contains("tighten the pattern"), "got: {h}");
+    }
+
+    #[test]
+    fn refine_hint_grep_with_context_suggests_reducing() {
+        let q = FetchQuery::Grep {
+            pattern: "err".into(),
+            case_insensitive: false,
+            after_context: Some(3),
+            before_context: Some(2),
+            context: None,
+            line_numbers: false,
+            invert_match: false,
+            head_limit: Some(100),
+        };
+        let h = refine_hint(&q);
+        assert!(h.contains("lower `head_limit`"), "got: {h}");
+        assert!(h.contains("`-A`/`-B`"), "got: {h}");
     }
 
     #[test]
