@@ -348,15 +348,29 @@ impl TopLevelTool for DescribeCatalogTool {
 }
 
 /// Dispatches into the visible + executable `SearchableToolSet` for the
-/// caller. The dispatcher's universal pipeline handles result elision +
-/// persistence; recovery happens through `tool_output_fetch`.
+/// caller. Self-handles classify+persist+envelope so the universal-
+/// pipeline row reflects the **inner** tool's identity rather than
+/// `call_tool` — direct upstream invocations and `call_tool`-proxied
+/// invocations produce identical persisted shapes, and typed
+/// classifiers (concourse_logs, future cargo/nix/etc.) fire either
+/// way.
 pub struct CallCatalogTool {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
+    tool_invocations: Option<Arc<super::super::tool_invocations::ToolInvocations>>,
+    classifiers: Arc<super::super::classifier::ClassifierRegistry>,
 }
 
 impl CallCatalogTool {
-    pub fn new(sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>) -> Self {
-        Self { sets }
+    pub fn new(
+        sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
+        tool_invocations: Option<Arc<super::super::tool_invocations::ToolInvocations>>,
+        classifiers: Arc<super::super::classifier::ClassifierRegistry>,
+    ) -> Self {
+        Self {
+            sets,
+            tool_invocations,
+            classifiers,
+        }
     }
 
     fn find_set(
@@ -412,6 +426,16 @@ impl TopLevelTool for CallCatalogTool {
         &CALL_SCHEMA
     }
 
+    fn bypass_universal_pipeline(&self) -> bool {
+        // We run the universal pipeline ourselves (below) with the
+        // *inner* tool's name + args as identity, so the persisted
+        // `tool_invocations` row is indistinguishable from a direct
+        // upstream invocation. Letting the dispatcher also run the
+        // pipeline would persist a second row keyed on `call_tool`
+        // and double-classify.
+        true
+    }
+
     async fn call(
         &self,
         subject: &AuthSubject,
@@ -442,8 +466,54 @@ impl TopLevelTool for CallCatalogTool {
         // terminal handler, no domain service involved.
         Audit::record_action(format!("catalog: {}", tool_name));
 
-        let result = set.call(subject, &name, inner_args).await;
-        annotate_envelope_mistake(result, &tool_name, &extra_keys)
+        let started_at = chrono::Utc::now();
+        let start = std::time::Instant::now();
+        let result = set.call(subject, &name, inner_args.clone()).await;
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        let result = annotate_envelope_mistake(result, &tool_name, &extra_keys)?;
+
+        // Snapshot the inner args under the same key the upstream tool
+        // saw — this is what gets persisted as `tool_invocations.args`.
+        let recorded_args = inner_args
+            .map(serde_json::Value::Object)
+            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+
+        // Run the universal pipeline ourselves with the *inner* identity:
+        // typed classifiers (e.g. `concourse_logs`) match on tool_name,
+        // and the persisted row's `tool_name`/`args` reflect the upstream
+        // tool, not the `call_tool` envelope. Falls back to the raw
+        // result if persistence isn't wired (test paths) or the subject
+        // has no scope.
+        let Some(invocations) = self.tool_invocations.as_ref() else {
+            return Ok(result);
+        };
+        let classification = self
+            .classifiers
+            .classify(&super::super::classifier::ClassifierContext {
+                tool_name: &tool_name,
+                args: &recorded_args,
+                raw: &result,
+                exit_code: None,
+            });
+        if classification.summary.is_passthrough() {
+            return Ok(result);
+        }
+        match invocations
+            .persist_and_envelope(
+                subject,
+                &tool_name,
+                &recorded_args,
+                classification,
+                &result,
+                duration_ms,
+                started_at,
+            )
+            .await
+        {
+            Some(wrapped) => Ok(wrapped),
+            None => Ok(result),
+        }
     }
 }
 
