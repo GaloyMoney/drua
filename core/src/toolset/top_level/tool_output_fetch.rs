@@ -119,7 +119,14 @@ impl TopLevelTool for ToolOutputFetch {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.can_use_agent_file_tools()
+        // Mirror the inner `call` body's ownership gate — any subject
+        // that can derive a `ToolInvocationOwner` is also entitled to
+        // fetch its own persisted invocations. The previous gate
+        // (`can_use_agent_file_tools`) was the *file-tool* permission
+        // and required a readable sandbox; an agent without one would
+        // see envelopes pointing at this tool but not be able to call
+        // it.
+        crate::toolset::tool_invocations::ToolInvocationOwner::from_subject(subject).is_some()
     }
 
     fn bypass_universal_pipeline(&self) -> bool {
