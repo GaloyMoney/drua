@@ -352,6 +352,10 @@ enum WorkflowStepParams {
         /// `{success, output, reason}` schema.
         #[serde(default)]
         output_schema: Option<serde_json::Value>,
+        /// Bare CEL boolean expression — when present and false, the
+        /// step is skipped (run continues to the next step).
+        #[serde(default)]
+        condition: Option<String>,
     },
     ToolStep {
         name: String,
@@ -364,6 +368,9 @@ enum WorkflowStepParams {
         params: serde_json::Value,
         #[serde(default)]
         timeout_seconds: Option<u64>,
+        /// See `AgentStep::condition` — same semantics for ToolSteps.
+        #[serde(default)]
+        condition: Option<String>,
     },
 }
 
@@ -378,6 +385,7 @@ impl WorkflowStepParams {
                 timeout_seconds,
                 model_chain,
                 output_schema,
+                condition,
             } => {
                 let output_schema = match output_schema {
                     Some(value) => serde_json::from_value(value).map_err(|e| {
@@ -395,6 +403,7 @@ impl WorkflowStepParams {
                     timeout_seconds,
                     model_chain,
                     output_schema: Box::new(output_schema),
+                    condition,
                 })
             }
             WorkflowStepParams::ToolStep {
@@ -402,11 +411,13 @@ impl WorkflowStepParams {
                 tool,
                 params,
                 timeout_seconds,
+                condition,
             } => Ok(WorkflowStepDef::ToolStep {
                 name,
                 tool,
                 params,
                 timeout_seconds,
+                condition,
             }),
         }
     }
@@ -2079,6 +2090,9 @@ fn format_run(r: &WorkflowRun) -> String {
             out.push_str(&format!("    - name: {}\n", step.name));
             if let Some(err) = &step.error {
                 out.push_str(&format!("      error: {err}\n"));
+            }
+            if let Some(body) = &step.skipped {
+                out.push_str(&format!("      skipped: {body}\n"));
             }
             if let Some(value) = &step.output {
                 let json =

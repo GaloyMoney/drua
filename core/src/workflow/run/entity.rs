@@ -30,6 +30,13 @@ pub struct StepResult {
     pub output: Option<serde_json::Value>,
     pub error: Option<String>,
     pub completed_at: Option<DateTime<Utc>>,
+    /// `Some(condition_body)` if the step was skipped because its
+    /// `condition:` evaluated to false. Mutually exclusive with
+    /// `output` and `error` — the executor records exactly one of
+    /// the three terminal states. `#[serde(default)]` so older
+    /// `StepResult` rows hydrate cleanly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skipped: Option<String>,
 }
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +66,17 @@ pub enum WorkflowRunEvent {
     StepErrored {
         step_name: String,
         error: String,
+        completed_at: DateTime<Utc>,
+    },
+    /// The step's `condition:` evaluated to `false`. The run
+    /// continues to the next step. Folds into run-state aggregation
+    /// as Succeeded (skipped steps are invisible to the
+    /// Errored/Failed/Succeeded classification).
+    StepSkipped {
+        step_name: String,
+        /// Raw CEL body that was false at evaluation time. Kept on
+        /// the event for forensic visibility in `runs --include=steps`.
+        condition_body: String,
         completed_at: DateTime<Utc>,
     },
     RunCompleted {
@@ -116,6 +134,8 @@ impl WorkflowRun {
                 WorkflowRunEvent::StepCompleted { step_name: n, .. } if n == &step_name,
             already_applied:
                 WorkflowRunEvent::StepErrored { step_name: n, .. } if n == &step_name,
+            already_applied:
+                WorkflowRunEvent::StepSkipped { step_name: n, .. } if n == &step_name,
         );
         let now = Utc::now();
         if !self.step_results.iter().any(|r| r.name == step_name) {
@@ -124,6 +144,7 @@ impl WorkflowRun {
                 output: None,
                 error: None,
                 completed_at: None,
+                skipped: None,
             });
         }
         if self.state == WorkflowRunState::Pending {
@@ -148,6 +169,8 @@ impl WorkflowRun {
                 WorkflowRunEvent::StepCompleted { step_name: n, .. } if n == &step_name,
             already_applied:
                 WorkflowRunEvent::StepErrored { step_name: n, .. } if n == &step_name,
+            already_applied:
+                WorkflowRunEvent::StepSkipped { step_name: n, .. } if n == &step_name,
         );
         let now = Utc::now();
         if let Some(r) = self.step_results.iter_mut().find(|r| r.name == step_name) {
@@ -159,6 +182,7 @@ impl WorkflowRun {
                 output: Some(output.clone()),
                 error: None,
                 completed_at: Some(now),
+                skipped: None,
             });
         }
         self.events.push(WorkflowRunEvent::StepCompleted {
@@ -183,6 +207,8 @@ impl WorkflowRun {
                 WorkflowRunEvent::StepErrored { step_name: n, .. } if n == &step_name,
             already_applied:
                 WorkflowRunEvent::StepCompleted { step_name: n, .. } if n == &step_name,
+            already_applied:
+                WorkflowRunEvent::StepSkipped { step_name: n, .. } if n == &step_name,
         );
         let now = Utc::now();
         if let Some(r) = self.step_results.iter_mut().find(|r| r.name == step_name) {
@@ -194,11 +220,49 @@ impl WorkflowRun {
                 output: None,
                 error: Some(error.clone()),
                 completed_at: Some(now),
+                skipped: None,
             });
         }
         self.events.push(WorkflowRunEvent::StepErrored {
             step_name,
             error,
+            completed_at: now,
+        });
+        Idempotent::Executed(())
+    }
+
+    /// Records that the step was skipped because its `condition:`
+    /// evaluated to false. The run continues to the next step.
+    /// `condition_body` is the raw CEL expression — kept on the
+    /// event so `runs --include=steps` can render which gate fired.
+    ///
+    /// No-op if the step already terminated.
+    pub fn step_skipped(&mut self, step_name: String, condition_body: String) -> Idempotent<()> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied:
+                WorkflowRunEvent::StepSkipped { step_name: n, .. } if n == &step_name,
+            already_applied:
+                WorkflowRunEvent::StepCompleted { step_name: n, .. } if n == &step_name,
+            already_applied:
+                WorkflowRunEvent::StepErrored { step_name: n, .. } if n == &step_name,
+        );
+        let now = Utc::now();
+        if let Some(r) = self.step_results.iter_mut().find(|r| r.name == step_name) {
+            r.skipped = Some(condition_body.clone());
+            r.completed_at = Some(now);
+        } else {
+            self.step_results.push(StepResult {
+                name: step_name.clone(),
+                output: None,
+                error: None,
+                completed_at: Some(now),
+                skipped: Some(condition_body.clone()),
+            });
+        }
+        self.events.push(WorkflowRunEvent::StepSkipped {
+            step_name,
+            condition_body,
             completed_at: now,
         });
         Idempotent::Executed(())
@@ -235,12 +299,13 @@ impl WorkflowRun {
 }
 
 /// True when a cleanly-completed step's structured output carries
-/// `success: false` (top-level boolean). Infrastructure-errored steps
-/// return false here — they're classified as `Errored`, not `Failed`.
+/// `success: false` (top-level boolean). Infrastructure-errored and
+/// condition-skipped steps return false here — they're classified
+/// as `Errored` and Succeeded respectively, never `Failed`.
 /// Missing or non-boolean `success` defaults to "no agent-reported
 /// failure" (back-compat for non-default-schema steps).
 fn step_reported_agent_failure(step: &StepResult) -> bool {
-    if step.error.is_some() {
+    if step.error.is_some() || step.skipped.is_some() {
         return false;
     }
     let reported_success = step
@@ -296,6 +361,7 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
                             output: None,
                             error: None,
                             completed_at: None,
+                            skipped: None,
                         });
                     }
                 }
@@ -313,6 +379,7 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
                             output: Some(output.clone()),
                             error: None,
                             completed_at: Some(*ts),
+                            skipped: None,
                         });
                     }
                 }
@@ -330,6 +397,25 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
                             output: None,
                             error: Some(error.clone()),
                             completed_at: Some(*ts),
+                            skipped: None,
+                        });
+                    }
+                }
+                WorkflowRunEvent::StepSkipped {
+                    step_name,
+                    condition_body,
+                    completed_at: ts,
+                } => {
+                    if let Some(r) = results.iter_mut().find(|r| &r.name == step_name) {
+                        r.skipped = Some(condition_body.clone());
+                        r.completed_at = Some(*ts);
+                    } else {
+                        results.push(StepResult {
+                            name: step_name.clone(),
+                            output: None,
+                            error: None,
+                            completed_at: Some(*ts),
+                            skipped: Some(condition_body.clone()),
                         });
                     }
                 }
@@ -400,6 +486,7 @@ mod tests {
             timeout_seconds: None,
             model_chain: None,
             output_schema: Box::new(default_output_schema()),
+            condition: None,
         }
     }
 
@@ -424,6 +511,10 @@ mod tests {
 
     fn error(run: &mut WorkflowRun, name: &str, err: &str) {
         run.step_errored(name.into(), err.into()).did_execute();
+    }
+
+    fn skip(run: &mut WorkflowRun, name: &str, body: &str) {
+        run.step_skipped(name.into(), body.into()).did_execute();
     }
 
     fn finalize(run: &mut WorkflowRun) -> WorkflowRunState {
@@ -548,5 +639,107 @@ mod tests {
         );
 
         assert_eq!(finalize(&mut run), WorkflowRunState::Succeeded);
+    }
+
+    #[test]
+    fn step_skipped_event_wire_format() {
+        let ev = WorkflowRunEvent::StepSkipped {
+            step_name: "s".into(),
+            condition_body: "trigger.payload.x == 'y'".into(),
+            completed_at: Utc::now(),
+        };
+        let v = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v.get("type").and_then(|t| t.as_str()), Some("step_skipped"));
+        assert_eq!(
+            v.get("condition_body").and_then(|c| c.as_str()),
+            Some("trigger.payload.x == 'y'")
+        );
+    }
+
+    #[test]
+    fn run_state_succeeded_when_only_step_was_skipped() {
+        // Skipped steps fold into the Succeeded classification: a
+        // run whose every step was gated out is a clean "no-op".
+        let mut run = fresh_run(&["only"]);
+        start(&mut run, "only");
+        skip(&mut run, "only", "trigger.payload.flag == true");
+        assert_eq!(finalize(&mut run), WorkflowRunState::Succeeded);
+    }
+
+    #[test]
+    fn run_state_succeeded_when_skip_mixes_with_success() {
+        let mut run = fresh_run(&["a", "b"]);
+        start(&mut run, "a");
+        skip(&mut run, "a", "trigger.payload.flag == true");
+        start(&mut run, "b");
+        complete(
+            &mut run,
+            "b",
+            json!({ "success": true, "output": "did the thing" }),
+        );
+        assert_eq!(finalize(&mut run), WorkflowRunState::Succeeded);
+    }
+
+    #[test]
+    fn run_state_failed_when_skip_mixes_with_agent_failure() {
+        let mut run = fresh_run(&["a", "b"]);
+        start(&mut run, "a");
+        skip(&mut run, "a", "trigger.payload.flag == true");
+        start(&mut run, "b");
+        complete(
+            &mut run,
+            "b",
+            json!({ "success": false, "reason": "no", "output": "" }),
+        );
+        assert_eq!(finalize(&mut run), WorkflowRunState::Failed);
+    }
+
+    #[test]
+    fn run_state_errored_when_skip_mixes_with_infra_error() {
+        let mut run = fresh_run(&["a", "b"]);
+        start(&mut run, "a");
+        skip(&mut run, "a", "trigger.payload.flag == true");
+        start(&mut run, "b");
+        error(&mut run, "b", "sandbox not ready");
+        assert_eq!(finalize(&mut run), WorkflowRunState::Errored);
+    }
+
+    #[test]
+    fn step_skipped_is_idempotent_against_retry() {
+        let mut run = fresh_run(&["only"]);
+        start(&mut run, "only");
+        skip(&mut run, "only", "x == 'y'");
+        // Replay the same event — should be a no-op.
+        let outcome = run.step_skipped("only".into(), "x == 'y'".into());
+        assert!(matches!(outcome, Idempotent::AlreadyApplied));
+    }
+
+    #[test]
+    fn step_skipped_blocks_subsequent_completed_or_errored() {
+        let mut run = fresh_run(&["only"]);
+        start(&mut run, "only");
+        skip(&mut run, "only", "x == 'y'");
+        // Subsequent terminal mutations are no-ops.
+        let outcome = run.step_completed("only".into(), json!({ "success": true }));
+        assert!(matches!(outcome, Idempotent::AlreadyApplied));
+        let outcome = run.step_errored("only".into(), "boom".into());
+        assert!(matches!(outcome, Idempotent::AlreadyApplied));
+    }
+
+    #[test]
+    fn step_skipped_hydrates_from_events() {
+        let mut run = fresh_run(&["only"]);
+        start(&mut run, "only");
+        skip(&mut run, "only", "trigger.payload.x == 'y'");
+        let events = run.events;
+        let rehydrated = WorkflowRun::try_from_events(events).unwrap();
+        assert_eq!(rehydrated.step_results.len(), 1);
+        assert_eq!(
+            rehydrated.step_results[0].skipped.as_deref(),
+            Some("trigger.payload.x == 'y'")
+        );
+        assert!(rehydrated.step_results[0].output.is_none());
+        assert!(rehydrated.step_results[0].error.is_none());
+        assert!(rehydrated.step_results[0].completed_at.is_some());
     }
 }

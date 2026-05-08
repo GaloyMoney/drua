@@ -218,6 +218,8 @@ enum WorkflowStepYaml {
         model_chain: Option<ModelChain>,
         #[serde(default = "default_output_schema_boxed")]
         output_schema: Box<OutputSchema>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        condition: Option<String>,
     },
     ToolStep {
         name: String,
@@ -226,6 +228,8 @@ enum WorkflowStepYaml {
         params: serde_json::Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_seconds: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        condition: Option<String>,
     },
 }
 
@@ -240,6 +244,7 @@ impl WorkflowStepYaml {
                 timeout_seconds,
                 model_chain,
                 output_schema,
+                condition,
             } => WorkflowStepYaml::AgentStep {
                 name: name.clone(),
                 skill: skill.clone(),
@@ -248,17 +253,20 @@ impl WorkflowStepYaml {
                 timeout_seconds: *timeout_seconds,
                 model_chain: model_chain.clone(),
                 output_schema: output_schema.clone(),
+                condition: condition.clone(),
             },
             WorkflowStepDef::ToolStep {
                 name,
                 tool,
                 params,
                 timeout_seconds,
+                condition,
             } => WorkflowStepYaml::ToolStep {
                 name: name.clone(),
                 tool: tool.clone(),
                 params: params.clone(),
                 timeout_seconds: *timeout_seconds,
+                condition: condition.clone(),
             },
         }
     }
@@ -273,6 +281,7 @@ impl WorkflowStepYaml {
                 timeout_seconds,
                 model_chain,
                 output_schema,
+                condition,
             } => WorkflowStepDef::AgentStep {
                 name,
                 skill,
@@ -281,17 +290,20 @@ impl WorkflowStepYaml {
                 timeout_seconds,
                 model_chain,
                 output_schema,
+                condition,
             },
             WorkflowStepYaml::ToolStep {
                 name,
                 tool,
                 params,
                 timeout_seconds,
+                condition,
             } => WorkflowStepDef::ToolStep {
                 name,
                 tool,
                 params,
                 timeout_seconds,
+                condition,
             },
         }
     }
@@ -461,6 +473,7 @@ mod tests {
             timeout_seconds: Some(120),
             model_chain: None,
             output_schema: Box::new(default_output_schema()),
+            condition: None,
         }]
     }
 
@@ -664,6 +677,7 @@ steps:
             timeout_seconds: None,
             model_chain: None,
             output_schema: Box::new(schema),
+            condition: None,
         }];
         let content = render_workflow_yaml(
             id,

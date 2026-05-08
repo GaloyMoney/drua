@@ -182,6 +182,52 @@ pub fn parse_path(body: &str) -> Result<TemplateRef, TemplateError> {
     })
 }
 
+/// Outcome of evaluating a step `condition:` body — distinguishes
+/// the three cases the executor must react to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConditionOutcome {
+    /// The expression evaluated to `true` — run the step.
+    True,
+    /// The expression evaluated to `false` — skip the step.
+    False,
+    /// The expression evaluated to a non-boolean. The step should
+    /// be `step_errored` with a message naming the offending value.
+    NotBoolean(String),
+}
+
+/// Compile-time parse + root validation for a step `condition:`.
+/// Same shape as `parse_path` + `validate_root`; bundled because
+/// the two checks always run together for conditions.
+pub fn parse_condition(body: &str) -> Result<TemplateRef, TemplateError> {
+    let r = parse_path(body)?;
+    validate_root(&r)?;
+    Ok(r)
+}
+
+/// Evaluate a previously-compiled condition reference against the
+/// given context. `None` indicates a CEL runtime error (caller
+/// surfaces it as a `StepErrored`); `Some(ConditionOutcome)` carries
+/// the boolean decision or a "not-a-bool" diagnostic.
+///
+/// Conversion rules: only literal `Bool(true)` / `Bool(false)` are
+/// accepted. Truthy-coercion (treating `0`, `""`, `null`, etc. as
+/// false) is intentionally NOT supported — non-boolean bodies
+/// surface as `StepErrored` so authors fix the typing rather than
+/// rely on coercion.
+pub fn evaluate_condition(ctx: &TemplateContext<'_>, r: &TemplateRef) -> Option<ConditionOutcome> {
+    let built = ctx.build_cel_context().ok()?;
+    let program = Program::compile(&r.body).ok()?;
+    let value = program.execute(&built.cel).ok()?;
+    let json = value.json().ok()?;
+    Some(match json {
+        Value::Bool(true) => ConditionOutcome::True,
+        Value::Bool(false) => ConditionOutcome::False,
+        other => ConditionOutcome::NotBoolean(
+            serde_json::to_string(&other).unwrap_or_else(|_| "<?>".to_string()),
+        ),
+    })
+}
+
 /// Reject expressions that reference identifiers other than the two
 /// bound namespaces (`trigger`, `steps`). Stops mistakes like
 /// `${{ env.HOME }}` from compiling cleanly only to silently resolve
@@ -782,6 +828,90 @@ mod tests {
         assert!(formatted.contains(".tags[0]"));
         assert!(formatted.contains("trigger.payload.pipeline"));
         assert!(formatted.contains("null"));
+    }
+
+    #[test]
+    fn parse_condition_accepts_simple_predicate() {
+        let r = parse_condition("steps.triage.outputs.kind == 'autofix'").unwrap();
+        assert_eq!(r.body, "steps.triage.outputs.kind == 'autofix'");
+    }
+
+    #[test]
+    fn parse_condition_rejects_unknown_root() {
+        let err = parse_condition("env.HOME == 'x'").unwrap_err();
+        assert!(matches!(err, TemplateError::UnknownRoot(_, _)));
+    }
+
+    #[test]
+    fn parse_condition_rejects_compile_error() {
+        let err = parse_condition("steps.x ==").unwrap_err();
+        assert!(matches!(err, TemplateError::Compile(_, _)));
+    }
+
+    #[test]
+    fn evaluate_condition_true() {
+        let mut steps = HashMap::new();
+        steps.insert("triage".into(), json!({ "kind": "autofix" }));
+        let trigger = json!({});
+        let ctx = TemplateContext {
+            trigger: &trigger,
+            steps: &steps,
+        };
+        let r = parse_condition("steps.triage.outputs.kind == 'autofix'").unwrap();
+        assert_eq!(evaluate_condition(&ctx, &r), Some(ConditionOutcome::True));
+    }
+
+    #[test]
+    fn evaluate_condition_false() {
+        let mut steps = HashMap::new();
+        steps.insert("triage".into(), json!({ "kind": "flake_bump" }));
+        let trigger = json!({});
+        let ctx = TemplateContext {
+            trigger: &trigger,
+            steps: &steps,
+        };
+        let r = parse_condition("steps.triage.outputs.kind == 'autofix'").unwrap();
+        assert_eq!(evaluate_condition(&ctx, &r), Some(ConditionOutcome::False));
+    }
+
+    #[test]
+    fn evaluate_condition_not_boolean_when_body_returns_string() {
+        let mut steps = HashMap::new();
+        steps.insert("triage".into(), json!({ "kind": "autofix" }));
+        let trigger = json!({});
+        let ctx = TemplateContext {
+            trigger: &trigger,
+            steps: &steps,
+        };
+        // String concat → string; not a bool.
+        let r = parse_condition("steps.triage.outputs.kind + '!'").unwrap();
+        match evaluate_condition(&ctx, &r) {
+            Some(ConditionOutcome::NotBoolean(rendered)) => {
+                assert!(rendered.contains("autofix"));
+            }
+            other => panic!("expected NotBoolean, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluate_condition_skipped_step_null_coalesces_to_false() {
+        // `Executor::collect_step_outputs` populates skipped /
+        // errored / pending steps with `Value::Null` so CEL's
+        // null-coalesce path takes over here — `null.outputs.kind`
+        // evaluates to `Bool(false)` (same quirk as the trigger
+        // payload normalisation in `build_cel_context`), and
+        // `false == 'autofix'` is `false`. The whole condition
+        // collapses to `false`, the dependent step is skipped
+        // (cascading naturally without a transitive-skip mechanism).
+        let mut steps = HashMap::new();
+        steps.insert("triage".into(), json!(null));
+        let trigger = json!({});
+        let ctx = TemplateContext {
+            trigger: &trigger,
+            steps: &steps,
+        };
+        let r = parse_condition("steps.triage.outputs.kind == 'autofix'").unwrap();
+        assert_eq!(evaluate_condition(&ctx, &r), Some(ConditionOutcome::False));
     }
 
     #[test]
