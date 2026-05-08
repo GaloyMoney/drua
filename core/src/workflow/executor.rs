@@ -17,7 +17,9 @@ use super::definition::{WorkflowSandboxDecl, WorkflowStepDef};
 use super::error::WorkflowError;
 use super::repo::WorkflowDefinitionRepo;
 use super::run::{StepResult, WorkflowRunRepo, WorkflowRunState};
-use super::template::{substitute_value, TemplateContext};
+use super::template::{
+    format_template_diagnostics, substitute_value, template_diagnostics, TemplateContext,
+};
 
 /// Hard cap on the pre-flight per-sandbox readiness wait. Protects the
 /// queue from a stuck infrastructure step.
@@ -734,6 +736,11 @@ impl Executor {
         };
         let resolved_params = substitute_value(params, &template_ctx)
             .map_err(|e| WorkflowError::InvalidTemplateRef(e.to_string()))?;
+        // Pre-compute the diagnostic trace once so any of the
+        // tool-rejection paths below can include it without
+        // re-walking the params tree.
+        let diagnostics = template_diagnostics(params, &resolved_params);
+        let diagnostics_block = format_template_diagnostics(&diagnostics);
 
         // Top-level tools accept `Option<JsonObject>`. Coerce non-objects
         // to an empty object — the tool's input schema rejects the
@@ -757,7 +764,12 @@ impl Executor {
             .toolsets
             .call_top_level_tool(&subject, tool_name, arguments);
         let result = match tokio::time::timeout(timeout, call).await {
-            Ok(r) => r.map_err(|e| WorkflowError::ToolDispatch(e.to_string()))?,
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                return Err(WorkflowError::ToolDispatch(format!(
+                    "tool '{tool_name}': {e}{diagnostics_block}"
+                )));
+            }
             Err(_) => {
                 return Err(WorkflowError::StepErrored {
                     step: step_name.to_string(),
@@ -771,7 +783,7 @@ impl Executor {
                 .unwrap_or_else(|| "tool returned is_error: true with no text content".to_string());
             return Err(WorkflowError::StepErrored {
                 step: step_name.to_string(),
-                reason: format!("tool '{tool_name}' failed: {detail}"),
+                reason: format!("tool '{tool_name}' failed: {detail}{diagnostics_block}"),
             });
         }
 

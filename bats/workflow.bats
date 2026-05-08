@@ -241,4 +241,10 @@ extract_id_field() {
   # leaking through. That phrase must NOT appear.
   [[ "$output" != *"boolean \`false\`"* ]]
   [[ "$output" != *"boolean false"* ]]
+  # Error must surface the template-substitution trace so the
+  # author can immediately see WHICH `${{ … }}` reference produced
+  # the null. Asserts the path annotation + the actual ref body.
+  [[ "$output" == *"template substitutions"* ]]
+  [[ "$output" == *".tags[0]"* ]]
+  [[ "$output" == *"trigger.payload.pipeline"* ]]
 }

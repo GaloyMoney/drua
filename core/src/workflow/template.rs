@@ -315,6 +315,91 @@ pub fn extract_refs_in_string(s: &str) -> Result<Vec<TemplateRef>, TemplateError
     Ok(refs)
 }
 
+/// One template substitution captured during a `substitute_value`
+/// pass — used by callers that want to report which `${{ … }}`
+/// reference produced which value when downstream consumers reject
+/// the resolved tree.
+#[derive(Debug, Clone)]
+pub struct TemplateDiagnostic {
+    /// JSON-pointer-style path into the params tree (e.g.
+    /// `.tags[0]`, `.title`).
+    pub json_path: String,
+    /// The literal string from the original params, including the
+    /// `${{ … }}` markers — useful when a single string carries
+    /// multiple refs and surrounding literal text.
+    pub source: String,
+    /// The substituted value — what the consuming tool actually
+    /// saw. Surfaces nulls, empty strings, and unexpected scalars
+    /// in error messages.
+    pub resolved: Value,
+}
+
+/// Walk the original and resolved params trees in parallel and
+/// collect a diagnostic for every string leaf in `original` that
+/// contained a `${{ … }}` reference. The list is the input/output
+/// trace the executor includes when a tool dispatch rejects the
+/// substituted params.
+pub fn template_diagnostics(original: &Value, resolved: &Value) -> Vec<TemplateDiagnostic> {
+    let mut out = Vec::new();
+    walk_diagnostics(original, resolved, "", &mut out);
+    out
+}
+
+fn walk_diagnostics(
+    original: &Value,
+    resolved: &Value,
+    path: &str,
+    acc: &mut Vec<TemplateDiagnostic>,
+) {
+    match (original, resolved) {
+        (Value::String(s), r) if s.contains(OPEN) => {
+            acc.push(TemplateDiagnostic {
+                json_path: if path.is_empty() {
+                    ".".to_string()
+                } else {
+                    path.to_string()
+                },
+                source: s.clone(),
+                resolved: r.clone(),
+            });
+        }
+        (Value::Object(o), Value::Object(r)) => {
+            for (k, ov) in o {
+                let next = format!("{path}.{k}");
+                let rv = r.get(k).unwrap_or(&Value::Null);
+                walk_diagnostics(ov, rv, &next, acc);
+            }
+        }
+        (Value::Array(o), Value::Array(r)) => {
+            for (i, ov) in o.iter().enumerate() {
+                let next = format!("{path}[{i}]");
+                let rv = r.get(i).unwrap_or(&Value::Null);
+                walk_diagnostics(ov, rv, &next, acc);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Render a `Vec<TemplateDiagnostic>` as a human-readable multi-line
+/// block suited for embedding in a `WorkflowError` reason. Empty
+/// slices produce empty output.
+pub fn format_template_diagnostics(diags: &[TemplateDiagnostic]) -> String {
+    if diags.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n  template substitutions:\n");
+    for d in diags {
+        let resolved = serde_json::to_string(&d.resolved).unwrap_or_else(|_| "<?>".to_string());
+        let source_escaped = d.source.replace('\n', "\\n");
+        out.push_str(&format!(
+            "    {}: {} → {}\n",
+            d.json_path, source_escaped, resolved
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -549,6 +634,46 @@ mod tests {
         .unwrap();
         let names = referenced_step_names(&r);
         assert_eq!(names, vec!["triage".to_string(), "dispatch".to_string()]);
+    }
+
+    #[test]
+    fn template_diagnostics_records_path_source_and_resolved() {
+        let trigger = json!(null);
+        let mut steps = HashMap::new();
+        steps.insert(
+            "identify".into(),
+            json!({ "workflow_run_id": "abc-123", "type": "workflow_executor" }),
+        );
+        let ctx = TemplateContext {
+            trigger: &trigger,
+            steps: &steps,
+        };
+        let original = json!({
+            "title": "run-${{ steps.identify.outputs.workflow_run_id }}",
+            "tags": [
+                "${{ trigger.payload.pipeline }}",
+                "build-${{ trigger.payload.build }}"
+            ]
+        });
+        let resolved = substitute_value(&original, &ctx).unwrap();
+        let diags = template_diagnostics(&original, &resolved);
+        assert_eq!(diags.len(), 3);
+
+        let title = diags.iter().find(|d| d.json_path == ".title").unwrap();
+        assert_eq!(title.resolved, json!("run-abc-123"));
+
+        let pipeline = diags.iter().find(|d| d.json_path == ".tags[0]").unwrap();
+        assert!(pipeline.source.contains("trigger.payload.pipeline"));
+        assert_eq!(pipeline.resolved, Value::Null);
+
+        let build = diags.iter().find(|d| d.json_path == ".tags[1]").unwrap();
+        assert_eq!(build.resolved, json!("build-"));
+
+        let formatted = format_template_diagnostics(&diags);
+        assert!(formatted.contains(".title"));
+        assert!(formatted.contains(".tags[0]"));
+        assert!(formatted.contains("trigger.payload.pipeline"));
+        assert!(formatted.contains("null"));
     }
 
     #[test]
