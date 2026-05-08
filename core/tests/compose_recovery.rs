@@ -1,9 +1,8 @@
-//! End-to-end tests for compose's recovery surface (`result_invocation_id`
-//! + `sub_invocations` directory + WorkflowExecutor bypass). Builds on
-//! the same stub-toolset shape as `compose_audit.rs` but adds a
-//! configurable per-call payload size so we can exercise both the
-//! Passthrough and StructuredElision branches of the walker, plus the
-//! sub-invocation accumulator.
+//! End-to-end tests for compose's recovery surface (`result_invocation_id` +
+//! `sub_invocations` directory + WorkflowExecutor bypass). Builds on the same
+//! stub-toolset shape as `compose_audit.rs` but adds a configurable per-call
+//! payload size so we can exercise both the Passthrough and StructuredElision
+//! branches of the walker, plus the sub-invocation accumulator.
 
 use std::sync::Arc;
 
