@@ -207,8 +207,13 @@ async fn bypass_universal_pipeline_skips_classifier_and_persistence() {
         bypass: false,
     });
 
+    // Subject carries the agent_id so `subject.acting_agent_id()` lands
+    // in the persistence branch of the dispatcher; an Anonymous subject
+    // would short-circuit to passthrough regardless of the bypass flag.
+    let agent_subject = AuthSubject::Agent(project_id, agent_id, Vec::new());
+
     let bypass_result = toolsets
-        .call_top_level_tool(&AuthSubject::Anonymous, "stub-bypass", None, Some(agent_id))
+        .call_top_level_tool(&agent_subject, "stub-bypass", None)
         .await
         .expect("bypass tool dispatch");
     // Raw passthrough: text is the original body, structured_content
@@ -233,12 +238,7 @@ async fn bypass_universal_pipeline_skips_classifier_and_persistence() {
     );
 
     let wrapped_result = toolsets
-        .call_top_level_tool(
-            &AuthSubject::Anonymous,
-            "stub-no-bypass",
-            None,
-            Some(agent_id),
-        )
+        .call_top_level_tool(&agent_subject, "stub-no-bypass", None)
         .await
         .expect("non-bypass tool dispatch");
     // Confirm the test setup is real: the same body, without the

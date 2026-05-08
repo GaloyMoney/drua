@@ -1462,14 +1462,8 @@ impl Agents {
                                 input: tu.input,
                             })
                             .collect();
-                        let results = fan_out_tool_calls(
-                            &toolsets,
-                            &agent_subject,
-                            tool_calls,
-                            Some(id),
-                            &tx,
-                        )
-                        .await;
+                        let results =
+                            fan_out_tool_calls(&toolsets, &agent_subject, tool_calls, &tx).await;
 
                         // The session detects a terminal `submit_output`
                         // call inside `add_tool_results` and returns
@@ -1620,8 +1614,6 @@ async fn fan_out_tool_calls(
     toolsets: &Arc<ToolSets>,
     subject: &AuthSubject,
     calls: Vec<llm::RequestToolUse>,
-    // @@ no need for this - code lower in call stack can derive from subject
-    agent_id: Option<crate::primitives::AgentId>,
     tx: &tokio::sync::mpsc::Sender<ChatOutputEvent>,
 ) -> Vec<llm::ToolUseResult> {
     let n = calls.len();
@@ -1633,7 +1625,7 @@ async fn fan_out_tool_calls(
             let id = tu.id.clone();
             let args = tu.input.as_object().cloned();
             let res = toolsets
-                .call_top_level_tool(&subject, &name, args, agent_id)
+                .call_top_level_tool(&subject, &name, args)
                 .await;
             let result = match res {
                 Ok(r) => llm::ToolUseResult {
@@ -1799,7 +1791,7 @@ mod tests {
 
         let results = tokio::time::timeout(
             Duration::from_millis(100),
-            fan_out_tool_calls(&toolsets, &AuthSubject::Anonymous, tool_calls, None, &tx),
+            fan_out_tool_calls(&toolsets, &AuthSubject::Anonymous, tool_calls, &tx),
         )
         .await
         .expect("tool result persistence must not wait on chat stream backpressure");

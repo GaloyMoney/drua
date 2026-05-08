@@ -129,7 +129,7 @@ async fn subtool_success_then_script_throw_keeps_subtool_outcome_success() {
     );
 
     let result = toolsets
-        .call_top_level_tool(&subject, "compose", Some(args), None)
+        .call_top_level_tool(&subject, "compose", Some(args))
         .await;
     assert!(
         result.is_err(),
@@ -179,7 +179,7 @@ async fn subtool_failure_records_error_on_subtool_row() {
     );
 
     let result = toolsets
-        .call_top_level_tool(&subject, "compose", Some(args), None)
+        .call_top_level_tool(&subject, "compose", Some(args))
         .await;
     assert!(
         result.is_err(),
@@ -221,7 +221,7 @@ async fn all_success_path_records_success_on_both_rows() {
     );
 
     let result = toolsets
-        .call_top_level_tool(&subject, "compose", Some(args), None)
+        .call_top_level_tool(&subject, "compose", Some(args))
         .await;
     assert!(result.is_ok(), "compose call should succeed");
 

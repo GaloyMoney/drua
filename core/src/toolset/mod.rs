@@ -36,7 +36,7 @@ use rmcp::model::{CallToolResult, Content, JsonObject};
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
-use crate::primitives::{AgentId, ToolInvocationId};
+use crate::primitives::ToolInvocationId;
 
 /// schemars 0.8 emits boolean `true` for `serde_json::Value` fields, which
 /// strict JSON-Schema validators (notably Claude Code's MCP client) reject
@@ -481,18 +481,16 @@ impl ToolSets {
 
     /// Records an audit entry when an [`Audit`] has been wired via [`set_audit`].
     ///
-    /// `agent_id` is the universal-pipeline scope key — when `Some` and the
-    /// classifier returns a non-`Passthrough` summary, the raw output is
-    /// persisted via [`ToolInvocations`] and the model-facing result gains
-    /// an `invocation_id` envelope. `None` short-circuits to raw passthrough
-    /// regardless of classifier shape (MCP-gateway external callers, tests).
+    /// The universal-pipeline scope key is derived from `subject` —
+    /// `subject.acting_agent_id()` selects the agent the persisted
+    /// invocation rows hang off. Subjects without an agent (MCP-gateway
+    /// external callers, tests) short-circuit to raw passthrough
+    /// regardless of classifier shape.
     pub async fn call_top_level_tool(
         &self,
         subject: &AuthSubject,
         name: &str,
         arguments: Option<JsonObject>,
-        // @@ don't pass agent_id
-        agent_id: Option<AgentId>,
     ) -> Result<CallToolResult, ToolSetsError> {
         use es_entity::context::{EventContext, WithEventContext};
 
@@ -549,23 +547,23 @@ impl ToolSets {
                         exit_code: None,
                     });
 
-                    let wrapped = match (&summary, tool_invocations.as_ref(), agent_id) {
-                        (s, _, _) if s.is_passthrough() => raw,
-                        // @@
-                        (_, Some(invocations), Some(agent_id)) => persist_and_envelope(
-                            invocations.as_ref(),
-                            agent_id,
-                            name,
-                            &args_for_classify,
-                            summary,
-                            &raw,
-                            duration_ms,
-                            started_at,
-                        )
-                        .await
-                        .unwrap_or(raw),
-                        _ => raw,
-                    };
+                    let wrapped =
+                        match (&summary, tool_invocations.as_ref(), subject.acting_agent_id()) {
+                            (s, _, _) if s.is_passthrough() => raw,
+                            (_, Some(invocations), Some(_)) => persist_and_envelope(
+                                invocations.as_ref(),
+                                subject,
+                                name,
+                                &args_for_classify,
+                                summary,
+                                &raw,
+                                duration_ms,
+                                started_at,
+                            )
+                            .await
+                            .unwrap_or(raw),
+                            _ => raw,
+                        };
 
                     Audit::record_tokens(estimate_tokens(&wrapped));
                     Audit::record_success();
@@ -599,9 +597,7 @@ impl ToolSets {
 // move any fns in this file that are primarily interacting with tool_invocations onto that
 async fn persist_and_envelope(
     tool_invocations: &ToolInvocations,
-    // @@ instead of the agent_id we should be passing the subject
-    // then subject.acting_agent_id can be called inside this fn
-    agent_id: AgentId,
+    subject: &AuthSubject,
     tool_name: &str,
     args: &serde_json::Value,
     summary: ToolResultSummary,
@@ -609,6 +605,7 @@ async fn persist_and_envelope(
     duration_ms: u64,
     started_at: chrono::DateTime<chrono::Utc>,
 ) -> Option<CallToolResult> {
+    let agent_id = subject.acting_agent_id()?;
     use sha2::{Digest, Sha256};
 
     let raw_text = raw
