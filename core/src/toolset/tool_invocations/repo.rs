@@ -14,10 +14,7 @@ impl ToolInvocationRepo {
         Self { pool: pool.clone() }
     }
 
-    pub async fn create(
-        &self,
-        new: NewToolInvocation,
-    ) -> Result<ToolInvocation, sqlx::Error> {
+    pub async fn create(&self, new: NewToolInvocation) -> Result<ToolInvocation, sqlx::Error> {
         let id = ToolInvocationId::new();
         let id_uuid: uuid::Uuid = id.into();
         let agent_uuid: Option<uuid::Uuid> = new.owner.agent_id().map(Into::into);
@@ -27,10 +24,10 @@ impl ToolInvocationRepo {
             r#"
             INSERT INTO tool_invocations (
                 id, agent_id, user_id, tool_name, args, args_hash, classifier,
-                summary, raw_text, raw_size_bytes, exit_code,
-                duration_ms, started_at
+                summary, raw_text, raw_size_bytes, original_structured,
+                exit_code, duration_ms, started_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             RETURNING created_at
             "#,
             id_uuid,
@@ -43,6 +40,7 @@ impl ToolInvocationRepo {
             new.summary,
             new.raw_text,
             new.raw_size_bytes,
+            new.original_structured,
             new.exit_code,
             new.duration_ms,
             new.started_at,
@@ -60,6 +58,7 @@ impl ToolInvocationRepo {
             summary: new.summary,
             raw_text: new.raw_text,
             raw_size_bytes: new.raw_size_bytes,
+            original_structured: new.original_structured,
             exit_code: new.exit_code,
             duration_ms: new.duration_ms,
             started_at: new.started_at,
@@ -67,17 +66,14 @@ impl ToolInvocationRepo {
         })
     }
 
-    pub async fn find_by_id(
-        &self,
-        id: ToolInvocationId,
-    ) -> Result<ToolInvocation, sqlx::Error> {
+    pub async fn find_by_id(&self, id: ToolInvocationId) -> Result<ToolInvocation, sqlx::Error> {
         let id_uuid: uuid::Uuid = id.into();
         let row = sqlx::query!(
             r#"
             SELECT
                 id, agent_id, user_id, tool_name, args, args_hash, classifier,
-                summary, raw_text, raw_size_bytes, exit_code,
-                duration_ms, started_at, created_at
+                summary, raw_text, raw_size_bytes, original_structured,
+                exit_code, duration_ms, started_at, created_at
             FROM tool_invocations
             WHERE id = $1
             "#,
@@ -97,6 +93,7 @@ impl ToolInvocationRepo {
             row.summary,
             row.raw_text,
             row.raw_size_bytes,
+            row.original_structured,
             row.exit_code,
             row.duration_ms,
             row.started_at,
@@ -132,8 +129,8 @@ impl ToolInvocationRepo {
             r#"
             SELECT
                 id, agent_id, user_id, tool_name, args, args_hash, classifier,
-                summary, raw_text, raw_size_bytes, exit_code,
-                duration_ms, started_at, created_at
+                summary, raw_text, raw_size_bytes, original_structured,
+                exit_code, duration_ms, started_at, created_at
             FROM tool_invocations
             WHERE agent_id = $1 AND args_hash = $2
             ORDER BY created_at DESC
@@ -157,6 +154,7 @@ impl ToolInvocationRepo {
                 r.summary,
                 r.raw_text,
                 r.raw_size_bytes,
+                r.original_structured,
                 r.exit_code,
                 r.duration_ms,
                 r.started_at,
@@ -175,8 +173,8 @@ impl ToolInvocationRepo {
             r#"
             SELECT
                 id, agent_id, user_id, tool_name, args, args_hash, classifier,
-                summary, raw_text, raw_size_bytes, exit_code,
-                duration_ms, started_at, created_at
+                summary, raw_text, raw_size_bytes, original_structured,
+                exit_code, duration_ms, started_at, created_at
             FROM tool_invocations
             WHERE user_id = $1 AND args_hash = $2
             ORDER BY created_at DESC
@@ -200,6 +198,7 @@ impl ToolInvocationRepo {
                 r.summary,
                 r.raw_text,
                 r.raw_size_bytes,
+                r.original_structured,
                 r.exit_code,
                 r.duration_ms,
                 r.started_at,
@@ -221,6 +220,7 @@ fn hydrate_row(
     summary: serde_json::Value,
     raw_text: String,
     raw_size_bytes: i64,
+    original_structured: Option<serde_json::Value>,
     exit_code: Option<i32>,
     duration_ms: i32,
     started_at: chrono::DateTime<chrono::Utc>,
@@ -236,9 +236,9 @@ fn hydrate_row(
         // The DB-level CHECK constraint guarantees exactly-one is set;
         // if we observe both/neither it's a schema violation, not a
         // runtime case to silently paper over.
-        (a, u) => panic!(
-            "tool_invocations row violates owner CHECK: agent_id={a:?}, user_id={u:?}"
-        ),
+        (a, u) => {
+            panic!("tool_invocations row violates owner CHECK: agent_id={a:?}, user_id={u:?}")
+        }
     };
     ToolInvocation {
         id: ToolInvocationId::from(id),
@@ -250,6 +250,7 @@ fn hydrate_row(
         summary,
         raw_text,
         raw_size_bytes,
+        original_structured,
         exit_code,
         duration_ms,
         started_at,

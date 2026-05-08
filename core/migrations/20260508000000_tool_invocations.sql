@@ -28,6 +28,12 @@ CREATE TABLE public.tool_invocations (
     summary         jsonb                    NOT NULL,
     raw_text        text                     NOT NULL,
     raw_size_bytes  bigint                   NOT NULL,
+    -- Verbatim copy of the upstream tool's `structured_content` (when
+    -- it had one). `tool_output_fetch` returns this as the response's
+    -- structured_content so compose JS callers see the same shape they
+    -- would get by re-running the original tool. `null` for plain-text
+    -- tools (bash, k8s logs).
+    original_structured jsonb,
     exit_code       integer,
     duration_ms     integer                  NOT NULL,
     started_at      timestamp with time zone NOT NULL,

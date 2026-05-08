@@ -27,15 +27,13 @@ impl ToolInvocationOwner {
             // Agent (with or without user attribution) keys off the
             // agent — the more granular cleanup target.
             AuthSubject::Agent(_, agent_id, _)
-            | AuthSubject::AgentOnBehalfOfUser(_, _, agent_id, _) => {
-                Some(Self::Agent { agent_id: *agent_id })
-            }
+            | AuthSubject::AgentOnBehalfOfUser(_, _, agent_id, _) => Some(Self::Agent {
+                agent_id: *agent_id,
+            }),
             // User-rooted: mcp-gateway external callers, IDE-driven
             // tool dispatch, exported-agent bearer tokens.
             AuthSubject::User(user_id) => Some(Self::User { user_id: *user_id }),
-            AuthSubject::ExportedAgent(user_id, _, _) => {
-                Some(Self::User { user_id: *user_id })
-            }
+            AuthSubject::ExportedAgent(user_id, _, _) => Some(Self::User { user_id: *user_id }),
             // No scope. The dispatcher short-circuits to raw
             // passthrough — the tool's own `structured_content`
             // reaches the caller untouched.
@@ -78,6 +76,12 @@ pub struct ToolInvocation {
     pub summary: serde_json::Value,
     pub raw_text: String,
     pub raw_size_bytes: i64,
+    /// The upstream tool's `structured_content` verbatim, when present.
+    /// `tool_output_fetch` returns this as the response's
+    /// `structured_content` so compose JS callers see the same shape
+    /// they'd get from calling the original tool fresh. `None` for
+    /// plain-text tools (bash, k8s logs).
+    pub original_structured: Option<serde_json::Value>,
     pub exit_code: Option<i32>,
     pub duration_ms: i32,
     pub started_at: DateTime<Utc>,
@@ -97,6 +101,7 @@ pub struct NewToolInvocation {
     pub summary: serde_json::Value,
     pub raw_text: String,
     pub raw_size_bytes: i64,
+    pub original_structured: Option<serde_json::Value>,
     pub exit_code: Option<i32>,
     pub duration_ms: i32,
     pub started_at: DateTime<Utc>,

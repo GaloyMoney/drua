@@ -131,12 +131,14 @@ impl ToolInvocations {
     /// - summary or args fail to serialize (logged + skipped);
     /// - the PG insert errors (logged + skipped).
     #[instrument(name = "core.tool_invocations.persist_classification", skip_all)]
+    #[allow(clippy::too_many_arguments)]
     pub async fn persist_classification(
         &self,
         subject: &AuthSubject,
         tool_name: &str,
         args: &serde_json::Value,
         classification: Classification,
+        original_structured: Option<serde_json::Value>,
         duration_ms: u64,
         started_at: chrono::DateTime<chrono::Utc>,
     ) -> Option<PersistedClassification> {
@@ -178,6 +180,7 @@ impl ToolInvocations {
             summary: summary_value.clone(),
             raw_text: canonical_text,
             raw_size_bytes,
+            original_structured,
             exit_code: None,
             duration_ms: duration_ms.min(i32::MAX as u64) as i32,
             started_at,
@@ -227,6 +230,7 @@ impl ToolInvocations {
                 tool_name,
                 args,
                 classification,
+                raw.structured_content.clone(),
                 duration_ms,
                 started_at,
             )
@@ -373,7 +377,10 @@ fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId) -> String {
     }
 }
 
-fn apply_fetch_query(raw: &str, query: &FetchQuery) -> Result<FetchResult, ToolInvocationError> {
+pub(crate) fn apply_fetch_query(
+    raw: &str,
+    query: &FetchQuery,
+) -> Result<FetchResult, ToolInvocationError> {
     let total_bytes = raw.len() as u64;
 
     let content = match query {

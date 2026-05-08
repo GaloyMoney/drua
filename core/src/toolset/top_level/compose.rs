@@ -238,6 +238,13 @@ impl TopLevelTool for ComposeTool {
                 (summary, Some(invocations)) => {
                     let canonical_text = classification.canonical_text;
                     let curated = render_curated_result(&summary);
+                    // Compose's own "structured_content" is the JS
+                    // return value — exactly what the script meant to
+                    // produce. Persist that as `original_structured`
+                    // so a future fetch of `result_invocation_id`
+                    // returns the same Value the script returned,
+                    // not the curated/elided form.
+                    let original_structured = Some(result.value.clone());
                     let persisted = invocations
                         .persist_classification(
                             subject,
@@ -247,6 +254,7 @@ impl TopLevelTool for ComposeTool {
                                 summary,
                                 canonical_text,
                             },
+                            original_structured,
                             result.execution_time.as_millis() as u64,
                             started_at,
                         )
@@ -645,6 +653,7 @@ impl CatalogDispatcherShared {
                 tool_name,
                 args,
                 classification,
+                raw.structured_content.clone(),
                 duration_ms,
                 started_at,
             )

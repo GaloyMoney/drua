@@ -1,11 +1,17 @@
 //! `tool_output_fetch` — recovery handle for the universal-pipeline envelope.
 //!
-//! Any large tool result returned by drua's dispatcher carries an
-//! `invocation_id` in `structured_content.envelope`. This tool resolves
-//! that handle into a slice of the persisted raw output, picked by exactly
-//! one of `tail` / `head` / `range` / `grep`. The full row never returns to
-//! the model context — agents who realise they need more should refine the
-//! query rather than fetch wholesale.
+//! When you call this tool with an `invocation_id` from a prior tool's
+//! envelope, the response **mirrors what the original tool returned**:
+//! `structured_content` carries the upstream tool's verbatim
+//! `structured_content` (so compose JS callers see the same Value they'd
+//! get from re-running the tool fresh — full disclosure by default).
+//!
+//! Optional `query` slices the persisted canonical text into
+//! `content[].text` for the model-facing view; agents asking for tail /
+//! head / grep / range still get those bytes. The `view: "summary"` flag
+//! returns the typed classifier summary as `structured_content` instead
+//! of the original — useful when callers want the post-elision shape
+//! without re-deriving it.
 
 use std::sync::{Arc, LazyLock};
 
@@ -35,12 +41,34 @@ struct FetchInput {
     /// The id surfaced as `envelope.invocation_id` on the original tool
     /// call. Use exactly the value the dispatcher returned.
     invocation_id: uuid::Uuid,
-    /// Nested rather than `#[serde(flatten)]`-ed because serde
-    /// documents `deny_unknown_fields` + `flatten` as unsupported —
-    /// the deny becomes a silent no-op, letting typos like `tial`
-    /// instead of `tail` slip through. Explicit nesting keeps the
-    /// strict-mode guarantee.
-    query: FetchQuery,
+    /// Default `original` — the response's `structured_content` carries
+    /// the upstream tool's verbatim `structured_content`, same shape an
+    /// agent would receive from calling the original tool fresh. Set to
+    /// `summary` to get the classifier's typed summary instead (useful
+    /// when callers want the post-elision shape directly).
+    #[serde(default)]
+    view: FetchView,
+    /// Optional slice operation on the persisted canonical text. When
+    /// absent, the response's `content[].text` is empty — the typed
+    /// data lives entirely in `structured_content`. When present,
+    /// `content[].text` carries the slice; `structured_content`
+    /// remains the original (or summary, per `view`).
+    #[serde(default)]
+    query: Option<FetchQuery>,
+}
+
+#[derive(Debug, Default, Clone, Copy, serde::Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+enum FetchView {
+    /// Full disclosure: return whatever the original tool put in its
+    /// `structured_content`. Compose JS callers see the same Value
+    /// they'd get from re-running the tool.
+    #[default]
+    Original,
+    /// Return the classifier's typed summary (e.g. `Concourse(...)`,
+    /// `StructuredElision { kept, ... }`). Smaller payload; same shape
+    /// the agent saw in the universal envelope.
+    Summary,
 }
 
 static INPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<FetchInput>);
@@ -53,7 +81,10 @@ static OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<F
 /// `deny_unknown_fields` rejection). Locked in by
 /// `fetch_hint_matches_schema`.
 pub(crate) const FETCH_HINT: &str =
-    "tool_output_fetch({invocation_id, query: {mode: 'tail'|'head'|'range'|'grep', ...}})";
+    "tool_output_fetch({invocation_id, view?: 'original'|'summary', \
+     query?: {mode: 'tail'|'head'|'range'|'grep', ...}}) — \
+     default `view: original` returns the upstream tool's structured_content; \
+     `query` slices the persisted text into content[].text";
 
 #[async_trait::async_trait]
 impl TopLevelTool for ToolOutputFetch {
@@ -62,14 +93,17 @@ impl TopLevelTool for ToolOutputFetch {
     }
 
     fn description(&self) -> &str {
-        "Fetch elided detail from a prior tool call's persisted output. \
-         A tool result includes an `invocation_id` if and only if its full \
-         output is recoverable through this tool. \
-         Call shape: `{invocation_id, query: { mode: tail|head|range|grep, ... }}`. \
-         Per-mode args: `tail`/`head` take `lines`; `range` takes `offset` + `len`; \
-         `grep` takes `pattern` + optional `context`. \
-         Responses are capped — refine the query rather than asking for the \
-         whole stream."
+        "Fetch a previously-persisted tool result. Same response shape \
+         as calling the original tool: `structured_content` carries the \
+         original tool's verbatim structured output. \
+         Call shape: `{invocation_id, view?, query?}`. \
+         `view: 'original'` (default) returns the upstream tool's \
+         structured_content; `view: 'summary'` returns the typed \
+         classifier summary instead. \
+         `query` is optional — when present, content[].text carries a \
+         slice (`tail`/`head`/`range`/`grep`); when absent, no slicing. \
+         Per-mode args: `tail`/`head` take `lines`; `range` takes \
+         `offset` + `len`; `grep` takes `pattern` + optional `context`."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -85,11 +119,11 @@ impl TopLevelTool for ToolOutputFetch {
     }
 
     fn bypass_universal_pipeline(&self) -> bool {
-        // The fetch tool exists to surface raw bytes from a previously
-        // persisted invocation. Letting the dispatcher re-classify and
-        // re-wrap that response would assign a *new* invocation_id to
-        // detail the agent already explicitly asked for — the recovery
-        // path would loop on itself.
+        // The fetch tool exists to surface the persisted invocation
+        // verbatim. Letting the dispatcher re-classify and re-wrap that
+        // response would assign a *new* invocation_id to detail the
+        // agent already explicitly asked for — the recovery path would
+        // loop on itself.
         true
     }
 
@@ -101,17 +135,45 @@ impl TopLevelTool for ToolOutputFetch {
         let input: FetchInput = parse_params(arguments)?;
         let id = ToolInvocationId::from(input.invocation_id);
 
-        match self.tool_invocations.fetch(id, input.query).await {
-            Ok(result) => {
-                let structured = serde_json::to_value(&result).expect("FetchResult serialization");
-                let mut ctr = CallToolResult::success(vec![Content::text(result.content)]);
-                ctr.structured_content = Some(structured);
-                Ok(ctr)
+        let invocation = match self.tool_invocations.find_by_id(id).await {
+            Ok(inv) => inv,
+            Err(e) => {
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "tool_output_fetch failed: {e}"
+                ))]));
             }
-            Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
-                "tool_output_fetch failed: {e}"
-            ))])),
-        }
+        };
+
+        // Pick the structured form per `view`. `Original` is full
+        // disclosure (matches what the original tool returned);
+        // `Summary` returns the typed classifier output.
+        let structured = match input.view {
+            FetchView::Original => invocation.original_structured.clone(),
+            FetchView::Summary => Some(invocation.summary.clone()),
+        };
+
+        // Apply the optional slice query against the canonical text.
+        // When no query is provided, content[].text is empty — the
+        // typed data lives in structured_content, which is what
+        // compose JS reads via result_to_value.
+        let content_text = match input.query {
+            Some(q) => {
+                match crate::toolset::tool_invocations::apply_fetch_query(&invocation.raw_text, &q)
+                {
+                    Ok(r) => r.content,
+                    Err(e) => {
+                        return Ok(CallToolResult::error(vec![Content::text(format!(
+                            "tool_output_fetch failed: {e}"
+                        ))]));
+                    }
+                }
+            }
+            None => String::new(),
+        };
+
+        let mut ctr = CallToolResult::success(vec![Content::text(content_text)]);
+        ctr.structured_content = structured;
+        Ok(ctr)
     }
 }
 
@@ -119,14 +181,13 @@ impl TopLevelTool for ToolOutputFetch {
 mod tests {
     use super::*;
 
-    /// Bugbot review on PR #309: `#[serde(deny_unknown_fields)]` is silently
-    /// no-op'd when combined with `#[serde(flatten)]`. The fix is to nest
-    /// `query` as an explicit field — these two cases lock that in.
+    /// Bugbot review on PR #309: `#[serde(deny_unknown_fields)]` is
+    /// silently no-op'd when combined with `#[serde(flatten)]`.
+    /// Locked in: typos at any top-level key are rejected.
     #[test]
     fn fetch_input_rejects_unknown_top_level_field() {
         let raw = serde_json::json!({
             "invocation_id": "00000000-0000-0000-0000-000000000000",
-            "query": { "mode": "tail", "lines": 10 },
             "bogus": "should be rejected",
         });
         let err = serde_json::from_value::<FetchInput>(raw)
@@ -135,37 +196,54 @@ mod tests {
     }
 
     #[test]
-    fn fetch_input_accepts_well_formed_query() {
+    fn fetch_input_minimal_shape_no_query_no_view() {
+        // Default behaviour: just an invocation_id. No query (so no
+        // slice), default view = Original.
         let raw = serde_json::json!({
             "invocation_id": "00000000-0000-0000-0000-000000000000",
+        });
+        let parsed: FetchInput = serde_json::from_value(raw).expect("minimal shape must parse");
+        assert!(parsed.query.is_none());
+        assert!(matches!(parsed.view, FetchView::Original));
+    }
+
+    #[test]
+    fn fetch_input_accepts_view_summary() {
+        let raw = serde_json::json!({
+            "invocation_id": "00000000-0000-0000-0000-000000000000",
+            "view": "summary",
+        });
+        let parsed: FetchInput = serde_json::from_value(raw).expect("view: summary must parse");
+        assert!(matches!(parsed.view, FetchView::Summary));
+    }
+
+    #[test]
+    fn fetch_input_accepts_query_with_view() {
+        let raw = serde_json::json!({
+            "invocation_id": "00000000-0000-0000-0000-000000000000",
+            "view": "original",
             "query": { "mode": "tail", "lines": 10 },
         });
-        let parsed: FetchInput =
-            serde_json::from_value(raw).expect("nested-query call shape parses");
-        assert!(matches!(parsed.query, FetchQuery::Tail { lines: 10 }));
+        let parsed: FetchInput = serde_json::from_value(raw).expect("view + query parse");
+        assert!(matches!(parsed.view, FetchView::Original));
+        assert!(matches!(parsed.query, Some(FetchQuery::Tail { lines: 10 })));
     }
 
     /// Bugbot review on PR #309 (medium): the envelope's `fetch_hint`
-    /// previously claimed the call shape was
-    /// `tool_output_fetch({invocation_id, mode: ..., ...})` (flat),
-    /// but the actual schema requires `query: {mode: ..., ...}`
-    /// (nested). An agent following the hint literally hit a
-    /// `deny_unknown_fields` rejection. The hint and the schema must
-    /// stay aligned — `FETCH_HINT` is the single source of truth that
-    /// the dispatcher embeds.
+    /// previously drifted from the schema. The hint and the schema
+    /// must stay aligned — agents follow the hint literally.
     #[test]
-    fn fetch_hint_matches_schema() {
-        // The hint must reference the nested-`query` shape; if someone
-        // changes it to a flat layout without also changing the schema
-        // it's a regression.
+    fn fetch_hint_mentions_view_and_query() {
         assert!(
-            FETCH_HINT.contains("query: {"),
-            "FETCH_HINT must mention the nested `query: {{...}}` envelope, got: {FETCH_HINT}",
+            FETCH_HINT.contains("view"),
+            "hint should mention the new `view` parameter"
         );
-
-        // Each mode mentioned in the hint must round-trip through
-        // `FetchInput` so an agent that mechanically substitutes
-        // values into the hint never builds an invalid request.
+        assert!(
+            FETCH_HINT.contains("query"),
+            "hint should mention the optional `query` parameter"
+        );
+        // Each mode listed in the hint must round-trip through
+        // `FetchInput`.
         for (mode, sample_args) in [
             ("tail", serde_json::json!({"mode": "tail", "lines": 5})),
             ("head", serde_json::json!({"mode": "head", "lines": 5})),

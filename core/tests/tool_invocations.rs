@@ -91,6 +91,7 @@ fn build_new(owner: ToolInvocationOwner, raw: &str) -> NewToolInvocation {
         summary: serde_json::json!({"kind": "generic", "total_bytes": raw.len()}),
         raw_text: raw.to_string(),
         raw_size_bytes: raw.len() as i64,
+        original_structured: None,
         exit_code: None,
         duration_ms: 42,
         started_at: Utc::now(),
