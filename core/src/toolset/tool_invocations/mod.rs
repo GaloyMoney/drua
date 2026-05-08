@@ -11,6 +11,7 @@
 
 mod entity;
 mod error;
+mod grep;
 mod repo;
 
 pub use entity::{NewToolInvocation, ToolInvocation, ToolInvocationOwner};
@@ -57,7 +58,7 @@ pub struct FetchResult {
     pub total_bytes: u64,
 }
 
-/// Maximum length of a `Grep` regex. Mirrors `OutputFilter`'s cap.
+/// Maximum length of a `Grep` regex.
 const MAX_GREP_PATTERN_LENGTH: usize = 1000;
 
 /// Hard ceiling on the bytes a single `tool_output_fetch` may return. The
@@ -406,8 +407,7 @@ pub(crate) fn apply_fetch_query(
             let re = regex::Regex::new(pattern)
                 .map_err(|e| ToolInvocationError::InvalidPattern(format!("invalid regex: {e}")))?;
             let lines: Vec<&str> = raw.lines().collect();
-            // Reuse the in-tree `filter::filter_lines` helper (grep + context).
-            let kept = super::filter::filter_lines(
+            let kept = grep::filter_lines(
                 &lines,
                 &re,
                 /* invert */ false,

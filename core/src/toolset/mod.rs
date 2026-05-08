@@ -1,7 +1,6 @@
 pub mod classifier;
 mod config;
 mod error;
-mod filter;
 mod inspect;
 pub mod searchable;
 pub mod tool_invocations;
@@ -16,7 +15,6 @@ pub use classifier::{
 };
 pub use config::*;
 pub use error::*;
-pub use filter::OutputFilter;
 pub use searchable::*;
 pub use tool_invocations::{
     FetchQuery, FetchResult, NewToolInvocation, ToolInvocation, ToolInvocationError,
