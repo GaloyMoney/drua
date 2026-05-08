@@ -751,11 +751,13 @@ impl Executor {
         };
         let resolved_params = substitute_value(params, &template_ctx)
             .map_err(|e| WorkflowError::InvalidTemplateRef(e.to_string()))?;
-        // Pre-compute the diagnostic trace once so any of the
-        // tool-rejection paths below can include it without
-        // re-walking the params tree.
+        // Walk the params/resolved trees once up front so the
+        // happy path drops `resolved_params` cleanly into the
+        // dispatch arguments below; the rejection paths share the
+        // same `diagnostics` slice and only pay the formatting
+        // cost when they fire.
         let diagnostics = template_diagnostics(params, &resolved_params);
-        let diagnostics_block = format_template_diagnostics(&diagnostics);
+        let diagnose = || format_template_diagnostics(&diagnostics);
 
         // Top-level tools accept `Option<JsonObject>`. Coerce non-objects
         // to an empty object — the tool's input schema rejects the
@@ -782,7 +784,8 @@ impl Executor {
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
                 return Err(WorkflowError::ToolDispatch(format!(
-                    "tool '{tool_name}': {e}{diagnostics_block}"
+                    "tool '{tool_name}': {e}{}",
+                    diagnose()
                 )));
             }
             Err(_) => {
@@ -798,7 +801,7 @@ impl Executor {
                 .unwrap_or_else(|| "tool returned is_error: true with no text content".to_string());
             return Err(WorkflowError::StepErrored {
                 step: step_name.to_string(),
-                reason: format!("tool '{tool_name}' failed: {detail}{diagnostics_block}"),
+                reason: format!("tool '{tool_name}' failed: {detail}{}", diagnose()),
             });
         }
 

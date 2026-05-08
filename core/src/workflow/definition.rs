@@ -388,8 +388,14 @@ mod tests {
         assert!(back.model_chain().is_none());
     }
 
+    /// `params` deserializes to `Value::Null` when omitted (serde
+    /// default for an untagged `serde_json::Value`). The executor
+    /// treats that as "no arguments" — see the
+    /// `Value::Null => None` arm of the dispatch path in
+    /// `executor::execute_tool_step`. The wire null is the
+    /// idiomatic absent-marker; we don't rewrite it to `{}`.
     #[test]
-    fn tool_step_params_default_to_empty_object() {
+    fn tool_step_omitted_params_deserializes_as_null() {
         let json = serde_json::json!({
             "type": "tool_step",
             "name": "noop",

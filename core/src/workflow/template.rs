@@ -73,8 +73,17 @@ pub struct TemplateContext<'a> {
     pub steps: &'a std::collections::HashMap<String, Value>,
 }
 
+/// CEL context built from a [`TemplateContext`], cached so a single
+/// `substitute_value` / `substitute_in_string` pass binds `trigger`
+/// and `steps` exactly once instead of cloning the whole map per
+/// reference. Held only for the duration of a substitution call —
+/// no shared state across passes.
+struct BuiltContext {
+    cel: Context<'static>,
+}
+
 impl TemplateContext<'_> {
-    fn build_cel_context(&self) -> Result<Context<'static>, TemplateError> {
+    fn build_cel_context(&self) -> Result<BuiltContext, TemplateError> {
         let mut ctx = Context::default();
         // GHA / Swamp convention: `${{ trigger.payload.X }}` for the
         // run's user payload, leaving room for future trigger
@@ -115,25 +124,31 @@ impl TemplateContext<'_> {
         );
         ctx.add_variable("steps", steps_value)
             .map_err(|e| TemplateError::Resolve("<context>".to_string(), format!("steps: {e}")))?;
-        Ok(ctx)
+        Ok(BuiltContext { cel: ctx })
     }
 
     /// `None` when the path doesn't exist at this point in time
     /// (parse-time validation should already have rejected refs
     /// that can never resolve, but optional fields surface here).
+    ///
+    /// Convenience wrapper that builds the CEL context per call —
+    /// fine for one-off resolutions; the substitution walks reuse
+    /// a built context across all string leaves to amortise the
+    /// `trigger` / `steps` clones.
     pub fn resolve(&self, r: &TemplateRef) -> Option<Value> {
-        let program = match Program::compile(&r.body) {
-            Ok(p) => p,
-            Err(_) => return None,
-        };
-        let ctx = self.build_cel_context().ok()?;
-        let value = program.execute(&ctx).ok()?;
-        // `value.json()` errors only on values CEL can produce that
-        // JSON can't represent (functions, durations beyond i64
-        // nanoseconds, …); not reachable for paths into JSON-typed
-        // inputs, so silent-on-error is acceptable here.
-        value.json().ok()
+        let built = self.build_cel_context().ok()?;
+        resolve_with_built(&built, r)
     }
+}
+
+fn resolve_with_built(built: &BuiltContext, r: &TemplateRef) -> Option<Value> {
+    let program = Program::compile(&r.body).ok()?;
+    let value = program.execute(&built.cel).ok()?;
+    // `value.json()` errors only on values CEL can produce that
+    // JSON can't represent (functions, durations beyond i64
+    // nanoseconds, …); not reachable for paths into JSON-typed
+    // inputs, so silent-on-error is acceptable here.
+    value.json().ok()
 }
 
 /// Parse the body of a `${{ … }}` reference (delimiters already
@@ -232,24 +247,29 @@ fn coerce_embedded(v: Value, out: &mut String) {
 /// Walk a JSON tree and substitute every string leaf. Whole-string
 /// `${{ x }}` matches splice; embedded matches stringify.
 pub fn substitute_value(value: &Value, ctx: &TemplateContext) -> Result<Value, TemplateError> {
+    let built = ctx.build_cel_context()?;
+    substitute_value_with_built(value, &built)
+}
+
+fn substitute_value_with_built(value: &Value, built: &BuiltContext) -> Result<Value, TemplateError> {
     match value {
         Value::String(s) => {
             if let Some(r) = whole_string_ref(s)? {
-                return Ok(ctx.resolve(&r).unwrap_or(Value::Null));
+                return Ok(resolve_with_built(built, &r).unwrap_or(Value::Null));
             }
-            Ok(Value::String(substitute_in_string(s, ctx)?))
+            Ok(Value::String(substitute_in_string_with_built(s, built)?))
         }
         Value::Array(arr) => {
             let mut out = Vec::with_capacity(arr.len());
             for v in arr {
-                out.push(substitute_value(v, ctx)?);
+                out.push(substitute_value_with_built(v, built)?);
             }
             Ok(Value::Array(out))
         }
         Value::Object(map) => {
             let mut out = serde_json::Map::with_capacity(map.len());
             for (k, v) in map {
-                out.insert(k.clone(), substitute_value(v, ctx)?);
+                out.insert(k.clone(), substitute_value_with_built(v, built)?);
             }
             Ok(Value::Object(out))
         }
@@ -261,6 +281,14 @@ pub fn substitute_value(value: &Value, ctx: &TemplateContext) -> Result<Value, T
 /// surrounding container is itself text. Non-scalar resolved values
 /// are JSON-encoded.
 pub fn substitute_in_string(s: &str, ctx: &TemplateContext) -> Result<String, TemplateError> {
+    let built = ctx.build_cel_context()?;
+    substitute_in_string_with_built(s, &built)
+}
+
+fn substitute_in_string_with_built(
+    s: &str,
+    built: &BuiltContext,
+) -> Result<String, TemplateError> {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(open_idx) = rest.find(OPEN) {
@@ -274,7 +302,7 @@ pub fn substitute_in_string(s: &str, ctx: &TemplateContext) -> Result<String, Te
         })?;
         let body = &after_open[..close_idx];
         let r = parse_path(body)?;
-        let resolved = ctx.resolve(&r).unwrap_or(Value::Null);
+        let resolved = resolve_with_built(built, &r).unwrap_or(Value::Null);
         coerce_embedded(resolved, &mut out);
         rest = &after_open[close_idx + CLOSE.len()..];
     }
