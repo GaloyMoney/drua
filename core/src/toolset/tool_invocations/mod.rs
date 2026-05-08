@@ -13,7 +13,7 @@ mod entity;
 mod error;
 mod repo;
 
-pub use entity::{NewToolInvocation, ToolInvocation};
+pub use entity::{NewToolInvocation, ToolInvocation, ToolInvocationOwner};
 pub use error::ToolInvocationError;
 
 use rmcp::model::{CallToolResult, Content};
@@ -23,7 +23,7 @@ use tracing::instrument;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
-use crate::primitives::{AgentId, ToolInvocationId};
+use crate::primitives::ToolInvocationId;
 
 use super::classifier::ToolResultSummary;
 use super::top_level::FETCH_HINT;
@@ -104,31 +104,32 @@ impl ToolInvocations {
         apply_fetch_query(&invocation.raw_text, &query)
     }
 
-    /// Cache-aware diff probe. Stub for the boilerplate — the consuming
-    /// `Diff` summary variant lands in a follow-up PR. The
-    /// `(agent_id, args_hash)` index is in place so the eventual query is
-    /// a single index lookup.
+    /// Cache-aware diff probe — most-recent invocation matching
+    /// `(owner, args_hash)`. The consuming `Diff` summary variant lands
+    /// in a follow-up PR; the `(scope, args_hash)` partial indexes are
+    /// in place so each lookup is a single index hit.
     #[instrument(name = "core.tool_invocations.find_for_diff", skip(self))]
     pub async fn find_for_diff(
         &self,
-        agent_id: AgentId,
+        owner: ToolInvocationOwner,
         args_hash: &[u8],
     ) -> Result<Option<ToolInvocation>, ToolInvocationError> {
         Ok(self
             .repo
-            .find_latest_by_args_hash(agent_id, args_hash)
+            .find_latest_by_args_hash(owner, args_hash)
             .await?)
     }
 
     /// Persist the captured raw output and decorate the original
-    /// `CallToolResult` with an `envelope.invocation_id` so the agent
+    /// `CallToolResult` with an `envelope.invocation_id` so the caller
     /// can recover detail through `tool_output_fetch`. Returns the
     /// original raw result on persistence failure (the model still
     /// gets a usable result; the failure is logged).
     ///
-    /// Returns `None` when the subject doesn't carry an agent (no
-    /// scope key for the persisted row); the dispatcher then falls
-    /// back to raw passthrough.
+    /// Returns `None` when the subject is `Anonymous` (no scope key
+    /// for the persisted row); the dispatcher then falls back to raw
+    /// passthrough. Both agent-scoped and user-scoped subjects (the
+    /// latter for mcp-gateway external callers) get a wrapped result.
     #[instrument(name = "core.tool_invocations.persist_and_envelope", skip_all)]
     #[allow(clippy::too_many_arguments)]
     pub async fn persist_and_envelope(
@@ -141,7 +142,7 @@ impl ToolInvocations {
         duration_ms: u64,
         started_at: chrono::DateTime<chrono::Utc>,
     ) -> Option<CallToolResult> {
-        let agent_id = subject.acting_agent_id()?;
+        let owner = ToolInvocationOwner::from_subject(subject)?;
 
         let raw_text = raw
             .content
@@ -174,7 +175,7 @@ impl ToolInvocations {
         let args_hash = hasher.finalize().to_vec();
 
         let new = NewToolInvocation {
-            agent_id,
+            owner,
             tool_name: tool_name.to_string(),
             args: args.clone(),
             args_hash,

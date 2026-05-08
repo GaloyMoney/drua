@@ -19,7 +19,7 @@ pub use filter::OutputFilter;
 pub use searchable::*;
 pub use tool_invocations::{
     FetchQuery, FetchResult, NewToolInvocation, ToolInvocation, ToolInvocationError,
-    ToolInvocations,
+    ToolInvocationOwner, ToolInvocations,
 };
 pub use top_level::{
     Bash, CallCatalogTool, ComposeTool, ComposeTypes, Delete, DescribeCatalogTool, GlobTool, Grep,
@@ -480,11 +480,11 @@ impl ToolSets {
 
     /// Records an audit entry when an [`Audit`] has been wired via [`set_audit`].
     ///
-    /// The universal-pipeline scope key is derived from `subject` —
-    /// `subject.acting_agent_id()` selects the agent the persisted
-    /// invocation rows hang off. Subjects without an agent (MCP-gateway
-    /// external callers, tests) short-circuit to raw passthrough
-    /// regardless of classifier shape.
+    /// The universal-pipeline scope key is derived from `subject` via
+    /// [`ToolInvocationOwner::from_subject`] — agent-rooted subjects key
+    /// off `agent_id`, user-rooted subjects (mcp-gateway external
+    /// callers, exported agents) key off `user_id`. Only `Anonymous`
+    /// short-circuits to raw passthrough.
     pub async fn call_top_level_tool(
         &self,
         subject: &AuthSubject,
@@ -546,23 +546,22 @@ impl ToolSets {
                         exit_code: None,
                     });
 
-                    let wrapped =
-                        match (&summary, tool_invocations.as_ref(), subject.acting_agent_id()) {
-                            (s, _, _) if s.is_passthrough() => raw,
-                            (_, Some(invocations), Some(_)) => invocations
-                                .persist_and_envelope(
-                                    subject,
-                                    name,
-                                    &args_for_classify,
-                                    summary,
-                                    &raw,
-                                    duration_ms,
-                                    started_at,
-                                )
-                                .await
-                                .unwrap_or(raw),
-                            _ => raw,
-                        };
+                    let wrapped = match (&summary, tool_invocations.as_ref()) {
+                        (s, _) if s.is_passthrough() => raw,
+                        (_, Some(invocations)) => invocations
+                            .persist_and_envelope(
+                                subject,
+                                name,
+                                &args_for_classify,
+                                summary,
+                                &raw,
+                                duration_ms,
+                                started_at,
+                            )
+                            .await
+                            .unwrap_or(raw),
+                        _ => raw,
+                    };
 
                     Audit::record_tokens(estimate_tokens(&wrapped));
                     Audit::record_success();

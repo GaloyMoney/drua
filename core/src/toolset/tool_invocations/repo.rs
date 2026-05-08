@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 
-use crate::primitives::{AgentId, ToolInvocationId};
+use crate::primitives::{AgentId, ToolInvocationId, UserId};
 
 use super::entity::*;
 
@@ -14,23 +14,28 @@ impl ToolInvocationRepo {
         Self { pool: pool.clone() }
     }
 
-    pub async fn create(&self, new: NewToolInvocation) -> Result<ToolInvocation, sqlx::Error> {
+    pub async fn create(
+        &self,
+        new: NewToolInvocation,
+    ) -> Result<ToolInvocation, sqlx::Error> {
         let id = ToolInvocationId::new();
         let id_uuid: uuid::Uuid = id.into();
-        let agent_uuid: uuid::Uuid = new.agent_id.into();
+        let agent_uuid: Option<uuid::Uuid> = new.owner.agent_id().map(Into::into);
+        let user_uuid: Option<uuid::Uuid> = new.owner.user_id().map(Into::into);
 
         let row = sqlx::query!(
             r#"
             INSERT INTO tool_invocations (
-                id, agent_id, tool_name, args, args_hash, classifier,
+                id, agent_id, user_id, tool_name, args, args_hash, classifier,
                 summary, raw_text, raw_size_bytes, exit_code,
                 duration_ms, started_at
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             RETURNING created_at
             "#,
             id_uuid,
             agent_uuid,
+            user_uuid,
             new.tool_name,
             new.args,
             new.args_hash,
@@ -47,7 +52,7 @@ impl ToolInvocationRepo {
 
         Ok(ToolInvocation {
             id,
-            agent_id: new.agent_id,
+            owner: new.owner,
             tool_name: new.tool_name,
             args: new.args,
             args_hash: new.args_hash,
@@ -62,12 +67,15 @@ impl ToolInvocationRepo {
         })
     }
 
-    pub async fn find_by_id(&self, id: ToolInvocationId) -> Result<ToolInvocation, sqlx::Error> {
+    pub async fn find_by_id(
+        &self,
+        id: ToolInvocationId,
+    ) -> Result<ToolInvocation, sqlx::Error> {
         let id_uuid: uuid::Uuid = id.into();
         let row = sqlx::query!(
             r#"
             SELECT
-                id, agent_id, tool_name, args, args_hash, classifier,
+                id, agent_id, user_id, tool_name, args, args_hash, classifier,
                 summary, raw_text, raw_size_bytes, exit_code,
                 duration_ms, started_at, created_at
             FROM tool_invocations
@@ -78,27 +86,43 @@ impl ToolInvocationRepo {
         .fetch_one(&self.pool)
         .await?;
 
-        Ok(ToolInvocation {
-            id: ToolInvocationId::from(row.id),
-            agent_id: AgentId::from(row.agent_id),
-            tool_name: row.tool_name,
-            args: row.args,
-            args_hash: row.args_hash,
-            classifier: row.classifier,
-            summary: row.summary,
-            raw_text: row.raw_text,
-            raw_size_bytes: row.raw_size_bytes,
-            exit_code: row.exit_code,
-            duration_ms: row.duration_ms,
-            started_at: row.started_at,
-            created_at: row.created_at,
-        })
+        Ok(hydrate_row(
+            row.id,
+            row.agent_id,
+            row.user_id,
+            row.tool_name,
+            row.args,
+            row.args_hash,
+            row.classifier,
+            row.summary,
+            row.raw_text,
+            row.raw_size_bytes,
+            row.exit_code,
+            row.duration_ms,
+            row.started_at,
+            row.created_at,
+        ))
     }
 
-    /// Most-recent matching invocation for `(agent_id, args_hash)` — the
-    /// cache-aware-diff probe. Returns the full row so the caller can
-    /// compare summaries without a second round-trip.
+    /// Most-recent matching invocation for `(owner, args_hash)` — the
+    /// cache-aware-diff probe. Walks the agent or user partial index
+    /// depending on the owner shape.
     pub async fn find_latest_by_args_hash(
+        &self,
+        owner: ToolInvocationOwner,
+        args_hash: &[u8],
+    ) -> Result<Option<ToolInvocation>, sqlx::Error> {
+        match owner {
+            ToolInvocationOwner::Agent { agent_id } => {
+                self.find_latest_by_agent(agent_id, args_hash).await
+            }
+            ToolInvocationOwner::User { user_id } => {
+                self.find_latest_by_user(user_id, args_hash).await
+            }
+        }
+    }
+
+    async fn find_latest_by_agent(
         &self,
         agent_id: AgentId,
         args_hash: &[u8],
@@ -107,7 +131,7 @@ impl ToolInvocationRepo {
         let row = sqlx::query!(
             r#"
             SELECT
-                id, agent_id, tool_name, args, args_hash, classifier,
+                id, agent_id, user_id, tool_name, args, args_hash, classifier,
                 summary, raw_text, raw_size_bytes, exit_code,
                 duration_ms, started_at, created_at
             FROM tool_invocations
@@ -121,20 +145,114 @@ impl ToolInvocationRepo {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|r| ToolInvocation {
-            id: ToolInvocationId::from(r.id),
-            agent_id: AgentId::from(r.agent_id),
-            tool_name: r.tool_name,
-            args: r.args,
-            args_hash: r.args_hash,
-            classifier: r.classifier,
-            summary: r.summary,
-            raw_text: r.raw_text,
-            raw_size_bytes: r.raw_size_bytes,
-            exit_code: r.exit_code,
-            duration_ms: r.duration_ms,
-            started_at: r.started_at,
-            created_at: r.created_at,
+        Ok(row.map(|r| {
+            hydrate_row(
+                r.id,
+                r.agent_id,
+                r.user_id,
+                r.tool_name,
+                r.args,
+                r.args_hash,
+                r.classifier,
+                r.summary,
+                r.raw_text,
+                r.raw_size_bytes,
+                r.exit_code,
+                r.duration_ms,
+                r.started_at,
+                r.created_at,
+            )
         }))
+    }
+
+    async fn find_latest_by_user(
+        &self,
+        user_id: UserId,
+        args_hash: &[u8],
+    ) -> Result<Option<ToolInvocation>, sqlx::Error> {
+        let user_uuid: uuid::Uuid = user_id.into();
+        let row = sqlx::query!(
+            r#"
+            SELECT
+                id, agent_id, user_id, tool_name, args, args_hash, classifier,
+                summary, raw_text, raw_size_bytes, exit_code,
+                duration_ms, started_at, created_at
+            FROM tool_invocations
+            WHERE user_id = $1 AND args_hash = $2
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+            user_uuid,
+            args_hash,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(|r| {
+            hydrate_row(
+                r.id,
+                r.agent_id,
+                r.user_id,
+                r.tool_name,
+                r.args,
+                r.args_hash,
+                r.classifier,
+                r.summary,
+                r.raw_text,
+                r.raw_size_bytes,
+                r.exit_code,
+                r.duration_ms,
+                r.started_at,
+                r.created_at,
+            )
+        }))
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hydrate_row(
+    id: uuid::Uuid,
+    agent_id: Option<uuid::Uuid>,
+    user_id: Option<uuid::Uuid>,
+    tool_name: String,
+    args: serde_json::Value,
+    args_hash: Vec<u8>,
+    classifier: String,
+    summary: serde_json::Value,
+    raw_text: String,
+    raw_size_bytes: i64,
+    exit_code: Option<i32>,
+    duration_ms: i32,
+    started_at: chrono::DateTime<chrono::Utc>,
+    created_at: chrono::DateTime<chrono::Utc>,
+) -> ToolInvocation {
+    let owner = match (agent_id, user_id) {
+        (Some(a), None) => ToolInvocationOwner::Agent {
+            agent_id: AgentId::from(a),
+        },
+        (None, Some(u)) => ToolInvocationOwner::User {
+            user_id: UserId::from(u),
+        },
+        // The DB-level CHECK constraint guarantees exactly-one is set;
+        // if we observe both/neither it's a schema violation, not a
+        // runtime case to silently paper over.
+        (a, u) => panic!(
+            "tool_invocations row violates owner CHECK: agent_id={a:?}, user_id={u:?}"
+        ),
+    };
+    ToolInvocation {
+        id: ToolInvocationId::from(id),
+        owner,
+        tool_name,
+        args,
+        args_hash,
+        classifier,
+        summary,
+        raw_text,
+        raw_size_bytes,
+        exit_code,
+        duration_ms,
+        started_at,
+        created_at,
     }
 }

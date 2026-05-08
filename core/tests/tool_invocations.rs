@@ -10,8 +10,10 @@ use chrono::Utc;
 use rmcp::model::{CallToolResult, Content, JsonObject};
 
 use drua_core::auth::AuthSubject;
-use drua_core::primitives::{AgentId, ProjectId};
-use drua_core::toolset::tool_invocations::{FetchQuery, NewToolInvocation, ToolInvocations};
+use drua_core::primitives::{AgentId, ProjectId, UserId};
+use drua_core::toolset::tool_invocations::{
+    FetchQuery, NewToolInvocation, ToolInvocationOwner, ToolInvocations,
+};
 use drua_core::toolset::{ToolSets, ToolSetsConfig, ToolSetsError, TopLevelTool};
 
 const PG_CON: &str = "postgres://user:password@localhost:5432/drua";
@@ -63,9 +65,25 @@ fn sample_raw() -> String {
     lines.join("\n")
 }
 
-fn build_new(agent_id: AgentId, raw: &str) -> NewToolInvocation {
+/// Inserts a bare users row so the `tool_invocations.user_id` FK
+/// resolves. `github_id` is unique-per-row in production — this fixture
+/// just needs a value that doesn't collide with parallel test runs, so
+/// we reuse the row id.
+async fn insert_user(pool: &sqlx::PgPool) -> UserId {
+    let id = UserId::new();
+    let github_id = format!("ti-test-{}", uuid::Uuid::from(id));
+    sqlx::query("INSERT INTO users (id, github_id, created_at) VALUES ($1, $2, NOW())")
+        .bind(id)
+        .bind(&github_id)
+        .execute(pool)
+        .await
+        .expect("insert user");
+    id
+}
+
+fn build_new(owner: ToolInvocationOwner, raw: &str) -> NewToolInvocation {
     NewToolInvocation {
-        agent_id,
+        owner,
         tool_name: "bash".to_string(),
         args: serde_json::json!({"command": "echo demo"}),
         args_hash: vec![1, 2, 3, 4],
@@ -88,10 +106,10 @@ async fn persist_round_trip_and_fetch_modes() {
     let agent_id = insert_agent(&pool, project_id).await;
 
     let raw = sample_raw();
-    let new = build_new(agent_id, &raw);
+    let new = build_new(ToolInvocationOwner::Agent { agent_id }, &raw);
     let persisted = invocations.persist(new).await.expect("persist");
 
-    assert_eq!(persisted.agent_id, agent_id);
+    assert_eq!(persisted.owner, ToolInvocationOwner::Agent { agent_id });
     assert_eq!(persisted.classifier, "generic::v1");
     assert_eq!(persisted.raw_size_bytes, raw.len() as i64);
     assert_eq!(persisted.raw_text, raw);
@@ -264,20 +282,21 @@ async fn find_for_diff_returns_latest_matching_args_hash() {
     let invocations = ToolInvocations::new(&pool);
     let project_id = insert_project(&pool).await;
     let agent_id = insert_agent(&pool, project_id).await;
+    let agent_owner = ToolInvocationOwner::Agent { agent_id };
 
     // Two distinct invocations with the same args_hash; expect the most
     // recent to come back.
     invocations
-        .persist(build_new(agent_id, "first"))
+        .persist(build_new(agent_owner, "first"))
         .await
         .expect("persist first");
     let second = invocations
-        .persist(build_new(agent_id, "second"))
+        .persist(build_new(agent_owner, "second"))
         .await
         .expect("persist second");
 
     let hit = invocations
-        .find_for_diff(agent_id, &[1, 2, 3, 4])
+        .find_for_diff(agent_owner, &[1, 2, 3, 4])
         .await
         .expect("find_for_diff");
     let hit = hit.expect("matching invocation");
@@ -286,8 +305,99 @@ async fn find_for_diff_returns_latest_matching_args_hash() {
 
     // Distinct hash → no hit.
     let miss = invocations
-        .find_for_diff(agent_id, &[9, 9, 9, 9])
+        .find_for_diff(agent_owner, &[9, 9, 9, 9])
         .await
         .expect("find_for_diff non-matching");
     assert!(miss.is_none());
+}
+
+/// User-rooted dispatch: mcp-gateway external callers run with
+/// `AuthSubject::User`, no agent in scope. The universal pipeline
+/// must still wrap their oversized results — the recovery handle is
+/// the load-bearing part for cli/IDE-driven tool calls too. The
+/// previous shape that short-circuited any non-agent subject to raw
+/// passthrough is what this test guards against regressing into.
+#[tokio::test]
+async fn user_subject_gets_pipeline_wrapping_via_mcp_gateway_path() {
+    let pool = pool().await;
+    let user_id = insert_user(&pool).await;
+
+    let tool_invocations = Arc::new(ToolInvocations::new(&pool));
+    let toolsets = ToolSets::init(
+        ToolSetsConfig::default(),
+        None,
+        None,
+        Some(Arc::clone(&tool_invocations)),
+    )
+    .await
+    .expect("ToolSets::init");
+
+    let body = "y".repeat(50_000);
+    toolsets.register_top_level(StubTool {
+        name: "stub-user-call",
+        body: body.clone(),
+        bypass: false,
+    });
+
+    let user_subject = AuthSubject::User(user_id);
+    let result = toolsets
+        .call_top_level_tool(&user_subject, "stub-user-call", None)
+        .await
+        .expect("user-scoped dispatch");
+
+    let envelope = result
+        .structured_content
+        .as_ref()
+        .expect("user-scoped body over the threshold must still be wrapped");
+    let invocation_id_str = envelope
+        .get("invocation_id")
+        .and_then(|v| v.as_str())
+        .expect("envelope must include invocation_id for user subject");
+    let invocation_id = uuid::Uuid::parse_str(invocation_id_str)
+        .expect("invocation_id is a uuid")
+        .into();
+
+    let persisted = tool_invocations
+        .find_by_id(invocation_id)
+        .await
+        .expect("persisted row");
+    assert_eq!(
+        persisted.owner,
+        ToolInvocationOwner::User { user_id },
+        "user-rooted call must persist with the User owner shape",
+    );
+}
+
+/// User-rooted scope: mcp-gateway external callers (subject =
+/// `AuthSubject::User`) get their own diff probe. Agent and user
+/// scopes are independent — same `args_hash` under different owners
+/// must not collide.
+#[tokio::test]
+async fn find_for_diff_user_scope_is_isolated_from_agent_scope() {
+    let pool = pool().await;
+    let invocations = ToolInvocations::new(&pool);
+    let project_id = insert_project(&pool).await;
+    let agent_id = insert_agent(&pool, project_id).await;
+    let user_id = insert_user(&pool).await;
+
+    let agent_owner = ToolInvocationOwner::Agent { agent_id };
+    let user_owner = ToolInvocationOwner::User { user_id };
+
+    invocations
+        .persist(build_new(agent_owner, "for-agent"))
+        .await
+        .expect("persist agent-scoped");
+    let user_row = invocations
+        .persist(build_new(user_owner, "for-user"))
+        .await
+        .expect("persist user-scoped");
+
+    let user_hit = invocations
+        .find_for_diff(user_owner, &[1, 2, 3, 4])
+        .await
+        .expect("find_for_diff user")
+        .expect("user-scoped match");
+    assert_eq!(user_hit.id, user_row.id);
+    assert_eq!(user_hit.raw_text, "for-user");
+    assert_eq!(user_hit.owner, user_owner);
 }
