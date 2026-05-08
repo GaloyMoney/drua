@@ -80,6 +80,11 @@ struct PipelineJobParams {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct BuildIdParams {
+    /// Global Concourse build id (numeric, returned as `build_id` by
+    /// `list_builds_for_job`). NOT the per-job build name from URLs like
+    /// `…/jobs/foo/builds/597`. To map a URL build name to its global id,
+    /// call `list_builds_for_job(pipeline, job)` and pick the entry whose
+    /// `name` matches the URL segment, then pass its `build_id` here.
     #[serde(deserialize_with = "deserialize_liberal_i64")]
     build_id: i64,
 }
@@ -215,6 +220,20 @@ mod schema_tests {
         let schema = schema_for::<BuildStatusOutput>();
         assert!(description_for(&schema, "start_time").contains("seconds"));
         assert!(description_for(&schema, "end_time").contains("seconds"));
+    }
+
+    #[test]
+    fn build_id_param_distinguishes_global_id_from_url_build_name() {
+        let schema = schema_for::<BuildIdParams>();
+        let desc = description_for(&schema, "build_id");
+        assert!(
+            desc.contains("Global"),
+            "build_id description must call out global vs URL build name: {desc}"
+        );
+        assert!(
+            desc.contains("list_builds_for_job"),
+            "build_id description must point at recovery path: {desc}"
+        );
     }
 
     /// MCP `structuredContent` must be a JSON object — list-style outputs

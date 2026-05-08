@@ -455,6 +455,13 @@ impl TopLevelTool for CallCatalogTool {
             .remove("output_filter")
             .and_then(|v| serde_json::from_value(v).ok());
 
+        // After tool_name/arguments/output_filter are consumed, anything left
+        // is an extra top-level key — almost always a flat call like
+        // `{tool_name, build_id: 597}` instead of `{tool_name, arguments:{build_id:597}}`.
+        // We let the call proceed (the inner schema may still accept it via
+        // `additionalProperties`), but if it errors we'll wrap with a hint.
+        let extra_keys: Vec<String> = args.keys().cloned().collect();
+
         let (set, name, tool_default_filter) = self
             .find_set(subject, &tool_name)
             .ok_or_else(|| ToolSetsError::ToolNotFound(tool_name.clone()))?;
@@ -467,8 +474,35 @@ impl TopLevelTool for CallCatalogTool {
         let filter = output_filter
             .or(tool_default_filter)
             .unwrap_or_else(OutputFilter::global_default);
-        result.and_then(|r| filter.apply(r))
+        let result = result.and_then(|r| filter.apply(r));
+        annotate_envelope_mistake(result, &tool_name, &extra_keys)
     }
+}
+
+/// When the inner tool errors *and* the caller passed extra top-level keys
+/// alongside `tool_name`, wrap the error with a hint nudging them at the
+/// correct envelope shape. The original error message is preserved verbatim
+/// so the agent still sees the underlying validation failure.
+fn annotate_envelope_mistake(
+    result: Result<CallToolResult, ToolSetsError>,
+    tool_name: &str,
+    extra_keys: &[String],
+) -> Result<CallToolResult, ToolSetsError> {
+    if extra_keys.is_empty() {
+        return result;
+    }
+    let Err(err) = result else {
+        return result;
+    };
+    let stray = extra_keys.join(", ");
+    let raw = err.to_string();
+    Err(ToolSetsError::InvalidArgument(format!(
+        "{raw}\nHint: call_tool envelope is {{tool_name, arguments:{{…}}, output_filter?}}; \
+         these top-level fields were ignored: {stray}. \
+         Likely you wrote `call_tool({{tool_name:\"{tool_name}\", {stray}: …}})` — \
+         move them inside `arguments`: \
+         `call_tool({{tool_name:\"{tool_name}\", arguments:{{{stray}: …}}}})`."
+    )))
 }
 
 fn visible_entries(
@@ -731,6 +765,46 @@ mod tests {
         assert_eq!(SearchCatalog::normalize("list-pipelines"), "list pipelines");
         assert_eq!(SearchCatalog::normalize("Search_Code"), "search code");
         assert_eq!(SearchCatalog::normalize("no changes"), "no changes");
+    }
+
+    #[test]
+    fn envelope_mistake_hint_is_prepended_when_extra_keys_present() {
+        let inner = Err(ToolSetsError::InvalidArgument(
+            "missing field `build_id`".to_string(),
+        ));
+        let wrapped =
+            annotate_envelope_mistake(inner, "concourse_get_build_logs", &["build_id".to_string()]);
+        let msg = wrapped.unwrap_err().to_string();
+        assert!(
+            msg.contains("missing field `build_id`"),
+            "underlying error preserved: {msg}"
+        );
+        assert!(
+            msg.contains("call_tool envelope"),
+            "envelope hint added: {msg}"
+        );
+        assert!(
+            msg.contains("arguments:{build_id: …}"),
+            "fix shape suggested: {msg}"
+        );
+    }
+
+    #[test]
+    fn envelope_mistake_passthrough_when_no_extra_keys() {
+        let inner = Err(ToolSetsError::InvalidArgument("oops".to_string()));
+        let out = annotate_envelope_mistake(inner, "concourse_get_build_logs", &[]);
+        assert_eq!(
+            out.unwrap_err().to_string(),
+            "ToolSetsError - InvalidArgument: oops"
+        );
+    }
+
+    #[test]
+    fn envelope_mistake_passthrough_on_success() {
+        let ok: Result<CallToolResult, ToolSetsError> =
+            Ok(CallToolResult::success(vec![Content::text("ok")]));
+        let out = annotate_envelope_mistake(ok, "x", &["stray".to_string()]);
+        assert!(out.is_ok());
     }
 
     /// Strict MCP clients (e.g. Claude Code) reject boolean schemas inside
