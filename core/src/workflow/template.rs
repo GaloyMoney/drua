@@ -81,7 +81,21 @@ impl TemplateContext<'_> {
         // metadata (`trigger.received_at`, etc.) without breaking
         // existing references. The executor passes the raw payload;
         // wrapping happens here so callers don't have to.
-        let trigger_value = serde_json::json!({ "payload": self.trigger.clone() });
+        //
+        // Null / non-object payloads (manual `trigger` with no
+        // arguments, webhook with empty body, …) are coerced to an
+        // empty object before binding. Without this, CEL evaluates
+        // `null.field` to `Bool(false)` rather than raising
+        // `NoSuchKey`, and the `false` ends up spliced into the
+        // params tree — surprising the consuming tool with a bool
+        // where it expected a string. The empty-object form lets
+        // every `trigger.payload.X` reference resolve cleanly to
+        // `null` via the existing missing-key path.
+        let payload = match &self.trigger {
+            Value::Object(_) => self.trigger.clone(),
+            _ => Value::Object(serde_json::Map::new()),
+        };
+        let trigger_value = serde_json::json!({ "payload": payload });
         ctx.add_variable("trigger", trigger_value).map_err(|e| {
             TemplateError::Resolve("<context>".to_string(), format!("trigger: {e}"))
         })?;
@@ -441,6 +455,35 @@ mod tests {
             substitute_in_string("[${{ trigger.payload.x }}]", &ctx).unwrap(),
             "[]"
         );
+    }
+
+    /// Run triggered with no payload — `trigger_context` arrives as
+    /// JSON `null`. Templates referring into the (absent) payload
+    /// must resolve silently, not produce a CEL error or splice a
+    /// surprise scalar like `false`.
+    #[test]
+    fn null_payload_resolves_silently_in_splice() {
+        let trigger = json!(null);
+        let steps = HashMap::new();
+        let ctx = TemplateContext {
+            trigger: &trigger,
+            steps: &steps,
+        };
+        let input = json!({ "x": "${{ trigger.payload.pipeline }}" });
+        let out = substitute_value(&input, &ctx).unwrap();
+        assert_eq!(out, json!({ "x": null }));
+    }
+
+    #[test]
+    fn null_payload_resolves_silently_in_embed() {
+        let trigger = json!(null);
+        let steps = HashMap::new();
+        let ctx = TemplateContext {
+            trigger: &trigger,
+            steps: &steps,
+        };
+        let s = substitute_in_string("build-${{ trigger.payload.build }}", &ctx).unwrap();
+        assert_eq!(s, "build-");
     }
 
     #[test]

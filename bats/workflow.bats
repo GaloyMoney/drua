@@ -157,3 +157,88 @@ extract_id_field() {
   [[ "$output" == *"state: succeeded"* ]]
   [[ "$output" == *"workflow_executor"* ]]
 }
+
+@test "workflow: null trigger payload doesn't leak Bool(false) into substituted params" {
+  # Regression test for a bug surfaced by a manual run with no
+  # payload: CEL's `null.field` evaluates to `Bool(false)` rather
+  # than raising `NoSuchKey`, so `${{ trigger.payload.X }}` got
+  # spliced as `false` and the consuming tool's deserializer
+  # exploded with `expected a string, got boolean false`.
+  #
+  # Fix coerces non-object trigger payloads to an empty object
+  # before binding so the resolver's normal missing-key →
+  # null path runs unchanged. The downstream step still errors
+  # (notes' tags are `Vec<String>` and reject null), but the
+  # error now names the right thing — `null` instead of the
+  # mysterious `false`. This test asserts both: the run errors
+  # cleanly, and the error mentions `null` rather than `boolean`.
+
+  local suffix
+  suffix="$(uuidgen | tr '[:upper:]' '[:lower:]' | cut -c1-8)"
+  local proj_name="proj-toolstep-null-$suffix"
+
+  run graphql_query "mutation { projectCreate(input: { name: \"$proj_name\" }) { project { id } } }" "$AGENT_TOKEN"
+  local project_id
+  project_id="$(echo "$output" | jq -r '.data.projectCreate.project.id')"
+  [ -n "$project_id" ] && [ "$project_id" != "null" ]
+
+  # Same workflow shape as the happy-path test — depends on
+  # `${{ trigger.payload.* }}` for content and tags.
+  run admin_call "workflow" "$(jq -nc --arg pid "$project_id" '{
+    command: "create",
+    project_id: $pid,
+    name: "tool-step-null",
+    manual: true,
+    steps: [
+      { type: "tool_step", name: "identify", tool: "whoami", params: {} },
+      {
+        type: "tool_step",
+        name: "store-note",
+        tool: "notes",
+        params: {
+          command: "store",
+          title: "run-${{ steps.identify.outputs.workflow_run_id }}",
+          content: "Build ${{ trigger.payload.build }} on ${{ trigger.payload.pipeline }}",
+          tags: [
+            "${{ trigger.payload.pipeline }}",
+            "build-${{ trigger.payload.build }}"
+          ]
+        }
+      }
+    ]
+  }')"
+  echo "$output"
+  local def_id
+  def_id="$(extract_id_field "$output")"
+  [ -n "$def_id" ] || { echo "could not extract definition id"; return 1; }
+
+  # Trigger with NO payload — admin accepts a missing `payload`
+  # field; the run lands with `trigger_context: null`.
+  run admin_call "workflow" "$(jq -nc --arg did "$def_id" '{
+    command: "trigger",
+    definition_id: $did
+  }')"
+  echo "$output"
+  local run_id
+  run_id="$(extract_id_field "$output")"
+  [ -n "$run_id" ] || { echo "could not extract run id"; return 1; }
+
+  run admin_call "workflow" "$(jq -nc --arg rid "$run_id" '{
+    command: "await_run",
+    run_id: $rid,
+    timeout_seconds: 60
+  }')"
+  echo "$output"
+  # Step 1 (whoami, no payload deps) should succeed. Step 2
+  # (notes, depends on missing payload fields) errors — but
+  # cleanly, with `null`, not `false`. The run rolls up to
+  # `errored`.
+  [[ "$output" == *"state: errored"* ]]
+  [[ "$output" == *"workflow_executor"* ]]
+  [[ "$output" == *"expected a string"* ]]
+  [[ "$output" == *"null"* ]]
+  # Regression assertion: the original symptom was `boolean false`
+  # leaking through. That phrase must NOT appear.
+  [[ "$output" != *"boolean \`false\`"* ]]
+  [[ "$output" != *"boolean false"* ]]
+}
