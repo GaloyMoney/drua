@@ -698,14 +698,17 @@ fn args_digest(tool_name: &str, args: &serde_json::Value) -> String {
     out.chars().take(80).collect()
 }
 
-/// Inner dispatch for a [`SearchableToolSet`] — returns both the raw
-/// (filter-applied) `CallToolResult` AND the JS-facing `Value`.
-/// The dispatcher takes the raw form, runs the classifier on it, and
-/// persists via `ToolInvocations::persist_classification`; JS still
-/// receives only the `Value`. Splitting the responsibilities here
-/// means existing scripts see exactly the shape they did before, but
-/// compose now has the recovery metadata to surface in
-/// `sub_invocations`.
+/// Inner dispatch for a [`SearchableToolSet`] — returns the **unfiltered**
+/// `CallToolResult` (for classifier + `tool_output_fetch` recovery) AND the
+/// JS-facing `Value` derived from the filter-applied form (so JS scripts
+/// see the same trimmed shape they would via direct `call_tool`).
+///
+/// Persisting the unfiltered original is load-bearing: the global default
+/// filter caps plain-text output at the last 1000 lines, and persisting
+/// that would silently break `tool_output_fetch` for any sub-tool whose
+/// real output is bigger than the cap. Structured tools are filtered too
+/// (filter doesn't touch `structured_content`) — for those JS still gets
+/// the same `Value` it always did.
 async fn run_searchable_call(
     set: Arc<dyn SearchableToolSet>,
     subject: &AuthSubject,
@@ -724,11 +727,12 @@ async fn run_searchable_call(
         .await
         .map_err(|e| e.to_string())?;
 
+    let unfiltered = result.clone();
     let filter = default_filter.unwrap_or_else(OutputFilter::global_default);
     let filtered = filter.apply(result).map_err(|e| e.to_string())?;
 
     let value = result_to_value(&filtered);
-    Ok((filtered, value))
+    Ok((unfiltered, value))
 }
 
 /// Inner dispatch for a [`TopLevelTool`] — same shape as
