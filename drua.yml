@@ -38,9 +38,9 @@ agents:
   #   2. builtin_roles.<role>.chain — optional per-role override
   #   3. default_chain
   default_chain:
-    primary: { name: deepseek/deepseek-v3.2, max_tokens: 8192 }
+    primary: { name: openai/gpt-5-mini, max_tokens: 8192 }
     fallbacks:
-      - { name: openai/gpt-5-mini, max_tokens: 8192 }
+      - { name: deepseek/deepseek-v3.2, max_tokens: 8192 }
   builtin_roles:
     project_lead:
       # Optional: chain: { primary: { name: ... }, fallbacks: [ ... ] }
