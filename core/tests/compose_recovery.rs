@@ -345,13 +345,16 @@ async fn tool_output_fetch_inside_compose_engine() {
     // sub_invocations directly (those are surfaced after JS exits).
     // Instead it asserts the fetch tool is callable; a real-world
     // pattern would use an invocation_id from a prior compose call.
+    // Rust's `\` line-continuation collapses newlines, so a multi-line
+    // JS script written with `\` ends up on one line — and a leading
+    // `//` comment swallows everything after it. Use real newlines.
     let result = toolsets
         .call_top_level_tool(
             &subject,
             "compose",
             compose_args(
-                "// tool_output_fetch is in the namespace. \
-                 const present = typeof tools.tool_output_fetch === 'function'; \
+                "// tool_output_fetch is in the namespace.\n\
+                 const present = typeof tools.tool_output_fetch === 'function';\n\
                  return { tool_output_fetch_visible: present };",
             ),
         )
