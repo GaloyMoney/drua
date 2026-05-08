@@ -314,6 +314,7 @@ impl ToolInvocations {
         wrapped.content = vec![Content::text(envelope_text(
             &persisted.summary,
             persisted.invocation_id,
+            persisted.raw_size_bytes,
         ))];
         wrapped.structured_content = Some(envelope);
         Some(wrapped)
@@ -331,7 +332,11 @@ pub struct PersistedClassification {
     pub raw_size_bytes: u64,
 }
 
-fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId) -> String {
+fn envelope_text(
+    summary: &ToolResultSummary,
+    id: ToolInvocationId,
+    raw_size_bytes: u64,
+) -> String {
     match summary {
         ToolResultSummary::Passthrough { value } => match value {
             // Plain-text tools land here as Value::String — emit the
@@ -383,12 +388,14 @@ fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId) -> String {
             // Schema-faithful summary: a single `logs` string that
             // already carries every signal inline (warning lines,
             // structured-pass markers, bulk-elide markers, etc).
-            // Render with a brief envelope pointing at recovery.
+            // The envelope reports the ORIGINAL byte count — what
+            // the agent can recover via `tool_output_fetch` — not
+            // what's in this rendered view (which they're already
+            // reading).
             let mut out = String::new();
             out.push_str(&format!(
-                "[concourse build log: {} bytes kept; \
+                "[concourse build log: {raw_size_bytes} original bytes; \
                  fetch raw via tool_output_fetch(invocation_id=\"{id}\")]\n",
-                s.logs.len(),
             ));
             out.push_str(&s.logs);
             if !s.logs.ends_with('\n') {
