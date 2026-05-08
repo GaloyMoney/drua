@@ -41,9 +41,14 @@ const GENERIC_TAIL_LINES: usize = 150;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolResultSummary {
-    /// Below the threshold and no typed classifier opted in — the agent
-    /// already received the full output, no envelope is added.
-    Passthrough { text: String },
+    /// Below the threshold and no typed classifier opted in — the
+    /// agent already received the full output, no envelope is added.
+    /// Carries `Value` rather than `String` so structured tool
+    /// results (compose, github_get_pr, honeycomb queries) keep
+    /// their programmatic shape end-to-end. Plain-text tools land
+    /// here as `Value::String(text)`; the old `text` field is
+    /// recoverable with `value.as_str()`.
+    Passthrough { value: serde_json::Value },
 
     /// Generic head/tail/middle-elision over the threshold. Lossy in the
     /// middle by design; the dropped detail is recoverable via the
@@ -167,7 +172,7 @@ impl ClassifierRegistry {
         let canonical_text = extract_text(ctx.raw);
         Classification {
             summary: ToolResultSummary::Passthrough {
-                text: canonical_text.clone(),
+                value: serde_json::Value::String(canonical_text.clone()),
             },
             canonical_text,
         }
@@ -220,7 +225,9 @@ impl ResultClassifier for GenericFallback {
             || lines.len() <= GENERIC_HEAD_LINES + GENERIC_TAIL_LINES
         {
             return Ok(Classification {
-                summary: ToolResultSummary::Passthrough { text: raw.clone() },
+                summary: ToolResultSummary::Passthrough {
+                    value: serde_json::Value::String(raw.clone()),
+                },
                 canonical_text: raw,
             });
         }
@@ -388,7 +395,9 @@ mod tests {
         let registry = ClassifierRegistry::with_default();
         let classification = registry.classify(&ctx("bash", &raw));
         match classification.summary {
-            ToolResultSummary::Passthrough { text } => assert_eq!(text, body),
+            ToolResultSummary::Passthrough { value } => {
+                assert_eq!(value.as_str(), Some(body.as_str()))
+            }
             ToolResultSummary::Generic {
                 kept_bytes,
                 total_bytes,

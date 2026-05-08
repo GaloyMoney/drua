@@ -214,7 +214,13 @@ impl ToolInvocations {
 
 fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId) -> String {
     match summary {
-        ToolResultSummary::Passthrough { text } => text.clone(),
+        ToolResultSummary::Passthrough { value } => match value {
+            // Plain-text tools land here as Value::String — emit the
+            // raw string. Structured tools land as a Value; pretty-
+            // print so the model can read it.
+            serde_json::Value::String(s) => s.clone(),
+            other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
+        },
         ToolResultSummary::Generic {
             head,
             tail,
