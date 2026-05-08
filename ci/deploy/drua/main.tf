@@ -107,9 +107,10 @@ resource "kubernetes_secret" "galoy_agents" {
     "gcs-creds"                  = file("${path.module}/gcs-creds.json")
     "concourse-username"         = var.concourse_username
     "concourse-password"         = var.concourse_password
-    "honeycomb-auth-header"      = var.honeycomb_api_key != "" ? "Bearer ${var.honeycomb_api_key}" : ""
-    "github-auth-header"         = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
-    "github_actions-auth-header" = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
+    "honeycomb-auth-header"               = var.honeycomb_api_key != "" ? "Bearer ${var.honeycomb_api_key}" : ""
+    "github-auth-header"                  = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
+    "github_actions-auth-header"          = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
+    "github_pull_requests-auth-header"    = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
     "lingo-auth-header"          = var.lingo_api_key
     "anthropic-api-key"          = var.anthropic_api_key
     "openai-api-key"             = var.openrouter_api_key

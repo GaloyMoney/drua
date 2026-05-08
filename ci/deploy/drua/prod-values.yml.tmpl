@@ -95,6 +95,18 @@ galoyAgents:
           - actions_list
           - actions_get
           - get_job_logs
+      # PR-mutation upstream — gated to internal agents (project_lead /
+      # agent / workflow_step_agent) only. Users and ExportedAgents
+      # don't see it. `merge_pull_request` deliberately excluded — the
+      # heal-flow guardrail forbids merges.
+      - name: github_pull_requests
+        url: https://api.githubcopilot.com/mcp/x/pull_requests
+        toolPrefix: github_pr
+        category: source-control-write
+        categoryDescription: "GitHub PR mutations — create"
+        internalOnly: true
+        allowedTools:
+          - create_pull_request
       - name: lingo
         url: https://mcp.lingo.dev/account
         authHeaderName: x-api-key

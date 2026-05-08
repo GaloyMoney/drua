@@ -210,6 +210,9 @@ data:
             - {{ . | quote }}
           {{- end }}
           {{- end }}
+          {{- if .internalOnly }}
+          internal_only: true
+          {{- end }}
       {{- end }}
       {{- if and $k8sMcp $k8sMcp.enabled }}
         - name: "kubernetes"

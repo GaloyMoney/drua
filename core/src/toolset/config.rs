@@ -125,6 +125,13 @@ pub struct McpUpstreamConfig {
     /// Empty means unrestricted.
     #[serde(default)]
     pub required_scopes: Option<Vec<AuthScope>>,
+    /// When true, the toolset is hidden from non-agent subjects (Users,
+    /// ExportedAgents, Anonymous). Use for upstreams whose tools should
+    /// only be reachable from agents drua spawns itself (project_lead,
+    /// agent, workflow_step_agent) — i.e. write-side surfaces like the
+    /// GitHub PR mutation endpoint.
+    #[serde(default)]
+    pub internal_only: bool,
 }
 
 fn default_auth_header_name() -> String {

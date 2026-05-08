@@ -22,6 +22,9 @@ pub struct UpstreamToolSet {
     category_description: String,
     /// Empty = unrestricted.
     required_scopes: Vec<AuthScope>,
+    /// When true, hidden from non-agent subjects (Users, ExportedAgents,
+    /// Anonymous). See [`McpUpstreamConfig::internal_only`].
+    internal_only: bool,
     tools: Vec<ToolSetEntry>,
     client: RunningService<RoleClient, ()>,
 }
@@ -83,6 +86,7 @@ impl UpstreamToolSet {
             category: upstream.category.clone().unwrap_or_default(),
             category_description: upstream.category_description.clone().unwrap_or_default(),
             required_scopes: upstream.required_scopes.clone().unwrap_or_default(),
+            internal_only: upstream.internal_only,
             tools,
             client,
         })
@@ -117,6 +121,7 @@ impl SearchableToolSet for UpstreamToolSet {
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
         has_required_scopes(&self.required_scopes, subject)
+            && (!self.internal_only || subject.is_agent())
     }
 
     async fn call(
@@ -136,4 +141,53 @@ impl SearchableToolSet for UpstreamToolSet {
 
 fn has_required_scopes(required: &[AuthScope], subject: &AuthSubject) -> bool {
     required.iter().all(|scope| subject.has_scope(scope))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::primitives::{AgentId, McpCredsId, ProjectId, UserId};
+
+    fn user_subject() -> AuthSubject {
+        AuthSubject::User(UserId::new())
+    }
+
+    fn agent_subject() -> AuthSubject {
+        AuthSubject::Agent(ProjectId::new(), AgentId::new(), Vec::new())
+    }
+
+    fn exported_agent_subject() -> AuthSubject {
+        AuthSubject::ExportedAgent(UserId::new(), McpCredsId::new(), Vec::new())
+    }
+
+    fn visible(internal_only: bool, subject: &AuthSubject) -> bool {
+        // Mirrors UpstreamToolSet::is_visible without needing a full
+        // RunningService — exercises the internal_only/required_scopes gate.
+        has_required_scopes(&[], subject) && (!internal_only || subject.is_agent())
+    }
+
+    #[test]
+    fn internal_only_hides_from_user() {
+        assert!(!visible(true, &user_subject()));
+    }
+
+    #[test]
+    fn internal_only_hides_from_exported_agent() {
+        assert!(!visible(true, &exported_agent_subject()));
+    }
+
+    #[test]
+    fn internal_only_hides_from_anonymous() {
+        assert!(!visible(true, &AuthSubject::Anonymous));
+    }
+
+    #[test]
+    fn internal_only_visible_to_agent() {
+        assert!(visible(true, &agent_subject()));
+    }
+
+    #[test]
+    fn internal_only_unset_visible_to_user() {
+        assert!(visible(false, &user_subject()));
+    }
 }
