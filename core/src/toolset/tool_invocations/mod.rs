@@ -238,17 +238,38 @@ fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId) -> String {
             total_bytes,
             kept_bytes,
         } => {
-            // Stub rendering — B4 fills in the structured prose with
-            // a per-path elided summary. For now emit the kept Value
-            // pretty-printed plus a one-line summary of how many
-            // branches were dropped.
-            let pretty = serde_json::to_string_pretty(kept).unwrap_or_else(|_| kept.to_string());
-            format!(
+            // Pretty-printed `kept` so agents/humans read structure
+            // naturally; the elided_paths list is rendered as a
+            // structured table so the agent can scan what was
+            // dropped without recursing through `kept` to find
+            // sentinels.
+            let mut out = String::new();
+            out.push_str(&format!(
                 "[json elided: {kept_bytes}/{total_bytes} bytes kept; \
-                 {} branches dropped; fetch raw via \
-                 tool_output_fetch(invocation_id=\"{id}\")]\n{pretty}",
-                elided_paths.len(),
-            )
+                 fetch raw via tool_output_fetch(invocation_id=\"{id}\")]\n",
+            ));
+            if !elided_paths.is_empty() {
+                out.push_str("=== elided paths ===\n");
+                for p in elided_paths {
+                    let kind_str = match p.kind {
+                        crate::toolset::ElisionKind::String => "string",
+                        crate::toolset::ElisionKind::Array => "array",
+                        crate::toolset::ElisionKind::Object => "object",
+                    };
+                    let length_str = p
+                        .length
+                        .map(|n| format!(", length: {n}"))
+                        .unwrap_or_default();
+                    out.push_str(&format!(
+                        "  {} ({}, {} bytes{})\n",
+                        p.path, kind_str, p.bytes, length_str,
+                    ));
+                }
+            }
+            out.push_str("=== kept ===\n");
+            let pretty = serde_json::to_string_pretty(kept).unwrap_or_else(|_| kept.to_string());
+            out.push_str(&pretty);
+            out
         }
         ToolResultSummary::Concourse(s) => {
             let mut out = String::new();
