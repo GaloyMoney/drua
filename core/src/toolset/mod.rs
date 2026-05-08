@@ -547,8 +547,17 @@ impl ToolSets {
 
             let final_result = match raw_result {
                 Ok(raw) if bypass_pipeline => {
-                    let raw_bytes = estimate_text_bytes(&raw);
-                    record_pipeline_metrics(raw_bytes, raw_bytes, "bypass", false);
+                    // Tools that run their own pipeline (e.g.
+                    // `call_tool`, future compose) emit accurate
+                    // metrics from inside their `call`. Skipping
+                    // the default `bypass + 1.0` write here avoids
+                    // a misleading `compression_ratio = 1.0`
+                    // overwrite of the inner tool's real numbers
+                    // (cursor bugbot review #3210558743).
+                    if !tool.records_own_pipeline_metrics() {
+                        let raw_bytes = estimate_text_bytes(&raw);
+                        record_pipeline_metrics(raw_bytes, raw_bytes, "bypass", false);
+                    }
                     Audit::record_tokens(estimate_tokens(&raw));
                     Audit::record_success();
                     Ok(raw)
@@ -647,7 +656,7 @@ pub fn estimate_tokens(result: &CallToolResult) -> u64 {
 
 /// Joined byte count of every text content block — used by the bypass
 /// branch where no canonical_text is computed.
-fn estimate_text_bytes(result: &CallToolResult) -> u64 {
+pub(crate) fn estimate_text_bytes(result: &CallToolResult) -> u64 {
     result
         .content
         .iter()
@@ -661,7 +670,7 @@ fn estimate_text_bytes(result: &CallToolResult) -> u64 {
 /// Bytes the model ends up seeing for a given summary. For
 /// `Passthrough` it equals the raw input (no elision); for elided
 /// shapes it's the summary's own kept_bytes counter.
-fn summary_kept_bytes(summary: &ToolResultSummary, raw_bytes: u64) -> u64 {
+pub(crate) fn summary_kept_bytes(summary: &ToolResultSummary, raw_bytes: u64) -> u64 {
     match summary {
         ToolResultSummary::Passthrough { .. } => raw_bytes,
         ToolResultSummary::StructuredElision { kept_bytes, .. } => *kept_bytes as u64,
@@ -674,7 +683,12 @@ fn summary_kept_bytes(summary: &ToolResultSummary, raw_bytes: u64) -> u64 {
 /// so the workflow-run inspector's compression column always has a
 /// value. `compression_ratio` of 1.0 is informative on its own
 /// (says "this call hit the threshold but didn't shrink").
-fn record_pipeline_metrics(raw_bytes: u64, kept_bytes: u64, classifier: &str, persisted: bool) {
+pub(crate) fn record_pipeline_metrics(
+    raw_bytes: u64,
+    kept_bytes: u64,
+    classifier: &str,
+    persisted: bool,
+) {
     let compression_ratio = if kept_bytes == 0 {
         1.0
     } else {

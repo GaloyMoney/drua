@@ -436,6 +436,15 @@ impl TopLevelTool for CallCatalogTool {
         true
     }
 
+    fn records_own_pipeline_metrics(&self) -> bool {
+        // We emit `record_pipeline_metrics` from inside `call` with
+        // the inner tool's true raw / kept byte counts; the
+        // dispatcher's default bypass-branch metrics would otherwise
+        // claim `compression_ratio = 1.0` for every `call_tool`
+        // dispatch (cursor bugbot review #3210558743).
+        true
+    }
+
     async fn call(
         &self,
         subject: &AuthSubject,
@@ -485,7 +494,9 @@ impl TopLevelTool for CallCatalogTool {
         // tool, not the `call_tool` envelope. Falls back to the raw
         // result if persistence isn't wired (test paths) or the subject
         // has no scope.
+        let raw_bytes = super::super::estimate_text_bytes(&result);
         let Some(invocations) = self.tool_invocations.as_ref() else {
+            super::super::record_pipeline_metrics(raw_bytes, raw_bytes, "bypass", false);
             return Ok(result);
         };
         let classification =
@@ -496,13 +507,17 @@ impl TopLevelTool for CallCatalogTool {
                     raw: &result,
                     exit_code: None,
                 });
+        let classifier_kind = classification.summary.kind();
+        let kept_bytes = super::super::summary_kept_bytes(&classification.summary, raw_bytes);
         if classification.summary.is_passthrough() {
+            super::super::record_pipeline_metrics(raw_bytes, kept_bytes, classifier_kind, false);
             return Ok(result);
         }
         let Some(owner) = super::super::invocation_owner(subject) else {
+            super::super::record_pipeline_metrics(raw_bytes, kept_bytes, classifier_kind, false);
             return Ok(result);
         };
-        match invocations
+        let wrapped = invocations
             .persist_and_envelope(
                 owner,
                 &tool_name,
@@ -512,11 +527,10 @@ impl TopLevelTool for CallCatalogTool {
                 duration_ms,
                 started_at,
             )
-            .await
-        {
-            Some(wrapped) => Ok(wrapped),
-            None => Ok(result),
-        }
+            .await;
+        let persisted = wrapped.is_some();
+        super::super::record_pipeline_metrics(raw_bytes, kept_bytes, classifier_kind, persisted);
+        Ok(wrapped.unwrap_or(result))
     }
 }
 

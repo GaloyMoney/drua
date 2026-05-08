@@ -64,6 +64,21 @@ pub trait TopLevelTool: Send + Sync {
         false
     }
 
+    /// `true` when the tool runs its own classify+persist+envelope
+    /// pipeline internally and emits accurate
+    /// `record_pipeline_metrics` itself. The dispatcher's bypass
+    /// branch then skips its default
+    /// `record_pipeline_metrics(raw, raw, "bypass", false)` write —
+    /// otherwise the audit row would carry a misleading
+    /// `compression_ratio = 1.0` even when the inner pipeline
+    /// achieved real compression (cursor bugbot review #3210558743).
+    /// Default: false — most bypass-marked tools (`tool_output_fetch`)
+    /// genuinely don't elide and the 1.0 baseline is correct for
+    /// them.
+    fn records_own_pipeline_metrics(&self) -> bool {
+        false
+    }
+
     async fn call(
         &self,
         subject: &AuthSubject,
