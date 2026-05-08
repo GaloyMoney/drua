@@ -15,6 +15,16 @@ pub enum ConcourseError {
     #[error("authentication failed: {0}")]
     Auth(String),
 
-    #[error("API error (HTTP {status}): {message}")]
-    Api { status: u16, message: String },
+    #[error("API error (HTTP {status} on {method} {path}): {message}")]
+    Api {
+        status: u16,
+        method: String,
+        path: String,
+        message: String,
+    },
+
+    #[error(
+        "pipeline `{pipeline}` not found on any visible team (visible pipelines: {available})"
+    )]
+    PipelineNotFound { pipeline: String, available: String },
 }
