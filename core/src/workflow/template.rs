@@ -130,11 +130,8 @@ impl TemplateContext<'_> {
     /// `None` when the path doesn't exist at this point in time
     /// (parse-time validation should already have rejected refs
     /// that can never resolve, but optional fields surface here).
-    ///
-    /// Convenience wrapper that builds the CEL context per call —
-    /// fine for one-off resolutions; the substitution walks reuse
-    /// a built context across all string leaves to amortise the
-    /// `trigger` / `steps` clones.
+    /// Builds a fresh CEL context per call; the `substitute*`
+    /// methods reuse one internally across all string leaves.
     pub fn resolve(&self, r: &TemplateRef) -> Option<Value> {
         let built = self.build_cel_context().ok()?;
         resolve_with_built(&built, r)
@@ -563,7 +560,9 @@ mod tests {
             trigger: &trigger,
             steps: &steps,
         };
-        let s = ctx.substitute_in_string("ids=${{ trigger.payload.list }}").unwrap();
+        let s = ctx
+            .substitute_in_string("ids=${{ trigger.payload.list }}")
+            .unwrap();
         assert_eq!(s, "ids=[1,2,3]");
     }
 
@@ -589,7 +588,8 @@ mod tests {
             steps: &steps,
         };
         assert_eq!(
-            ctx.substitute_in_string("[${{ trigger.payload.x }}]").unwrap(),
+            ctx.substitute_in_string("[${{ trigger.payload.x }}]")
+                .unwrap(),
             "[]"
         );
     }
@@ -619,7 +619,9 @@ mod tests {
             trigger: &trigger,
             steps: &steps,
         };
-        let s = ctx.substitute_in_string("build-${{ trigger.payload.build }}").unwrap();
+        let s = ctx
+            .substitute_in_string("build-${{ trigger.payload.build }}")
+            .unwrap();
         assert_eq!(s, "build-");
     }
 
