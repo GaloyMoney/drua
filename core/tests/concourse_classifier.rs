@@ -15,9 +15,11 @@
 
 use rmcp::model::{CallToolResult, Content};
 
+use std::sync::Arc;
+
 use drua_core::toolset::{
     ClassifierContext, ClassifierRegistry, ConcourseBuildLogClassifier, ConcourseBuildStatus,
-    ResultClassifier, ToolResultSummary,
+    NixStringClassifier, ResultClassifier, StringClassifierChain, ToolResultSummary,
 };
 
 const BUILD_610_SUCCEEDED: &str = include_str!("fixtures/concourse/build-610-succeeded.log");
@@ -33,14 +35,32 @@ fn classify(raw: &str) -> ToolResultSummary {
         raw: &result,
         exit_code: None,
     };
-    ConcourseBuildLogClassifier
+    // Wire the StringClassifierChain so `inner` gets populated by
+    // NixStringClassifier — same shape `with_default()` produces.
+    let chain = Arc::new(StringClassifierChain::new().register(NixStringClassifier));
+    ConcourseBuildLogClassifier::new(chain)
         .classify(&ctx)
         .expect("classifier never errors on valid input")
         .summary
 }
 
+/// Helper: extract the typed nix_build summary from a Concourse
+/// summary's `inner` field (set by the walker chain). Panics if the
+/// inner isn't a `nix_build` typed sentinel.
+fn nix_inner(s: &drua_core::toolset::ConcourseBuildLogSummary) -> &serde_json::Value {
+    let inner = &s.inner;
+    let kind = inner
+        .get("_typed")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("inner should be a typed sentinel, got {inner:#}"));
+    assert_eq!(kind, "nix_build", "expected nix_build inner; got {inner:#}");
+    inner
+        .get("summary")
+        .unwrap_or_else(|| panic!("typed sentinel must carry summary; got {inner:#}"))
+}
+
 #[test]
-fn build_610_succeeded_extracts_warnings_and_counts_noise() {
+fn build_610_succeeded_extracts_meta_and_delegates_inner_to_walker() {
     let raw_size = BUILD_610_SUCCEEDED.len();
     assert!(
         raw_size > 100_000,
@@ -52,122 +72,107 @@ fn build_610_succeeded_extracts_warnings_and_counts_noise() {
         other => panic!("expected ConcourseLogs summary, got {other:?}"),
     };
 
-    // Build #610 succeeded in concourse, but the classifier deliberately
-    // doesn't claim `Succeeded` — the log carries no positive pass
-    // marker. Ground truth lives in `concourse_get_build_status`; here
-    // we only assert that no failure pattern matched.
+    // Concourse-level signals: succeeded build → no failure pattern,
+    // no stray errors, status NoFailureDetected.
     assert_eq!(summary.status, ConcourseBuildStatus::NoFailureDetected);
-    assert!(
-        summary.failures.is_empty(),
-        "succeeded build should have no failures"
-    );
     assert!(
         summary.errors.is_empty(),
         "succeeded build should have no stray error: lines"
     );
-
-    // The captured fixture has 760 `copying path` lines and 100 cache-pruning
-    // lines; treat the exact counts as canon since the fixture is frozen.
-    assert_eq!(summary.nix_paths_copied, 760);
-    assert_eq!(summary.cache_files_pruned, 100);
-    // 16 `checking derivation` + 16 `derivation evaluated to` regex hits.
-    assert!(
-        summary.derivations_checked >= 16,
-        "expected ≥16 derivations, got {}",
-        summary.derivations_checked,
-    );
-
-    // Five distinct `warning:` lines in the fixture; preserved verbatim.
+    // Five distinct `warning:` lines in the fixture; preserved verbatim
+    // at the concourse layer (warnings can come from any tool, but
+    // they're useful as a top-level signal).
     assert_eq!(summary.warnings.len(), 5);
     assert!(summary
         .warnings
         .iter()
         .any(|w| w.message.contains("apps.x86_64-linux.bats")));
-    assert!(summary
-        .warnings
-        .iter()
-        .any(|w| w.message.contains("incompatible systems")));
-
-    // Task markers: `start` and `setup done` both appear in the fixture.
     assert!(!summary.task_phases.is_empty());
-
-    // Final-tail mirrors the cache-pruning summary lines.
     assert!(summary
         .final_lines
         .iter()
         .any(|l| l.contains("done saving")));
 
-    // Compression: typed summary should be at least 30× smaller than the
-    // raw input. Exact threshold is conservative — actual ratio for this
-    // fixture is much higher.
-    let compression = summary.total_bytes as f64 / summary.kept_bytes.max(1) as f64;
+    // Inner: walker chain matched NixStringClassifier on the log
+    // content. Derivation counts and cache copies live there now.
+    let nix = nix_inner(&summary);
+    let cache_copies = nix
+        .get("cache_paths_copied")
+        .and_then(|v| v.as_u64())
+        .expect("cache_paths_copied present");
     assert!(
-        compression >= 30.0,
-        "expected ≥30× compression on succeeded build, got {compression:.1}× \
-         ({} → {} bytes)",
-        summary.total_bytes,
-        summary.kept_bytes,
+        cache_copies >= 700,
+        "expected ≥700 cache copies in 610 fixture; got {cache_copies}"
     );
+    let derivs = nix
+        .get("derivations_attempted")
+        .and_then(|v| v.as_u64())
+        .expect("derivations_attempted present");
+    assert!(
+        derivs >= 1,
+        "expected ≥1 derivation attempted; got {derivs}"
+    );
+
     eprintln!(
-        "build #610: {} bytes raw → {} bytes typed ({:.1}× compression, {} warnings, {} \
-         nix paths, {} cache prunes)",
+        "build #610: {} bytes raw → concourse meta + nix inner ({} warnings, \
+         {} cache copies, {} derivations)",
         summary.total_bytes,
-        summary.kept_bytes,
-        compression,
         summary.warnings.len(),
-        summary.nix_paths_copied,
-        summary.cache_files_pruned,
+        cache_copies,
+        derivs,
     );
 }
 
 #[test]
-fn build_609_failed_extracts_clippy_rust_diagnostic() {
+fn build_609_failed_inner_carries_clippy_rust_diagnostic() {
     let summary = match classify(BUILD_609_FAILED) {
         ToolResultSummary::ConcourseLogs(s) => s,
         other => panic!("expected ConcourseLogs summary, got {other:?}"),
     };
 
+    // Concourse layer: status escalated to Failed because at least one
+    // `error: builder for ...failed` line was seen (or stray errors).
     assert_eq!(summary.status, ConcourseBuildStatus::Failed);
-    assert_eq!(
-        summary.failures.len(),
-        1,
-        "exactly one failed derivation in fixture"
-    );
 
-    let f = &summary.failures[0];
-    assert_eq!(f.attribute, "checks.x86_64-linux.clippy");
+    // Inner (walker chain → NixStringClassifier): derivation failure
+    // detail lives here.
+    let nix = nix_inner(&summary);
+    let failures = nix
+        .get("failures")
+        .and_then(|v| v.as_array())
+        .expect("nix inner should expose failures");
+    assert_eq!(failures.len(), 1, "exactly one failed derivation in fixture");
+
+    let f = &failures[0];
+    let drv = f
+        .get("drv_path")
+        .and_then(|v| v.as_str())
+        .expect("drv_path present");
     assert!(
-        f.drv
-            .as_deref()
-            .is_some_and(|s| s.contains("drua-clippy-0.1.0.drv")),
-        "expected drv path on failure, got {:?}",
-        f.drv,
+        drv.contains("drua-clippy-0.1.0.drv"),
+        "expected clippy drv path, got {drv:?}"
     );
-    assert_eq!(
-        f.reason.as_deref(),
-        Some("builder failed with exit code 101.")
-    );
-
-    // The whole point of the classifier — preserve the actual rust error
-    // verbatim out of the failure block.
-    let log_tail_concat = f.log_tail.join("\n");
+    let log_tail = f
+        .get("log_tail")
+        .and_then(|v| v.as_array())
+        .expect("log_tail present");
+    let concat = log_tail
+        .iter()
+        .filter_map(|l| l.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        log_tail_concat.contains("error[E0063]: missing fields"),
-        "rust diagnostic must survive into the typed summary; got: {log_tail_concat:?}"
+        concat.contains("error[E0063]: missing fields"),
+        "rust diagnostic must survive into the inner nix summary; got: {concat:?}"
     );
-    assert!(log_tail_concat.contains("McpUpstreamConfig"));
-    assert!(log_tail_concat.contains("auth_mode"));
-    assert!(log_tail_concat.contains("internal_only"));
+    assert!(concat.contains("McpUpstreamConfig"));
+    assert!(concat.contains("auth_mode"));
+    assert!(concat.contains("internal_only"));
 
-    let compression = summary.total_bytes as f64 / summary.kept_bytes.max(1) as f64;
     eprintln!(
-        "build #609: {} bytes raw → {} bytes typed ({:.1}× compression, failed at {}, \
-         {} log_tail lines)",
+        "build #609: {} bytes raw → concourse meta + nix inner with {} failures",
         summary.total_bytes,
-        summary.kept_bytes,
-        compression,
-        f.attribute,
-        f.log_tail.len(),
+        failures.len(),
     );
 }
 

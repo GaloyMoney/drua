@@ -98,9 +98,14 @@ fn sniff(text: &str) -> bool {
     let building = BUILDING_RE.get_or_init(|| {
         Regex::new(r"(?m)^(\[\d{2}:\d{2}:\d{2}\]\s+)?building '/nix/store/[^']+\.drv'").unwrap()
     });
+    // Three secondary fingerprints, any one of which (alongside or
+    // independent of `building`) is enough to recognize nix output:
+    //   - `error: builder for '/nix/store/...drv' failed`  (raw nix)
+    //   - `error: failed to build attribute '...'`         (nix flake check)
+    //   - `copying path '/nix/store/...' from`             (substituter)
     let secondary = SECONDARY_RE.get_or_init(|| {
         Regex::new(
-            r"(?m)^(\[\d{2}:\d{2}:\d{2}\]\s+)?(error: builder for '/nix/store/[^']+\.drv' failed|copying path '/nix/store/)",
+            r"(?m)^(\[\d{2}:\d{2}:\d{2}\]\s+)?(error: builder for '/nix/store/[^']+\.drv' failed|error: failed to build attribute '|copying path '/nix/store/)",
         )
         .unwrap()
     });
@@ -118,9 +123,17 @@ fn parse(raw: &str) -> NixBuildSummary {
     let copying = COPYING_RE.get_or_init(|| {
         Regex::new(r"(?m)^(\[\d{2}:\d{2}:\d{2}\]\s+)?copying path '/nix/store/[^']+' from").unwrap()
     });
+    // Two failure-header shapes:
+    //   A. `error: builder for '/nix/store/...drv' failed<REASON>`
+    //      — raw nix-build output (one drv at a time).
+    //   B. `error: failed to build attribute 'X', build of
+    //          '/nix/store/...drv^*' failed: <REASON>`
+    //      — `nix flake check` aggregating multiple drvs (the form
+    //      concourse logs use). Reason can be inline OR on a
+    //      subsequent indented `Reason: <…>` line.
     let failure_header = FAILURE_HEADER_RE.get_or_init(|| {
         Regex::new(
-            r"(?m)^(\[\d{2}:\d{2}:\d{2}\]\s+)?error: builder for '(/nix/store/[^']+\.drv)' failed(.*)$",
+            r"(?m)^(\[\d{2}:\d{2}:\d{2}\]\s+)?error: (?:builder for '(/nix/store/[^']+\.drv)' failed(.*)|failed to build attribute '[^']+',\s*build of '(/nix/store/[^']+\.drv)(?:\^\*)?' failed:?(.*))$",
         )
         .unwrap()
     });
@@ -134,33 +147,55 @@ fn parse(raw: &str) -> NixBuildSummary {
     while i < lines.len() && failures.len() < MAX_FAILURES_KEPT {
         let line = lines[i];
         if let Some(cap) = failure_header.captures(line) {
-            // Group 1 is the optional `[HH:MM:SS] ` prefix (concourse
-            // wrapping); 2 is the drv path; 3 is the reason tail.
-            let drv_path = cap.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
-            let reason = cap
+            // Capture groups (cap 1 = optional `[HH:MM:SS] ` prefix):
+            //   shape A: cap 2 = drv,        cap 3 = inline reason
+            //   shape B: cap 4 = drv (^*-stripped), cap 5 = inline reason
+            let drv_path = cap
+                .get(2)
+                .or_else(|| cap.get(4))
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default();
+            let mut reason = cap
                 .get(3)
+                .or_else(|| cap.get(5))
                 .map(|m| m.as_str().trim().to_string())
                 .filter(|s| !s.is_empty());
-            // Walk forward through `> <line>` continuation lines that
-            // nix emits as its "Last N log lines" trailer. Concourse
-            // wraps each line with a `[HH:MM:SS] ` prefix; strip that
-            // first if present.
+            // Walk forward through nix's "Last N log lines:" trailer
+            // PLUS the optional `Reason:` continuation line (shape B).
+            // Concourse wraps each line with a `[HH:MM:SS] ` prefix
+            // and an indent — strip both before pattern-matching.
             let mut log_tail: Vec<String> = Vec::new();
             let mut j = i + 1;
             while j < lines.len() && log_tail.len() < MAX_FAILURE_LOG_TAIL {
                 let next = lines[j];
                 let unwrapped = strip_concourse_timestamp(next);
-                if let Some(stripped) = unwrapped.strip_prefix("       > ") {
-                    log_tail.push(stripped.to_string());
-                } else if let Some(stripped) = unwrapped.strip_prefix("> ") {
-                    log_tail.push(stripped.to_string());
-                } else if unwrapped.trim().is_empty() {
+                let trimmed = unwrapped.trim_start();
+
+                if let Some(rest) = trimmed.strip_prefix("Reason: ") {
+                    if reason.is_none() {
+                        reason = Some(rest.trim().to_string());
+                    }
                     j += 1;
                     continue;
-                } else {
-                    break;
                 }
-                j += 1;
+                if let Some(stripped) = trimmed.strip_prefix("> ") {
+                    log_tail.push(stripped.to_string());
+                    j += 1;
+                    continue;
+                }
+                // Skip non-content concourse/nix scaffolding so we
+                // don't bail out before reaching the `> ` log lines.
+                if trimmed.is_empty()
+                    || trimmed.starts_with("Last ")
+                    || trimmed.starts_with("Output path")
+                    || trimmed.starts_with("For full logs")
+                    || trimmed.starts_with("nix log ")
+                    || trimmed.starts_with("/nix/store/")
+                {
+                    j += 1;
+                    continue;
+                }
+                break;
             }
             failures.push(NixDerivationFailure {
                 drv_path,

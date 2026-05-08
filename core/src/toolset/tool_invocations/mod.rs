@@ -389,14 +389,7 @@ fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId) -> String {
                  fetch the raw stream via tool_output_fetch(invocation_id=\"{}\")]\n",
                 s.status, s.total_lines, s.total_bytes, id
             ));
-            out.push_str(&format!(
-                "tasks: {} | nix paths copied: {} | derivations: {} | \
-                 cache files pruned: {}\n",
-                s.task_phases.len(),
-                s.nix_paths_copied,
-                s.derivations_checked,
-                s.cache_files_pruned,
-            ));
+            out.push_str(&format!("tasks: {}\n", s.task_phases.len()));
             if !s.warnings.is_empty() {
                 out.push_str("=== warnings ===\n");
                 for w in &s.warnings {
@@ -409,17 +402,16 @@ fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId) -> String {
                     out.push_str(&format!("[{}] {}\n", e.timestamp, e.message));
                 }
             }
-            for f in &s.failures {
-                out.push_str(&format!("=== failure: {} ===\n", f.attribute,));
-                if let Some(reason) = &f.reason {
-                    out.push_str(&format!("reason: {reason}\n"));
-                }
-                if !f.log_tail.is_empty() {
-                    out.push_str("log_tail:\n");
-                    for l in &f.log_tail {
-                        out.push_str(&format!("  > {l}\n"));
-                    }
-                }
+            // The substance — derivation counts, failure blocks, builder
+            // log_tails — lives in `inner` (a typed `nix_build` sentinel
+            // when the walker chain matched, byte-elided string otherwise).
+            // Render it pretty so agents can scan it inline.
+            if !s.inner.is_null() {
+                out.push_str("=== inner (walker chain) ===\n");
+                let pretty =
+                    serde_json::to_string_pretty(&s.inner).unwrap_or_else(|_| s.inner.to_string());
+                out.push_str(&pretty);
+                out.push('\n');
             }
             if !s.final_lines.is_empty() {
                 out.push_str("=== final lines ===\n");

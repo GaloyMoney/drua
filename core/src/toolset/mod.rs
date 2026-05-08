@@ -10,9 +10,8 @@ mod traits;
 pub use classifier::{
     Classification, ClassifierContext, ClassifierError, ClassifierRegistry,
     ConcourseBuildLogClassifier, ConcourseBuildLogSummary, ConcourseBuildStatus, ElidedPath,
-    ElisionKind, GenericFallback, NixBuildFailure, NixBuildSummary, NixDerivationFailure,
-    NixStringClassifier, ResultClassifier, StringClassifier, StringClassifierChain,
-    TimestampedLine, ToolResultSummary,
+    ElisionKind, GenericFallback, NixBuildSummary, NixDerivationFailure, NixStringClassifier,
+    ResultClassifier, StringClassifier, StringClassifierChain, TimestampedLine, ToolResultSummary,
 };
 pub use config::*;
 pub use error::*;

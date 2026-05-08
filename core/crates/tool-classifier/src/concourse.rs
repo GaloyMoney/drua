@@ -24,10 +24,13 @@
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
+use super::string_classifier::StringClassifierChain;
+use super::walker::{self, WalkOutcome};
 use super::{
     Classification, ClassifierContext, ClassifierError, ResultClassifier, ToolResultSummary,
+    DEFAULT_GENERIC_THRESHOLD_BYTES,
 };
 
 /// Lines kept from the very end of the log unconditionally. Bounded so a
@@ -35,16 +38,10 @@ use super::{
 /// enough to almost always include any final summary line.
 const FINAL_TAIL_LINES: usize = 30;
 
-/// Per-failure cap on captured `> ...` log lines. Concourse / nix already
-/// truncate to "Last 25 log lines" by convention, so 40 leaves headroom
-/// without re-introducing unbounded growth.
-const MAX_FAILURE_LOG_TAIL: usize = 40;
-
 /// Defence: a deeply-pathological log shouldn't allocate a million
 /// warnings / errors into the summary.
 const MAX_WARNINGS_KEPT: usize = 50;
 const MAX_ERRORS_KEPT: usize = 50;
-const MAX_FAILURES_KEPT: usize = 10;
 
 /// What the classifier could determine about the build's outcome from
 /// the log alone. Deliberately NOT a `Succeeded` variant — concourse
@@ -82,43 +79,16 @@ pub struct TimestampedLine {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NixBuildFailure {
-    /// e.g. `"checks.x86_64-linux.clippy"`.
-    pub attribute: String,
-    /// The `/nix/store/...drv` path mentioned in the failure header,
-    /// when extractable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub drv: Option<String>,
-    /// "builder failed with exit code 101" or similar one-liner.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reason: Option<String>,
-    /// The indented `> ...` lines emitted as nix's own "Last N log lines"
-    /// trailer — the actual rust/clippy/test diagnostic.
-    pub log_tail: Vec<String>,
-    /// `[HH:MM:SS]` of the failure header, useful for correlating across
-    /// parallel derivations.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub timestamp: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConcourseBuildLogSummary {
     pub status: ConcourseBuildStatus,
     /// Names from the `=== with-nix-cache: <name> ===` task markers.
     pub task_phases: Vec<String>,
-    pub nix_paths_copied: u32,
-    pub nix_paths_built: u32,
-    pub derivations_checked: u32,
-    pub cache_files_pruned: u32,
     pub warnings: Vec<TimestampedLine>,
     /// Stray `error:` lines that didn't open a structured nix failure
     /// block — shell-script errors, ad-hoc bash scripts emitting
     /// `error: foo`, build-task wrapper diagnostics. Each such line
     /// also escalates `status` to `Failed`.
     pub errors: Vec<TimestampedLine>,
-    /// Structured nix `error: failed to build attribute '...'` blocks,
-    /// each with the captured "Last N log lines" trailer.
-    pub failures: Vec<NixBuildFailure>,
     /// Always-on tail — last [`FINAL_TAIL_LINES`] lines verbatim.
     pub final_lines: Vec<String>,
     pub total_lines: u32,
@@ -127,13 +97,48 @@ pub struct ConcourseBuildLogSummary {
     /// `total_bytes / kept_bytes` is the compression ratio the inspector
     /// renders.
     pub kept_bytes: u32,
+    /// Result of running the walker chain over the raw log content.
+    /// Typically a `NixStringClassifier` typed sentinel
+    /// (`{"_typed": "nix_build", "summary": {...}}`) carrying the
+    /// derivation counts, cache copies, and per-failure
+    /// `log_tail`s — all the substance the Concourse classifier
+    /// used to extract inline. Falls back to the byte-elided
+    /// `Value::String` when no string classifier matched.
+    pub inner: serde_json::Value,
 }
 
-pub struct ConcourseBuildLogClassifier;
+/// Identity-matched call-level wrapper for `concourse_get_build_logs`.
+/// Owns the concourse-specific framing (timestamps, task markers,
+/// final-lines defence) and delegates the bulk-content extraction to
+/// the walker → `StringClassifierChain` pipeline. The chain is shared
+/// with `GenericFallback` at registration time — same instance,
+/// avoiding duplicate `NixStringClassifier`s across registrations.
+pub struct ConcourseBuildLogClassifier {
+    chain: Option<Arc<StringClassifierChain>>,
+    threshold_bytes: usize,
+}
+
+impl ConcourseBuildLogClassifier {
+    pub fn new(chain: Arc<StringClassifierChain>) -> Self {
+        Self {
+            chain: Some(chain),
+            threshold_bytes: DEFAULT_GENERIC_THRESHOLD_BYTES,
+        }
+    }
+}
+
+impl Default for ConcourseBuildLogClassifier {
+    fn default() -> Self {
+        Self {
+            chain: None,
+            threshold_bytes: DEFAULT_GENERIC_THRESHOLD_BYTES,
+        }
+    }
+}
 
 impl ResultClassifier for ConcourseBuildLogClassifier {
     fn name(&self) -> &str {
-        "concourse::build_log::v1"
+        "concourse::build_log::v2"
     }
 
     fn matches(&self, tool_name: &str, _args: &serde_json::Value) -> bool {
@@ -151,7 +156,24 @@ impl ResultClassifier for ConcourseBuildLogClassifier {
         // `tool_output_fetch(invocation_id, query: tail/range/grep)`
         // operate on the bytes the summary's slicing actually saw.
         let raw = extract_text(ctx.raw);
-        let summary = parse_concourse_log(&raw);
+        let mut summary = parse_concourse_log(&raw);
+
+        // Hand the raw log content to the walker → string classifier
+        // chain. Whatever the chain produces (typed nix_build sentinel,
+        // generic byte-elision, or passthrough for tiny logs) becomes
+        // the `inner` field. Substance — derivation counts, failure
+        // blocks with their builder log_tails — lives there now.
+        summary.inner = match self.chain.as_deref() {
+            Some(chain) => {
+                let value = serde_json::Value::String(raw.clone());
+                match walker::classify_value(&value, self.threshold_bytes, Some(chain)) {
+                    WalkOutcome::Passthrough(v) => v,
+                    WalkOutcome::Elided { kept, .. } => kept,
+                }
+            }
+            None => serde_json::Value::String(raw.clone()),
+        };
+
         Ok(Classification {
             summary: ToolResultSummary::ConcourseLogs(summary),
             canonical_text: raw,
@@ -183,36 +205,28 @@ fn extract_text(result: &rmcp::model::CallToolResult) -> String {
 /// tests. Public to the crate so `core/tests/concourse_classifier.rs` can
 /// drive it directly against the recorded fixtures without constructing a
 /// full `CallToolResult`.
+/// Extracts only the concourse-specific meta from the log: task phases,
+/// warnings, stray non-nix `error:` lines, final defence-in-depth tail,
+/// status. Nix-shaped substance (failure blocks, derivation counts,
+/// cache copies, builder log tails) is left for the walker chain to
+/// extract via `NixStringClassifier`. The classifier's `inner` field
+/// holds the chain's output.
 pub(crate) fn parse_concourse_log(raw: &str) -> ConcourseBuildLogSummary {
     let timestamp_re = timestamp_re();
     let task_marker_re = task_marker_re();
-    let copying_re = copying_path_re();
-    let building_re = building_drv_re();
-    let checking_re = checking_derivation_re();
-    let pruning_re = pruning_re();
     let warning_re = warning_re();
-    let failure_re = failure_header_re();
-    let reason_re = reason_re();
-    let log_line_re = log_line_re();
     let stray_error_re = stray_error_re();
+    let nix_failure_re = nix_failure_header_re();
 
-    let mut nix_paths_copied = 0u32;
-    let mut nix_paths_built = 0u32;
-    let mut derivations_checked = 0u32;
-    let mut cache_files_pruned = 0u32;
     let mut task_phases: Vec<String> = Vec::new();
     let mut warnings: Vec<TimestampedLine> = Vec::new();
     let mut errors: Vec<TimestampedLine> = Vec::new();
-    let mut failures: Vec<NixBuildFailure> = Vec::new();
+    let mut nix_failure_seen = false;
 
     let raw_lines: Vec<&str> = raw.lines().collect();
     let total_lines = raw_lines.len() as u32;
 
-    // Iterate with a lookahead — failure-tail lines are consumed greedily
-    // when we land on a failure header.
-    let mut i = 0usize;
-    while i < raw_lines.len() {
-        let line = raw_lines[i];
+    for line in raw_lines.iter() {
         let stripped = strip_ansi(line);
         let (timestamp, body) = split_timestamp(&stripped, timestamp_re);
 
@@ -220,14 +234,6 @@ pub(crate) fn parse_concourse_log(raw: &str) -> ConcourseBuildLogSummary {
             if let Some(name) = caps.get(1) {
                 task_phases.push(name.as_str().trim().to_string());
             }
-        } else if copying_re.is_match(body) {
-            nix_paths_copied += 1;
-        } else if building_re.is_match(body) {
-            nix_paths_built += 1;
-        } else if checking_re.is_match(body) {
-            derivations_checked += 1;
-        } else if pruning_re.is_match(body) {
-            cache_files_pruned += 1;
         } else if warning_re.is_match(body) {
             if warnings.len() < MAX_WARNINGS_KEPT {
                 warnings.push(TimestampedLine {
@@ -235,65 +241,15 @@ pub(crate) fn parse_concourse_log(raw: &str) -> ConcourseBuildLogSummary {
                     message: body.trim().to_string(),
                 });
             }
-        } else if let Some(caps) = failure_re.captures(body) {
-            // Header consumed; greedily eat the indented continuation
-            // lines that nix emits as the failure block:
-            //   Reason: ...
-            //   Output paths: ...
-            //   Last N log lines:
-            //   > <rust diagnostic>
-            //   > ...
-            //   For full logs, run: ...
-            let attribute = caps.get(1).map_or("", |m| m.as_str()).to_string();
-            let drv = caps.get(2).map(|m| m.as_str().to_string());
-
-            let mut reason: Option<String> = None;
-            let mut log_tail: Vec<String> = Vec::new();
-            let mut j = i + 1;
-            while j < raw_lines.len() {
-                let ahead = strip_ansi(raw_lines[j]);
-                let (_, ahead_body) = split_timestamp(&ahead, timestamp_re);
-                let trimmed = ahead_body.trim_start();
-
-                if let Some(rcaps) = reason_re.captures(trimmed) {
-                    reason = Some(rcaps.get(1).map_or("", |m| m.as_str()).trim().to_string());
-                    j += 1;
-                    continue;
-                }
-                if let Some(lcaps) = log_line_re.captures(trimmed) {
-                    if log_tail.len() < MAX_FAILURE_LOG_TAIL {
-                        log_tail.push(lcaps.get(1).map_or("", |m| m.as_str()).to_string());
-                    }
-                    j += 1;
-                    continue;
-                }
-                // Continuation lines like "Output paths:" and "Last 25 log
-                // lines:" use the same indent — keep skipping while the
-                // line is indented and didn't match any of the structural
-                // regexes.
-                if !ahead_body.is_empty() && ahead_body.starts_with(' ') {
-                    j += 1;
-                    continue;
-                }
-                break;
-            }
-
-            if failures.len() < MAX_FAILURES_KEPT {
-                failures.push(NixBuildFailure {
-                    attribute,
-                    drv,
-                    reason,
-                    log_tail,
-                    timestamp: timestamp.to_string(),
-                });
-            }
-            i = j;
-            continue;
+        } else if nix_failure_re.is_match(body) {
+            // The walker chain's NixStringClassifier captures the
+            // detail; we just need to know whether *any* nix failure
+            // was seen so `status` can escalate to Failed.
+            nix_failure_seen = true;
         } else if stray_error_re.is_match(body) {
-            // `error: <thing>` that didn't open a structured nix failure
-            // block — shell-script error, ad-hoc bash diagnostic, etc.
-            // These escalate `status` to Failed even without a captured
-            // log_tail.
+            // `error: <thing>` that's NOT a structured nix failure
+            // header — shell-script error, ad-hoc bash diagnostic.
+            // Escalate `status` to Failed.
             if errors.len() < MAX_ERRORS_KEPT {
                 errors.push(TimestampedLine {
                     timestamp: timestamp.to_string(),
@@ -301,8 +257,6 @@ pub(crate) fn parse_concourse_log(raw: &str) -> ConcourseBuildLogSummary {
                 });
             }
         }
-
-        i += 1;
     }
 
     let final_lines: Vec<String> = raw_lines
@@ -313,7 +267,7 @@ pub(crate) fn parse_concourse_log(raw: &str) -> ConcourseBuildLogSummary {
         .map(|l| strip_ansi(l).into_owned())
         .collect();
 
-    let status = if !failures.is_empty() || !errors.is_empty() {
+    let status = if nix_failure_seen || !errors.is_empty() {
         ConcourseBuildStatus::Failed
     } else if raw_lines.is_empty() {
         ConcourseBuildStatus::Unknown
@@ -323,23 +277,17 @@ pub(crate) fn parse_concourse_log(raw: &str) -> ConcourseBuildLogSummary {
 
     let total_bytes = raw.len() as u64;
 
-    // Rough kept_bytes estimate — sum of structured payload sizes. Useful
-    // for the inspector's compression-ratio column without re-serializing.
+    // Rough kept_bytes estimate for the inspector's compression-ratio
+    // column. The bulk of the structured shape now lives in
+    // `inner` — sized after walk; this counter is just the
+    // concourse-meta envelope, so kept_bytes is a lower bound on
+    // the agent's view (the walker contributes the rest).
     let mut kept_bytes: usize = 0;
     for w in &warnings {
         kept_bytes += w.message.len() + w.timestamp.len();
     }
     for e in &errors {
         kept_bytes += e.message.len() + e.timestamp.len();
-    }
-    for f in &failures {
-        kept_bytes += f.attribute.len();
-        kept_bytes += f.drv.as_ref().map_or(0, |s| s.len());
-        kept_bytes += f.reason.as_ref().map_or(0, |s| s.len());
-        kept_bytes += f.timestamp.len();
-        for l in &f.log_tail {
-            kept_bytes += l.len();
-        }
     }
     for l in &final_lines {
         kept_bytes += l.len();
@@ -349,17 +297,16 @@ pub(crate) fn parse_concourse_log(raw: &str) -> ConcourseBuildLogSummary {
     ConcourseBuildLogSummary {
         status,
         task_phases,
-        nix_paths_copied,
-        nix_paths_built,
-        derivations_checked,
-        cache_files_pruned,
         warnings,
         errors,
-        failures,
         final_lines,
         total_lines,
         total_bytes,
         kept_bytes: kept_bytes.min(u32::MAX as usize) as u32,
+        // Filled in by `ConcourseBuildLogClassifier::classify` after
+        // running the walker chain. Tests that drive `parse_concourse_log`
+        // directly get an empty placeholder.
+        inner: serde_json::Value::Null,
     }
 }
 
@@ -398,61 +345,31 @@ fn task_marker_re() -> &'static Regex {
     R.get_or_init(|| Regex::new(r"=== with-nix-cache: ([^=]+?) ===").expect("task marker regex"))
 }
 
-fn copying_path_re() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r"^copying path '/nix/store/").expect("copying-path regex"))
-}
-
-fn building_drv_re() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r"^building '/nix/store/[^']+\.drv'").expect("building-drv regex"))
-}
-
-fn checking_derivation_re() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| {
-        Regex::new(r"^(checking derivation|derivation evaluated to)").expect("checking-drv regex")
-    })
-}
-
-fn pruning_re() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r"^nix-cache: removing ").expect("pruning regex"))
-}
-
 fn warning_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| Regex::new(r"^warning:").expect("warning regex"))
 }
 
-/// Stray `error:` lines — anything that opens with `error:` but didn't
-/// match the structured nix-failure header. The exclusion of `failed to
-/// build attribute` is implicit: that branch is consumed earlier in the
-/// match cascade, so this only sees what falls through (shell errors,
-/// resource step diagnostics, ad-hoc bash `error: foo` lines).
+/// Stray `error:` lines. Matched only after `nix_failure_header_re`
+/// has been ruled out — the parse cascade in `parse_concourse_log`
+/// checks them in order, so this regex doesn't need a negative
+/// lookahead (Rust's regex crate doesn't support look-around anyway).
 fn stray_error_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| Regex::new(r"^error:").expect("stray-error regex"))
 }
 
-fn failure_header_re() -> &'static Regex {
-    // `error: failed to build attribute 'X', build of '/nix/store/...drv^*' failed: ...`
+/// Detects whether the log contains *any* nix failure signal (either
+/// `error: failed to build attribute '...'` or `error: builder for
+/// '/nix/store/...' failed`). Used only to escalate `status` to
+/// Failed — the per-failure detail is captured downstream by the
+/// walker chain's `NixStringClassifier`.
+fn nix_failure_header_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
-        Regex::new(r"^error: failed to build attribute '([^']+)'(?:, build of '([^']+)' failed)?")
-            .expect("failure-header regex")
+        Regex::new(r"^error: (failed to build attribute|builder for '/nix/store/)")
+            .expect("nix-failure-header regex")
     })
-}
-
-fn reason_re() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r"^Reason: (.+)$").expect("reason regex"))
-}
-
-fn log_line_re() -> &'static Regex {
-    // Indented `> <rust line>` — the actual diagnostic preserved verbatim.
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r"^> (.*)$").expect("log-line regex"))
 }
 
 #[cfg(test)]
@@ -461,7 +378,7 @@ mod tests {
 
     #[test]
     fn matches_only_concourse_get_build_logs() {
-        let c = ConcourseBuildLogClassifier;
+        let c = ConcourseBuildLogClassifier::default();
         let args = serde_json::json!({});
         assert!(c.matches("concourse_get_build_logs", &args));
         assert!(!c.matches("concourse_list_pipelines", &args));
@@ -487,6 +404,11 @@ mod tests {
 
     #[test]
     fn synthetic_clean_log_has_no_failure_signal() {
+        // Concourse meta only — `parse_concourse_log` no longer extracts
+        // nix-shaped substance (cache copies, derivation counts, failure
+        // blocks). Those land in `inner` after the walker chain runs,
+        // and are exercised by the integration test
+        // `core/tests/concourse_classifier.rs`.
         let raw = "[04:01:31] === with-nix-cache: start 04:01:31 ===\n\
                    [04:01:31] copying path '/nix/store/abc-foo'\n\
                    [04:01:31] copying path '/nix/store/def-bar'\n\
@@ -495,14 +417,11 @@ mod tests {
                    [04:05:53] nix-cache: done saving to local cache\n";
         let summary = parse_concourse_log(raw);
         assert_eq!(summary.status, ConcourseBuildStatus::NoFailureDetected);
-        assert_eq!(summary.nix_paths_copied, 2);
-        assert_eq!(summary.derivations_checked, 1);
         assert_eq!(summary.warnings.len(), 1);
         assert_eq!(summary.warnings[0].timestamp, "04:01:33");
         assert!(summary.warnings[0]
             .message
             .contains("apps.x86_64-linux.bats"));
-        assert!(summary.failures.is_empty());
         assert!(summary.errors.is_empty());
         assert!(!summary.task_phases.is_empty());
     }
@@ -525,35 +444,24 @@ mod tests {
             ConcourseBuildStatus::Failed,
             "stray `error:` lines must escalate to Failed",
         );
-        assert!(summary.failures.is_empty(), "no nix block in this fixture");
         assert_eq!(summary.errors.len(), 1);
         assert_eq!(summary.errors[0].timestamp, "04:00:13");
         assert!(summary.errors[0].message.contains("command not found"));
     }
 
     #[test]
-    fn synthetic_failure_block_is_extracted() {
-        let raw = "[04:00:11] error: failed to build attribute 'checks.x86_64-linux.clippy', build of '/nix/store/abc-clippy.drv^*' failed: Cannot build it.\n\
-                   [04:00:11]        Reason: builder failed with exit code 101.\n\
-                   [04:00:11]        Output paths:\n\
-                   [04:00:11]          /nix/store/xyz-clippy-out\n\
-                   [04:00:11]        Last 25 log lines:\n\
-                   [04:00:11]        > error[E0063]: missing fields\n\
-                   [04:00:11]        >    --> core/tests/toolset.rs:15\n\
-                   [04:00:11]        For full logs, run:\n\
-                   [04:00:11]          nix log /nix/store/abc-clippy.drv\n";
+    fn nix_failure_header_escalates_status_to_failed() {
+        // Concourse meta only checks that a nix-failure header was
+        // present; the per-failure detail (drv path, reason, log_tail)
+        // is captured downstream by the walker chain's
+        // `NixStringClassifier`.
+        let raw = "[04:00:11] error: failed to build attribute 'checks.x86_64-linux.clippy'\n\
+                   [04:00:11]        Reason: builder failed with exit code 101.\n";
         let summary = parse_concourse_log(raw);
         assert_eq!(summary.status, ConcourseBuildStatus::Failed);
-        assert_eq!(summary.failures.len(), 1);
-        let f = &summary.failures[0];
-        assert_eq!(f.attribute, "checks.x86_64-linux.clippy");
-        assert_eq!(f.drv.as_deref(), Some("/nix/store/abc-clippy.drv^*"));
-        assert_eq!(
-            f.reason.as_deref(),
-            Some("builder failed with exit code 101.")
-        );
-        assert_eq!(f.log_tail.len(), 2);
-        assert!(f.log_tail[0].contains("missing fields"));
+        // No structured failure here at the concourse layer — just the
+        // status escalation.
+        assert!(summary.errors.is_empty());
     }
 
     #[test]

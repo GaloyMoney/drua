@@ -19,8 +19,7 @@ mod string_classifier;
 mod walker;
 
 pub use concourse::{
-    ConcourseBuildLogClassifier, ConcourseBuildLogSummary, ConcourseBuildStatus, NixBuildFailure,
-    TimestampedLine,
+    ConcourseBuildLogClassifier, ConcourseBuildLogSummary, ConcourseBuildStatus, TimestampedLine,
 };
 pub use nix::{NixBuildSummary, NixDerivationFailure, NixStringClassifier};
 pub use string_classifier::{StringClassifier, StringClassifierChain};
@@ -197,7 +196,9 @@ impl ClassifierRegistry {
             StringClassifierChain::new().register(NixStringClassifier),
         );
         Self::new()
-            .register(ConcourseBuildLogClassifier)
+            .register(ConcourseBuildLogClassifier::new(std::sync::Arc::clone(
+                &string_chain,
+            )))
             .register(GenericFallback::default().with_string_classifiers(string_chain))
     }
 
