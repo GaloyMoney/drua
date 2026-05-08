@@ -265,14 +265,21 @@ impl ResultClassifier for GenericFallback {
     fn classify(&self, ctx: &ClassifierContext<'_>) -> Result<Classification, ClassifierError> {
         let value = canonical_value(ctx.raw);
         // canonical_text is the bytes `tool_output_fetch` will operate
-        // on. For Value::String we persist the inner string content
-        // (no JSON quotes) so bash-style fetches grep over the
-        // original bytes, not their stringified form. For everything
-        // else we serialize compactly.
-        let canonical_text = match &value {
-            serde_json::Value::String(s) => s.clone(),
-            other => serde_json::to_string(other).unwrap_or_default(),
-        };
+        // on. Goal: a multi-line representation where line-oriented
+        // grep is meaningful. Three shapes:
+        //
+        // - `Value::String(s)` — plain-text tools (bash, k8s logs).
+        //   Use the string verbatim; agents grep over real lines.
+        // - Single-string-field object like `{"logs": "<multi-line>"}`
+        //   (concourse, k8s pod logs, github raw fetch, bash via
+        //   tunnel). Compact JSON would collapse the embedded `\n`s
+        //   into the literal two-character sequence and grep would
+        //   see the whole document as one line. Extract the inner
+        //   string so each newline is a real line break.
+        // - Anything else — pretty-printed JSON. Multi-line, grep-able
+        //   on keys + values; less optimal than a typed classifier
+        //   but useful as a fallback.
+        let canonical_text = canonical_text_for(&value);
         let summary = match walker::classify_value(&value, self.threshold_bytes) {
             walker::WalkOutcome::Passthrough(v) => ToolResultSummary::Passthrough { value: v },
             walker::WalkOutcome::Elided {
@@ -291,6 +298,20 @@ impl ResultClassifier for GenericFallback {
             summary,
             canonical_text,
         })
+    }
+}
+
+/// Render the canonical text representation of a JSON value for
+/// downstream grep-mode fetches. See `GenericFallback::classify`
+/// for the rationale on each branch.
+pub(super) fn canonical_text_for(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Object(map) if map.len() == 1 => match map.values().next() {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            _ => serde_json::to_string_pretty(value).unwrap_or_default(),
+        },
+        _ => serde_json::to_string_pretty(value).unwrap_or_default(),
     }
 }
 
@@ -463,5 +484,43 @@ mod tests {
             classification.summary,
             ToolResultSummary::StructuredElision { .. }
         ));
+    }
+
+    #[test]
+    fn canonical_text_plain_string_unchanged() {
+        let v = serde_json::json!("line1\nline2\nline3");
+        assert_eq!(canonical_text_for(&v), "line1\nline2\nline3");
+    }
+
+    #[test]
+    fn canonical_text_extracts_single_string_field() {
+        // {"logs": "<multi-line>"} is the universal shape for log-emitting
+        // structured tools (concourse, k8s pod logs, github raw, bash via
+        // tunnel). Without this carve-out, grep against the persisted
+        // raw_text sees one line — the JSON envelope.
+        let v = serde_json::json!({"logs": "first\nsecond\nthird"});
+        assert_eq!(canonical_text_for(&v), "first\nsecond\nthird");
+    }
+
+    #[test]
+    fn canonical_text_pretty_prints_multi_field_object() {
+        let v = serde_json::json!({"name": "alice", "age": 30});
+        let canonical = canonical_text_for(&v);
+        // Pretty-print produces line-per-field — grep can match keys
+        // and values independently.
+        assert!(canonical.contains("\n"), "pretty-printed: {canonical}");
+        assert!(canonical.contains("\"name\""), "{canonical}");
+        assert!(canonical.contains("\"age\""), "{canonical}");
+    }
+
+    #[test]
+    fn canonical_text_single_field_non_string_falls_back_to_pretty() {
+        let v = serde_json::json!({"items": [1, 2, 3]});
+        let canonical = canonical_text_for(&v);
+        // Single-field heuristic is restricted to string values; a
+        // single-field object whose value is e.g. an array should
+        // pretty-print so the array's elements are line-grep-able.
+        assert!(canonical.contains("\n"), "{canonical}");
+        assert!(canonical.contains("\"items\""), "{canonical}");
     }
 }
