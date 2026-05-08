@@ -23,7 +23,6 @@ use super::super::classifier::{
 };
 use super::super::config::ComposeConfig;
 use super::super::error::ToolSetsError;
-use super::super::filter::OutputFilter;
 use super::super::tool_invocations::{PersistedClassification, ToolInvocations};
 use super::super::traits::{SearchableToolSet, TopLevelTool};
 use super::liberal;
@@ -432,7 +431,7 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
         name: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        if let Ok((set, tool_name, default_filter)) = self.find_set(name) {
+        if let Ok((set, tool_name)) = self.find_set(name) {
             let action = format!("compose > catalog: {name}");
             let audit = self.audit.clone();
             let subject = self.subject.clone();
@@ -452,7 +451,7 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
 
                 let start = std::time::Instant::now();
                 let dispatch_result =
-                    run_searchable_call(set, &subject, &tool_name, args.clone(), default_filter)
+                    run_searchable_call(set, &subject, &tool_name, args.clone())
                         .await
                         .map_err(|e| with_hint(&name_owned, e));
                 let duration_ms = start.elapsed().as_millis() as u64;
@@ -496,11 +495,10 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
 
 impl CatalogDispatcher {
     /// Same logic as `CallCatalogTool::find_set()`.
-    #[allow(clippy::type_complexity)]
     fn find_set(
         &self,
         prefixed_name: &str,
-    ) -> Result<(Arc<dyn SearchableToolSet>, String, Option<OutputFilter>), ToolSetsError> {
+    ) -> Result<(Arc<dyn SearchableToolSet>, String), ToolSetsError> {
         let sets = self.sets.read().expect("toolset lock poisoned");
         for set in sets.iter() {
             if !set.is_visible(&self.subject) {
@@ -508,12 +506,8 @@ impl CatalogDispatcher {
             }
             let prefix = format!("{}_", set.prefix());
             if let Some(tool_name) = prefixed_name.strip_prefix(&prefix) {
-                if let Some(entry) = set.tools().iter().find(|t| t.name == tool_name) {
-                    return Ok((
-                        Arc::clone(set),
-                        tool_name.to_string(),
-                        entry.default_output_filter.clone(),
-                    ));
+                if set.tools().iter().any(|t| t.name == tool_name) {
+                    return Ok((Arc::clone(set), tool_name.to_string()));
                 }
             }
         }
@@ -709,23 +703,17 @@ fn args_digest(tool_name: &str, args: &serde_json::Value) -> String {
     out.chars().take(80).collect()
 }
 
-/// Inner dispatch for a [`SearchableToolSet`] — returns the **unfiltered**
-/// `CallToolResult` (for classifier + `tool_output_fetch` recovery) AND the
-/// JS-facing `Value` derived from the filter-applied form (so JS scripts
-/// see the same trimmed shape they would via direct `call_tool`).
-///
-/// Persisting the unfiltered original is load-bearing: the global default
-/// filter caps plain-text output at the last 1000 lines, and persisting
-/// that would silently break `tool_output_fetch` for any sub-tool whose
-/// real output is bigger than the cap. Structured tools are filtered too
-/// (filter doesn't touch `structured_content`) — for those JS still gets
-/// the same `Value` it always did.
+/// Inner dispatch for a [`SearchableToolSet`] — returns both the raw
+/// `CallToolResult` (for classifier + `tool_output_fetch` recovery)
+/// and the JS-facing `Value`. No pre-classification trimming: the
+/// dispatcher's universal pipeline handles oversize results, and
+/// compose JS scripts get the full shape so they can filter /
+/// cross-reference in JS (compose's value proposition).
 async fn run_searchable_call(
     set: Arc<dyn SearchableToolSet>,
     subject: &AuthSubject,
     tool_name: &str,
     args: serde_json::Value,
-    default_filter: Option<OutputFilter>,
 ) -> Result<(CallToolResult, serde_json::Value), String> {
     let inner_args = match args {
         serde_json::Value::Object(obj) => Some(obj),
@@ -738,12 +726,8 @@ async fn run_searchable_call(
         .await
         .map_err(|e| e.to_string())?;
 
-    let unfiltered = result.clone();
-    let filter = default_filter.unwrap_or_else(OutputFilter::global_default);
-    let filtered = filter.apply(result).map_err(|e| e.to_string())?;
-
-    let value = result_to_value(&filtered);
-    Ok((unfiltered, value))
+    let value = result_to_value(&result);
+    Ok((result, value))
 }
 
 /// Inner dispatch for a [`TopLevelTool`] — same shape as

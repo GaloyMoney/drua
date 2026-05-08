@@ -519,8 +519,9 @@ fn register_tool_bridge(
                             return encode_error(&format!(
                                 "Tool result too large ({} bytes, max {max_tool_result_bytes}). \
                                  The tool returned more data than compose can hold in a single \
-                                 result. Try a more specific query (e.g. limit/filter parameters) \
-                                 or fall back to call_tool with output_filter.",
+                                 result. Try a more specific upstream query (limit/filter \
+                                 parameters), or recover the persisted bytes via \
+                                 tool_output_fetch(invocation_id, query).",
                                 result_json.len()
                             ));
                         }

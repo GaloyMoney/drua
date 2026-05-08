@@ -792,7 +792,6 @@ impl AdminToolSet {
                     t.description.to_string(),
                     serde_json::from_value::<JsonObject>((*t.schema).clone()).unwrap_or_default(),
                 ),
-                default_output_filter: None,
             })
             .collect();
 

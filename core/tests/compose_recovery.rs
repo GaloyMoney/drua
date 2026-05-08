@@ -43,7 +43,6 @@ impl StubSet {
             tools: vec![ToolSetEntry {
                 name: tool_name.to_string(),
                 description: tool,
-                default_output_filter: None,
             }],
             payload_bytes,
         }

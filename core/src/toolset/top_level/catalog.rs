@@ -18,7 +18,6 @@ use crate::audit::Audit;
 use crate::auth::AuthSubject;
 
 use super::super::error::ToolSetsError;
-use super::super::filter::OutputFilter;
 use super::super::traits::{SearchableToolSet, TopLevelTool};
 use super::schema_for;
 
@@ -29,7 +28,6 @@ pub struct CatalogEntry {
     pub category: String,
     pub brief_description: String,
     pub full_tool: Tool,
-    pub default_output_filter: Option<OutputFilter>,
 }
 
 pub struct SearchCatalog {
@@ -168,7 +166,6 @@ struct DescribeToolOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::toolset::any_json_schema")]
     output_schema: Option<serde_json::Value>,
-    default_output_filter: String,
 }
 
 static SEARCH_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
@@ -245,13 +242,6 @@ impl DescribeCatalogTool {
             .unwrap_or("No description available.");
         let schema =
             serde_json::to_string_pretty(&tool.input_schema).unwrap_or_else(|_| "{}".into());
-        let filter_desc = match &entry.default_output_filter {
-            Some(f) => format!("tool default: {}", f.describe()),
-            None => format!(
-                "global default: {}",
-                OutputFilter::global_default().describe()
-            ),
-        };
         let output_section = tool
             .output_schema
             .as_ref()
@@ -277,7 +267,7 @@ impl DescribeCatalogTool {
         );
 
         format!(
-            "## {}\n\nUpstream: {}\nCategory: {}\n\n{}\n\n### Parameters\n```json\n{}\n```{}{}\n\n### Default output filter\n{}\n\nUse call_tool(\"{}\", {{...}}) to execute.",
+            "## {}\n\nUpstream: {}\nCategory: {}\n\n{}\n\n### Parameters\n```json\n{}\n```{}{}\n\nUse call_tool(\"{}\", {{...}}) to execute.",
             entry.prefixed_name,
             entry.upstream_name,
             entry.category,
@@ -285,7 +275,6 @@ impl DescribeCatalogTool {
             schema,
             output_section,
             ts_signature,
-            filter_desc,
             entry.prefixed_name,
         )
     }
@@ -334,13 +323,6 @@ impl TopLevelTool for DescribeCatalogTool {
             Some(entry) => {
                 let text = Self::format_entry(&entry);
                 let tool = &entry.full_tool;
-                let filter_desc = match &entry.default_output_filter {
-                    Some(f) => format!("tool default: {}", f.describe()),
-                    None => format!(
-                        "global default: {}",
-                        OutputFilter::global_default().describe()
-                    ),
-                };
                 let out = DescribeToolOutput {
                     name: entry.prefixed_name,
                     upstream: entry.upstream_name,
@@ -351,7 +333,6 @@ impl TopLevelTool for DescribeCatalogTool {
                         .output_schema
                         .as_ref()
                         .map(|s| serde_json::Value::Object(s.as_ref().clone())),
-                    default_output_filter: filter_desc,
                 };
                 let structured =
                     serde_json::to_value(&out).expect("DescribeToolOutput serialization");
@@ -367,7 +348,8 @@ impl TopLevelTool for DescribeCatalogTool {
 }
 
 /// Dispatches into the visible + executable `SearchableToolSet` for the
-/// caller and applies an optional output filter.
+/// caller. The dispatcher's universal pipeline handles result elision +
+/// persistence; recovery happens through `tool_output_fetch`.
 pub struct CallCatalogTool {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
 }
@@ -381,7 +363,7 @@ impl CallCatalogTool {
         &self,
         subject: &AuthSubject,
         prefixed_name: &str,
-    ) -> Option<(Arc<dyn SearchableToolSet>, String, Option<OutputFilter>)> {
+    ) -> Option<(Arc<dyn SearchableToolSet>, String)> {
         let sets = self.sets.read().expect("toolset lock poisoned");
         for set in sets.iter() {
             if !set.is_visible(subject) {
@@ -389,12 +371,8 @@ impl CallCatalogTool {
             }
             let prefix = format!("{}_", set.prefix());
             if let Some(tool_name) = prefixed_name.strip_prefix(&prefix) {
-                if let Some(entry) = set.tools().iter().find(|t| t.name == tool_name) {
-                    return Some((
-                        Arc::clone(set),
-                        tool_name.to_string(),
-                        entry.default_output_filter.clone(),
-                    ));
+                if set.tools().iter().any(|t| t.name == tool_name) {
+                    return Some((Arc::clone(set), tool_name.to_string()));
                 }
             }
         }
@@ -413,10 +391,6 @@ static CALL_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             "arguments": {
                 "type": "object",
                 "description": "Tool arguments matching the schema from describe_tool"
-            },
-            "output_filter": {
-                "type": "object",
-                "description": "Optional post-processing filter applied to the tool's output (head / tail / grep / invert_match / context_lines). Falls back to the tool's default or the global default when omitted."
             }
         },
         "required": ["tool_name"]
@@ -431,7 +405,8 @@ impl TopLevelTool for CallCatalogTool {
     fn description(&self) -> &str {
         "Execute an upstream tool by its prefixed name with the provided \
          arguments. Use describe_tool first to understand the parameters. \
-         Supports an optional output_filter to trim large outputs."
+         Oversize results are auto-classified and persisted; recover full \
+         bytes via tool_output_fetch(invocation_id, query)."
     }
     fn input_schema(&self) -> &serde_json::Value {
         &CALL_SCHEMA
@@ -451,18 +426,15 @@ impl TopLevelTool for CallCatalogTool {
             serde_json::Value::Object(obj) => Some(obj),
             _ => None,
         });
-        let output_filter: Option<OutputFilter> = args
-            .remove("output_filter")
-            .and_then(|v| serde_json::from_value(v).ok());
 
-        // After tool_name/arguments/output_filter are consumed, anything left
-        // is an extra top-level key — almost always a flat call like
+        // After tool_name/arguments are consumed, anything left is an
+        // extra top-level key — almost always a flat call like
         // `{tool_name, build_id: 597}` instead of `{tool_name, arguments:{build_id:597}}`.
         // We let the call proceed (the inner schema may still accept it via
         // `additionalProperties`), but if it errors we'll wrap with a hint.
         let extra_keys: Vec<String> = args.keys().cloned().collect();
 
-        let (set, name, tool_default_filter) = self
+        let (set, name) = self
             .find_set(subject, &tool_name)
             .ok_or_else(|| ToolSetsError::ToolNotFound(tool_name.clone()))?;
 
@@ -471,10 +443,6 @@ impl TopLevelTool for CallCatalogTool {
         Audit::record_action(format!("catalog: {}", tool_name));
 
         let result = set.call(subject, &name, inner_args).await;
-        let filter = output_filter
-            .or(tool_default_filter)
-            .unwrap_or_else(OutputFilter::global_default);
-        let result = result.and_then(|r| filter.apply(r));
         annotate_envelope_mistake(result, &tool_name, &extra_keys)
     }
 }
@@ -497,7 +465,7 @@ fn annotate_envelope_mistake(
     let stray = extra_keys.join(", ");
     let raw = err.to_string();
     Err(ToolSetsError::InvalidArgument(format!(
-        "{raw}\nHint: call_tool envelope is {{tool_name, arguments:{{…}}, output_filter?}}; \
+        "{raw}\nHint: call_tool envelope is {{tool_name, arguments:{{…}}}}; \
          these top-level fields were ignored: {stray}. \
          Likely you wrote `call_tool({{tool_name:\"{tool_name}\", {stray}: …}})` — \
          move them inside `arguments`: \
@@ -528,7 +496,6 @@ fn visible_entries(
                 category: set.category().to_string(),
                 brief_description: brief,
                 full_tool: desc.clone(),
-                default_output_filter: tool.default_output_filter.clone(),
             });
         }
     }
@@ -569,7 +536,6 @@ mod tests {
                         ToolSetEntry {
                             name: name.to_string(),
                             description: tool,
-                            default_output_filter: None,
                         }
                     })
                     .collect(),
@@ -599,7 +565,6 @@ mod tests {
                 entries: vec![ToolSetEntry {
                     name: name.to_string(),
                     description: tool,
-                    default_output_filter: None,
                 }],
             }
         }

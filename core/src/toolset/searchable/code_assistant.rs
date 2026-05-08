@@ -65,7 +65,6 @@ impl CodeAssistantToolSet {
         let tools = vec![ToolSetEntry {
             name: "search_code".to_string(),
             description: tool,
-            default_output_filter: None,
         }];
 
         Self { service, tools }

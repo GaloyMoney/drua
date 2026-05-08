@@ -2,14 +2,11 @@ use rmcp::model::{CallToolResult, JsonObject, Tool};
 
 use crate::auth::AuthSubject;
 
-use super::filter::OutputFilter;
 use super::ToolSetsError;
 
 pub struct ToolSetEntry {
     pub name: String,
     pub description: Tool,
-    /// Optional per-tool default (e.g. tail:150 for build logs); fallback before the global default.
-    pub default_output_filter: Option<OutputFilter>,
 }
 
 /// Dynamic-registration provenance: lets the container atomically replace all
