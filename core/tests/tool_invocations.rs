@@ -12,7 +12,7 @@ use rmcp::model::{CallToolResult, Content, JsonObject};
 use drua_core::auth::AuthSubject;
 use drua_core::primitives::{AgentId, ProjectId, UserId, WorkflowDefinitionId, WorkflowRunId};
 use drua_core::toolset::tool_invocations::{
-    FetchQuery, NewToolInvocation, ToolInvocationOwner, ToolInvocations,
+    FetchQuery, InvocationOwner, NewToolInvocation, ToolInvocations,
 };
 use drua_core::toolset::{ToolSets, ToolSetsConfig, ToolSetsError, TopLevelTool};
 
@@ -81,7 +81,7 @@ async fn insert_user(pool: &sqlx::PgPool) -> UserId {
     id
 }
 
-fn build_new(owner: ToolInvocationOwner, raw: &str) -> NewToolInvocation {
+fn build_new(owner: InvocationOwner, raw: &str) -> NewToolInvocation {
     NewToolInvocation {
         owner,
         tool_name: "bash".to_string(),
@@ -107,10 +107,10 @@ async fn persist_round_trip_and_fetch_modes() {
     let agent_id = insert_agent(&pool, project_id).await;
 
     let raw = sample_raw();
-    let new = build_new(ToolInvocationOwner::Agent { agent_id }, &raw);
+    let new = build_new(InvocationOwner::agent(agent_id), &raw);
     let persisted = invocations.persist(new).await.expect("persist");
 
-    assert_eq!(persisted.owner, ToolInvocationOwner::Agent { agent_id });
+    assert_eq!(persisted.owner, InvocationOwner::agent(agent_id));
     assert_eq!(persisted.classifier, "generic::v1");
     assert_eq!(persisted.raw_size_bytes, raw.len() as i64);
     assert_eq!(persisted.raw_text, raw);
@@ -289,7 +289,7 @@ async fn find_for_diff_returns_latest_matching_args_hash() {
     let invocations = ToolInvocations::new(&pool);
     let project_id = insert_project(&pool).await;
     let agent_id = insert_agent(&pool, project_id).await;
-    let agent_owner = ToolInvocationOwner::Agent { agent_id };
+    let agent_owner = InvocationOwner::agent(agent_id);
 
     // Two distinct invocations with the same args_hash; expect the most
     // recent to come back.
@@ -431,7 +431,7 @@ async fn user_subject_gets_pipeline_wrapping_via_mcp_gateway_path() {
         .expect("persisted row");
     assert_eq!(
         persisted.owner,
-        ToolInvocationOwner::User { user_id },
+        InvocationOwner::user(user_id),
         "user-rooted call must persist with the User owner shape",
     );
 }
@@ -448,8 +448,8 @@ async fn find_for_diff_user_scope_is_isolated_from_agent_scope() {
     let agent_id = insert_agent(&pool, project_id).await;
     let user_id = insert_user(&pool).await;
 
-    let agent_owner = ToolInvocationOwner::Agent { agent_id };
-    let user_owner = ToolInvocationOwner::User { user_id };
+    let agent_owner = InvocationOwner::agent(agent_id);
+    let user_owner = InvocationOwner::user(user_id);
 
     invocations
         .persist(build_new(agent_owner, "for-agent"))
