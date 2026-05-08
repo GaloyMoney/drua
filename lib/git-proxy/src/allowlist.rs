@@ -91,10 +91,15 @@ impl Allowlist {
         &self.entries
     }
 
+    /// Case-insensitive on `owner` and `repo` — GitHub treats both
+    /// segments as ASCII-case-insensitive on URL fetch (it 301s
+    /// `/galoymoney/drua` to `/GaloyMoney/drua`), and stripping the
+    /// case-sensitivity at the gate avoids the policy-bypass surface
+    /// that case mismatch would otherwise create.
     pub fn lookup(&self, owner: &str, repo: &str) -> Option<&AllowlistEntry> {
         self.entries
             .iter()
-            .find(|e| e.owner == owner && e.repo == repo)
+            .find(|e| e.owner.eq_ignore_ascii_case(owner) && e.repo.eq_ignore_ascii_case(repo))
     }
 
     /// Authorization point called per smart-HTTP request. `refs` may be
@@ -190,6 +195,21 @@ mod tests {
         let a = Allowlist::from_config(&cfg()).unwrap();
         assert!(a
             .check_authorization("GaloyMoney", "drua", GitProxyMode::Pull, &[])
+            .is_ok());
+    }
+
+    #[test]
+    fn lookup_is_case_insensitive_on_owner_and_repo() {
+        let a = Allowlist::from_config(&cfg()).unwrap();
+        // Allow-list entry is `GaloyMoney/drua`; client typed lowercase.
+        assert!(a
+            .check_authorization("galoymoney", "drua", GitProxyMode::Pull, &[])
+            .is_ok());
+        assert!(a
+            .check_authorization("GALOYMONEY", "DRUA", GitProxyMode::Pull, &[])
+            .is_ok());
+        assert!(a
+            .check_authorization("GaloyMoney", "DRUA", GitProxyMode::Pull, &[])
             .is_ok());
     }
 
