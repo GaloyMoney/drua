@@ -189,6 +189,15 @@ pub trait ResultClassifier: Send + Sync + 'static {
     fn matches_content(&self, _ctx: &ClassifierContext<'_>) -> bool {
         false
     }
+    /// `true` for the registry's last-resort classifier. The dispatcher
+    /// skips catch-all classifiers in the identity and content-sniff
+    /// passes and runs them only after every more-specific classifier
+    /// has declined. Without this, a `matches`-returns-`true` catch-all
+    /// would win the identity pass and short-circuit the content-sniff
+    /// pass for every input.
+    fn is_catch_all(&self) -> bool {
+        false
+    }
     fn classify(&self, ctx: &ClassifierContext<'_>) -> Result<Classification, ClassifierError>;
 }
 
@@ -223,8 +232,13 @@ impl ClassifierRegistry {
     }
 
     pub fn classify(&self, ctx: &ClassifierContext<'_>) -> Classification {
-        // First pass — identity match (cheap, declarative).
+        // First pass — identity match (cheap, declarative). Catch-all
+        // classifiers are skipped here: their always-true `matches`
+        // would short-circuit the content-sniff pass.
         for classifier in &self.classifiers {
+            if classifier.is_catch_all() {
+                continue;
+            }
             if !classifier.matches(ctx.tool_name, ctx.args) {
                 continue;
             }
@@ -239,12 +253,13 @@ impl ClassifierRegistry {
                 }
             }
         }
-        // Second pass — content-sniff. `GenericFallback`'s
-        // `matches_content` stays false (it's the catch-all and would
-        // trip on every input here, defeating the more-specific
-        // sniff). Cargo / Nix / Nextest classifiers use this path to
-        // fire on bash-disguised content and on sub-region recursion.
+        // Second pass — content-sniff. Cargo / Nix / Nextest
+        // classifiers use this path to fire on bash-disguised content
+        // and on sub-region recursion. Catch-alls also skipped here.
         for classifier in &self.classifiers {
+            if classifier.is_catch_all() {
+                continue;
+            }
             if !classifier.matches_content(ctx) {
                 continue;
             }
@@ -259,10 +274,16 @@ impl ClassifierRegistry {
                 }
             }
         }
-        // Final fallback — `GenericFallback::matches` always returns
-        // true, so the first-pass loop should already have caught
-        // anything reaching here. Kept as a safety net for empty
-        // registries.
+        // Third pass — catch-all (GenericFallback). Last resort.
+        for classifier in &self.classifiers {
+            if !classifier.is_catch_all() {
+                continue;
+            }
+            if let Ok(c) = classifier.classify(ctx) {
+                return c;
+            }
+        }
+        // Empty registry safety net.
         let canonical_text = extract_text(ctx.raw);
         Classification {
             summary: ToolResultSummary::Passthrough {
@@ -296,6 +317,11 @@ impl ClassifierRegistry {
             classify_region: nop_recurse,
         };
         for classifier in &self.classifiers {
+            // Catch-alls would always claim regions and defeat the
+            // `Option<...>` "no inner classifier matched" semantics.
+            if classifier.is_catch_all() {
+                continue;
+            }
             if !classifier.matches_content(&region_ctx) {
                 continue;
             }
@@ -347,6 +373,10 @@ impl ResultClassifier for GenericFallback {
     }
 
     fn matches(&self, _tool_name: &str, _args: &serde_json::Value) -> bool {
+        true
+    }
+
+    fn is_catch_all(&self) -> bool {
         true
     }
 
