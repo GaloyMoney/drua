@@ -276,17 +276,6 @@ fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId) -> String {
             serde_json::Value::String(s) => s.clone(),
             other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
         },
-        ToolResultSummary::Generic {
-            head,
-            tail,
-            total_bytes,
-            kept_bytes,
-            ..
-        } => format!(
-            "[output elided: {kept_bytes}/{total_bytes} bytes kept; \
-             fetch the rest via tool_output_fetch(invocation_id=\"{id}\")]\n\
-             === head ===\n{head}\n=== tail ===\n{tail}",
-        ),
         ToolResultSummary::StructuredElision {
             kept,
             elided_paths,

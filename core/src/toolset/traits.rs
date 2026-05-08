@@ -61,8 +61,8 @@ pub trait TopLevelTool: Send + Sync {
     /// — the raw `CallToolResult` is returned unchanged. Set on
     /// `tool_output_fetch` so the recovery escape hatch's own response
     /// (which can itself be tens of KB, deliberately) doesn't get
-    /// re-classified as `Generic` and wrapped in a fresh envelope, which
-    /// would defeat the point of the fetch tool.
+    /// re-classified and wrapped in a fresh envelope, which would
+    /// defeat the point of the fetch tool.
     fn bypass_universal_pipeline(&self) -> bool {
         false
     }

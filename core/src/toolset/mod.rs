@@ -659,7 +659,6 @@ fn estimate_text_bytes(result: &CallToolResult) -> u64 {
 fn summary_kept_bytes(summary: &ToolResultSummary, raw_bytes: u64) -> u64 {
     match summary {
         ToolResultSummary::Passthrough { .. } => raw_bytes,
-        ToolResultSummary::Generic { kept_bytes, .. } => *kept_bytes as u64,
         ToolResultSummary::StructuredElision { kept_bytes, .. } => *kept_bytes as u64,
         ToolResultSummary::Concourse(s) => s.kept_bytes as u64,
     }

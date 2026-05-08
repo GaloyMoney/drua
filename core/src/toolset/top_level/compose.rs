@@ -355,12 +355,6 @@ fn render_curated_result(summary: &ToolResultSummary) -> serde_json::Value {
     match summary {
         ToolResultSummary::Passthrough { value } => value.clone(),
         ToolResultSummary::StructuredElision { kept, .. } => kept.clone(),
-        ToolResultSummary::Generic { head, tail, .. } => serde_json::json!({
-            "_elided": true,
-            "kind": "generic_text",
-            "head": head,
-            "tail": tail,
-        }),
         ToolResultSummary::Concourse(s) => {
             serde_json::to_value(s).unwrap_or(serde_json::Value::Null)
         }

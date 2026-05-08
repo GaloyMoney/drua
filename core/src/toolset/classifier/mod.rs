@@ -22,15 +22,11 @@ pub use concourse::{
 };
 
 /// Default byte threshold for [`GenericFallback`]. Below → `Passthrough`;
-/// at-or-above → `Generic { head, tail, … }`. 4 KB is roughly aligned with
-/// the brief's `019e019e` cold-shell pathology; tunable per-deployment by
-/// constructing `GenericFallback` with a custom `threshold_bytes`.
+/// at-or-above → the JSON-aware walker emits `StructuredElision`. 4 KB is
+/// roughly aligned with the brief's `019e019e` cold-shell pathology;
+/// tunable per-deployment by constructing `GenericFallback` with a
+/// custom `threshold_bytes`.
 pub const DEFAULT_GENERIC_THRESHOLD_BYTES: usize = 4096;
-
-// Pre-walker line-budget constants are gone — the walker uses
-// char-budget string elision instead, which doesn't suffer the
-// head/tail overlap class of bug. See `walker::STRING_ELIDE_*` for
-// the new caps.
 
 /// What the classifier produces. The dispatcher branches on the variant.
 ///
@@ -49,18 +45,6 @@ pub enum ToolResultSummary {
     /// here as `Value::String(text)`; the old `text` field is
     /// recoverable with `value.as_str()`.
     Passthrough { value: serde_json::Value },
-
-    /// Generic head/tail/middle-elision over the threshold. Lossy in the
-    /// middle by design; the dropped detail is recoverable via the
-    /// persisted `tool_invocations` row + `tool_output_fetch`.
-    Generic {
-        head: String,
-        tail: String,
-        total_bytes: u64,
-        kept_bytes: u32,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        classifier_hint: Option<String>,
-    },
 
     /// JSON-aware elision. The walker preserves shape — strings get
     /// byte-elided in place (type stays `String`), arrays/objects too
@@ -99,7 +83,6 @@ impl ToolResultSummary {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Passthrough { .. } => "passthrough",
-            Self::Generic { .. } => "generic",
             Self::StructuredElision { .. } => "structured_elision",
             Self::Concourse(_) => "concourse",
         }
