@@ -381,33 +381,44 @@ fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId) -> String {
         }
         ToolResultSummary::ConcourseLogs(s) => {
             let mut out = String::new();
+            let status_str = match &s.status {
+                Some(st) => format!("{st:?}"),
+                None => "unknown (pair with concourse_get_build_status)".to_string(),
+            };
             out.push_str(&format!(
-                "[concourse build log: status={:?}, {} lines / {} bytes; \
-                 fetch the raw stream via tool_output_fetch(invocation_id=\"{}\")]\n",
-                s.status, s.total_lines, s.total_bytes, id
+                "[concourse build log: status={status_str}, {} lines / {} bytes; \
+                 fetch the raw stream via tool_output_fetch(invocation_id=\"{id}\")]\n",
+                s.total_lines, s.total_bytes,
             ));
+            if let (Some(first), Some(last)) = (&s.first_timestamp, &s.last_timestamp) {
+                out.push_str(&format!("timestamps: {first} → {last}\n"));
+            }
             out.push_str(&format!("tasks: {}\n", s.task_phases.len()));
             if !s.warnings.is_empty() {
                 out.push_str("=== warnings ===\n");
                 for w in &s.warnings {
-                    out.push_str(&format!("[{}] {}\n", w.timestamp, w.message));
+                    out.push_str(&format!(
+                        "[{} · line {}] {}\n",
+                        w.timestamp, w.line_number, w.message
+                    ));
                 }
             }
             if !s.errors.is_empty() {
                 out.push_str("=== errors ===\n");
                 for e in &s.errors {
-                    out.push_str(&format!("[{}] {}\n", e.timestamp, e.message));
+                    out.push_str(&format!(
+                        "[{} · line {}] {}\n",
+                        e.timestamp, e.line_number, e.message
+                    ));
                 }
             }
-            // The substance — derivation counts, failure blocks, builder
-            // log_tails — lives in `inner` (a typed `nix_build` sentinel
-            // when the walker chain matched, byte-elided string otherwise).
-            // Render it pretty so agents can scan it inline.
-            if !s.inner.is_null() {
-                out.push_str("=== inner (walker chain) ===\n");
-                let pretty =
-                    serde_json::to_string_pretty(&s.inner).unwrap_or_else(|_| s.inner.to_string());
-                out.push_str(&pretty);
+            // The compacted log itself: timestamps stripped,
+            // summarisable runs replaced inline with XML markers
+            // (`<nix-copy>...</nix-copy>`, `<nix-failure ...>...`).
+            // Same coordinate space as `warnings[*].line_number`.
+            out.push_str("=== logs ===\n");
+            out.push_str(&s.logs);
+            if !s.logs.ends_with('\n') {
                 out.push('\n');
             }
             if !s.final_lines.is_empty() {
@@ -418,10 +429,7 @@ fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId) -> String {
                 }
             }
             out
-        } // (Top-level `NixBuild` summaries used to land here; Nix is now
-          // a `StringClassifier` only and lives inside StructuredElision
-          // typed sentinels — rendered through the StructuredElision arm
-          // above as part of `kept`.)
+        }
     }
 }
 

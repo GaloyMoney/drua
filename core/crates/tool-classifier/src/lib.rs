@@ -15,14 +15,17 @@ use serde::{Deserialize, Serialize};
 
 mod concourse;
 mod nix;
-mod string_classifier;
+mod string_summarizer;
 mod walker;
 
 pub use concourse::{
-    ConcourseBuildLogClassifier, ConcourseBuildLogSummary, ConcourseBuildStatus, TimestampedLine,
+    ConcourseBuildLogClassifier, ConcourseBuildLogPreprocessor, ConcourseBuildLogSummary,
+    ConcourseBuildStatus, TimestampedLine,
 };
-pub use nix::{NixBuildSummary, NixDerivationFailure, NixStringClassifier};
-pub use string_classifier::{StringClassifier, StringClassifierChain};
+pub use nix::{NixCopyRun, NixDrvList, NixFailureBlock};
+pub use string_summarizer::{
+    close_tag, open_tag, LogContext, StringSummarizer, StringSummarizerChain, VerbatimRegion,
+};
 
 /// Default byte threshold for [`GenericFallback`]. Below → `Passthrough`;
 /// at-or-above → the JSON-aware walker emits `StructuredElision`. 4 KB is
@@ -192,13 +195,12 @@ impl ClassifierRegistry {
     /// future Cargo / Nextest / cpp-compile) consulted at every string
     /// leaf during walk.
     pub fn with_default() -> Self {
-        let string_chain =
-            std::sync::Arc::new(StringClassifierChain::new().register(NixStringClassifier));
+        let chain = std::sync::Arc::new(default_summarizer_chain());
         Self::new()
             .register(ConcourseBuildLogClassifier::new(std::sync::Arc::clone(
-                &string_chain,
+                &chain,
             )))
-            .register(GenericFallback::default().with_string_classifiers(string_chain))
+            .register(GenericFallback::default().with_summarizer_chain(chain))
     }
 
     pub fn register(mut self, classifier: impl ResultClassifier) -> Self {
@@ -264,28 +266,43 @@ impl Default for ClassifierRegistry {
 /// registration-time contracts (workflow `ToolStep` validator).
 pub struct GenericFallback {
     pub threshold_bytes: usize,
-    /// Consulted at every string leaf in the walker. First match
-    /// substitutes the string with a typed sentinel (`{"_typed": ...,
-    /// "summary": ...}`); no match falls through to the existing
-    /// byte-elision behaviour. `None` keeps the legacy behaviour
-    /// (no typed strings).
-    pub string_classifiers: Option<std::sync::Arc<StringClassifierChain>>,
+    /// Consulted at every string leaf in the walker. Each pass
+    /// rewrites contiguous matching runs in place, replacing them
+    /// with XML-tag marker blocks while keeping the value's
+    /// `String` JSON type. After the chain runs, byte-elision
+    /// fallback handles whatever's still over threshold.
+    pub summarizer_chain: Option<std::sync::Arc<StringSummarizerChain>>,
 }
 
 impl Default for GenericFallback {
     fn default() -> Self {
         Self {
             threshold_bytes: DEFAULT_GENERIC_THRESHOLD_BYTES,
-            string_classifiers: None,
+            summarizer_chain: None,
         }
     }
 }
 
 impl GenericFallback {
-    pub fn with_string_classifiers(mut self, chain: std::sync::Arc<StringClassifierChain>) -> Self {
-        self.string_classifiers = Some(chain);
+    pub fn with_summarizer_chain(
+        mut self,
+        chain: std::sync::Arc<StringSummarizerChain>,
+    ) -> Self {
+        self.summarizer_chain = Some(chain);
         self
     }
+}
+
+/// Chain registered by [`ClassifierRegistry::with_default`]. Order
+/// matters: failure blocks claim before drv-list (which would
+/// otherwise eat the failure header's drv path) and copy-run
+/// (which never overlaps but is registered last for ordering
+/// consistency).
+pub fn default_summarizer_chain() -> StringSummarizerChain {
+    StringSummarizerChain::new()
+        .register(nix::NixFailureBlock)
+        .register(nix::NixDrvList)
+        .register(nix::NixCopyRun)
 }
 
 impl ResultClassifier for GenericFallback {
@@ -315,7 +332,7 @@ impl ResultClassifier for GenericFallback {
         //   on keys + values; less optimal than a typed classifier
         //   but useful as a fallback.
         let canonical_text = canonical_text_for(&value);
-        let chain = self.string_classifiers.as_deref();
+        let chain = self.summarizer_chain.as_deref();
         let summary = match walker::classify_value(&value, self.threshold_bytes, chain) {
             walker::WalkOutcome::Passthrough(v) => ToolResultSummary::Passthrough { value: v },
             walker::WalkOutcome::Elided {
@@ -508,48 +525,37 @@ mod tests {
     }
 
     #[test]
-    fn walker_chain_embeds_typed_sentinel_at_string_leaf() {
-        // The new "walker is the spine, string classifiers fire at
-        // leaves" path: a bash result whose stdout looks like nix
-        // output should land in `StructuredElision { kept }` where
-        // `kept` is a typed sentinel (`{"_typed": "nix_build", ...}`)
-        // instead of a byte-elided string. No identity match for
-        // `bash`; the chain is the only signal.
+    fn walker_chain_substitutes_in_place_at_string_leaf() {
+        // Walker is the spine; the StringSummarizer chain rewrites
+        // string leaves in place. A bash result whose stdout looks
+        // like nix output lands in `StructuredElision { kept }` where
+        // `kept` is still a `Value::String` — just with copy-run /
+        // failure-block runs collapsed into XML markers.
         let registry = ClassifierRegistry::with_default();
-        let nix_output = "\
-preparing to build\n\
-building '/nix/store/aaaa-foo.drv'\n\
-copying path '/nix/store/bbbb-bar' from 'https://cache.nixos.org/'\n\
-copying path '/nix/store/cccc-baz' from 'https://cache.nixos.org/'\n\
-error: builder for '/nix/store/aaaa-foo.drv' failed with exit code 1; last 10 log lines:\n\
-       > some compiler error\n\
-       > another diagnostic line\n";
-        let raw = result_with(nix_output);
+        let mut nix_output = String::from("preparing to build\n");
+        nix_output.push_str("building '/nix/store/aaaa-foo.drv'\n");
+        for i in 0..20 {
+            nix_output.push_str(&format!(
+                "copying path '/nix/store/bbb{i:02}-bar' from 'https://cache.nixos.org/'\n"
+            ));
+        }
+        nix_output.push_str(
+            "error: builder for '/nix/store/aaaa-foo.drv' failed with exit code 1; last 10 log lines:\n",
+        );
+        nix_output.push_str("       > some compiler error\n");
+        nix_output.push_str("       > another diagnostic line\n");
+        let raw = result_with(&nix_output);
         let classification = registry.classify(&ctx("bash", &raw));
         let kept = match classification.summary {
             ToolResultSummary::StructuredElision { kept, .. } => kept,
-            other => panic!("expected StructuredElision with typed-sentinel kept, got {other:?}"),
+            ToolResultSummary::Passthrough { value } => value,
+            other => panic!("unexpected summary shape: {other:?}"),
         };
-        // The walker chain should have substituted the root string
-        // with a Nix-typed sentinel.
-        let typed = kept
-            .get("_typed")
-            .and_then(|v| v.as_str())
-            .expect("kept should be a typed sentinel");
-        assert_eq!(typed, "nix_build");
-        let summary = kept
-            .get("summary")
-            .expect("typed sentinel carries the summary inline");
-        assert_eq!(
-            summary
-                .get("derivations_attempted")
-                .and_then(|v| v.as_u64()),
-            Some(1)
-        );
-        assert_eq!(
-            summary.get("cache_paths_copied").and_then(|v| v.as_u64()),
-            Some(2)
-        );
+        let s = kept.as_str().expect("kept is still Value::String");
+        assert!(s.contains("<nix-copy"), "got: {s}");
+        assert!(s.contains("</nix-copy>"), "got: {s}");
+        assert!(s.contains("<nix-failure"), "got: {s}");
+        assert!(s.contains("some compiler error"), "got: {s}");
     }
 
     #[test]
@@ -559,7 +565,7 @@ error: builder for '/nix/store/aaaa-foo.drv' failed with exit code 1; last 10 lo
         // walk form is smaller than the input.
         let registry = ClassifierRegistry::new().register(GenericFallback {
             threshold_bytes: 4,
-            string_classifiers: None,
+            summarizer_chain: None,
         });
         let body: String = "x".repeat(2000);
         let raw = result_with(&body);

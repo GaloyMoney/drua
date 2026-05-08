@@ -10,10 +10,11 @@ pub mod top_level;
 mod traits;
 
 pub use classifier::{
-    Classification, ClassifierContext, ClassifierError, ClassifierRegistry,
-    ConcourseBuildLogClassifier, ConcourseBuildLogSummary, ConcourseBuildStatus, ElidedPath,
-    ElisionKind, GenericFallback, NixBuildSummary, NixDerivationFailure, NixStringClassifier,
-    ResultClassifier, StringClassifier, StringClassifierChain, TimestampedLine, ToolResultSummary,
+    default_summarizer_chain, Classification, ClassifierContext, ClassifierError,
+    ClassifierRegistry, ConcourseBuildLogClassifier, ConcourseBuildLogPreprocessor,
+    ConcourseBuildLogSummary, ConcourseBuildStatus, ElidedPath, ElisionKind, GenericFallback,
+    LogContext, NixCopyRun, NixDrvList, NixFailureBlock, ResultClassifier, StringSummarizer,
+    StringSummarizerChain, TimestampedLine, ToolResultSummary,
 };
 pub use config::*;
 pub use error::*;

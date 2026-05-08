@@ -10,7 +10,7 @@
 
 use serde_json::{Map, Value};
 
-use super::string_classifier::StringClassifierChain;
+use super::string_summarizer::{LogContext, StringSummarizerChain};
 use super::{ElidedPath, ElisionKind};
 
 /// Per-string head/tail char count when byte-eliding. Picked to keep
@@ -43,7 +43,7 @@ pub enum WalkOutcome {
 pub fn classify_value(
     value: &Value,
     threshold: usize,
-    chain: Option<&StringClassifierChain>,
+    chain: Option<&StringSummarizerChain>,
 ) -> WalkOutcome {
     let total_bytes = json_size(value);
     let mut paths = Vec::new();
@@ -88,26 +88,32 @@ pub fn classify_value(
 fn walk(
     value: &Value,
     threshold: usize,
-    chain: Option<&StringClassifierChain>,
+    chain: Option<&StringSummarizerChain>,
     path: String,
     paths: &mut Vec<ElidedPath>,
     typed_replacements: &mut usize,
 ) -> Value {
     match value {
         // Strings always get the chain offered, regardless of size —
-        // a 200-byte cargo-error region is worth typing even when no
-        // elision is needed. If no classifier claims it, fall through
-        // to byte-elision (only fires when over-threshold).
+        // a 200-byte nix copy run is worth collapsing even when no
+        // byte-elision is needed. The chain mutates the string in
+        // place (preserving Value::String). Whatever's left, if
+        // still oversize, falls through to byte-elision.
         Value::String(s) => {
+            let mut current = s.clone();
             if let Some(c) = chain {
-                if let Some(typed) = c.classify(s) {
+                let mut ctx = LogContext::from_initial(s);
+                if c.run(&mut ctx) {
                     *typed_replacements += 1;
-                    return typed;
+                    current = ctx.into_log();
                 }
             }
-            let bytes = json_size(value);
+            let value_for_size = Value::String(current.clone());
+            let bytes = json_size(&value_for_size);
             if bytes >= threshold {
-                byte_elide_string(s, &path, paths, bytes)
+                byte_elide_string(&current, &path, paths, bytes)
+            } else if current != *s {
+                Value::String(current)
             } else {
                 value.clone()
             }
@@ -186,7 +192,7 @@ fn byte_elide_string(
 fn walk_array(
     items: &[Value],
     threshold: usize,
-    chain: Option<&StringClassifierChain>,
+    chain: Option<&StringSummarizerChain>,
     path: &str,
     paths: &mut Vec<ElidedPath>,
     original_bytes: usize,
@@ -289,7 +295,7 @@ fn make_array_sentinel(
 fn walk_object(
     map: &Map<String, Value>,
     threshold: usize,
-    chain: Option<&StringClassifierChain>,
+    chain: Option<&StringSummarizerChain>,
     path: &str,
     paths: &mut Vec<ElidedPath>,
     _original_bytes: usize,
