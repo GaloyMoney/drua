@@ -14,12 +14,14 @@ use rmcp::model::CallToolResult;
 use serde::{Deserialize, Serialize};
 
 mod concourse;
+mod nix;
 mod walker;
 
 pub use concourse::{
     ConcourseBuildLogClassifier, ConcourseBuildLogSummary, ConcourseBuildStatus, NixBuildFailure,
     TimestampedLine,
 };
+pub use nix::{NixBuildClassifier, NixBuildSummary, NixDerivationFailure};
 
 /// Default byte threshold for [`GenericFallback`]. Below → `Passthrough`;
 /// at-or-above → the JSON-aware walker emits `StructuredElision`. 4 KB is
@@ -72,6 +74,13 @@ pub enum ToolResultSummary {
     /// (resource versions, pipeline config) would each get their own
     /// kind.
     ConcourseLogs(ConcourseBuildLogSummary),
+
+    /// Typed summary of nix-build-shaped output. Lands here from two
+    /// directions: top-level content sniff (e.g. `bash` running
+    /// `nix build`) and region recursion from a parent classifier
+    /// (e.g. concourse → failed-derivation log_tail that itself
+    /// contains a nix-build sequence).
+    NixBuild(NixBuildSummary),
 }
 
 impl ToolResultSummary {
@@ -88,6 +97,7 @@ impl ToolResultSummary {
             Self::Passthrough { .. } => "passthrough",
             Self::StructuredElision { .. } => "structured_elision",
             Self::ConcourseLogs(_) => "concourse_logs",
+            Self::NixBuild(_) => "nix_build",
         }
     }
 
@@ -198,9 +208,12 @@ impl ClassifierRegistry {
 
     /// Pre-built registry with every shipping classifier registered in
     /// most-specific → fallback order. New classifiers slot in here.
+    /// Identity-matchers (concourse) run first; content-sniff
+    /// classifiers (Nix) run between identity and `GenericFallback`.
     pub fn with_default() -> Self {
         Self::new()
             .register(ConcourseBuildLogClassifier)
+            .register(NixBuildClassifier)
             .register(GenericFallback::default())
     }
 
