@@ -21,10 +21,6 @@ use super::super::{
     McpAuthMode, McpUpstreamConfig, SearchableToolSet, ToolSetEntry, ToolSetsError,
 };
 
-/// Refresh App-minted installation tokens this often. Tokens nominally
-/// expire after 1 hour; the 10-minute safety margin absorbs clock skew
-/// and gives us one in-cycle retry window if the GitHub API is briefly
-/// unreachable when refresh fires.
 const GITHUB_APP_REFRESH_INTERVAL: Duration = Duration::from_secs(50 * 60);
 
 pub struct UpstreamToolSet {
@@ -38,11 +34,7 @@ pub struct UpstreamToolSet {
     /// Anonymous). See [`McpUpstreamConfig::internal_only`].
     internal_only: bool,
     tools: Vec<ToolSetEntry>,
-    /// `Arc<RwLock<...>>` so the optional refresh task can swap in a
-    /// freshly-built rmcp client when the github-app token expires
-    /// without dropping in-flight calls.
     client: Arc<RwLock<RunningService<RoleClient, ()>>>,
-    /// Owned so the refresh task is aborted when the toolset is dropped.
     _refresh_task: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -95,10 +87,6 @@ impl UpstreamToolSet {
 
         let client = Arc::new(RwLock::new(client));
 
-        // For github-app upstreams, the installation token expires in 1
-        // hour. Spawn a per-upstream task that pre-emptively rebuilds the
-        // rmcp client with a fresh token every 50 minutes. The handle is
-        // owned by the toolset so it's aborted on drop.
         let refresh_task = match upstream.auth_mode {
             McpAuthMode::GithubApp => {
                 let provider = Arc::clone(github_app.expect("checked above"));

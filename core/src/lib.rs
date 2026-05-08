@@ -108,13 +108,10 @@ impl App {
             None
         };
 
-        // Built before ToolSets::init / Sandboxes::init so:
-        //   - mcp upstreams with `auth_mode: github_app` can mint their
-        //     initial installation token at upstream init time
-        //   - sandboxes can mint a fresh installation token for
-        //     `/initialize` to clone private repos
-        // Verify by generating a token at startup — crash on failure
-        // rather than silently skip.
+        // Built before Sandboxes::init so the provider can mint a fresh
+        // installation token for `/initialize` to clone private repos.
+        // Verify by generating a token at startup — crash on failure rather
+        // than silently skip.
         let github_app = match config.github_app {
             Some(ref gh_config) => {
                 let provider = GitHubAppTokenProvider::new(gh_config)

@@ -102,14 +102,6 @@ pub struct CodeAssistantToolSetConfig {
     pub db_path: String,
 }
 
-/// How the upstream's outbound `Authorization` header is sourced.
-///
-/// `Static` (default) reads `{NAME}_AUTH_HEADER` from the environment at
-/// startup and bakes the value into the rmcp client. `GithubApp` mints
-/// fresh GitHub App installation tokens via the configured
-/// `GitHubAppTokenProvider` and refreshes them on a ~50-minute cadence
-/// (tokens expire after 1 hour). The latter requires `github_app` to
-/// be configured at the top level of the drua config.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpAuthMode {
@@ -127,7 +119,6 @@ pub struct McpUpstreamConfig {
     #[serde(default = "default_auth_header_name")]
     pub auth_header_name: String,
     /// When true (default), init fails if the auth header env var is missing.
-    /// Ignored when `auth_mode` is `github_app`.
     #[serde(default = "default_auth_required")]
     pub auth_required: bool,
     #[serde(default)]
