@@ -232,6 +232,24 @@ fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId) -> String {
              fetch the rest via tool_output_fetch(invocation_id=\"{id}\")]\n\
              === head ===\n{head}\n=== tail ===\n{tail}",
         ),
+        ToolResultSummary::StructuredElision {
+            kept,
+            elided_paths,
+            total_bytes,
+            kept_bytes,
+        } => {
+            // Stub rendering — B4 fills in the structured prose with
+            // a per-path elided summary. For now emit the kept Value
+            // pretty-printed plus a one-line summary of how many
+            // branches were dropped.
+            let pretty = serde_json::to_string_pretty(kept).unwrap_or_else(|_| kept.to_string());
+            format!(
+                "[json elided: {kept_bytes}/{total_bytes} bytes kept; \
+                 {} branches dropped; fetch raw via \
+                 tool_output_fetch(invocation_id=\"{id}\")]\n{pretty}",
+                elided_paths.len(),
+            )
+        }
         ToolResultSummary::Concourse(s) => {
             let mut out = String::new();
             out.push_str(&format!(

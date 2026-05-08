@@ -62,6 +62,22 @@ pub enum ToolResultSummary {
         classifier_hint: Option<String>,
     },
 
+    /// JSON-aware elision. The walker preserves shape — strings get
+    /// byte-elided in place (type stays `String`), arrays/objects too
+    /// big to walk into get replaced with typed sentinels in `kept`.
+    /// Each elided branch is also enumerated in `elided_paths` so the
+    /// agent can reason about what was dropped without inspecting the
+    /// kept structure.
+    StructuredElision {
+        /// Partial JSON value — always parseable. Branches that didn't
+        /// fit the budget appear as `{"_elided": true, "kind": "...",
+        /// "bytes": ..., ...}` sentinels (see `kept` walker rules).
+        kept: serde_json::Value,
+        elided_paths: Vec<ElidedPath>,
+        total_bytes: u64,
+        kept_bytes: u32,
+    },
+
     /// Typed summary of a Concourse build's text log. Collapses ~100 KB
     /// of timestamped progress (nix substituter chatter, derivation
     /// checks, cache pruning) into a structured shape that preserves
@@ -77,6 +93,7 @@ impl ToolResultSummary {
         match self {
             Self::Passthrough { .. } => "passthrough",
             Self::Generic { .. } => "generic",
+            Self::StructuredElision { .. } => "structured_elision",
             Self::Concourse(_) => "concourse_build_log",
         }
     }
@@ -86,6 +103,36 @@ impl ToolResultSummary {
     pub fn is_passthrough(&self) -> bool {
         matches!(self, Self::Passthrough { .. })
     }
+}
+
+/// One branch of a `StructuredElision`'s `kept` value that the walker
+/// replaced with a sentinel. Recorded so the agent can scan
+/// `elided_paths` to discover what was dropped without recursing
+/// through `kept` to find sentinels.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ElidedPath {
+    /// JSON-pointer-style path: `$.steps[12].log`,
+    /// `$.builds`, `$.["weird key"]`. Roots at `$`.
+    pub path: String,
+    pub kind: ElisionKind,
+    pub bytes: u64,
+    /// For arrays — element count of the original branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub length: Option<usize>,
+    /// First ~200 chars of a string sentinel, head sample of an
+    /// array sentinel, etc. — small enough to inline without
+    /// blowing the budget. `None` when the walker had no preview
+    /// budget left.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ElisionKind {
+    String,
+    Array,
+    Object,
 }
 
 pub struct ClassifierContext<'a> {
