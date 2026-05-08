@@ -105,6 +105,17 @@ impl TopLevelTool for ComposeTool {
         false
     }
 
+    fn bypass_universal_pipeline(&self) -> bool {
+        // Compose owns its own envelope shape — richer than the
+        // standard `{invocation_id, summary, fetch_hint}` because it
+        // carries `result_invocation_id` (recovery for the JS return
+        // value) AND `sub_invocations[]` (recovery handles for each
+        // sub-tool call the script made). Letting the dispatcher
+        // re-wrap compose's structured_content with the standard
+        // envelope would clobber the `sub_invocations` directory.
+        true
+    }
+
     #[tracing::instrument(name = "toolset.compose.call", skip_all)]
     async fn call(
         &self,
