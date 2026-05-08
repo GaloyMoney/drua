@@ -7,6 +7,7 @@ pub mod importer;
 pub(crate) mod job;
 pub(crate) mod repo;
 pub mod run;
+pub mod template;
 pub mod yaml;
 
 pub use importer::WorkflowsImporter;
@@ -20,6 +21,7 @@ use crate::agent::Agents;
 use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 use crate::skill::Skills;
+use crate::toolset::ToolSets;
 use crate::user::Users;
 
 pub const WORKFLOW_DOC_TYPE: drua_library::DocType = drua_library::DocType::new("workflow");
@@ -36,6 +38,41 @@ use cron_job::{cron_queue_id, TriggerCronConfig, TriggerCronJobInitializer};
 use job::{ExecuteRunConfig, ExecuteRunJobInitializer};
 use repo::WorkflowDefinitionRepo;
 use run::entity::NewWorkflowRun;
+use template::TemplateRef;
+
+/// CEL identifier shape — `[A-Za-z_][A-Za-z0-9_]*`. Step names
+/// must conform so `${{ steps.<name>.outputs.… }}` parses as a
+/// field path rather than an arithmetic expression. Mirrors the
+/// regex in `template::referenced_step_names`.
+fn is_cel_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Reject `${{ steps.X.outputs.… }}` refs whose `X` hasn't been
+/// validated yet. Trigger refs always pass (provider payload schema
+/// validation deferred — memo `019e01a4` open Q6).
+fn validate_ref_against_prior_steps(
+    step_name: &str,
+    r: &TemplateRef,
+    seen: &std::collections::HashSet<String>,
+) -> Result<(), WorkflowError> {
+    template::validate_root(r)
+        .map_err(|e| WorkflowError::InvalidTemplateRef(format!("step '{step_name}': {e}")))?;
+    for target in template::referenced_step_names(r) {
+        if !seen.contains(&target) {
+            return Err(WorkflowError::InvalidTemplateRef(format!(
+                "step '{step_name}': {} — references step '{target}' which is not declared earlier in the workflow",
+                r.raw
+            )));
+        }
+    }
+    Ok(())
+}
 
 #[derive(Clone)]
 pub struct Workflows {
@@ -43,6 +80,10 @@ pub struct Workflows {
     run_repo: WorkflowRunRepo,
     skills: Arc<Skills>,
     users: Arc<Users>,
+    /// Held for parse-time `${{ … }}` reference validation in
+    /// `tool_step.params` — looks up the called tool's
+    /// `output_schema()` + `composable()` flag.
+    toolsets: Arc<ToolSets>,
     execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
     cron_spawner: ::job::JobSpawner<TriggerCronConfig>,
     /// Cloned `Jobs` handle so `await_run_completion` can block on the
@@ -63,6 +104,7 @@ impl Workflows {
         agents: Arc<Agents>,
         sandboxes: Arc<Sandboxes>,
         users: Arc<Users>,
+        toolsets: Arc<ToolSets>,
         jobs: &mut ::job::Jobs,
     ) -> Self {
         let execute_run_spawner = jobs.add_initializer(ExecuteRunJobInitializer::new(
@@ -71,6 +113,7 @@ impl Workflows {
             agents,
             Arc::clone(&skills),
             sandboxes,
+            Arc::clone(&toolsets),
         ));
         let cron_spawner = jobs.add_initializer(TriggerCronJobInitializer::new(
             WorkflowDefinitionRepo::new_without_library(pool),
@@ -82,6 +125,7 @@ impl Workflows {
             run_repo: WorkflowRunRepo::new(pool),
             skills,
             users,
+            toolsets,
             execute_run_spawner,
             cron_spawner,
             jobs: jobs.clone(),
@@ -226,6 +270,31 @@ impl Workflows {
         // sees the full list (rather than fixing one and re-running).
         let mut missing_skills: Vec<(String, String)> = Vec::new();
         let mut undeclared_sandboxes: Vec<(String, String)> = Vec::new();
+        // Names of steps that have already been validated, in order;
+        // a step's `${{ steps.X.outputs.… }}` refs may only point at
+        // entries already in this set (i.e. earlier in the linear
+        // step list).
+        let mut seen_step_names: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        // Step names appear inside `${{ steps.<name>.outputs.… }}`
+        // and must therefore be valid CEL identifiers — anything
+        // else (hyphens, spaces, leading digits, …) is parsed by
+        // CEL as a different expression entirely (e.g.
+        // `steps.store-note.outputs.x` becomes
+        // `(steps.store) - (note.outputs.x)`). Reject at parse time
+        // so authors learn at create time, not when a downstream
+        // template silently fails to resolve.
+        for step in steps {
+            if !is_cel_identifier(step.name()) {
+                return Err(WorkflowError::InvalidStep(format!(
+                    "step '{}': name must be a CEL identifier (letters, digits, \
+                     underscores; first char a letter or underscore) so it can be \
+                     referenced via `${{{{ steps.<name>.outputs.… }}}}`",
+                    step.name()
+                )));
+            }
+        }
 
         for step in steps {
             match step {
@@ -262,7 +331,31 @@ impl Workflows {
                     // invariant at construction/deserialization
                     // (memo 019dfc8c). Bad schemas can't reach here.
                 }
+                WorkflowStepDef::ToolStep {
+                    name, tool, params, ..
+                } => {
+                    // The lookup enforces every workflow `tool_step`
+                    // contract in one place: registered, composable,
+                    // declares an output_schema. The runtime
+                    // executor calls the same helper, so a workflow
+                    // that passes `validate_steps` cannot fail
+                    // dispatch on these checks at run time.
+                    self.toolsets.find_for_workflow(tool).map_err(|e| {
+                        WorkflowError::InvalidStep(format!("tool_step '{name}': {e}"))
+                    })?;
+
+                    // `validate_ref_against_prior_steps` runs
+                    // `template::validate_root` internally — no need
+                    // to repeat it here.
+                    let refs = template::extract_refs_in_value(params).map_err(|e| {
+                        WorkflowError::InvalidTemplateRef(format!("tool_step '{name}': {e}"))
+                    })?;
+                    for r in &refs {
+                        validate_ref_against_prior_steps(name, r, &seen_step_names)?;
+                    }
+                }
             }
+            seen_step_names.insert(step.name().to_string());
         }
 
         if !missing_skills.is_empty() {
@@ -721,5 +814,52 @@ mod tests {
         })
         .unwrap_err();
         assert!(matches!(err, WorkflowError::InvalidTimezone(_)));
+    }
+
+    #[test]
+    fn template_ref_against_prior_steps_accepts_trigger() {
+        let r = template::parse_path("trigger.payload.build").unwrap();
+        let seen = std::collections::HashSet::new();
+        validate_ref_against_prior_steps("any", &r, &seen).expect("trigger refs always accepted");
+    }
+
+    #[test]
+    fn template_ref_against_prior_steps_accepts_seen_step() {
+        let r = template::parse_path("steps.triage.outputs.workflow").unwrap();
+        let mut seen = std::collections::HashSet::new();
+        seen.insert("triage".to_string());
+        validate_ref_against_prior_steps("dispatch", &r, &seen).unwrap();
+    }
+
+    #[test]
+    fn template_ref_against_prior_steps_rejects_forward_ref() {
+        let r = template::parse_path("steps.later.outputs.x").unwrap();
+        let seen = std::collections::HashSet::new();
+        let err = validate_ref_against_prior_steps("first", &r, &seen).unwrap_err();
+        assert!(matches!(err, WorkflowError::InvalidTemplateRef(_)));
+    }
+
+    #[test]
+    fn template_ref_against_prior_steps_rejects_unknown_root() {
+        let r = template::parse_path("env.HOME").unwrap();
+        let seen = std::collections::HashSet::new();
+        let err = validate_ref_against_prior_steps("any", &r, &seen).unwrap_err();
+        assert!(matches!(err, WorkflowError::InvalidTemplateRef(_)));
+    }
+
+    #[test]
+    fn cel_identifier_accepts_underscore_and_alphanumerics() {
+        assert!(is_cel_identifier("step1"));
+        assert!(is_cel_identifier("_leading_underscore"));
+        assert!(is_cel_identifier("Camel_Snake_42"));
+    }
+
+    #[test]
+    fn cel_identifier_rejects_hyphen_leading_digit_and_empty() {
+        assert!(!is_cel_identifier(""));
+        assert!(!is_cel_identifier("store-note"));
+        assert!(!is_cel_identifier("1step"));
+        assert!(!is_cel_identifier("has space"));
+        assert!(!is_cel_identifier("dot.in.middle"));
     }
 }

@@ -57,7 +57,10 @@ enum WorkflowParams {
         definition_id: WorkflowDefinitionId,
     },
     Trigger {
-        definition_id: WorkflowDefinitionId,
+        /// Either the definition's UUID or its project-scoped name.
+        /// UUID parsing is tried first; on failure the value is
+        /// resolved against the project's `list_for_project`.
+        definition_id: String,
         #[serde(default)]
         payload: Option<serde_json::Value>,
     },
@@ -166,50 +169,90 @@ fn specs_from_parts(
     }
 }
 
+/// Tagged step input. `type: agent_step` (the historical default,
+/// inferred when omitted) reuses the existing AgentStep shape; `type:
+/// tool_step` dispatches a single top-level MCP tool.
 #[derive(Deserialize, schemars::JsonSchema)]
-struct WorkflowStepParam {
-    name: String,
-    /// NAME of an existing skill in this project (created via the
-    /// `skill` tool). NOT an inline body — the runtime looks up the
-    /// skill by this name at trigger time.
-    skill: String,
-    /// Name of a sandbox declared in this workflow's top-level
-    /// `sandboxes` array.
-    #[serde(default)]
-    sandbox: Option<String>,
-    #[serde(default)]
-    sandbox_mode: Option<SandboxAgentMode>,
-    #[serde(default)]
-    timeout_seconds: Option<u64>,
-    #[serde(default)]
-    model_chain: Option<llm::ModelChain>,
-    /// JSON Schema (root must be `type: object`) for the step's
-    /// structured output. Omit to fall back to the default `{success,
-    /// reason}` schema.
-    #[serde(default)]
-    output_schema: Option<serde_json::Value>,
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WorkflowStepParam {
+    AgentStep {
+        name: String,
+        /// NAME of an existing skill in this project (created via the
+        /// `skill` tool). NOT an inline body — the runtime looks up the
+        /// skill by this name at trigger time.
+        skill: String,
+        /// Name of a sandbox declared in this workflow's top-level
+        /// `sandboxes` array.
+        #[serde(default)]
+        sandbox: Option<String>,
+        #[serde(default)]
+        sandbox_mode: Option<SandboxAgentMode>,
+        #[serde(default)]
+        timeout_seconds: Option<u64>,
+        #[serde(default)]
+        model_chain: Option<llm::ModelChain>,
+        /// JSON Schema (root must be `type: object`) for the step's
+        /// structured output. Omit to fall back to the default
+        /// `{success, output, reason}` schema.
+        #[serde(default)]
+        output_schema: Option<serde_json::Value>,
+    },
+    ToolStep {
+        name: String,
+        /// Top-level tool name (e.g. `"workflow"`). Must be
+        /// `composable: true`. Dispatched with `AuthSubject::WorkflowExecutor`.
+        tool: String,
+        /// Pre-substitution params; `${{ trigger.X }}` and
+        /// `${{ steps.<name>.outputs.Y }}` resolve at run time.
+        #[serde(default)]
+        params: serde_json::Value,
+        #[serde(default)]
+        timeout_seconds: Option<u64>,
+    },
 }
 
 impl WorkflowStepParam {
     fn into_step(self) -> Result<WorkflowStepDef, ToolSetsError> {
-        let output_schema = match self.output_schema {
-            Some(value) => serde_json::from_value(value).map_err(|e| {
-                ToolSetsError::MissingArgument(format!(
-                    "step '{}': output_schema invalid (root must be `type: object` per MCP): {e}",
-                    self.name
-                ))
-            })?,
-            None => crate::workflow::default_output_schema(),
-        };
-        Ok(WorkflowStepDef::AgentStep {
-            name: self.name,
-            skill: self.skill,
-            sandbox: self.sandbox,
-            sandbox_mode: self.sandbox_mode,
-            timeout_seconds: self.timeout_seconds,
-            model_chain: self.model_chain,
-            output_schema,
-        })
+        match self {
+            WorkflowStepParam::AgentStep {
+                name,
+                skill,
+                sandbox,
+                sandbox_mode,
+                timeout_seconds,
+                model_chain,
+                output_schema,
+            } => {
+                let output_schema = match output_schema {
+                    Some(value) => serde_json::from_value(value).map_err(|e| {
+                        ToolSetsError::MissingArgument(format!(
+                            "step '{name}': output_schema invalid (root must be `type: object` per MCP): {e}"
+                        ))
+                    })?,
+                    None => crate::workflow::default_output_schema(),
+                };
+                Ok(WorkflowStepDef::AgentStep {
+                    name,
+                    skill,
+                    sandbox,
+                    sandbox_mode,
+                    timeout_seconds,
+                    model_chain,
+                    output_schema: Box::new(output_schema),
+                })
+            }
+            WorkflowStepParam::ToolStep {
+                name,
+                tool,
+                params,
+                timeout_seconds,
+            } => Ok(WorkflowStepDef::ToolStep {
+                name,
+                tool,
+                params,
+                timeout_seconds,
+            }),
+        }
     }
 }
 
@@ -317,9 +360,13 @@ struct WorkflowSandboxOutput {
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct WorkflowStepOutput {
     name: String,
-    /// `"agent_step"`.
+    /// `"agent_step"` or `"tool_step"`.
     step_type: String,
+    /// Empty string for `tool_step`.
     skill: String,
+    /// Set on `tool_step`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     sandbox: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -445,8 +492,7 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "definition_id": {
                 "type": "string",
-                "format": "uuid",
-                "description": "Workflow definition ID (get / trigger / runs)."
+                "description": "Workflow definition ID — UUID for `get`/`runs`/`update`, UUID-or-name for `trigger` (the project-scoped workflow name resolves identically)."
             },
             "run_id": {
                 "type": "string",
@@ -493,6 +539,35 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
         "additionalProperties": false
     })
 });
+
+/// Resolve a `definition_id` field that may be either a UUID or a
+/// project-scoped workflow name. UUID parsing wins; the name path is
+/// the fallback so callers can write `workflow.trigger
+/// definition_id="drua-test-failure"` without doing a `list` lookup
+/// first (memo `019e01a4` open Q1).
+async fn resolve_definition_id_or_name(
+    workflows: &Arc<Workflows>,
+    subject: &AuthSubject,
+    project_id: crate::primitives::ProjectId,
+    raw: &str,
+) -> Result<WorkflowDefinitionId, ToolSetsError> {
+    if let Ok(uuid) = uuid::Uuid::parse_str(raw) {
+        return Ok(WorkflowDefinitionId::from(uuid));
+    }
+    let definitions = workflows
+        .list_for_project(subject, project_id)
+        .await
+        .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+    definitions
+        .iter()
+        .find(|d| d.name == raw)
+        .map(|d| d.id)
+        .ok_or_else(|| {
+            ToolSetsError::MissingArgument(format!(
+                "no workflow named '{raw}' in this project (and `{raw}` is not a valid UUID)"
+            ))
+        })
+}
 
 #[async_trait::async_trait]
 impl TopLevelTool for WorkflowTool {
@@ -593,7 +668,7 @@ impl TopLevelTool for WorkflowTool {
                         sandbox_mode,
                         timeout_seconds,
                         model_chain: None,
-                        output_schema: crate::workflow::default_output_schema(),
+                        output_schema: Box::new(crate::workflow::default_output_schema()),
                     }]
                 };
 
@@ -668,11 +743,18 @@ impl TopLevelTool for WorkflowTool {
                 definition_id,
                 payload,
             } => {
+                let resolved_id = resolve_definition_id_or_name(
+                    &self.workflows,
+                    subject,
+                    project_id,
+                    &definition_id,
+                )
+                .await?;
                 let payload =
                     payload.unwrap_or_else(|| serde_json::Value::Object(Default::default()));
                 let run = self
                     .workflows
-                    .trigger_run(subject, definition_id, payload)
+                    .trigger_run(subject, resolved_id, payload)
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
                 let text = format_run_text(&run);
@@ -903,6 +985,20 @@ fn step_to_output(s: &WorkflowStepDef) -> WorkflowStepOutput {
             skill: skill.clone(),
             sandbox: sandbox.clone(),
             timeout_seconds: *timeout_seconds,
+            tool: None,
+        },
+        WorkflowStepDef::ToolStep {
+            name,
+            tool,
+            timeout_seconds,
+            ..
+        } => WorkflowStepOutput {
+            name: name.clone(),
+            step_type: "tool_step".to_string(),
+            skill: String::new(),
+            sandbox: None,
+            timeout_seconds: *timeout_seconds,
+            tool: Some(tool.clone()),
         },
     }
 }
@@ -1096,6 +1192,16 @@ fn format_get_text(d: &WorkflowDefinition) -> String {
                         .as_ref()
                         .map(|c| format!("{}+{}", c.primary.name, c.fallbacks.len()))
                         .unwrap_or_else(|| "<inherit>".into())
+                ));
+            }
+            WorkflowStepDef::ToolStep {
+                name,
+                tool,
+                timeout_seconds,
+                ..
+            } => {
+                out.push_str(&format!(
+                    "  - tool_step name={name} tool={tool} timeout_s={timeout_seconds:?}\n"
                 ));
             }
         }

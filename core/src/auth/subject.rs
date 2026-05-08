@@ -1,5 +1,8 @@
 use super::{error::AuthorizationError, AuthResource, AuthScope, AuthVerb};
-use crate::primitives::{AgentId, McpCredsId, ProjectId, SandboxId, UserId, UserMessageSource};
+use crate::primitives::{
+    AgentId, McpCredsId, ProjectId, SandboxId, UserId, UserMessageSource, WorkflowDefinitionId,
+    WorkflowRunId,
+};
 
 /// Authentication subject resolved from session or bearer token.
 #[derive(Debug, Clone)]
@@ -11,6 +14,19 @@ pub enum AuthSubject {
     /// Agent acting on behalf of a `User` or `ExportedAgent` originator,
     /// so downstream actions are attributable back to the user.
     AgentOnBehalfOfUser(UserId, ProjectId, AgentId, Vec<AuthScope>),
+    /// Workflow executor invoking a top-level tool from a `ToolStep`.
+    /// Carries `ProjectAdmin(project_id)` scope so the step can act
+    /// on any resource the workflow's project covers. Distinct from
+    /// `Agent` so audit + visibility paths can tell them apart. Both
+    /// the definition id and the run id are part of the identity so
+    /// audit trails and observability link the dispatch back to the
+    /// definition without a second DB hop.
+    WorkflowExecutor(
+        ProjectId,
+        WorkflowDefinitionId,
+        WorkflowRunId,
+        Vec<AuthScope>,
+    ),
     Anonymous,
 }
 
@@ -37,17 +53,22 @@ impl AuthSubject {
             AuthSubject::ExportedAgent(_, _, _) => Err("ExportedAgent auth not allowed here"),
             AuthSubject::Agent(_, _, _) => Err("Agent auth not allowed here"),
             AuthSubject::AgentOnBehalfOfUser(_, _, _, _) => Err("Agent auth not allowed here"),
+            AuthSubject::WorkflowExecutor(_, _, _, _) => {
+                Err("WorkflowExecutor auth not allowed here")
+            }
             AuthSubject::Anonymous => Err("Authentication required"),
         }
     }
 
-    /// `None` for unattributed `Agent` and `Anonymous`.
+    /// `None` for unattributed `Agent`, `WorkflowExecutor`, and `Anonymous`.
     pub fn originating_user_id(&self) -> Option<UserId> {
         match self {
             AuthSubject::User(user_id) => Some(*user_id),
             AuthSubject::ExportedAgent(user_id, _, _) => Some(*user_id),
             AuthSubject::AgentOnBehalfOfUser(user_id, _, _, _) => Some(*user_id),
-            AuthSubject::Agent(_, _, _) | AuthSubject::Anonymous => None,
+            AuthSubject::Agent(_, _, _)
+            | AuthSubject::WorkflowExecutor(_, _, _, _)
+            | AuthSubject::Anonymous => None,
         }
     }
 
@@ -55,6 +76,7 @@ impl AuthSubject {
         match self {
             AuthSubject::Agent(project_id, _, _) => Some(*project_id),
             AuthSubject::AgentOnBehalfOfUser(_, project_id, _, _) => Some(*project_id),
+            AuthSubject::WorkflowExecutor(project_id, _, _, _) => Some(*project_id),
             _ => None,
         }
     }
@@ -67,11 +89,32 @@ impl AuthSubject {
         }
     }
 
+    /// `Some(_)` only for `WorkflowExecutor`. Lets audit/inspection
+    /// link a tool dispatch back to the workflow run that issued it.
+    pub fn acting_workflow_run_id(&self) -> Option<WorkflowRunId> {
+        match self {
+            AuthSubject::WorkflowExecutor(_, _, run_id, _) => Some(*run_id),
+            _ => None,
+        }
+    }
+
+    /// `Some(_)` only for `WorkflowExecutor`. Names the definition
+    /// the dispatching run was spawned from — useful for audit
+    /// queries that filter by definition without joining through
+    /// `workflow_runs`.
+    pub fn acting_workflow_definition_id(&self) -> Option<WorkflowDefinitionId> {
+        match self {
+            AuthSubject::WorkflowExecutor(_, def_id, _, _) => Some(*def_id),
+            _ => None,
+        }
+    }
+
     pub fn scopes(&self) -> &[AuthScope] {
         match self {
             AuthSubject::ExportedAgent(_, _, scopes)
             | AuthSubject::Agent(_, _, scopes)
-            | AuthSubject::AgentOnBehalfOfUser(_, _, _, scopes) => scopes,
+            | AuthSubject::AgentOnBehalfOfUser(_, _, _, scopes)
+            | AuthSubject::WorkflowExecutor(_, _, _, scopes) => scopes,
             _ => &[],
         }
     }
@@ -86,7 +129,8 @@ impl AuthSubject {
             AuthSubject::User(_) => true,
             AuthSubject::ExportedAgent(_, _, scopes)
             | AuthSubject::Agent(_, _, scopes)
-            | AuthSubject::AgentOnBehalfOfUser(_, _, _, scopes) => scopes.contains(scope),
+            | AuthSubject::AgentOnBehalfOfUser(_, _, _, scopes)
+            | AuthSubject::WorkflowExecutor(_, _, _, scopes) => scopes.contains(scope),
             AuthSubject::Anonymous => false,
         }
     }
@@ -128,7 +172,9 @@ impl AuthSubject {
         })
     }
 
-    /// Panics for `Anonymous` (callers must authenticate first).
+    /// Panics for `Anonymous` and `WorkflowExecutor` — neither sends
+    /// chat messages directly (the executor dispatches top-level tools
+    /// rather than driving an agent session).
     pub fn to_message_source(&self) -> UserMessageSource {
         match self {
             AuthSubject::User(user_id) => UserMessageSource::User { user_id: *user_id },
@@ -140,8 +186,31 @@ impl AuthSubject {
             | AuthSubject::AgentOnBehalfOfUser(_, _, agent_id, _) => UserMessageSource::Agent {
                 agent_id: *agent_id,
             },
+            AuthSubject::WorkflowExecutor(_, _, _, _) => {
+                panic!("WorkflowExecutor subject has no message source")
+            }
             AuthSubject::Anonymous => panic!("Anonymous subject has no message source"),
         }
+    }
+}
+
+impl AuthSubject {
+    /// Mints a `WorkflowExecutor` subject scoped to `project_id` with
+    /// implicit `ProjectAdmin(project_id)` scope. The workflow tier
+    /// owns the definition + run identity; the dispatched tool sees
+    /// the project authority it needs to read/write its own
+    /// resources.
+    pub fn workflow_executor(
+        project_id: ProjectId,
+        definition_id: WorkflowDefinitionId,
+        run_id: WorkflowRunId,
+    ) -> Self {
+        AuthSubject::WorkflowExecutor(
+            project_id,
+            definition_id,
+            run_id,
+            vec![AuthScope::ProjectAdmin(project_id)],
+        )
     }
 }
 

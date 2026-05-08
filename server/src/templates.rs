@@ -259,6 +259,8 @@ pub struct WorkflowStepView {
     pub name: String,
     pub step_type: String,
     pub skill: String,
+    /// Set on `tool_step` rows.
+    pub tool: Option<String>,
     pub sandbox: Option<String>,
     pub timeout_seconds: Option<u64>,
 }

@@ -17,90 +17,15 @@
 # observe importer side-effects via psql.
 
 load helpers
+load library-helpers
 
 setup_file() {
-  if [ "${SKIP_COMPOSE:-0}" = "1" ]; then
-    psql "${PG_CON:-postgres://user:password@localhost:5432/drua}" \
-      -q -c "TRUNCATE job_events, job_executions CASCADE;" \
-      -c "DELETE FROM jobs;" \
-      -c "DELETE FROM note_events; DELETE FROM notes;" \
-      -c "DELETE FROM library_documents;" \
-      > /dev/null 2>&1 || true
-  fi
-
-  UPSTREAM_REPO="$BATS_FILE_TMPDIR/upstream.git"
-  WORKING_REPO="$BATS_FILE_TMPDIR/upstream-working"
-  mkdir -p "$WORKING_REPO"
-  git init --bare --initial-branch=main "$UPSTREAM_REPO" >/dev/null
-  git -C "$WORKING_REPO" init -q -b main
-  git -C "$WORKING_REPO" config user.email test@drua
-  git -C "$WORKING_REPO" config user.name "Drua Test"
-  mkdir -p "$WORKING_REPO/spaces"
-  : > "$WORKING_REPO/spaces/.gitkeep"
-  git -C "$WORKING_REPO" add -A
-  git -C "$WORKING_REPO" commit -q -m "init"
-  git -C "$WORKING_REPO" remote add origin "$UPSTREAM_REPO"
-  git -C "$WORKING_REPO" push -q origin main
-
-  cat > "$BATS_FILE_TMPDIR/drua.yml" <<EOF
-server:
-  port: 4200
-  host: "0.0.0.0"
-  secure_cookies: false
-  mcp_endpoint: "http://localhost:4200/mcp"
-oauth:
-  login: github
-  github_client_id: "test-client-id"
-  github_redirect_uri: "http://localhost:4200/auth/github/callback"
-  github_allowed_teams: []
-agents:
-  default_chain:
-    primary: { name: test-model }
-  builtin_roles:
-    project_lead:
-      compaction:
-        prune_after_seconds: 600
-    agent:
-      compaction:
-        prune_after_seconds: 600
-    workflow_step_agent:
-      compaction:
-        prune_after_seconds: 600
-providers:
-  - name: openai
-    base_url: http://127.0.0.1:9
-    models:
-      - name: test-model
-        max_tokens_per_response: 1024
-        context_window_tokens: 4096
-library:
-  data_dir: "$BATS_FILE_TMPDIR/library"
-  repo_url: "file://$UPSTREAM_REPO"
-  skill_sync_interval_secs: 1
-sandbox:
-  backend:
-    provider: local
-    sandbox_spawn_cmd: "true"
-    local_repo_root: "."
-EOF
-  export DRUA_CONFIG="$BATS_FILE_TMPDIR/drua.yml"
-  start_server
+  reset_library_tables note_events notes
+  setup_isolated_library spaces
 }
 
 teardown_file() {
   stop_server
-}
-
-# Calls a searchable admin tool.
-admin_call() {
-  local tool_name="$1"
-  local args_json="$2"
-  local body
-  body="$(jq -nc --arg t "drua_admin_$tool_name" --argjson a "$args_json" '{
-    name: "call_tool",
-    arguments: { tool_name: $t, arguments: $a }
-  }')"
-  mcp_call "$AGENT_TOKEN" "tools/call" "$body"
 }
 
 # Drop a note markdown into a space via `spaces edit op=write`.

@@ -399,7 +399,7 @@ mod tests {
             sandbox_mode: None,
             timeout_seconds: None,
             model_chain: None,
-            output_schema: default_output_schema(),
+            output_schema: Box::new(default_output_schema()),
         }
     }
 

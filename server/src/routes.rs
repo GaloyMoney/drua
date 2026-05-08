@@ -1813,7 +1813,21 @@ fn workflow_step_to_view(s: &domain::workflow::WorkflowStepDef) -> WorkflowStepV
             name: name.clone(),
             step_type: "agent_step".to_string(),
             skill: skill.clone(),
+            tool: None,
             sandbox: sandbox.clone(),
+            timeout_seconds: *timeout_seconds,
+        },
+        domain::workflow::WorkflowStepDef::ToolStep {
+            name,
+            tool,
+            timeout_seconds,
+            ..
+        } => WorkflowStepView {
+            name: name.clone(),
+            step_type: "tool_step".to_string(),
+            skill: String::new(),
+            tool: Some(tool.clone()),
+            sandbox: None,
             timeout_seconds: *timeout_seconds,
         },
     }

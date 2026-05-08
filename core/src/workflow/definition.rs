@@ -128,9 +128,33 @@ pub enum WorkflowStepDef {
         /// root is guaranteed `type: "object"` (enforced by
         /// [`OutputSchema`] validation on construction/deserialization).
         /// Old workflows / inputs that omit the field hydrate as
-        /// [`default_output_schema`] (`{success, reason}`).
-        #[serde(default = "default_output_schema")]
-        output_schema: OutputSchema,
+        /// [`default_output_schema`] (`{success, reason}`). Boxed
+        /// to keep the [`WorkflowStepDef`] enum's `AgentStep` and
+        /// `ToolStep` variants close in size (clippy
+        /// `large_enum_variant`).
+        #[serde(default = "default_output_schema_boxed")]
+        output_schema: Box<OutputSchema>,
+    },
+    /// Deterministic single-tool dispatch — no agent loop, no LLM.
+    /// `params` is the raw `arguments` object handed to the named
+    /// top-level MCP tool after `${{ … }}` substitution against the
+    /// run's trigger context and prior step outputs. The tool is
+    /// dispatched as `AuthSubject::WorkflowExecutor` with the
+    /// workflow's project authority; only `composable: true` tools
+    /// can be invoked. The tool's `structured_content` becomes
+    /// `StepResult.output`; `is_error: true` fails the step.
+    ToolStep {
+        name: String,
+        /// Top-level tool name, e.g. `"workflow"` for sub-workflow
+        /// dispatch via `command: trigger`.
+        tool: String,
+        /// Pre-substitution params; `${{ … }}` references are resolved
+        /// against [`crate::workflow::template::TemplateContext`]
+        /// at execution time.
+        #[serde(default)]
+        params: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_seconds: Option<u64>,
     },
 }
 
@@ -138,25 +162,31 @@ impl WorkflowStepDef {
     pub fn name(&self) -> &str {
         match self {
             WorkflowStepDef::AgentStep { name, .. } => name,
+            WorkflowStepDef::ToolStep { name, .. } => name,
         }
     }
 
     pub fn model_chain(&self) -> Option<&ModelChain> {
         match self {
             WorkflowStepDef::AgentStep { model_chain, .. } => model_chain.as_ref(),
+            WorkflowStepDef::ToolStep { .. } => None,
         }
     }
 
-    /// Every AgentStep produces a structured output via the
-    /// synthesised `submit_output` tool. The schema defaults to
-    /// [`default_output_schema`] (`{success, reason}`) when the step
-    /// doesn't declare its own; there is no schemaless free-text
-    /// passthrough.
-    pub fn output_schema(&self) -> &OutputSchema {
+    /// AgentSteps carry an explicit `output_schema` enforced via the
+    /// synthesised `submit_output` tool. ToolSteps have none — the
+    /// called tool's own declared schema is the contract.
+    pub fn output_schema(&self) -> Option<&OutputSchema> {
         match self {
-            WorkflowStepDef::AgentStep { output_schema, .. } => output_schema,
+            WorkflowStepDef::AgentStep { output_schema, .. } => Some(output_schema.as_ref()),
+            WorkflowStepDef::ToolStep { .. } => None,
         }
     }
+}
+
+/// Boxed factory used by `serde(default = …)` on the `AgentStep` variant.
+fn default_output_schema_boxed() -> Box<OutputSchema> {
+    Box::new(default_output_schema())
 }
 
 /// Default `output_schema` injected when an `AgentStep` doesn't declare
@@ -311,9 +341,9 @@ mod tests {
             sandbox_mode: None,
             timeout_seconds: None,
             model_chain: None,
-            output_schema: custom,
+            output_schema: Box::new(custom),
         };
-        let actual = serde_json::to_value(step.output_schema()).unwrap();
+        let actual = serde_json::to_value(step.output_schema().expect("AgentStep")).unwrap();
         assert_eq!(actual, custom_value);
     }
 
@@ -330,8 +360,54 @@ mod tests {
         });
         let step: WorkflowStepDef = serde_json::from_value(json).unwrap();
         let default = serde_json::to_value(default_output_schema()).unwrap();
-        let actual = serde_json::to_value(step.output_schema()).unwrap();
+        let actual = serde_json::to_value(step.output_schema().expect("AgentStep")).unwrap();
         assert_eq!(actual, default);
+    }
+
+    #[test]
+    fn tool_step_round_trips_through_serde() {
+        let step = WorkflowStepDef::ToolStep {
+            name: "dispatch".into(),
+            tool: "workflow".into(),
+            params: serde_json::json!({
+                "command": "trigger",
+                "definition_id": "drua-test-failure",
+                "payload": "${{ steps.triage.outputs.args }}"
+            }),
+            timeout_seconds: Some(60),
+        };
+        let value = serde_json::to_value(&step).unwrap();
+        assert_eq!(
+            value.get("type").and_then(|v| v.as_str()),
+            Some("tool_step")
+        );
+        assert_eq!(value.get("tool").and_then(|v| v.as_str()), Some("workflow"));
+        let back: WorkflowStepDef = serde_json::from_value(value).unwrap();
+        assert_eq!(back.name(), "dispatch");
+        assert!(back.output_schema().is_none());
+        assert!(back.model_chain().is_none());
+    }
+
+    /// `params` deserializes to `Value::Null` when omitted (serde
+    /// default for an untagged `serde_json::Value`). The executor
+    /// treats that as "no arguments" — see the
+    /// `Value::Null => None` arm of the dispatch path in
+    /// `executor::execute_tool_step`. The wire null is the
+    /// idiomatic absent-marker; we don't rewrite it to `{}`.
+    #[test]
+    fn tool_step_omitted_params_deserializes_as_null() {
+        let json = serde_json::json!({
+            "type": "tool_step",
+            "name": "noop",
+            "tool": "whoami"
+        });
+        let step: WorkflowStepDef = serde_json::from_value(json).unwrap();
+        match step {
+            WorkflowStepDef::ToolStep { params, .. } => {
+                assert_eq!(params, serde_json::Value::Null);
+            }
+            _ => panic!("expected ToolStep"),
+        }
     }
 
     #[test]
@@ -343,7 +419,7 @@ mod tests {
             sandbox_mode: None,
             timeout_seconds: None,
             model_chain: None,
-            output_schema: default_output_schema(),
+            output_schema: Box::new(default_output_schema()),
         };
         let value = serde_json::to_value(&step).unwrap();
         assert!(
