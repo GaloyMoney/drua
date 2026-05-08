@@ -297,3 +297,164 @@ fn ceil_char_boundary(s: &str, idx: usize) -> usize {
     }
     i
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Walker outputs `Elided` only when the elided form is strictly
+    /// smaller than the raw input — load-bearing invariant for every
+    /// downstream consumer of `kept_bytes`/`total_bytes`.
+    #[test]
+    fn walker_never_inflates_serialized_form() {
+        let v = serde_json::json!((0..400).collect::<Vec<_>>());
+        let raw_bytes = json_size(&v);
+        let outcome = classify_value(&v, 4096);
+        match outcome {
+            WalkOutcome::Passthrough(passed) => assert_eq!(passed, v),
+            WalkOutcome::Elided { kept_bytes, .. } => {
+                assert!(
+                    (kept_bytes as usize) < raw_bytes,
+                    "kept_bytes ({kept_bytes}) must be strictly smaller \
+                     than raw_bytes ({raw_bytes}) — invariant violated"
+                );
+            }
+        }
+    }
+
+    /// Deeply-nested value: byte-elide the leaf string only; every
+    /// ancestor object stays verbatim and is reachable by key.
+    #[test]
+    fn walker_preserves_structure_to_leaf() {
+        let huge = "x".repeat(20_000);
+        let v = serde_json::json!({
+            "a": { "b": { "c": { "d": huge } } }
+        });
+        let outcome = classify_value(&v, 4096);
+        let WalkOutcome::Elided {
+            kept,
+            elided_paths,
+            kept_bytes,
+            total_bytes,
+        } = outcome
+        else {
+            panic!("expected Elided");
+        };
+        assert!((kept_bytes as u64) < total_bytes);
+        let leaf = kept
+            .get("a")
+            .and_then(|x| x.get("b"))
+            .and_then(|x| x.get("c"))
+            .and_then(|x| x.get("d"))
+            .and_then(|v| v.as_str())
+            .expect("leaf string preserved as String");
+        assert!(leaf.len() < 20_000, "leaf must be byte-elided");
+        assert_eq!(elided_paths.len(), 1);
+        assert_eq!(elided_paths[0].path, "$.a.b.c.d");
+        assert!(matches!(elided_paths[0].kind, ElisionKind::String));
+    }
+
+    /// Bash-shaped wrapper `{output: "<huge>"}`: wrapper object
+    /// verbatim, inner string byte-elided in place. Critically, the
+    /// `output` key is still a JSON string — scripts reading
+    /// `result.output.split(...)` keep working.
+    #[test]
+    fn walker_string_elision_preserves_type() {
+        let huge = "y".repeat(10_000);
+        let v = serde_json::json!({ "output": huge });
+        let outcome = classify_value(&v, 4096);
+        let WalkOutcome::Elided { kept, .. } = outcome else {
+            panic!("expected Elided");
+        };
+        let output = kept.get("output").expect("key present");
+        assert!(
+            output.is_string(),
+            "output field must remain a JSON string after walking"
+        );
+        let s = output.as_str().unwrap();
+        assert!(s.len() < 10_000, "string must shrink");
+        assert!(
+            s.contains(STRING_ELIDE_MARKER),
+            "ellipsis marker present in elided string"
+        );
+    }
+
+    /// Many small array items totalling over threshold: recursion
+    /// can't shrink each item, walker emits a typed sentinel with
+    /// head/tail samples.
+    #[test]
+    fn walker_emits_array_sentinel_when_items_irreducible() {
+        let items: Vec<Value> = (0..200)
+            .map(|i| Value::String(format!("item-{i:03}-{}", "z".repeat(20))))
+            .collect();
+        let v = Value::Array(items);
+        let outcome = classify_value(&v, 4096);
+        let WalkOutcome::Elided {
+            kept, elided_paths, ..
+        } = outcome
+        else {
+            panic!("expected Elided");
+        };
+        let sentinel = kept.as_object().expect("sentinel is an object");
+        assert_eq!(sentinel.get("_elided"), Some(&Value::Bool(true)));
+        assert_eq!(
+            sentinel.get("kind"),
+            Some(&Value::String("array".to_string()))
+        );
+        assert_eq!(sentinel.get("length"), Some(&Value::from(200)));
+        assert!(sentinel.contains_key("head"));
+        assert!(sentinel.contains_key("tail"));
+        assert!(elided_paths
+            .iter()
+            .any(|p| p.path == "$" && matches!(p.kind, ElisionKind::Array)));
+    }
+
+    /// Object with one massively-large value: peel that key, others
+    /// stay verbatim.
+    #[test]
+    fn walker_peels_largest_object_key_when_recursion_didnt_help() {
+        let huge_items: Vec<Value> = (0..200)
+            .map(|i| Value::String(format!("entry-{i:03}-{}", "q".repeat(20))))
+            .collect();
+        let v = serde_json::json!({
+            "meta": {"id": 42, "status": "ok"},
+            "huge_array": huge_items,
+            "summary": {"count": 200},
+        });
+        let outcome = classify_value(&v, 4096);
+        let WalkOutcome::Elided {
+            kept, elided_paths, ..
+        } = outcome
+        else {
+            panic!("expected Elided");
+        };
+        assert_eq!(
+            kept.get("meta").and_then(|m| m.get("id")),
+            Some(&Value::from(42))
+        );
+        assert_eq!(
+            kept.get("summary").and_then(|s| s.get("count")),
+            Some(&Value::from(200))
+        );
+        assert!(
+            elided_paths.iter().any(|p| p.path.contains("huge_array")),
+            "expected an elided path mentioning huge_array; got {:?}",
+            elided_paths
+                .iter()
+                .map(|p| p.path.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// `classify_value` short-circuits on small input, the walker
+    /// itself is never called.
+    #[test]
+    fn walker_passthroughs_below_threshold() {
+        let v = serde_json::json!({"hi": "world"});
+        let outcome = classify_value(&v, 4096);
+        match outcome {
+            WalkOutcome::Passthrough(passed) => assert_eq!(passed, v),
+            WalkOutcome::Elided { .. } => panic!("small input must Passthrough"),
+        }
+    }
+}
