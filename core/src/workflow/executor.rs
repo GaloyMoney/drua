@@ -18,8 +18,7 @@ use super::error::WorkflowError;
 use super::repo::WorkflowDefinitionRepo;
 use super::run::{StepResult, WorkflowRunRepo, WorkflowRunState};
 use super::template::{
-    evaluate_condition, format_template_diagnostics, parse_condition, template_diagnostics,
-    ConditionOutcome, TemplateContext,
+    format_template_diagnostics, template_diagnostics, ConditionOutcome, TemplateContext,
 };
 
 /// Hard cap on the pre-flight per-sandbox readiness wait. Protects the
@@ -191,47 +190,27 @@ impl Executor {
 
             // Condition gate. Evaluated BEFORE `step_started`: a
             // skipped step never enters Running state — it's
-            // terminally Skipped from the start. Validation at
-            // create time guarantees `parse_condition` succeeds, so
-            // the only remaining failure modes here are a CEL
-            // runtime error (type mismatch, etc.) or a body that
-            // resolves to a non-bool — both classified as
-            // infrastructure errors (`step_errored` → run
-            // aggregates Errored).
+            // terminally Skipped from the start. `evaluate_condition`
+            // folds parse + execute into one call; create-time
+            // validation guarantees the body compiles, so an `Err`
+            // here is a CEL runtime error (type mismatch, etc.).
             if let Some(body) = step.condition() {
                 let step_outputs = collect_step_outputs(&run.step_results);
                 let ctx = TemplateContext {
                     trigger: &trigger_context,
                     steps: &step_outputs,
                 };
-                // `parse_condition` re-compiles for evaluation; the
-                // create-time pass already proved it parses cleanly,
-                // so an error here would be a defensive arm.
-                let parsed = match parse_condition(body) {
-                    Ok(p) => p,
-                    Err(e) => {
-                        let err =
-                            WorkflowError::InvalidCondition(format!("step '{step_name}': {e}"));
-                        if run
-                            .step_errored(step_name.clone(), err.to_string())
-                            .did_execute()
-                        {
-                            self.runs.update(&mut run).await?;
-                        }
-                        break;
-                    }
-                };
-                match evaluate_condition(&ctx, &parsed) {
-                    Some(ConditionOutcome::True) => {
+                match ctx.evaluate_condition(body) {
+                    Ok(ConditionOutcome::True) => {
                         // Fall through to step_started + execute_step.
                     }
-                    Some(ConditionOutcome::False) => {
+                    Ok(ConditionOutcome::False) => {
                         if run.step_skipped(step_name, body.to_string()).did_execute() {
                             self.runs.update(&mut run).await?;
                         }
                         continue;
                     }
-                    Some(ConditionOutcome::NotBoolean(rendered)) => {
+                    Ok(ConditionOutcome::NotBoolean(rendered)) => {
                         let err = WorkflowError::ConditionNotBoolean {
                             step: step_name.clone(),
                             body: body.to_string(),
@@ -242,10 +221,9 @@ impl Executor {
                         }
                         break;
                     }
-                    None => {
-                        let err = WorkflowError::InvalidCondition(format!(
-                            "step '{step_name}': CEL runtime error evaluating `{body}`"
-                        ));
+                    Err(e) => {
+                        let err =
+                            WorkflowError::InvalidCondition(format!("step '{step_name}': {e}"));
                         if run.step_errored(step_name, err.to_string()).did_execute() {
                             self.runs.update(&mut run).await?;
                         }

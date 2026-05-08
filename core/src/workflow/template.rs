@@ -154,6 +154,37 @@ impl TemplateContext<'_> {
         let built = self.build_cel_context()?;
         substitute_in_string_with_built(s, &built)
     }
+
+    /// Compile and evaluate a step `condition:` body in this
+    /// context — single entry point for the executor's gate. Returns
+    /// `Ok(ConditionOutcome::True/False)` on a clean boolean,
+    /// `Ok(ConditionOutcome::NotBoolean(rendered))` when the body
+    /// evaluated cleanly but produced a non-boolean (caller turns
+    /// this into a `StepErrored`), and `Err(TemplateError)` for
+    /// compile errors and CEL runtime errors (type mismatch, etc.).
+    ///
+    /// Truthy-coercion (treating `0`, `""`, `null`, etc. as false)
+    /// is intentionally NOT supported — non-boolean bodies surface
+    /// as a hard error so authors fix the typing.
+    pub fn evaluate_condition(&self, body: &str) -> Result<ConditionOutcome, TemplateError> {
+        let r = parse_condition(body)?;
+        let built = self.build_cel_context()?;
+        let program = Program::compile(&r.body)
+            .map_err(|e| TemplateError::Compile(r.raw.clone(), e.to_string()))?;
+        let value = program
+            .execute(&built.cel)
+            .map_err(|e| TemplateError::Resolve(r.raw.clone(), e.to_string()))?;
+        let json = value
+            .json()
+            .map_err(|e| TemplateError::JsonConvert(r.raw.clone(), e.to_string()))?;
+        Ok(match json {
+            Value::Bool(true) => ConditionOutcome::True,
+            Value::Bool(false) => ConditionOutcome::False,
+            other => ConditionOutcome::NotBoolean(
+                serde_json::to_string(&other).unwrap_or_else(|_| "<?>".to_string()),
+            ),
+        })
+    }
 }
 
 fn resolve_with_built(built: &BuiltContext, r: &TemplateRef) -> Option<Value> {
@@ -202,30 +233,6 @@ pub fn parse_condition(body: &str) -> Result<TemplateRef, TemplateError> {
     let r = parse_path(body)?;
     validate_root(&r)?;
     Ok(r)
-}
-
-/// Evaluate a previously-compiled condition reference against the
-/// given context. `None` indicates a CEL runtime error (caller
-/// surfaces it as a `StepErrored`); `Some(ConditionOutcome)` carries
-/// the boolean decision or a "not-a-bool" diagnostic.
-///
-/// Conversion rules: only literal `Bool(true)` / `Bool(false)` are
-/// accepted. Truthy-coercion (treating `0`, `""`, `null`, etc. as
-/// false) is intentionally NOT supported — non-boolean bodies
-/// surface as `StepErrored` so authors fix the typing rather than
-/// rely on coercion.
-pub fn evaluate_condition(ctx: &TemplateContext<'_>, r: &TemplateRef) -> Option<ConditionOutcome> {
-    let built = ctx.build_cel_context().ok()?;
-    let program = Program::compile(&r.body).ok()?;
-    let value = program.execute(&built.cel).ok()?;
-    let json = value.json().ok()?;
-    Some(match json {
-        Value::Bool(true) => ConditionOutcome::True,
-        Value::Bool(false) => ConditionOutcome::False,
-        other => ConditionOutcome::NotBoolean(
-            serde_json::to_string(&other).unwrap_or_else(|_| "<?>".to_string()),
-        ),
-    })
 }
 
 /// Reject expressions that reference identifiers other than the two
@@ -857,8 +864,11 @@ mod tests {
             trigger: &trigger,
             steps: &steps,
         };
-        let r = parse_condition("steps.triage.outputs.kind == 'autofix'").unwrap();
-        assert_eq!(evaluate_condition(&ctx, &r), Some(ConditionOutcome::True));
+        assert_eq!(
+            ctx.evaluate_condition("steps.triage.outputs.kind == 'autofix'")
+                .unwrap(),
+            ConditionOutcome::True
+        );
     }
 
     #[test]
@@ -870,8 +880,11 @@ mod tests {
             trigger: &trigger,
             steps: &steps,
         };
-        let r = parse_condition("steps.triage.outputs.kind == 'autofix'").unwrap();
-        assert_eq!(evaluate_condition(&ctx, &r), Some(ConditionOutcome::False));
+        assert_eq!(
+            ctx.evaluate_condition("steps.triage.outputs.kind == 'autofix'")
+                .unwrap(),
+            ConditionOutcome::False
+        );
     }
 
     #[test]
@@ -884,9 +897,8 @@ mod tests {
             steps: &steps,
         };
         // String concat → string; not a bool.
-        let r = parse_condition("steps.triage.outputs.kind + '!'").unwrap();
-        match evaluate_condition(&ctx, &r) {
-            Some(ConditionOutcome::NotBoolean(rendered)) => {
+        match ctx.evaluate_condition("steps.triage.outputs.kind + '!'") {
+            Ok(ConditionOutcome::NotBoolean(rendered)) => {
                 assert!(rendered.contains("autofix"));
             }
             other => panic!("expected NotBoolean, got {other:?}"),
@@ -910,8 +922,35 @@ mod tests {
             trigger: &trigger,
             steps: &steps,
         };
-        let r = parse_condition("steps.triage.outputs.kind == 'autofix'").unwrap();
-        assert_eq!(evaluate_condition(&ctx, &r), Some(ConditionOutcome::False));
+        assert_eq!(
+            ctx.evaluate_condition("steps.triage.outputs.kind == 'autofix'")
+                .unwrap(),
+            ConditionOutcome::False
+        );
+    }
+
+    #[test]
+    fn evaluate_condition_propagates_compile_error() {
+        let trigger = json!({});
+        let steps = HashMap::new();
+        let ctx = TemplateContext {
+            trigger: &trigger,
+            steps: &steps,
+        };
+        let err = ctx.evaluate_condition("steps.x ==").unwrap_err();
+        assert!(matches!(err, TemplateError::Compile(_, _)));
+    }
+
+    #[test]
+    fn evaluate_condition_rejects_unknown_root() {
+        let trigger = json!({});
+        let steps = HashMap::new();
+        let ctx = TemplateContext {
+            trigger: &trigger,
+            steps: &steps,
+        };
+        let err = ctx.evaluate_condition("env.HOME == 'x'").unwrap_err();
+        assert!(matches!(err, TemplateError::UnknownRoot(_, _)));
     }
 
     #[test]
