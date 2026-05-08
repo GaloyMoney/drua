@@ -22,10 +22,9 @@ use tracing::{debug, instrument};
 
 use crate::primitives::RepoCoord;
 
-/// Synchronous `(github.com, ephemeral-token) -> credentials` callback.
-/// Implementations mint fresh tokens via the existing
-/// `GitHubAppTokenProvider` plumbing — the proxy never holds long-lived
-/// credentials.
+/// `(github.com, ephemeral-token) -> credentials` callback. Implementations
+/// mint fresh tokens via the existing `GitHubAppTokenProvider` plumbing —
+/// the proxy never holds long-lived credentials.
 #[async_trait::async_trait]
 pub trait UpstreamCredentialProvider: Send + Sync {
     /// Returns a short-lived token usable as the password for HTTPS
@@ -61,8 +60,8 @@ impl MirrorConfig {
 }
 
 /// Lock + last-fetched timestamp for one mirror. Held in a process-wide
-/// map so concurrent requests for the same `(project, owner, repo)`
-/// serialize on `fetch`.
+/// map so concurrent requests for the same `(owner, repo)` serialize
+/// on `fetch`.
 #[derive(Default)]
 struct MirrorState {
     last_fetched_at: Option<Instant>,

@@ -2,8 +2,8 @@
 //!
 //! Per memo `019dfebc`: authenticate the sandbox via the shared
 //! `AuthSubject` extension (already populated by the global
-//! `auth_middleware` from a projected SA token or, in dev, a
-//! `dev-agent:<uuid>` token), authorize the
+//! `auth_middleware` from a projected SA token, or in dev from
+//! the literal `dev-agent` Bearer token), authorize the
 //! `(owner, repo, mode, refs)` tuple against the global YAML
 //! allow-list, audit-log the decision (with project_id for
 //! attribution), then forward to upstream `git http-backend`
@@ -149,17 +149,6 @@ async fn git_receive_pack(
         Some(c) => c,
         None => return reject_response(StatusCode::BAD_REQUEST, "invalid_repo_coord"),
     };
-    if !auth.is_agent() {
-        let _ = audit_reject(
-            &state,
-            &auth,
-            &coord,
-            GitService::GitReceivePack,
-            "unauthorized",
-        )
-        .await;
-        return reject_response(StatusCode::UNAUTHORIZED, "unauthorized");
-    }
 
     // Peek the pkt-line cmd list BEFORE spawning git-http-backend so we
     // can deny non-allowed refs before any object touches disk.
@@ -218,10 +207,8 @@ async fn git_receive_pack(
 
     let cgi_response = forward_to_backend(
         &state,
-        &auth,
         &coord,
         &upstream_url,
-        GitService::GitReceivePack,
         Forward {
             method: "POST",
             path_info: "/git-receive-pack",
@@ -262,7 +249,6 @@ async fn git_receive_pack(
     cgi_response
 }
 
-/// Forwarding inputs the handler needs for a CGI-spawn dispatch.
 struct Forward<'a> {
     method: &'a str,
     path_info: &'a str,
@@ -271,8 +257,10 @@ struct Forward<'a> {
     body: Bytes,
 }
 
-/// Single dispatch: parse → authorize → audit → forward (pull-side
-/// only — receive-pack is handled inline above).
+/// Pull-side dispatch: parse → authorize (via service, fail-closed
+/// for non-Agent subjects) → audit → spawn `git http-backend`. The
+/// receive-pack handler is inline above because it needs an extra
+/// pkt-line peek step before authz.
 async fn handle(
     auth: &AuthSubject,
     state: &AppState,
@@ -288,11 +276,6 @@ async fn handle(
         Some(c) => c,
         None => return reject_response(StatusCode::BAD_REQUEST, "invalid_repo_coord"),
     };
-
-    if !auth.is_agent() {
-        let _ = audit_reject(state, auth, &coord, service, "unauthorized").await;
-        return reject_response(StatusCode::UNAUTHORIZED, "unauthorized");
-    }
 
     let upstream_url = match state.app.git_proxies().check_authorization(
         auth,
@@ -333,20 +316,16 @@ async fn handle(
         }
     };
 
-    forward_to_backend(state, auth, &coord, &upstream_url, service, fwd, attempt_id).await
+    forward_to_backend(state, &coord, &upstream_url, fwd, attempt_id).await
 }
 
 async fn forward_to_backend(
     state: &AppState,
-    auth: &AuthSubject,
     coord: &RepoCoord,
     upstream_url: &str,
-    service: GitService,
     fwd: Forward<'_>,
     attempt_id: Option<uuid::Uuid>,
 ) -> Response {
-    let _ = auth;
-
     let proxies = state.app.git_proxies();
     let Some(mirror) = proxies.mirror() else {
         tracing::warn!("git-proxy: mirror manager not configured");
@@ -416,7 +395,6 @@ async fn forward_to_backend(
             .await
             .map_err(|e| tracing::error!(error = %e, "audit completion update failed"));
     }
-    let _ = service;
 
     let mut response = Response::builder().status(cgi_resp.status);
     if let Some(headers_mut) = response.headers_mut() {

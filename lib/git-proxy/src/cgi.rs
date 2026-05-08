@@ -6,7 +6,6 @@
 //! out of its stdout. Standalone from drua-core so it's unit-testable
 //! against fixture bare repos.
 
-use std::collections::HashMap;
 use std::io;
 use std::path::Path;
 use std::process::Stdio;
@@ -220,25 +219,6 @@ fn find_header_terminator(raw: &[u8]) -> Option<Range> {
         });
     }
     None
-}
-
-/// Pulls the headers `git http-backend` cares about off an arbitrary
-/// `HeaderMap`. Used by the axum handler to build a [`CgiRequest`].
-pub fn extract_cgi_headers(headers: &HeaderMap) -> HashMap<&'static str, &str> {
-    let mut out = HashMap::new();
-    if let Some(v) = headers
-        .get(http::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-    {
-        out.insert("CONTENT_TYPE", v);
-    }
-    if let Some(v) = headers
-        .get(http::header::CONTENT_ENCODING)
-        .and_then(|v| v.to_str().ok())
-    {
-        out.insert("HTTP_CONTENT_ENCODING", v);
-    }
-    out
 }
 
 #[cfg(test)]

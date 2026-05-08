@@ -10,6 +10,8 @@
 
 use std::path::Path;
 
+use tracing::instrument;
+
 use crate::mirror::{MirrorError, UpstreamCredentialProvider};
 use crate::pktline::RefUpdate;
 
@@ -19,6 +21,11 @@ use crate::pktline::RefUpdate;
 /// Refspecs use the leading `+` so non-fast-forward updates propagate
 /// when the wire-level update was already non-ff (the upstream server
 /// makes the final call on whether to accept).
+#[instrument(
+    name = "git_proxy.forward.push_to_upstream",
+    skip_all,
+    fields(upstream_url = %upstream_url, ref_count = updates.len())
+)]
 pub async fn push_to_upstream(
     mirror_path: &Path,
     upstream_url: &str,

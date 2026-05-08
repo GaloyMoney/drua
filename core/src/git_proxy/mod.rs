@@ -34,15 +34,10 @@ impl UpstreamCredentialProvider for AppTokenCreds {
     }
 }
 
-/// Service surface for the git-proxy.
-///
-/// Holds the YAML-driven allow-list (in-memory; rebuilt at boot from
-/// `[git_proxy.allowlist]` in `drua.yml`), the audit-log writer, the
-/// per-project bare-mirror manager, and a credential bridge to the
-/// existing `GitHubAppTokenProvider`. `check_authorization` is the
-/// single per-request authorization entry point — extracts
-/// `project_id` from `AuthSubject`, asserts the subject is an Agent,
-/// then delegates ref/mode/repo enforcement to lib's [`Allowlist`].
+/// Service surface for the git-proxy. Holds the YAML-driven
+/// allow-list (rebuilt at boot from `[git_proxy.allowlist]` in
+/// `drua.yml`), the audit-log writer, the bare-mirror manager, and
+/// a credential bridge to the existing `GitHubAppTokenProvider`.
 #[derive(Clone)]
 pub struct GitProxies {
     allowlist: Arc<Allowlist>,
@@ -106,12 +101,12 @@ impl GitProxies {
     /// `git-receive-pack` POSTs the handler peeks the pkt-line stream
     /// and re-calls this with the parsed ref names.
     ///
-    /// The allow-list is GLOBAL — `sub`'s project_id is recorded in
-    /// the audit row but doesn't gate the policy. The subject must
-    /// still be `AuthSubject::Agent` (or `AgentOnBehalfOfUser`) so
-    /// only sandbox-issued tokens can drive the proxy; user sessions,
-    /// MCP creds, and anonymous traffic are all rejected upstream of
-    /// this call.
+    /// **Authorization model**: deliberately bypasses
+    /// `sub.can(AuthVerb, AuthResource)` — the YAML allow-list IS
+    /// the policy (memo `019dfebc` §7.2). The gate is "is this an
+    /// Agent" + "does the global allow-list permit `(owner, repo,
+    /// mode, refs)`". `sub.project_id()` is recorded in the audit
+    /// row for attribution but doesn't gate the decision.
     ///
     /// Fail-closed: non-Agent subject, repo not in allow-list, mode
     /// missing, ref denied — all return `Err(_)` so the caller records
