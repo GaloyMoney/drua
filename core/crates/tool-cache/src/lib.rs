@@ -384,25 +384,42 @@ fn envelope_text(
             out.push_str(&pretty);
             out
         }
-        ToolResultSummary::ConcourseLogs(s) => {
-            // Schema-faithful summary: a single `logs` string that
-            // already carries every signal inline (warning lines,
-            // structured-pass markers, bulk-elide markers, etc).
-            // The envelope reports the ORIGINAL byte count — what
-            // the agent can recover via `tool_output_fetch` — not
-            // what's in this rendered view (which they're already
-            // reading).
+        ToolResultSummary::Typed { typed_kind, body } => {
+            // Generic typed-body rendering — works for any classifier
+            // that produces a Typed summary. Reports the ORIGINAL
+            // byte count so the agent knows what's recoverable via
+            // `tool_output_fetch`. Body content is shown inline:
+            // a single-string-field object (e.g. `{logs: "…"}` from
+            // Concourse) gets the raw string dumped; otherwise the
+            // body pretty-prints as JSON.
             let mut out = String::new();
             out.push_str(&format!(
-                "[concourse build log: {raw_size_bytes} original bytes; \
+                "[{typed_kind}: {raw_size_bytes} original bytes; \
                  fetch raw via tool_output_fetch(invocation_id=\"{id}\")]\n",
             ));
-            out.push_str(&s.logs);
-            if !s.logs.ends_with('\n') {
+            out.push_str(&render_typed_body(body));
+            if !out.ends_with('\n') {
                 out.push('\n');
             }
             out
         }
+    }
+}
+
+/// Render a `Typed` summary's `body` value for inline display.
+/// Single-string-field objects (the canonical shape for log-emitting
+/// tools that conform to a `{logs: String}` output_schema) get their
+/// inner string dumped verbatim — pretty-printed JSON would escape
+/// embedded newlines into `\n` and break line-grep. Anything else
+/// pretty-prints.
+fn render_typed_body(body: &serde_json::Value) -> String {
+    match body {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Object(map) if map.len() == 1 => match map.values().next() {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            _ => serde_json::to_string_pretty(body).unwrap_or_default(),
+        },
+        _ => serde_json::to_string_pretty(body).unwrap_or_default(),
     }
 }
 

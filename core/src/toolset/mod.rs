@@ -11,11 +11,10 @@ mod traits;
 
 pub use classifier::{
     default_summarizer_chain, BulkElide, Classification, ClassifierContext, ClassifierError,
-    ClassifierRegistry, ConcourseBuildLogClassifier, ConcourseBuildLogPreprocessor,
-    ConcourseBuildLogSummary, ConcourseBuildStatus, ElidedPath, ElisionKind, GenericFallback,
-    GitCloneProgress, NixBuildingRun, NixCacheActivity, NixCopyRun, NixDrvList, NixFetchList,
-    ResultClassifier, SegmentedText, StringSummarizer, StringSummarizerChain, TimestampedLine,
-    ToolResultSummary,
+    ClassifierRegistry, ConcourseBuildLogClassifier, ConcourseBuildLogPreprocessor, ElidedPath,
+    ElisionKind, GenericFallback, GitCloneProgress, NixBuildingRun, NixCacheActivity, NixCopyRun,
+    NixDrvList, NixFetchList, ResultClassifier, SegmentedText, StringSummarizer,
+    StringSummarizerChain, ToolResultSummary,
 };
 pub use config::*;
 pub use error::*;
@@ -581,7 +580,10 @@ impl ToolSets {
                     // the inspector's compression-ratio column has a
                     // value for every audit row.
                     let raw_bytes = classification.canonical_text.len() as u64;
-                    let classifier_kind = classification.summary.kind();
+                    // Convert to owned so subsequent move of
+                    // `classification` into `persist_and_envelope`
+                    // doesn't conflict with this borrow.
+                    let classifier_kind = classification.summary.kind().to_string();
                     let kept_bytes = summary_kept_bytes(&classification.summary, raw_bytes);
                     let summary_is_passthrough = classification.summary.is_passthrough();
 
@@ -619,7 +621,7 @@ impl ToolSets {
                     record_pipeline_metrics(
                         raw_bytes,
                         effective_kept_bytes,
-                        classifier_kind,
+                        &classifier_kind,
                         persisted,
                     );
                     Audit::record_tokens(estimate_tokens(&wrapped));
@@ -676,7 +678,25 @@ pub(crate) fn summary_kept_bytes(summary: &ToolResultSummary, raw_bytes: u64) ->
     match summary {
         ToolResultSummary::Passthrough { .. } => raw_bytes,
         ToolResultSummary::StructuredElision { kept_bytes, .. } => *kept_bytes as u64,
-        ToolResultSummary::ConcourseLogs(s) => s.logs.len() as u64,
+        ToolResultSummary::Typed { body, .. } => {
+            // Approximate kept bytes from the body. For typed
+            // bodies whose canonical projection is a string (e.g.
+            // `{logs: String}`), the inner string is what the
+            // agent reads inline. Falls back to the JSON
+            // serialisation length for arbitrary bodies.
+            match body {
+                serde_json::Value::String(s) => s.len() as u64,
+                serde_json::Value::Object(map) if map.len() == 1 => match map.values().next() {
+                    Some(serde_json::Value::String(s)) => s.len() as u64,
+                    _ => serde_json::to_string(body)
+                        .map(|s| s.len() as u64)
+                        .unwrap_or(0),
+                },
+                _ => serde_json::to_string(body)
+                    .map(|s| s.len() as u64)
+                    .unwrap_or(0),
+            }
+        }
     }
 }
 

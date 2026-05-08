@@ -19,10 +19,7 @@ mod nix;
 mod string_summarizer;
 mod walker;
 
-pub use concourse::{
-    ConcourseBuildLogClassifier, ConcourseBuildLogPreprocessor, ConcourseBuildLogSummary,
-    ConcourseBuildStatus, TimestampedLine,
-};
+pub use concourse::{ConcourseBuildLogClassifier, ConcourseBuildLogPreprocessor};
 pub use git::GitCloneProgress;
 pub use nix::{NixBuildingRun, NixCacheActivity, NixCopyRun, NixDrvList, NixFetchList};
 pub use string_summarizer::{
@@ -39,10 +36,18 @@ pub const DEFAULT_GENERIC_THRESHOLD_BYTES: usize = 4096;
 
 /// What the classifier produces. The dispatcher branches on the variant.
 ///
-/// New variants land here as classifiers come online (`CargoBuild`,
-/// `CargoTest`, `NixBuild`, `Concourse`, `Diff`, …). The discriminator is
-/// stable enough to persist into `tool_invocations.summary` JSONB without
-/// migration churn.
+/// Three shapes only:
+/// - `Passthrough` — the result is small enough / generic enough to
+///   forward verbatim. No persistence, no envelope.
+/// - `StructuredElision` — the JSON walker shrank the value in place;
+///   `kept` is a partial JSON value with sentinels marking dropped
+///   branches.
+/// - `Typed` — generic typed body. Each classifier picks its own
+///   `typed_kind` discriminator (e.g. `"concourse_logs"`,
+///   `"github_pr"`) and ships a `body: Value` that **MUST conform
+///   to the upstream MCP tool's `output_schema`**. Adding a new
+///   typed classifier touches only the classifier — no enum
+///   surgery, no central match arms.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolResultSummary {
@@ -71,32 +76,42 @@ pub enum ToolResultSummary {
         kept_bytes: u32,
     },
 
-    /// Typed summary of a Concourse build's text log. Collapses ~100 KB
-    /// of timestamped progress (nix substituter chatter, derivation
-    /// checks, cache pruning) into a structured shape that preserves
-    /// every signal-bearing line — warnings, build failures, the full
-    /// nix log tail of any failed derivation, and the closing N lines.
-    /// Renamed from `Concourse` because Concourse is the upstream
-    /// service, not a content shape — future Concourse-shaped outputs
-    /// (resource versions, pipeline config) would each get their own
-    /// kind.
-    ConcourseLogs(ConcourseBuildLogSummary),
+    /// Generic typed summary. Adding a new typed classifier (Concourse,
+    /// future GitHub PR, Honeycomb query, …) is purely additive —
+    /// the classifier picks its own `typed_kind` and ships a
+    /// schema-faithful `body`. JSON-on-the-wire shape:
+    ///
+    /// ```json
+    /// {"kind": "typed", "typed_kind": "concourse_logs", "body": {...}}
+    /// ```
+    ///
+    /// `ToolResultSummary::kind()` returns `typed_kind` (not the
+    /// outer serde tag), so the `kind` text column on
+    /// `tool_invocations` carries the classifier-specific
+    /// discriminator and remains filterable.
+    Typed {
+        typed_kind: String,
+        /// Schema-faithful body — should match the upstream MCP
+        /// tool's declared `output_schema`. The dispatcher
+        /// persists this verbatim in the `summary` JSONB column;
+        /// strict-validating clients reading the structured
+        /// envelope will accept it iff the upstream schema
+        /// permits the projection.
+        body: serde_json::Value,
+    },
 }
 
 impl ToolResultSummary {
-    /// `kind` discriminator used by the dispatcher to decide whether to
-    /// persist + envelope. **Must match the serde tag exactly** —
-    /// the `classifier` DB column stores `kind()` while the
-    /// `summary` JSONB column stores the serde-tagged form;
-    /// disagreement makes those two columns disagree about what
-    /// kind of summary the row actually carries (cursor review
-    /// #3207287028). Variants follow `rename_all = "snake_case"`
-    /// so e.g. `ConcourseLogs` serialises as `"concourse_logs"`.
-    pub fn kind(&self) -> &'static str {
+    /// Discriminator used as the `kind` text column on
+    /// `tool_invocations`. For `Typed` we surface the inner
+    /// `typed_kind` rather than the literal serde tag (`"typed"`)
+    /// — callers filter rows by classifier identity, not by enum
+    /// shape.
+    pub fn kind(&self) -> &str {
         match self {
             Self::Passthrough { .. } => "passthrough",
             Self::StructuredElision { .. } => "structured_elision",
-            Self::ConcourseLogs(_) => "concourse_logs",
+            Self::Typed { typed_kind, .. } => typed_kind,
         }
     }
 

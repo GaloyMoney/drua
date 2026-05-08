@@ -507,14 +507,14 @@ impl TopLevelTool for CallCatalogTool {
                     raw: &result,
                     exit_code: None,
                 });
-        let classifier_kind = classification.summary.kind();
+        let classifier_kind = classification.summary.kind().to_string();
         let kept_bytes = super::super::summary_kept_bytes(&classification.summary, raw_bytes);
         if classification.summary.is_passthrough() {
-            super::super::record_pipeline_metrics(raw_bytes, kept_bytes, classifier_kind, false);
+            super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, false);
             return Ok(result);
         }
         let Some(owner) = super::super::invocation_owner(subject) else {
-            super::super::record_pipeline_metrics(raw_bytes, kept_bytes, classifier_kind, false);
+            super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, false);
             return Ok(result);
         };
         let wrapped = invocations
@@ -529,7 +529,7 @@ impl TopLevelTool for CallCatalogTool {
             )
             .await;
         let persisted = wrapped.is_some();
-        super::super::record_pipeline_metrics(raw_bytes, kept_bytes, classifier_kind, persisted);
+        super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, persisted);
         Ok(wrapped.unwrap_or(result))
     }
 }

@@ -1,13 +1,14 @@
 //! Drives [`ConcourseBuildLogClassifier`] against captured fixtures from
 //! ci.galoy.io's `galoy-agents-bin` pipeline (`check-code` job, builds #610
-//! and #609). Fixtures live under `core/tests/fixtures/concourse/`.
+//! and #609).
 //!
 //! Architecture under test:
-//! - Concourse classifier preprocesses (strips ANSI + timestamps).
-//! - Output is a schema-faithful `{ logs: String }` summary.
-//! - The chain compacts copy-runs, drv-lists, cache-removal, and
-//!   git-clone progress runs into XML markers; the terminal
-//!   `BulkElide` pass bounds total size.
+//! - Concourse classifier preprocesses (strips ANSI + timestamps) and
+//!   delegates to the walker, producing a `Typed` summary.
+//! - `typed_kind = "concourse_logs"` matches the upstream tool's
+//!   identity for filterable PG queries.
+//! - `body = { logs: String }` matches the upstream tool's
+//!   declared `output_schema`.
 
 use rmcp::model::{CallToolResult, Content};
 
@@ -38,69 +39,72 @@ fn classify(raw: &str) -> ToolResultSummary {
         .summary
 }
 
+/// Helper: extract the `logs` string from a `Typed` summary.
+fn typed_logs(summary: &ToolResultSummary) -> &str {
+    match summary {
+        ToolResultSummary::Typed { typed_kind, body } => {
+            assert_eq!(typed_kind, "concourse_logs");
+            body.get("logs")
+                .and_then(|v| v.as_str())
+                .expect("body.logs is a string")
+        }
+        other => panic!("expected Typed summary, got {other:?}"),
+    }
+}
+
 #[test]
 fn build_610_succeeded_compacts_copy_runs_inline() {
     let raw_size = BUILD_610_SUCCEEDED.len();
     assert!(raw_size > 100_000);
 
-    let summary = match classify(BUILD_610_SUCCEEDED) {
-        ToolResultSummary::ConcourseLogs(s) => s,
-        other => panic!("expected ConcourseLogs summary, got {other:?}"),
-    };
-
-    // Schema-faithful: the only field is `logs`.
-    let v = serde_json::to_value(&summary).expect("serialise");
-    let obj = v.as_object().expect("summary is an object");
-    assert_eq!(obj.len(), 1);
-    assert!(obj.contains_key("logs"));
+    let summary = classify(BUILD_610_SUCCEEDED);
+    let logs = typed_logs(&summary);
 
     // 700+ `copying path` lines collapsed into <nix-copy>.
-    assert!(summary.logs.contains("<nix-copy"));
-    assert!(summary.logs.contains("</nix-copy>"));
-    assert_eq!(summary.logs.matches("copying path '/nix/store/").count(), 0);
+    assert!(logs.contains("<nix-copy"));
+    assert!(logs.contains("</nix-copy>"));
+    assert_eq!(logs.matches("copying path '/nix/store/").count(), 0);
 
     // Total size is bounded by the BulkElide terminal pass.
     assert!(
-        summary.logs.len() <= 16 * 1024,
+        logs.len() <= 16 * 1024,
         "post-chain logs len {} exceeds BulkElide cap",
-        summary.logs.len()
+        logs.len()
     );
 
     // Warning lines survive as ordinary text inside `logs`.
-    assert!(summary.logs.contains("warning:"));
+    assert!(logs.contains("warning:"));
 
     eprintln!(
         "build #610: {} bytes raw → {} bytes kept",
         BUILD_610_SUCCEEDED.len(),
-        summary.logs.len(),
+        logs.len(),
     );
 }
 
 #[test]
 fn build_609_failed_compacts_under_bulk_elide_cap() {
-    let summary = match classify(BUILD_609_FAILED) {
-        ToolResultSummary::ConcourseLogs(s) => s,
-        other => panic!("expected ConcourseLogs summary, got {other:?}"),
-    };
+    let summary = classify(BUILD_609_FAILED);
+    let logs = typed_logs(&summary);
 
     // The chain compresses #609 well under the BulkElide cap.
     // Failure header + indented `> ` log_tail stay inline as
     // ordinary text — no marker, no special handling.
-    assert!(summary.logs.len() <= 16 * 1024);
-    assert!(summary.logs.contains("error: failed to build attribute"));
-    assert!(summary.logs.contains("drua-clippy"));
-    assert!(summary.logs.contains("error[E0063]: missing fields"));
-    assert!(summary.logs.contains("McpUpstreamConfig"));
+    assert!(logs.len() <= 16 * 1024);
+    assert!(logs.contains("error: failed to build attribute"));
+    assert!(logs.contains("drua-clippy"));
+    assert!(logs.contains("error[E0063]: missing fields"));
+    assert!(logs.contains("McpUpstreamConfig"));
 
     eprintln!(
         "build #609: {} bytes raw → {} bytes kept",
         BUILD_609_FAILED.len(),
-        summary.logs.len(),
+        logs.len(),
     );
 }
 
 #[test]
-fn registry_routes_concourse_to_typed_classifier() {
+fn registry_routes_concourse_to_typed_classifier_with_concourse_logs_kind() {
     let registry = ClassifierRegistry::with_default();
     let mut result = CallToolResult::success(vec![Content::text(BUILD_610_SUCCEEDED.to_string())]);
     result.structured_content = Some(serde_json::json!({"logs": BUILD_610_SUCCEEDED}));
@@ -113,7 +117,25 @@ fn registry_routes_concourse_to_typed_classifier() {
         exit_code: None,
     };
     let classification = registry.classify(&ctx);
+    // PG `kind` column gets the typed_kind, not the serde tag.
     assert_eq!(classification.summary.kind(), "concourse_logs");
+}
+
+/// Schema-faithfulness check: the body conforms to the upstream
+/// MCP tool's `output_schema` (`{logs: String}`).
+#[test]
+fn typed_body_conforms_to_concourse_output_schema() {
+    let summary = classify(BUILD_610_SUCCEEDED);
+    let body = match summary {
+        ToolResultSummary::Typed { body, .. } => body,
+        other => panic!("expected Typed, got {other:?}"),
+    };
+    let obj = body.as_object().expect("body is an object");
+    assert_eq!(obj.len(), 1, "schema is `{{logs: String}}`; got: {obj:?}");
+    assert!(
+        obj.get("logs").map(|v| v.is_string()).unwrap_or(false),
+        "body.logs must be a string"
+    );
 }
 
 /// Bash-shape result with nix-build chatter: walker descends to the
@@ -172,7 +194,7 @@ fn bulk_elide_bounds_unstructured_log_size() {
     result.structured_content = Some(serde_json::json!({"logs": raw.clone()}));
     let args = serde_json::json!({"build_id": 1u64});
     let chain = Arc::new(default_summarizer_chain());
-    let summary = match ConcourseBuildLogClassifier::new(chain)
+    let summary = ConcourseBuildLogClassifier::new(chain)
         .classify(&ClassifierContext {
             tool_name: "concourse_get_build_logs",
             args: &args,
@@ -180,20 +202,17 @@ fn bulk_elide_bounds_unstructured_log_size() {
             exit_code: None,
         })
         .expect("classify")
-        .summary
-    {
-        ToolResultSummary::ConcourseLogs(s) => s,
-        other => panic!("unexpected summary shape: {other:?}"),
-    };
+        .summary;
 
+    let logs = typed_logs(&summary);
     assert!(
-        summary.logs.len() <= 16 * 1024,
+        logs.len() <= 16 * 1024,
         "post-chain logs len {} exceeds BulkElide cap",
-        summary.logs.len()
+        logs.len()
     );
-    assert!(summary.logs.contains("<bulk-elided"));
+    assert!(logs.contains("<bulk-elided"));
     // Simple tail-keep — head is dropped, tail survives.
-    assert!(summary.logs.contains("tail line"));
+    assert!(logs.contains("tail line"));
 }
 
 #[test]

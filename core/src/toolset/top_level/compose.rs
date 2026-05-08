@@ -367,9 +367,10 @@ fn render_curated_result(summary: &ToolResultSummary) -> serde_json::Value {
     match summary {
         ToolResultSummary::Passthrough { value } => value.clone(),
         ToolResultSummary::StructuredElision { kept, .. } => kept.clone(),
-        ToolResultSummary::ConcourseLogs(s) => {
-            serde_json::to_value(s).unwrap_or(serde_json::Value::Null)
-        }
+        // Typed bodies are already schema-faithful — forward the
+        // body verbatim. New typed classifiers slot in without any
+        // change here.
+        ToolResultSummary::Typed { body, .. } => body.clone(),
     }
 }
 
