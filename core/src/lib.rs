@@ -41,6 +41,7 @@ use project_secret::ProjectSecrets;
 use prompt_executor::PromptExecutor;
 use sandbox::Sandboxes;
 use skill::Skills;
+use toolset::ToolInvocations;
 use toolset::{
     AdminToolSet, Bash, CodeAssistantToolSet, Delete, GlobTool, Grep, LibraryToolSet, Ls, MoveFile,
     NotesTool, ProjectAgent, ProjectLog, ProjectSandbox, Read, SkillTool, SpacesTool,
@@ -130,10 +131,12 @@ impl App {
         };
 
         let audit = Arc::new(Audit::new(pool));
+        let tool_invocations = Arc::new(ToolInvocations::new(pool));
         let toolsets = ToolSets::init(
             config.toolsets,
             Some(Arc::clone(&audit)),
             github_app.clone(),
+            Some(Arc::clone(&tool_invocations)),
         )
         .await?;
         toolsets.log_init_summary();

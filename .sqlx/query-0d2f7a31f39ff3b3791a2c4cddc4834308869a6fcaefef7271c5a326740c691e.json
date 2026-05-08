@@ -1,0 +1,94 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                id, agent_id, tool_name, args, args_hash, classifier,\n                summary, raw_text, raw_size_bytes, exit_code,\n                duration_ms, started_at, created_at\n            FROM tool_invocations\n            WHERE id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "agent_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "tool_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "args",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 4,
+        "name": "args_hash",
+        "type_info": "Bytea"
+      },
+      {
+        "ordinal": 5,
+        "name": "classifier",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "summary",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 7,
+        "name": "raw_text",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "raw_size_bytes",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "exit_code",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 10,
+        "name": "duration_ms",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 11,
+        "name": "started_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "0d2f7a31f39ff3b3791a2c4cddc4834308869a6fcaefef7271c5a326740c691e"
+}

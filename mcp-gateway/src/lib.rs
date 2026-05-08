@@ -131,7 +131,7 @@ impl ServerHandler for McpGateway {
 
         self.app
             .toolsets()
-            .call_top_level_tool(auth, name, request.arguments)
+            .call_top_level_tool(auth, name, request.arguments, None)
             .await
             .map_err(|e| {
                 ErrorData::new(

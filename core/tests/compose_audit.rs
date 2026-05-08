@@ -81,7 +81,7 @@ impl SearchableToolSet for StubSet {
 
 async fn build_toolsets(pool: &sqlx::PgPool, set: StubSet) -> (ToolSets, Arc<Audit>) {
     let audit = Arc::new(Audit::new(pool));
-    let toolsets = ToolSets::init(ToolSetsConfig::default(), Some(Arc::clone(&audit)), None)
+    let toolsets = ToolSets::init(ToolSetsConfig::default(), Some(Arc::clone(&audit)), None, None)
         .await
         .expect("init toolsets");
     toolsets.register_searchable(set);
@@ -129,7 +129,7 @@ async fn subtool_success_then_script_throw_keeps_subtool_outcome_success() {
     );
 
     let result = toolsets
-        .call_top_level_tool(&subject, "compose", Some(args))
+        .call_top_level_tool(&subject, "compose", Some(args), None)
         .await;
     assert!(
         result.is_err(),
@@ -179,7 +179,7 @@ async fn subtool_failure_records_error_on_subtool_row() {
     );
 
     let result = toolsets
-        .call_top_level_tool(&subject, "compose", Some(args))
+        .call_top_level_tool(&subject, "compose", Some(args), None)
         .await;
     assert!(
         result.is_err(),
@@ -221,7 +221,7 @@ async fn all_success_path_records_success_on_both_rows() {
     );
 
     let result = toolsets
-        .call_top_level_tool(&subject, "compose", Some(args))
+        .call_top_level_tool(&subject, "compose", Some(args), None)
         .await;
     assert!(result.is_ok(), "compose call should succeed");
 
