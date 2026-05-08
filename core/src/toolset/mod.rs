@@ -523,7 +523,15 @@ impl ToolSets {
                 "arguments": args_value,
             }));
 
-            let bypass_pipeline = tool.bypass_universal_pipeline();
+            // Two reasons the universal pipeline is skipped before the
+            // tool even runs: the tool itself opts out (e.g.
+            // `tool_output_fetch` is the recovery handle and must not
+            // be re-wrapped), or the subject has no scope key — most
+            // notably `AuthSubject::WorkflowExecutor`, whose dispatched
+            // tool's `structured_content` is the workflow step's typed
+            // output and would be corrupted by an envelope.
+            let bypass_pipeline = tool.bypass_universal_pipeline()
+                || ToolInvocationOwner::from_subject(subject).is_none();
             let start = std::time::Instant::now();
             let raw_result = tool.call(subject, arguments).await;
             let duration_ms = start.elapsed().as_millis() as u64;

@@ -10,7 +10,7 @@ use chrono::Utc;
 use rmcp::model::{CallToolResult, Content, JsonObject};
 
 use drua_core::auth::AuthSubject;
-use drua_core::primitives::{AgentId, ProjectId, UserId};
+use drua_core::primitives::{AgentId, ProjectId, UserId, WorkflowDefinitionId, WorkflowRunId};
 use drua_core::toolset::tool_invocations::{
     FetchQuery, NewToolInvocation, ToolInvocationOwner, ToolInvocations,
 };
@@ -309,6 +309,67 @@ async fn find_for_diff_returns_latest_matching_args_hash() {
         .await
         .expect("find_for_diff non-matching");
     assert!(miss.is_none());
+}
+
+/// `AuthSubject::WorkflowExecutor` (introduced in PR #306) dispatches
+/// composable tools whose `structured_content` is the workflow step's
+/// typed output — wrapping that result in a recovery envelope would
+/// replace the structured payload with summary JSON the workflow
+/// can't consume. The pipeline must short-circuit to raw passthrough
+/// for this subject, exactly the way it does for `Anonymous`. This
+/// test guards the contract.
+#[tokio::test]
+async fn workflow_executor_subject_skips_envelope_to_preserve_structured_output() {
+    let pool = pool().await;
+
+    let tool_invocations = Arc::new(ToolInvocations::new(&pool));
+    let toolsets = ToolSets::init(
+        ToolSetsConfig::default(),
+        None,
+        None,
+        Some(Arc::clone(&tool_invocations)),
+    )
+    .await
+    .expect("ToolSets::init");
+
+    // 50 KB body — well over the 4 KB threshold; the only thing
+    // keeping it from getting wrapped is the subject's scope rule.
+    let body = "z".repeat(50_000);
+    toolsets.register_top_level(StubTool {
+        name: "stub-workflow-tool",
+        body: body.clone(),
+        bypass: false,
+    });
+
+    let subject = AuthSubject::workflow_executor(
+        ProjectId::new(),
+        WorkflowDefinitionId::new(),
+        WorkflowRunId::new(),
+    );
+    let result = toolsets
+        .call_top_level_tool(&subject, "stub-workflow-tool", None)
+        .await
+        .expect("workflow-executor dispatch");
+
+    let text: String = result
+        .content
+        .iter()
+        .filter_map(|c| match &c.raw {
+            rmcp::model::RawContent::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    assert_eq!(
+        text, body,
+        "WorkflowExecutor's tool body must reach the workflow verbatim"
+    );
+    assert!(
+        result.structured_content.is_none(),
+        "WorkflowExecutor result must NOT be wrapped in an envelope; \
+         structured_content was: {:?}",
+        result.structured_content,
+    );
 }
 
 /// User-rooted dispatch: mcp-gateway external callers run with

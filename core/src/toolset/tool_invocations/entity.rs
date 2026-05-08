@@ -23,17 +23,31 @@ impl ToolInvocationOwner {
     /// Derive the owner from an `AuthSubject`. `None` for `Anonymous` —
     /// the dispatcher then short-circuits to raw passthrough.
     pub fn from_subject(subject: &AuthSubject) -> Option<Self> {
-        // `AgentOnBehalfOfUser` resolves to the agent (more granular FK
-        // for cleanup). User-only subjects (`User`, `ExportedAgent`)
-        // fall back to `originating_user_id`. Pure `Anonymous` and
-        // autonomous `Agent`-without-user paths are handled by the two
-        // calls in priority order.
-        if let Some(agent_id) = subject.acting_agent_id() {
-            return Some(Self::Agent { agent_id });
+        match subject {
+            // Agent (with or without user attribution) keys off the
+            // agent — the more granular cleanup target.
+            AuthSubject::Agent(_, agent_id, _)
+            | AuthSubject::AgentOnBehalfOfUser(_, _, agent_id, _) => {
+                Some(Self::Agent { agent_id: *agent_id })
+            }
+            // User-rooted: mcp-gateway external callers, IDE-driven
+            // tool dispatch, exported-agent bearer tokens.
+            AuthSubject::User(user_id) => Some(Self::User { user_id: *user_id }),
+            AuthSubject::ExportedAgent(user_id, _, _) => {
+                Some(Self::User { user_id: *user_id })
+            }
+            // No scope. The dispatcher short-circuits to raw
+            // passthrough — the tool's own `structured_content`
+            // reaches the caller untouched.
+            //
+            // `WorkflowExecutor` is here on purpose: a `ToolStep`
+            // dispatches a `composable: true` top-level tool whose
+            // `structured_content` is the workflow step's typed
+            // output. Wrapping it in an `invocation_id` envelope
+            // would replace that structured payload with summary
+            // JSON the workflow can't consume.
+            AuthSubject::WorkflowExecutor(_, _, _, _) | AuthSubject::Anonymous => None,
         }
-        subject
-            .originating_user_id()
-            .map(|user_id| Self::User { user_id })
     }
 
     pub fn agent_id(&self) -> Option<AgentId> {
