@@ -88,13 +88,20 @@ pub enum ToolResultSummary {
 
 impl ToolResultSummary {
     /// `kind` discriminator used by the dispatcher to decide whether to
-    /// persist + envelope. Mirrors the serde tag.
+    /// persist + envelope. **Must match the serde tag exactly** —
+    /// the `classifier` DB column stores `kind()` while the
+    /// `summary` JSONB column stores the serde-tagged form;
+    /// disagreement makes those two columns disagree about what
+    /// kind of summary the row actually carries (cursor review
+    /// #3207287028). Variants follow `rename_all = "snake_case"`
+    /// so e.g. `Concourse` serialises as `"concourse"`, not
+    /// `"concourse_build_log"`.
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Passthrough { .. } => "passthrough",
             Self::Generic { .. } => "generic",
             Self::StructuredElision { .. } => "structured_elision",
-            Self::Concourse(_) => "concourse_build_log",
+            Self::Concourse(_) => "concourse",
         }
     }
 

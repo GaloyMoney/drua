@@ -394,7 +394,7 @@ pub struct SubInvocation {
     /// `tool_invocations.id` — pass to `tool_output_fetch` to recover
     /// elided detail.
     pub invocation_id: uuid::Uuid,
-    /// `summary.kind` discriminator (e.g. `"concourse_build_log"`,
+    /// `summary.kind` discriminator (e.g. `"concourse"`,
     /// `"structured_elision"`, `"generic"`).
     pub kind: String,
     pub raw_size_bytes: u64,

@@ -188,5 +188,5 @@ fn registry_routes_concourse_to_typed_classifier() {
         exit_code: None,
     };
     let classification = registry.classify(&ctx);
-    assert_eq!(classification.summary.kind(), "concourse_build_log");
+    assert_eq!(classification.summary.kind(), "concourse");
 }

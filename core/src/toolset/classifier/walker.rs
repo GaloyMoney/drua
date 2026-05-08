@@ -110,6 +110,12 @@ fn walk_array(
     paths: &mut Vec<ElidedPath>,
     original_bytes: usize,
 ) -> Value {
+    // Snapshot the elided-paths length before recursing. If the
+    // post-walk array still doesn't fit and we have to sentinel-
+    // replace the whole thing, drop any child entries pushed during
+    // recursion — they reference locations inside `walked` that
+    // won't exist in `kept` (cursor review #3207731468).
+    let paths_before = paths.len();
     let walked: Vec<Value> = items
         .iter()
         .enumerate()
@@ -119,6 +125,7 @@ fn walk_array(
     if json_size(&walked_value) < threshold {
         return walked_value;
     }
+    paths.truncate(paths_before);
     sentinel_array(&walked, items.len(), path, paths, original_bytes)
 }
 
@@ -195,15 +202,28 @@ fn walk_object(
     paths: &mut Vec<ElidedPath>,
     _original_bytes: usize,
 ) -> Value {
-    let walked: Map<String, Value> = map
-        .iter()
-        .map(|(k, v)| (k.clone(), walk(v, threshold, format!("{path}.{k}"), paths)))
-        .collect();
+    // Walk each key into a LOCAL elided-paths bucket per child.
+    // peel_object_keys then either flushes a key's bucket to `paths`
+    // (when the key stays verbatim) or drops it (when the key is
+    // peeled to a sentinel — its descendant paths reference
+    // locations that won't exist in `kept`). Cursor review
+    // #3207731468 caught the orphan-paths shape.
+    let mut walked: Map<String, Value> = Map::new();
+    let mut per_key_paths: Vec<(String, Vec<ElidedPath>)> = Vec::with_capacity(map.len());
+    for (k, v) in map.iter() {
+        let mut child_paths = Vec::new();
+        let walked_v = walk(v, threshold, format!("{path}.{k}"), &mut child_paths);
+        per_key_paths.push((k.clone(), child_paths));
+        walked.insert(k.clone(), walked_v);
+    }
     let walked_value = Value::Object(walked.clone());
     if json_size(&walked_value) < threshold {
+        for (_, child_paths) in per_key_paths {
+            paths.extend(child_paths);
+        }
         return walked_value;
     }
-    peel_object_keys(walked, threshold, path, paths)
+    peel_object_keys(walked, threshold, path, paths, per_key_paths)
 }
 
 fn peel_object_keys(
@@ -211,6 +231,7 @@ fn peel_object_keys(
     threshold: usize,
     path: &str,
     paths: &mut Vec<ElidedPath>,
+    mut per_key_paths: Vec<(String, Vec<ElidedPath>)>,
 ) -> Value {
     loop {
         let current_size = json_size(&Value::Object(walked.clone()));
@@ -244,6 +265,9 @@ fn peel_object_keys(
                 break;
             }
         };
+        // Drop the peeled key's child paths — those positions are
+        // gone in the sentinel-replaced subtree.
+        per_key_paths.retain(|(k, _)| k != &key);
         paths.push(ElidedPath {
             path: format!("{path}.{key}"),
             kind,
@@ -252,6 +276,11 @@ fn peel_object_keys(
             preview: None,
         });
         walked.insert(key, sentinel_for(kind, bytes, length));
+    }
+    // Flush kept keys' child paths — they reference locations that
+    // do still exist in `kept`.
+    for (_, child_paths) in per_key_paths {
+        paths.extend(child_paths);
     }
     Value::Object(walked)
 }
@@ -456,5 +485,118 @@ mod tests {
             WalkOutcome::Passthrough(passed) => assert_eq!(passed, v),
             WalkOutcome::Elided { .. } => panic!("small input must Passthrough"),
         }
+    }
+
+    /// Cursor review #3207731468: when an array is sentinel-replaced
+    /// after recursion, child paths pushed during the walk reference
+    /// positions inside `walked` that aren't in `kept`. Every
+    /// elided_path entry must point to a location reachable in the
+    /// final `kept` value.
+    #[test]
+    fn walker_no_orphaned_paths_under_array_sentinel() {
+        // Each item has an oversized inner string; child elision
+        // pushes paths like `$[i].output`. Then the array as a
+        // whole exceeds threshold (200 × 600B ≈ 120 KB), forcing
+        // sentinel replacement at the root.
+        let items: Vec<Value> = (0..200)
+            .map(|i| serde_json::json!({"id": i, "output": "z".repeat(600)}))
+            .collect();
+        let v = Value::Array(items);
+        let WalkOutcome::Elided {
+            kept, elided_paths, ..
+        } = classify_value(&v, 4096)
+        else {
+            panic!("expected Elided");
+        };
+        // Every reported path must resolve in `kept`.
+        for p in &elided_paths {
+            assert!(
+                resolves(&kept, &p.path),
+                "elided_path {} references a location absent from kept",
+                p.path
+            );
+        }
+    }
+
+    /// Same invariant for objects: peeling a key with descendants
+    /// drops the child paths from the report.
+    #[test]
+    fn walker_no_orphaned_paths_under_peeled_object_key() {
+        let huge_blob = "p".repeat(600);
+        let big_array: Vec<Value> = (0..200)
+            .map(|_| serde_json::json!({"line": huge_blob.clone()}))
+            .collect();
+        // Keep `meta` small (verbatim survival); `huge` will get
+        // peeled because its serialized form dominates the object.
+        let v = serde_json::json!({
+            "meta": {"id": 1, "tag": "a"},
+            "huge": big_array,
+        });
+        let WalkOutcome::Elided {
+            kept, elided_paths, ..
+        } = classify_value(&v, 4096)
+        else {
+            panic!("expected Elided");
+        };
+        for p in &elided_paths {
+            assert!(
+                resolves(&kept, &p.path),
+                "elided_path {} references a location absent from kept",
+                p.path
+            );
+        }
+        // `huge` must be reported as peeled, AND its descendants
+        // (e.g. `$.huge[3].line`) must NOT appear in the report.
+        assert!(
+            elided_paths.iter().any(|p| p.path == "$.huge"),
+            "expected `$.huge` to be reported as peeled"
+        );
+        assert!(
+            !elided_paths
+                .iter()
+                .any(|p| p.path.starts_with("$.huge[") || p.path.starts_with("$.huge.")),
+            "no descendants of peeled `$.huge` should remain in elided_paths"
+        );
+    }
+
+    /// Walk the kept Value following a JSON-pointer-ish path
+    /// (`$.foo.bar[3].baz`) — returns true when the path resolves to
+    /// some node, false when any segment is missing.
+    fn resolves(kept: &Value, path: &str) -> bool {
+        if path == "$" {
+            return true;
+        }
+        let mut cur = kept;
+        let mut s = path.strip_prefix('$').unwrap_or(path);
+        while !s.is_empty() {
+            if let Some(rest) = s.strip_prefix('.') {
+                let (segment, tail) = split_at_object_or_index(rest);
+                cur = match cur.get(segment) {
+                    Some(v) => v,
+                    None => return false,
+                };
+                s = tail;
+            } else if let Some(rest) = s.strip_prefix('[') {
+                let close = rest.find(']').unwrap_or(rest.len());
+                let idx: usize = rest[..close].parse().unwrap_or(usize::MAX);
+                cur = match cur.get(idx) {
+                    Some(v) => v,
+                    None => return false,
+                };
+                s = &rest[close + 1..];
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn split_at_object_or_index(s: &str) -> (&str, &str) {
+        for (i, c) in s.char_indices() {
+            if c == '.' || c == '[' {
+                return (&s[..i], &s[i..]);
+            }
+        }
+        (s, "")
     }
 }
