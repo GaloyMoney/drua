@@ -49,6 +49,9 @@ enum NotesParams {
     Unpin {
         note_id: NoteId,
     },
+    Delete {
+        note_id: NoteId,
+    },
 }
 
 impl NotesParams {
@@ -66,6 +69,7 @@ impl NotesParams {
             Self::List { .. } => "list",
             Self::Pin { .. } => "pin",
             Self::Unpin { .. } => "unpin",
+            Self::Delete { .. } => "delete",
         }
     }
 }
@@ -106,7 +110,7 @@ static NOTES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
         "properties": {
             "command": {
                 "type": "string",
-                "enum": ["store", "get", "search", "list", "pin", "unpin"],
+                "enum": ["store", "get", "search", "list", "pin", "unpin", "delete"],
                 "description": "Which notes operation to perform."
             },
             "title": {
@@ -125,7 +129,7 @@ static NOTES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             "note_id": {
                 "type": "string",
                 "format": "uuid",
-                "description": "Note ID. Required for get/pin/unpin; optional for store (omit to create, pass to update)."
+                "description": "Note ID. Required for get/pin/unpin/delete; optional for store (omit to create, pass to update)."
             },
             "query": {
                 "type": "string",
@@ -173,7 +177,9 @@ impl TopLevelTool for NotesTool {
          Store findings, decisions, and task outcomes so future agents benefit. \
          Commands: `store` (create/update), `get` (by ID), \
          `search` (hybrid keyword + semantic), `list` (recent first), \
-         `pin` (inject into all agents' context), `unpin` (remove from context)."
+         `pin` (inject into all agents' context), `unpin` (remove from context), \
+         `delete` (requires `note_id`; project-scoped only — for space-scoped \
+         notes use the `spaces` tool)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -330,6 +336,20 @@ impl TopLevelTool for NotesTool {
                     note_id: Some(note.id.to_string()),
                     title: Some(note.title.clone()),
                     pinned: Some(false),
+                    ..Default::default()
+                };
+                (text, out)
+            }
+
+            NotesParams::Delete { note_id } => {
+                self.notes
+                    .delete(subject, project_id, note_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Note(e.to_string()))?;
+                let text = format!("Note deleted (id {note_id}).");
+                let out = NotesOutput {
+                    command: "delete".to_string(),
+                    note_id: Some(note_id.to_string()),
                     ..Default::default()
                 };
                 (text, out)
