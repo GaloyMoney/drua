@@ -296,6 +296,7 @@
                 pkgs.coreutils
                 pkgs.gawk
                 pkgs.gnugrep
+                pkgs.gnused
                 pkgs.postgresql
                 pkgs.procps
                 pkgs.util-linux
