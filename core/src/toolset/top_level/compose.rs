@@ -169,6 +169,15 @@ impl TopLevelTool for ComposeTool {
 
         Audit::record_action("compose".to_string());
 
+        // Snapshot the agent-supplied params for persistence — the
+        // `tool_invocations.args` JSONB column is otherwise an opaque
+        // `{}` for compose rows since the dts-prepended `script` and
+        // `params` itself both get consumed below.
+        let recorded_args = serde_json::json!({
+            "script": params.script,
+            "timeout_ms": params.timeout_ms,
+        });
+
         let dts = {
             let sets = self.sets.read().expect("toolset lock poisoned");
             let top = self.top_level.read().expect("top_level lock poisoned");
@@ -217,11 +226,10 @@ impl TopLevelTool for ComposeTool {
         // persist the full return so the agent can fetch it.
         let walker_classifier = GenericFallback::default();
         let walker_input = build_walker_input(&result.value);
-        let no_args = serde_json::json!({});
         let classification = walker_classifier
             .classify(&ClassifierContext {
                 tool_name: "compose",
-                args: &no_args,
+                args: &recorded_args,
                 raw: &walker_input,
                 exit_code: None,
             })
@@ -249,7 +257,7 @@ impl TopLevelTool for ComposeTool {
                         .persist_classification(
                             subject,
                             "compose",
-                            &no_args,
+                            &recorded_args,
                             Classification {
                                 summary,
                                 canonical_text,
