@@ -120,14 +120,20 @@ impl StringClassifier for NixStringClassifier {
 /// `copying path '/nix/store/...' from`. Single-line stragglers from
 /// other tools (a bash session that happens to mention `/nix/store/`
 /// in passing) won't trip both.
+///
+/// Patterns tolerate an optional `[HH:MM:SS]` timestamp prefix so the
+/// classifier fires on concourse-wrapped nix output too — concourse's
+/// per-task timestamping is the only structural difference between
+/// "raw nix" and "nix wrapped by concourse".
 fn sniff(text: &str) -> bool {
     static BUILDING_RE: OnceLock<Regex> = OnceLock::new();
     static SECONDARY_RE: OnceLock<Regex> = OnceLock::new();
-    let building =
-        BUILDING_RE.get_or_init(|| Regex::new(r"(?m)^building '/nix/store/[^']+\.drv'").unwrap());
+    let building = BUILDING_RE.get_or_init(|| {
+        Regex::new(r"(?m)^(\[\d{2}:\d{2}:\d{2}\]\s+)?building '/nix/store/[^']+\.drv'").unwrap()
+    });
     let secondary = SECONDARY_RE.get_or_init(|| {
         Regex::new(
-            r"(?m)^(error: builder for '/nix/store/[^']+\.drv' failed|copying path '/nix/store/)",
+            r"(?m)^(\[\d{2}:\d{2}:\d{2}\]\s+)?(error: builder for '/nix/store/[^']+\.drv' failed|copying path '/nix/store/)",
         )
         .unwrap()
     });
@@ -139,12 +145,17 @@ fn parse(raw: &str) -> NixBuildSummary {
     static COPYING_RE: OnceLock<Regex> = OnceLock::new();
     static FAILURE_HEADER_RE: OnceLock<Regex> = OnceLock::new();
 
-    let building = BUILDING_RE
-        .get_or_init(|| Regex::new(r"(?m)^building '/nix/store/[^']+\.drv'").unwrap());
-    let copying = COPYING_RE
-        .get_or_init(|| Regex::new(r"(?m)^copying path '/nix/store/[^']+' from").unwrap());
+    let building = BUILDING_RE.get_or_init(|| {
+        Regex::new(r"(?m)^(\[\d{2}:\d{2}:\d{2}\]\s+)?building '/nix/store/[^']+\.drv'").unwrap()
+    });
+    let copying = COPYING_RE.get_or_init(|| {
+        Regex::new(r"(?m)^(\[\d{2}:\d{2}:\d{2}\]\s+)?copying path '/nix/store/[^']+' from").unwrap()
+    });
     let failure_header = FAILURE_HEADER_RE.get_or_init(|| {
-        Regex::new(r"(?m)^error: builder for '(/nix/store/[^']+\.drv)' failed(.*)$").unwrap()
+        Regex::new(
+            r"(?m)^(\[\d{2}:\d{2}:\d{2}\]\s+)?error: builder for '(/nix/store/[^']+\.drv)' failed(.*)$",
+        )
+        .unwrap()
     });
 
     let derivations_attempted = building.find_iter(raw).count() as u32;
@@ -156,19 +167,27 @@ fn parse(raw: &str) -> NixBuildSummary {
     while i < lines.len() && failures.len() < MAX_FAILURES_KEPT {
         let line = lines[i];
         if let Some(cap) = failure_header.captures(line) {
-            let drv_path = cap.get(1).map(|m| m.as_str().to_string()).unwrap_or_default();
-            let reason = cap.get(2).map(|m| m.as_str().trim().to_string()).filter(|s| !s.is_empty());
+            // Group 1 is the optional `[HH:MM:SS] ` prefix (concourse
+            // wrapping); 2 is the drv path; 3 is the reason tail.
+            let drv_path = cap.get(2).map(|m| m.as_str().to_string()).unwrap_or_default();
+            let reason = cap
+                .get(3)
+                .map(|m| m.as_str().trim().to_string())
+                .filter(|s| !s.is_empty());
             // Walk forward through `> <line>` continuation lines that
-            // nix emits as its "Last N log lines" trailer.
+            // nix emits as its "Last N log lines" trailer. Concourse
+            // wraps each line with a `[HH:MM:SS] ` prefix; strip that
+            // first if present.
             let mut log_tail: Vec<String> = Vec::new();
             let mut j = i + 1;
             while j < lines.len() && log_tail.len() < MAX_FAILURE_LOG_TAIL {
                 let next = lines[j];
-                if let Some(stripped) = next.strip_prefix("       > ") {
+                let unwrapped = strip_concourse_timestamp(next);
+                if let Some(stripped) = unwrapped.strip_prefix("       > ") {
                     log_tail.push(stripped.to_string());
-                } else if let Some(stripped) = next.strip_prefix("> ") {
+                } else if let Some(stripped) = unwrapped.strip_prefix("> ") {
                     log_tail.push(stripped.to_string());
-                } else if next.trim().is_empty() {
+                } else if unwrapped.trim().is_empty() {
                     j += 1;
                     continue;
                 } else {
@@ -196,6 +215,23 @@ fn parse(raw: &str) -> NixBuildSummary {
         failures,
         total_bytes,
         kept_bytes,
+    }
+}
+
+/// `[HH:MM:SS] foo` → `foo`. Lines without a timestamp prefix pass
+/// through unchanged. Used so the line-walk for `> <line>` log_tail
+/// continuation can match either raw nix output or concourse-wrapped
+/// nix output.
+fn strip_concourse_timestamp(line: &str) -> &str {
+    if line.len() >= 11
+        && line.starts_with('[')
+        && line.as_bytes().get(3) == Some(&b':')
+        && line.as_bytes().get(6) == Some(&b':')
+        && line.as_bytes().get(9) == Some(&b']')
+    {
+        line[10..].strip_prefix(' ').unwrap_or(&line[10..])
+    } else {
+        line
     }
 }
 
@@ -278,6 +314,35 @@ mod tests {
     fn sniff_rejects_unrelated_bash_output() {
         let text = "ls /nix/store/abcd  # passing reference to nix store, not a build";
         assert!(!sniff(text));
+    }
+
+    #[test]
+    fn sniff_matches_concourse_wrapped_nix() {
+        // Concourse prefixes every line with `[HH:MM:SS] `; the Nix
+        // classifier should fire either way so the same classifier
+        // covers raw `nix build` output AND concourse-wrapped build
+        // logs (delegated by the Concourse classifier or by the
+        // walker descending into the `logs` field).
+        let text = "[03:57:25] preparing to build\n\
+                    [03:57:25] building '/nix/store/aaaa-foo.drv'\n\
+                    [03:57:30] copying path '/nix/store/bbbb-bar' from 'https://cache.nixos.org/'";
+        assert!(sniff(text));
+    }
+
+    #[test]
+    fn parse_extracts_failure_under_concourse_timestamps() {
+        let text = "\
+[03:57:28] error: builder for '/nix/store/aaaa-clippy.drv' failed with exit code 101; last 25 log lines:
+[03:57:28]        > error[E0063]: missing fields `auth_mode`
+[03:57:28]        >   --> core/tests/toolset.rs:15:29
+[03:57:29] some unrelated trailing line
+";
+        let s = parse(text);
+        assert_eq!(s.failures.len(), 1);
+        let f = &s.failures[0];
+        assert_eq!(f.drv_path, "/nix/store/aaaa-clippy.drv");
+        assert!(f.reason.as_deref().unwrap_or("").contains("exit code 101"));
+        assert!(f.log_tail.iter().any(|l| l.contains("E0063")));
     }
 
     #[test]
