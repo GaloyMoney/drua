@@ -251,7 +251,10 @@ pub fn substitute_value(value: &Value, ctx: &TemplateContext) -> Result<Value, T
     substitute_value_with_built(value, &built)
 }
 
-fn substitute_value_with_built(value: &Value, built: &BuiltContext) -> Result<Value, TemplateError> {
+fn substitute_value_with_built(
+    value: &Value,
+    built: &BuiltContext,
+) -> Result<Value, TemplateError> {
     match value {
         Value::String(s) => {
             if let Some(r) = whole_string_ref(s)? {
@@ -285,10 +288,7 @@ pub fn substitute_in_string(s: &str, ctx: &TemplateContext) -> Result<String, Te
     substitute_in_string_with_built(s, &built)
 }
 
-fn substitute_in_string_with_built(
-    s: &str,
-    built: &BuiltContext,
-) -> Result<String, TemplateError> {
+fn substitute_in_string_with_built(s: &str, built: &BuiltContext) -> Result<String, TemplateError> {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(open_idx) = rest.find(OPEN) {
