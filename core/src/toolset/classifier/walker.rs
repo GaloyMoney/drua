@@ -82,17 +82,23 @@ fn byte_elide_string(
     let head_end = floor_char_boundary(s, STRING_ELIDE_HEAD_CHARS);
     let tail_target = s.len().saturating_sub(STRING_ELIDE_TAIL_CHARS);
     let tail_start = ceil_char_boundary(s, tail_target.max(head_end));
-    let elided = if head_end < tail_start {
-        format!(
-            "{}{}{}",
-            &s[..head_end],
-            STRING_ELIDE_MARKER,
-            &s[tail_start..]
-        )
-    } else {
-        // Head and tail would overlap; nothing to elide meaningfully.
-        s.to_string()
-    };
+    if head_end >= tail_start {
+        // Head and tail would overlap — nothing to elide meaningfully.
+        // Rare edge case: the string trips `json_size > threshold`
+        // due to escape expansion (each `\` becomes `\\` in the
+        // serialized form, doubling apparent size) while its
+        // character count stays below `head + tail`. Don't push an
+        // ElidedPath: that would mislead agents reasoning over
+        // `elided_paths` into thinking content was dropped when the
+        // bytes are identical. Cursor review #3208271652.
+        return Value::String(s.to_string());
+    }
+    let elided = format!(
+        "{}{}{}",
+        &s[..head_end],
+        STRING_ELIDE_MARKER,
+        &s[tail_start..]
+    );
     paths.push(ElidedPath {
         path: path.to_string(),
         kind: ElisionKind::String,
@@ -233,8 +239,15 @@ fn peel_object_keys(
     paths: &mut Vec<ElidedPath>,
     mut per_key_paths: Vec<(String, Vec<ElidedPath>)>,
 ) -> Value {
+    // Track running serialized size incrementally so we don't clone
+    // the entire map and re-serialize it on every loop iteration
+    // (cursor review #3208216140 — for objects with many oversize
+    // keys this was O(n × map_size)). After each peel, the
+    // serialized size delta is exactly
+    // `json_size(sentinel) - json_size(peeled_value)` since keys,
+    // commas, and braces are unchanged.
+    let mut current_size = json_size(&Value::Object(walked.clone()));
     loop {
-        let current_size = json_size(&Value::Object(walked.clone()));
         if current_size < threshold {
             break;
         }
@@ -244,7 +257,7 @@ fn peel_object_keys(
             .filter(|(_, v)| !is_sentinel(v))
             .map(|(k, v)| (k.clone(), json_size(v)))
             .max_by_key(|(_, size)| *size);
-        let Some((key, _)) = candidate else {
+        let Some((key, value_size)) = candidate else {
             // Nothing left to peel — give up; the parent's
             // post-walk size check will route us back to
             // Passthrough if we made things worse.
@@ -253,7 +266,6 @@ fn peel_object_keys(
         let value = walked
             .remove(&key)
             .expect("just selected this key from the same map");
-        let bytes = json_size(&value);
         let (kind, length) = match &value {
             Value::String(_) => (ElisionKind::String, None),
             Value::Array(a) => (ElisionKind::Array, Some(a.len())),
@@ -271,11 +283,18 @@ fn peel_object_keys(
         paths.push(ElidedPath {
             path: format!("{path}.{key}"),
             kind,
-            bytes: bytes as u64,
+            bytes: value_size as u64,
             length,
             preview: None,
         });
-        walked.insert(key, sentinel_for(kind, bytes, length));
+        let sentinel = sentinel_for(kind, value_size, length);
+        let sentinel_size = json_size(&sentinel);
+        walked.insert(key, sentinel);
+        // Update running size: `value` was replaced by `sentinel`,
+        // every other byte stays the same.
+        current_size = current_size
+            .saturating_sub(value_size)
+            .saturating_add(sentinel_size);
     }
     // Flush kept keys' child paths — they reference locations that
     // do still exist in `kept`.

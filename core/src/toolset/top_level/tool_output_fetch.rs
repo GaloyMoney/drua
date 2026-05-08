@@ -129,11 +129,26 @@ impl TopLevelTool for ToolOutputFetch {
 
     async fn call(
         &self,
-        _subject: &AuthSubject,
+        subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let input: FetchInput = parse_params(arguments)?;
         let id = ToolInvocationId::from(input.invocation_id);
+
+        // Defense-in-depth ownership check (cursor review
+        // #3208271640). UUIDs are hard to guess and are only surfaced
+        // to the originating agent's context, but the fetch tool
+        // shouldn't rely on that. Subjects with no scope
+        // (`Anonymous`, `WorkflowExecutor`) can't fetch at all;
+        // others can only fetch invocations whose persisted
+        // `owner` matches their derived owner.
+        let Some(subject_owner) =
+            crate::toolset::tool_invocations::ToolInvocationOwner::from_subject(subject)
+        else {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "tool_output_fetch failed: subject has no fetch scope".to_string(),
+            )]));
+        };
 
         let invocation = match self.tool_invocations.find_by_id(id).await {
             Ok(inv) => inv,
@@ -143,6 +158,12 @@ impl TopLevelTool for ToolOutputFetch {
                 ))]));
             }
         };
+
+        if invocation.owner != subject_owner {
+            return Ok(CallToolResult::error(vec![Content::text(
+                "tool_output_fetch failed: invocation_id is not in your scope".to_string(),
+            )]));
+        }
 
         // Pick the structured form per `view`. `Original` is full
         // disclosure (matches what the original tool returned);

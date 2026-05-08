@@ -592,7 +592,20 @@ impl ToolSets {
                         (raw, false)
                     };
 
-                    record_pipeline_metrics(raw_bytes, kept_bytes, classifier_kind, persisted);
+                    // When persistence didn't happen (subject had no
+                    // owner, or persist_classification logged-and-
+                    // bailed), the model received the raw bytes —
+                    // not the classifier's kept_bytes. Reporting the
+                    // classifier's intended kept_bytes would lie to
+                    // the inspector's compression-ratio column.
+                    // Cursor review #3208216149.
+                    let effective_kept_bytes = if persisted { kept_bytes } else { raw_bytes };
+                    record_pipeline_metrics(
+                        raw_bytes,
+                        effective_kept_bytes,
+                        classifier_kind,
+                        persisted,
+                    );
                     Audit::record_tokens(estimate_tokens(&wrapped));
                     Audit::record_success();
                     Ok(wrapped)
