@@ -52,12 +52,16 @@ impl BashCommandInput {
     }
 }
 
-/// Typed response for the `bash` tool. Same wire shape as the generic
-/// `/execute` envelope — this is a renamed alias on the wire.
+/// Typed response for the `bash` tool. Streams stay split — the
+/// sandbox already captures stdout / stderr separately
+/// (`session.rs:208-211`); merging at the boundary throws away
+/// signal the agent's classifier needs.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct BashCommandOutput {
-    pub output: String,
-    pub is_error: bool,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Error)]
@@ -415,12 +419,16 @@ mod tests {
     fn bash_output_roundtrip() {
         for case in [
             BashCommandOutput {
-                output: "hello\n".to_string(),
-                is_error: false,
+                stdout: "hello\n".to_string(),
+                stderr: String::new(),
+                exit_code: 0,
+                duration_ms: 12,
             },
             BashCommandOutput {
-                output: "Exit code 1\noops".to_string(),
-                is_error: true,
+                stdout: String::new(),
+                stderr: "oops\n".to_string(),
+                exit_code: 1,
+                duration_ms: 4,
             },
         ] {
             let json = serde_json::to_value(&case).unwrap();

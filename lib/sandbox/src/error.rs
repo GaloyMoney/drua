@@ -43,4 +43,7 @@ pub enum InstanceError {
 
     #[error("Server returned error: {0}")]
     Server(String),
+
+    #[error("Decode error: {0}")]
+    Decode(String),
 }

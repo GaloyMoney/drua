@@ -98,10 +98,6 @@ impl TopLevelTool for TextEditor {
 
         let is_mutating = input.is_mutating();
 
-        // `space:<slug>/...` paths are handled entirely by SpaceFs —
-        // both reads (`view`) and writes (`create` / `str_replace` /
-        // `insert`). Each helper returns Ok(None) on non-space paths
-        // so we fall through to the sandbox dispatch below.
         if SpaceFs::is_space_path(&input.path) {
             let action = input
                 .clone()
@@ -155,7 +151,6 @@ impl TopLevelTool for TextEditor {
             }
         }
 
-        // Mutating commands require SandboxUse; `view` falls back to SandboxRead.
         let sandbox_id = if is_mutating {
             writable_sandbox_id(subject).ok_or(ToolSetsError::Unauthorized)?
         } else {
@@ -175,11 +170,6 @@ impl TopLevelTool for TextEditor {
                 .await
         }?;
 
-        // For `view` only, the sandbox now returns raw clipped text;
-        // wrap with `number_lines` so the response matches Anthropic's
-        // `str_replace_based_edit_tool view` (cat -n numbered).
-        // create / str_replace / insert return success messages —
-        // no numbering applied.
         let view_range = match input.clone().resolve() {
             Ok(TextEditorAction::View { view_range, .. }) => view_range.map(|[s, e]| {
                 let start = s.max(1) as usize;

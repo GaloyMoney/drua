@@ -483,7 +483,7 @@ impl TopLevelTool for CallCatalogTool {
                 });
         let raw_bytes = classification.canonical_text.len() as u64;
         let classifier_kind = classification.summary.kind().to_string();
-        let kept_bytes = super::super::summary_kept_bytes(&classification.summary, raw_bytes);
+        let kept_bytes = classification.summary.kept_bytes(raw_bytes);
         if classification.summary.is_passthrough() {
             super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, false);
             return Ok(result);

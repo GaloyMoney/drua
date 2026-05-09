@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::instrument;
 
-use drua_tool_classifier::{canonical_text_for, Classification, ToolResultSummary};
+use drua_tool_classifier::{Classification, ToolResultSummary};
 use repo::ToolInvocationRepo;
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
@@ -260,57 +260,7 @@ pub struct PersistedClassification {
 }
 
 fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId, raw_size_bytes: u64) -> String {
-    match summary {
-        ToolResultSummary::Passthrough { value } => match value {
-            serde_json::Value::String(s) => s.clone(),
-            other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
-        },
-        ToolResultSummary::StructuredElision {
-            kept,
-            elided_paths,
-            total_bytes,
-            kept_bytes,
-        } => {
-            let mut out = String::new();
-            out.push_str(&format!(
-                "[json elided: {kept_bytes}/{total_bytes} bytes kept; \
-                 fetch raw via tool_output_fetch(invocation_id=\"{id}\")]\n",
-            ));
-            if !elided_paths.is_empty() {
-                out.push_str("=== elided paths ===\n");
-                for p in elided_paths {
-                    let kind_str = match p.kind {
-                        drua_tool_classifier::ElisionKind::String => "string",
-                        drua_tool_classifier::ElisionKind::Array => "array",
-                        drua_tool_classifier::ElisionKind::Object => "object",
-                    };
-                    let length_str = p
-                        .length
-                        .map(|n| format!(", length: {n}"))
-                        .unwrap_or_default();
-                    out.push_str(&format!(
-                        "  {} ({}, {} bytes{})\n",
-                        p.path, kind_str, p.bytes, length_str,
-                    ));
-                }
-            }
-            out.push_str("=== kept ===\n");
-            out.push_str(&canonical_text_for(kept));
-            out
-        }
-        ToolResultSummary::Typed { typed_kind, body } => {
-            let mut out = String::new();
-            out.push_str(&format!(
-                "[{typed_kind}: {raw_size_bytes} original bytes; \
-                 fetch raw via tool_output_fetch(invocation_id=\"{id}\")]\n",
-            ));
-            out.push_str(&canonical_text_for(body));
-            if !out.ends_with('\n') {
-                out.push('\n');
-            }
-            out
-        }
-    }
+    summary.render_envelope_text(&uuid::Uuid::from(id).to_string(), raw_size_bytes)
 }
 
 pub fn apply_fetch_query(

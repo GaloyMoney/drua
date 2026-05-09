@@ -17,7 +17,7 @@
 use std::sync::{Arc, LazyLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
-use sandbox::BashCommandInput;
+use sandbox::{BashCommandInput, BashCommandOutput};
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
@@ -26,7 +26,7 @@ use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
-use super::{schema_for, TextOutput};
+use super::schema_for;
 
 pub struct Bash {
     sandboxes: Arc<Sandboxes>,
@@ -38,13 +38,10 @@ impl Bash {
     }
 }
 
-static BASH_OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<TextOutput>);
+static BASH_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<BashCommandOutput>);
 
 static BASH_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
-    // Mirrors Anthropic's bash_20250124 command/restart fields and adds
-    // timeout_ms as a drua extension. The schema's bounds reference
-    // [`BashCommandInput`] constants so the typed contract and the model-
-    // facing schema can't drift.
     serde_json::json!({
         "type": "object",
         "properties": {
@@ -87,9 +84,9 @@ impl TopLevelTool for Bash {
         "Run a shell command inside the agent's attached sandbox. \
          Compatible with Anthropic's built-in bash tool — same \
          command / restart semantics, plus optional timeout_ms for \
-         long-running commands. Same is_error semantics. \
-         Output is stdout + stderr concatenated; exit code != 0 surfaces \
-         as is_error: true on the tool result."
+         long-running commands. Returns structured output \
+         {stdout, stderr, exit_code, duration_ms}; exit_code != 0 \
+         surfaces as is_error: true on the tool result."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -101,7 +98,6 @@ impl TopLevelTool for Bash {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        // Visible whether attached or not so the model can ask to attach.
         subject.can_use_agent_file_tools()
     }
 
@@ -119,10 +115,6 @@ impl TopLevelTool for Bash {
             .instance_client_for(subject, sandbox_id)
             .await?;
 
-        // MCP boundary: `arguments` is loosely-typed JSON. Convert to the
-        // typed `BashCommandInput` here so any caller-side typo (e.g.
-        // `timeoutMs`) surfaces as a clear deserialization error rather
-        // than being silently dropped on the floor.
         let raw = serde_json::Value::Object(arguments.unwrap_or_default());
         let input: BashCommandInput = match serde_json::from_value(raw) {
             Ok(input) => input,
@@ -133,18 +125,29 @@ impl TopLevelTool for Bash {
             }
         };
 
-        // Map transport/server failures to `is_error: true` text so the model
-        // sees a consistent shape. Non-zero exits arrive with `is_error` set already.
         match client.execute_bash(&input).await {
-            Ok(resp) => {
-                let is_error = resp.is_error;
-                let out = TextOutput {
-                    output: resp.output,
-                };
-                let structured = serde_json::to_value(&out).expect("TextOutput serialization");
-                // Move `out.output` into Content::text rather than borrowing,
-                // so we don't clone potentially-large bash output.
-                let content = vec![Content::text(out.output)];
+            Ok((output, transport_error)) => {
+                let exit_code = output.exit_code;
+                let is_error = transport_error || exit_code != 0;
+                let structured = serde_json::to_value(&output).expect("BashCommandOutput");
+                let default_text = format!(
+                    "[bash exit={} in {}ms; stdout={}B stderr={}B]\n{}",
+                    output.exit_code,
+                    output.duration_ms,
+                    output.stdout.len(),
+                    output.stderr.len(),
+                    if output.stderr.is_empty() {
+                        output.stdout.clone()
+                    } else if output.stdout.is_empty() {
+                        format!("--- stderr ---\n{}", output.stderr)
+                    } else {
+                        format!(
+                            "--- stdout ---\n{}\n--- stderr ---\n{}",
+                            output.stdout, output.stderr
+                        )
+                    },
+                );
+                let content = vec![Content::text(default_text)];
                 let mut result = if is_error {
                     CallToolResult::error(content)
                 } else {

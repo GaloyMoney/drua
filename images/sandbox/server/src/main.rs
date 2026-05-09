@@ -11,8 +11,8 @@ use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use sandbox::tool_protocol::{
-    BashCommandInput, BashInputError, DeleteInput, GlobInput, GrepInput, GrepOutputMode, MoveInput,
-    TextEditorAction, TextEditorInput,
+    BashCommandInput, BashCommandOutput, BashInputError, DeleteInput, GlobInput, GrepInput,
+    GrepOutputMode, MoveInput, TextEditorAction, TextEditorInput,
 };
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
@@ -139,7 +139,13 @@ async fn execute_bash(session: &SharedSession, input: serde_json::Value) -> Resu
 
     if input.restart {
         session.restart().await?;
-        return Ok("Bash session restarted.".to_string());
+        return Ok(serde_json::to_string(&BashCommandOutput {
+            stdout: "Bash session restarted.".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+            duration_ms: 0,
+        })
+        .expect("BashCommandOutput is serialisable"));
     }
 
     let timeout_ms = input.validated_timeout_ms().map_err(|e| e.to_string())?;
@@ -150,18 +156,22 @@ async fn execute_bash(session: &SharedSession, input: serde_json::Value) -> Resu
 
     if result.shell_died {
         return Err(format!(
-            "Shell exited before completing the command (exit_code={}, output_bytes={})\n{}",
+            "Shell exited before completing the command (exit_code={}, stdout_bytes={}, stderr_bytes={})\n--- stdout ---\n{}\n--- stderr ---\n{}",
             result.exit_code,
-            result.output.len(),
-            result.output
+            result.stdout.len(),
+            result.stderr.len(),
+            result.stdout,
+            result.stderr,
         ));
     }
 
-    if result.exit_code == 0 {
-        Ok(result.output)
-    } else {
-        Err(format!("Exit code {}\n{}", result.exit_code, result.output))
-    }
+    let output = BashCommandOutput {
+        stdout: result.stdout,
+        stderr: result.stderr,
+        exit_code: result.exit_code,
+        duration_ms: result.duration_ms,
+    };
+    Ok(serde_json::to_string(&output).expect("BashCommandOutput is serialisable"))
 }
 
 /// Async wrapper that resolves `path` against the session's current
@@ -642,12 +652,12 @@ async fn attach(
     const SMOKE_MARKER: &str = "__sandbox_attach_ready__";
     let smoke_cmd = format!("echo {SMOKE_MARKER}");
     match session.execute(&smoke_cmd, SMOKE_TIMEOUT_MS).await {
-        Ok(r) if !r.shell_died && r.exit_code == 0 && r.output.contains(SMOKE_MARKER) => Ok("ok"),
+        Ok(r) if !r.shell_died && r.exit_code == 0 && r.stdout.contains(SMOKE_MARKER) => Ok("ok"),
         Ok(r) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             format!(
-                "attach smoke test failed: shell_died={}, exit_code={}, output={:?}",
-                r.shell_died, r.exit_code, r.output
+                "attach smoke test failed: shell_died={}, exit_code={}, stdout={:?}, stderr={:?}",
+                r.shell_died, r.exit_code, r.stdout, r.stderr
             ),
         )),
         Err(e) => Err((
@@ -696,9 +706,9 @@ echo __reset_done__ ) || true"#
     match session.execute(&script, RESET_TIMEOUT_MS).await {
         Ok(r) => Json(ResetRepoResponse {
             ok: !r.shell_died
-                && (r.output.contains("__reset_done__")
-                    || r.output.contains("__reset_skipped_no_git__")),
-            output: r.output,
+                && (r.stdout.contains("__reset_done__")
+                    || r.stdout.contains("__reset_skipped_no_git__")),
+            output: r.stdout,
         }),
         Err(e) => Json(ResetRepoResponse {
             ok: false,
@@ -1132,14 +1142,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bash_returns_error_on_nonzero_exit() {
+    async fn bash_nonzero_exit_surfaces_in_structured_output() {
         init_test_workspace();
         let session = test_session();
-        // Use a sub-shell to get non-zero exit without killing the session
         let input = serde_json::json!({"command": "bash -c 'exit 42'"});
-        let result = execute_bash(&session, input).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Exit code 42"));
+        let result = execute_bash(&session, input).await.expect("ok envelope");
+        let parsed: BashCommandOutput = serde_json::from_str(&result).expect("json");
+        assert_eq!(parsed.exit_code, 42);
     }
 
     #[tokio::test]

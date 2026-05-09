@@ -10,11 +10,12 @@ pub mod top_level;
 mod traits;
 
 pub use classifier::{
-    default_summarizer_chain, BulkElide, Classification, ClassifierContext, ClassifierError,
-    ClassifierRegistry, ConcourseBuildLogClassifier, ConcourseBuildLogPreprocessor, ElidedPath,
-    ElisionKind, GenericFallback, GitCloneProgress, NixBuildingRun, NixCacheActivity, NixCopyRun,
-    NixDrvList, NixFetchList, ResultClassifier, SegmentedText, StringSummarizer,
-    StringSummarizerChain, ToolResultSummary,
+    default_summarizer_chain, BashClassifier, BulkElide, CargoCheckRun, CargoCompileRun,
+    CargoDownloadRun, Classification, ClassifierContext, ClassifierError, ClassifierRegistry,
+    ConcourseBuildLogClassifier, ConcourseBuildLogPreprocessor, ElidedPath, ElisionKind,
+    GenericFallback, GitCloneProgress, NixBuildingRun, NixCacheActivity, NixCopyRun, NixDrvList,
+    NixFetchList, ResultClassifier, SegmentedText, StringSummarizer, StringSummarizerChain,
+    ToolResultSummary,
 };
 pub use config::*;
 pub use error::*;
@@ -562,7 +563,7 @@ impl ToolSets {
 
                     let raw_bytes = classification.canonical_text.len() as u64;
                     let classifier_kind = classification.summary.kind().to_string();
-                    let kept_bytes = summary_kept_bytes(&classification.summary, raw_bytes);
+                    let kept_bytes = classification.summary.kept_bytes(raw_bytes);
                     let summary_is_passthrough = classification.summary.is_passthrough();
 
                     let owner = invocation_owner(subject);
@@ -643,27 +644,6 @@ pub(crate) fn estimate_text_bytes(result: &CallToolResult) -> u64 {
             _ => 0,
         })
         .sum()
-}
-
-/// Bytes the model sees for a given summary. `Typed` extracts the
-/// inner string of single-string-field bodies (e.g. `{logs: String}`).
-pub(crate) fn summary_kept_bytes(summary: &ToolResultSummary, raw_bytes: u64) -> u64 {
-    match summary {
-        ToolResultSummary::Passthrough { .. } => raw_bytes,
-        ToolResultSummary::StructuredElision { kept_bytes, .. } => *kept_bytes as u64,
-        ToolResultSummary::Typed { body, .. } => match body {
-            serde_json::Value::String(s) => s.len() as u64,
-            serde_json::Value::Object(map) if map.len() == 1 => match map.values().next() {
-                Some(serde_json::Value::String(s)) => s.len() as u64,
-                _ => serde_json::to_string(body)
-                    .map(|s| s.len() as u64)
-                    .unwrap_or(0),
-            },
-            _ => serde_json::to_string(body)
-                .map(|s| s.len() as u64)
-                .unwrap_or(0),
-        },
-    }
 }
 
 pub(crate) fn record_pipeline_metrics(

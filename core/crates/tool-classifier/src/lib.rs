@@ -6,12 +6,16 @@
 use rmcp::model::CallToolResult;
 use serde::{Deserialize, Serialize};
 
+mod bash;
+mod cargo;
 mod concourse;
 mod git;
 mod nix;
 mod string_summarizer;
 mod walker;
 
+pub use bash::BashClassifier;
+pub use cargo::{CargoCheckRun, CargoCompileRun, CargoDownloadRun};
 pub use concourse::{ConcourseBuildLogClassifier, ConcourseBuildLogPreprocessor};
 pub use git::GitCloneProgress;
 pub use nix::{NixBuildingRun, NixCacheActivity, NixCopyRun, NixDrvList, NixFetchList};
@@ -64,6 +68,92 @@ impl ToolResultSummary {
 
     pub fn is_passthrough(&self) -> bool {
         matches!(self, Self::Passthrough { .. })
+    }
+
+    /// Bytes the agent ends up reading. Owns kind-aware dispatch
+    /// so callers never inspect `Typed` bodies directly.
+    pub fn kept_bytes(&self, raw_bytes: u64) -> u64 {
+        match self {
+            Self::Passthrough { .. } => raw_bytes,
+            Self::StructuredElision { kept_bytes, .. } => *kept_bytes as u64,
+            Self::Typed { typed_kind, body } => {
+                if typed_kind == bash::BASH_KIND {
+                    let stdout_len = body
+                        .get("stdout")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.len() as u64)
+                        .unwrap_or(0);
+                    let stderr_len = body
+                        .get("stderr")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.len() as u64)
+                        .unwrap_or(0);
+                    stdout_len + stderr_len
+                } else {
+                    canonical_text_for(body).len() as u64
+                }
+            }
+        }
+    }
+
+    /// Render the agent-visible envelope text. Owns kind-aware
+    /// rendering — `invocation_id_str` is the formatted UUID so
+    /// this crate stays free of `tool-cache` types.
+    pub fn render_envelope_text(&self, invocation_id_str: &str, raw_size_bytes: u64) -> String {
+        match self {
+            Self::Passthrough { value } => match value {
+                serde_json::Value::String(s) => s.clone(),
+                other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
+            },
+            Self::StructuredElision {
+                kept,
+                elided_paths,
+                total_bytes,
+                kept_bytes,
+            } => {
+                let mut out = String::new();
+                out.push_str(&format!(
+                    "[json elided: {kept_bytes}/{total_bytes} bytes kept; \
+                     fetch raw via tool_output_fetch(invocation_id=\"{invocation_id_str}\")]\n",
+                ));
+                if !elided_paths.is_empty() {
+                    out.push_str("=== elided paths ===\n");
+                    for p in elided_paths {
+                        let kind_str = match p.kind {
+                            ElisionKind::String => "string",
+                            ElisionKind::Array => "array",
+                            ElisionKind::Object => "object",
+                        };
+                        let length_str = p
+                            .length
+                            .map(|n| format!(", length: {n}"))
+                            .unwrap_or_default();
+                        out.push_str(&format!(
+                            "  {} ({}, {} bytes{})\n",
+                            p.path, kind_str, p.bytes, length_str,
+                        ));
+                    }
+                }
+                out.push_str("=== kept ===\n");
+                out.push_str(&canonical_text_for(kept));
+                out
+            }
+            Self::Typed { typed_kind, body } => {
+                if typed_kind == bash::BASH_KIND {
+                    bash::render_bash_envelope(body, invocation_id_str, raw_size_bytes)
+                } else {
+                    let mut out = format!(
+                        "[{typed_kind}: {raw_size_bytes} original bytes; \
+                         fetch raw via tool_output_fetch(invocation_id=\"{invocation_id_str}\")]\n",
+                    );
+                    out.push_str(&canonical_text_for(body));
+                    if !out.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    out
+                }
+            }
+        }
     }
 }
 
@@ -135,6 +225,7 @@ impl ClassifierRegistry {
             .register(ConcourseBuildLogClassifier::new(std::sync::Arc::clone(
                 &chain,
             )))
+            .register(BashClassifier::new(std::sync::Arc::clone(&chain)))
             .register(GenericFallback::default().with_summarizer_chain(chain))
     }
 
@@ -209,6 +300,9 @@ pub fn default_summarizer_chain() -> StringSummarizerChain {
         .register(nix::NixCopyRun)
         .register(nix::NixBuildingRun)
         .register(nix::NixCacheActivity)
+        .register(cargo::CargoDownloadRun)
+        .register(cargo::CargoCompileRun)
+        .register(cargo::CargoCheckRun)
         .register(git::GitCloneProgress)
         .register(string_summarizer::BulkElide::default())
 }
@@ -249,10 +343,7 @@ impl ResultClassifier for GenericFallback {
 
 /// Canonical text representation of a value: plain strings dump
 /// verbatim; single-string-field objects (`{logs: "…"}`) extract
-/// the inner string; anything else pretty-prints. Used for both
-/// grep-mode fetches and envelope rendering — exported so
-/// `tool-cache::envelope_text` can reuse instead of duplicating
-/// (cursor #3212927244, #3212927247).
+/// the inner string; anything else pretty-prints.
 pub fn canonical_text_for(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(s) => s.clone(),

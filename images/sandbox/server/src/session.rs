@@ -224,14 +224,11 @@ pub struct BashSession {
 
 #[derive(Debug)]
 pub struct CommandResult {
-    pub output: String,
+    pub stdout: String,
+    pub stderr: String,
     pub exit_code: i32,
-    /// True when the shell exited before echoing the per-command marker —
-    /// i.e. the command never completed normally. Distinguishes `exit 0`
-    /// (clean termination, output is empty) from a shell that died on
-    /// startup or mid-command (output carries any partial stdout/stderr
-    /// the shell printed before dying). Callers should surface this so
-    /// it doesn't get squashed into the generic exit-code path.
+    pub duration_ms: u64,
+    /// True when the shell exited before echoing the per-command marker.
     pub shell_died: bool,
 }
 
@@ -294,19 +291,16 @@ impl BashSession {
         }
 
         let timeout = Duration::from_millis(timeout_ms);
+        let started = std::time::Instant::now();
         match tokio::time::timeout(timeout, read_until_marker(&mut session.stdout, &request_id))
             .await
         {
             Ok(Ok(result)) => {
-                let output = self.collect_output(session, result).await;
+                let mut output = self.collect_output(session, result).await;
+                output.duration_ms = started.elapsed().as_millis() as u64;
                 Ok(output)
             }
             Ok(Err(read_err)) => {
-                // stdout EOF before the marker arrived. This is also the path
-                // for an explicit `exit N` (legitimate), so we still return Ok,
-                // but we drain stderr to EOF and surface any partial output so
-                // the caller can tell a clean exit from a shell that died on
-                // startup with no marker echo.
                 let mut session = guard.take().expect("session exists");
                 let _ = session.stdin.shutdown().await;
                 let exit_code = match session.child.wait().await {
@@ -317,17 +311,11 @@ impl BashSession {
                 while let Some(chunk) = session.stderr_rx.recv().await {
                     stderr_buf.push_str(&chunk);
                 }
-                let mut output = read_err.partial_stdout;
-                if !stderr_buf.is_empty() {
-                    output = if output.is_empty() {
-                        format!("--- stderr ---\n{stderr_buf}")
-                    } else {
-                        format!("{}\n--- stderr ---\n{}", output.trim_end(), stderr_buf)
-                    };
-                }
                 Ok(CommandResult {
-                    output,
+                    stdout: read_err.partial_stdout,
+                    stderr: stderr_buf,
                     exit_code,
+                    duration_ms: started.elapsed().as_millis() as u64,
                     shell_died: true,
                 })
             }
@@ -352,28 +340,16 @@ impl BashSession {
         session: &mut BashSessionInner,
         result: MarkerResult,
     ) -> CommandResult {
-        // Allow the stderr drainer to forward chunks that landed around the
-        // same time as the stdout marker.
         tokio::time::sleep(Duration::from_millis(10)).await;
-
         let mut stderr_buf = String::new();
         while let Ok(chunk) = session.stderr_rx.try_recv() {
             stderr_buf.push_str(&chunk);
         }
-
-        let output = if stderr_buf.is_empty() {
-            result.output
-        } else {
-            format!(
-                "{}\n--- stderr ---\n{}",
-                result.output.trim_end(),
-                stderr_buf
-            )
-        };
-
         CommandResult {
-            output,
+            stdout: result.output,
+            stderr: stderr_buf,
             exit_code: result.exit_code,
+            duration_ms: 0,
             shell_died: false,
         }
     }

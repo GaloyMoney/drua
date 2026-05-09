@@ -161,17 +161,32 @@ impl InstanceClient {
         Ok(resp)
     }
 
-    /// Typed wrapper over `/execute` for the `bash` tool.
+    /// Typed wrapper over `/execute` for the `bash` tool. The
+    /// sandbox server encodes `BashCommandOutput` as JSON inside
+    /// `ExecuteResponse.output`; we parse it back here. On
+    /// `is_error` (shell died, parse failures), the error string
+    /// rides through `output` as plain text.
     #[instrument(name = "sandbox.instance.execute_bash", skip_all)]
     pub async fn execute_bash(
         &self,
         input: &BashCommandInput,
-    ) -> Result<BashCommandOutput, InstanceError> {
+    ) -> Result<(BashCommandOutput, bool), InstanceError> {
         let resp = self.execute_typed("bash", input).await?;
-        Ok(BashCommandOutput {
-            output: resp.output,
-            is_error: resp.is_error,
-        })
+        if resp.is_error {
+            return Ok((
+                BashCommandOutput {
+                    stdout: String::new(),
+                    stderr: resp.output,
+                    exit_code: -1,
+                    duration_ms: 0,
+                },
+                true,
+            ));
+        }
+        let parsed: BashCommandOutput = serde_json::from_str(&resp.output).map_err(|e| {
+            InstanceError::Decode(format!("malformed bash output: {e}; raw: {}", resp.output))
+        })?;
+        Ok((parsed, false))
     }
 
     /// Typed wrapper over `/execute` for the `Glob` tool.

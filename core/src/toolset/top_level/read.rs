@@ -68,7 +68,6 @@ impl TopLevelTool for Read {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        // See bash.rs.
         subject.can_use_agent_file_tools()
     }
 
@@ -109,7 +108,6 @@ impl TopLevelTool for Read {
             .ok_or(ToolSetsError::Unauthorized)?;
         Audit::record_sandbox_id(sandbox_id);
 
-        // Translate offset/limit into the editor's view_range; start is 1-based, -1 = EOF.
         let mut editor_input = serde_json::json!({
             "command": "view",
             "path": params.path,
@@ -131,9 +129,6 @@ impl TopLevelTool for Read {
 
         match client.execute(&req).await {
             Ok(resp) => {
-                // Sandbox returns raw clipped text — Read owns the
-                // line-number formatting so space-fs and sandbox
-                // branches produce identical agent-visible bytes.
                 let content = if resp.is_error {
                     resp.output
                 } else {
