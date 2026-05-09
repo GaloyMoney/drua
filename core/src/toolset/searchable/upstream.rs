@@ -217,13 +217,6 @@ impl SearchableToolSet for UpstreamToolSet {
     }
 }
 
-/// When an upstream MCP tool returns its result as JSON-encoded text in
-/// `content[].text` without populating `structured_content`, parse it
-/// and stash the parsed value on `structured_content` so the classifier
-/// walker can do tree-aware elision instead of falling back to byte
-/// head/tail. No-op when the tool already provided structured content,
-/// when the text isn't JSON-shaped, or when parsing yields a scalar
-/// (only `Object`/`Array` are worth reifying).
 fn reify_json_structured_content(result: &mut CallToolResult) {
     if result.structured_content.is_some() {
         return;
@@ -365,8 +358,7 @@ mod tests {
 
     #[test]
     fn reify_handles_leading_whitespace() {
-        let mut r =
-            CallToolResult::success(vec![Content::text("  \n\t  [1,2,3]\n".to_string())]);
+        let mut r = CallToolResult::success(vec![Content::text("  \n\t  [1,2,3]\n".to_string())]);
         reify_json_structured_content(&mut r);
         assert!(r.structured_content.unwrap().is_array());
     }
