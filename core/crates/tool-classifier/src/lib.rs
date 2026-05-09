@@ -8,6 +8,7 @@ mod cargo;
 mod concourse;
 mod git;
 mod nix;
+mod rsync;
 mod string_summarizer;
 mod terraform_install;
 mod terraform_state;
@@ -21,6 +22,7 @@ pub use nix::{
     NixBuildingRun, NixCacheActivity, NixCopyRun, NixDerivationPreprocessor, NixDrvList,
     NixFetchList, NixImageLayerRun,
 };
+pub use rsync::RsyncFileList;
 pub use string_summarizer::{
     build_marker, close_tag, open_tag, BulkElide, SegmentedText, StringSummarizer,
     StringSummarizerChain, VerbatimRegion,
@@ -286,6 +288,7 @@ pub fn default_summarizer_chain() -> StringSummarizerChain {
         .register(terraform_install::TerraformInstallRun)
         .register(terraform_state::TerraformRefreshRun)
         .register(terraform_state::TerraformDataSourceRun)
+        .register(rsync::RsyncFileList)
         .register(git::GitCloneProgress)
         .register(string_summarizer::BulkElide::default())
 }
