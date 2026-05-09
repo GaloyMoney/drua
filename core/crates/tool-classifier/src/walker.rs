@@ -344,7 +344,14 @@ fn walk_object(
         }
         return walked_value;
     }
-    peel_object_keys(walked, threshold, path, paths, per_key_paths, original_sizes)
+    peel_object_keys(
+        walked,
+        threshold,
+        path,
+        paths,
+        per_key_paths,
+        original_sizes,
+    )
 }
 
 fn peel_object_keys(
@@ -404,10 +411,7 @@ fn peel_object_keys(
                 break;
             }
         };
-        let original_size = original_sizes
-            .get(&key)
-            .copied()
-            .unwrap_or(post_walk_size);
+        let original_size = original_sizes.get(&key).copied().unwrap_or(post_walk_size);
         // Drop the peeled key's child paths — those positions are
         // gone in the sentinel-replaced subtree.
         per_key_paths.retain(|(k, _)| k != &key);
@@ -625,7 +629,10 @@ mod tests {
                 panic!(
                     "expected a peeled field with bytes ≈ original size; \
                      got: {:?}",
-                    elided_paths.iter().map(|p| (p.path.clone(), p.bytes)).collect::<Vec<_>>(),
+                    elided_paths
+                        .iter()
+                        .map(|p| (p.path.clone(), p.bytes))
+                        .collect::<Vec<_>>(),
                 )
             });
         // Should be ~50 KB + 2 (quotes), not the byte-elided ~520.

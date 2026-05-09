@@ -178,11 +178,7 @@ impl SegmentedText {
     ///
     /// Returns `false` if `head_lines + tail_lines >= current_lines`
     /// or post-snap boundaries leave no middle to elide.
-    pub fn elide_middle_keep_head_and_tail(
-        &mut self,
-        head_lines: u32,
-        tail_lines: u32,
-    ) -> bool {
+    pub fn elide_middle_keep_head_and_tail(&mut self, head_lines: u32, tail_lines: u32) -> bool {
         let total = self.current_lines();
         if head_lines + tail_lines >= total {
             return false;
@@ -207,10 +203,7 @@ impl SegmentedText {
         let head_text = self.log[..middle_start_byte].to_string();
         let tail_text = self.log[middle_end_byte..].to_string();
 
-        let middle_body = format!(
-            "{} lines · {} bytes elided\n",
-            elided_lines, elided_bytes,
-        );
+        let middle_body = format!("{} lines · {} bytes elided\n", elided_lines, elided_bytes,);
         let middle_marker = build_marker(
             "bulk-elided",
             head_original_end..tail_original_start,
@@ -614,8 +607,7 @@ impl StringSummarizer for BulkElide {
             return false;
         }
         let pre_bytes = ctx.log().len();
-        let did_elide =
-            ctx.elide_middle_keep_head_and_tail(self.head_lines, self.tail_lines);
+        let did_elide = ctx.elide_middle_keep_head_and_tail(self.head_lines, self.tail_lines);
         if did_elide {
             // Warn-level: BulkElide is the dumb fallback — when it
             // fires, the structured passes weren't specific enough

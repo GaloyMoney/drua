@@ -269,10 +269,7 @@ fn k8s_shape_preserves_root_object_structure() {
         obj.get("namespace").and_then(|v| v.as_str()),
         Some("default")
     );
-    assert_eq!(
-        obj.get("container").and_then(|v| v.as_str()),
-        Some("drua")
-    );
+    assert_eq!(obj.get("container").and_then(|v| v.as_str()), Some("drua"));
 
     // `logs` is still a String (type-preserved at the leaf), and
     // BulkElide bracketed it with <head>/<tail> markers.
