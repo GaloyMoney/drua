@@ -6,7 +6,6 @@ use serde::Deserialize;
 
 use crate::auth::AuthSubject;
 
-use super::super::filter::OutputFilter;
 use super::super::{SearchableToolSet, ToolSetEntry, ToolSetsError};
 
 fn parse_params<T: serde::de::DeserializeOwned>(
@@ -80,6 +79,7 @@ struct PipelineJobParams {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct BuildIdParams {
+    /// Global Concourse `build_id` (numeric); not the per-job build name from a URL — map URL names via `list_builds_for_job`.
     #[serde(deserialize_with = "deserialize_liberal_i64")]
     build_id: i64,
 }
@@ -215,6 +215,20 @@ mod schema_tests {
         let schema = schema_for::<BuildStatusOutput>();
         assert!(description_for(&schema, "start_time").contains("seconds"));
         assert!(description_for(&schema, "end_time").contains("seconds"));
+    }
+
+    #[test]
+    fn build_id_param_distinguishes_global_id_from_url_build_name() {
+        let schema = schema_for::<BuildIdParams>();
+        let desc = description_for(&schema, "build_id");
+        assert!(
+            desc.contains("Global"),
+            "build_id description must call out global vs URL build name: {desc}"
+        );
+        assert!(
+            desc.contains("list_builds_for_job"),
+            "build_id description must point at recovery path: {desc}"
+        );
     }
 
     /// MCP `structuredContent` must be a JSON object — list-style outputs
@@ -362,15 +376,11 @@ impl ConcourseToolSet {
                 (*PIPELINE_JOB_SCHEMA).clone(),
                 (*OUT_BUILD_STATUS).clone(),
             ),
-            tool_entry_with_filter(
+            tool_entry(
                 "get_build_logs",
-                "Get build output/logs for a Concourse build by its numeric build ID. Returns log output as plain text. For in-flight builds, returns partial output — use get_build_status first to check if the build has finished. Output filtering (grep, tail, head) is handled by call_tool's output_filter parameter; default: tail 150 lines.",
+                "Get build output/logs for a Concourse build by its numeric build ID. Returns log output as plain text. For in-flight builds, returns partial output — use get_build_status first to check if the build has finished. Oversize logs are auto-classified by the universal pipeline (typed Concourse summary + persisted full bytes); recover specific slices via tool_output_fetch(invocation_id, query={mode:'tail'|'head'|'range'|'grep', ...}).",
                 (*BUILD_ID_SCHEMA).clone(),
                 (*OUT_BUILD_LOGS).clone(),
-                Some(OutputFilter {
-                    tail: Some(150),
-                    ..Default::default()
-                }),
             ),
             tool_entry(
                 "trigger_build",
@@ -587,16 +597,6 @@ fn tool_entry(
     schema: serde_json::Value,
     output_schema: serde_json::Value,
 ) -> ToolSetEntry {
-    tool_entry_with_filter(name, description, schema, output_schema, None)
-}
-
-fn tool_entry_with_filter(
-    name: &str,
-    description: &str,
-    schema: serde_json::Value,
-    output_schema: serde_json::Value,
-    default_output_filter: Option<OutputFilter>,
-) -> ToolSetEntry {
     let input_schema: JsonObject = match schema {
         serde_json::Value::Object(m) => m,
         _ => Default::default(),
@@ -613,7 +613,6 @@ fn tool_entry_with_filter(
     ToolSetEntry {
         name: name.to_string(),
         description: tool,
-        default_output_filter,
     }
 }
 

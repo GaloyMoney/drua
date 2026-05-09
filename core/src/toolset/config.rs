@@ -70,7 +70,7 @@ fn default_max_tool_result_bytes() -> usize {
 }
 
 fn default_max_return_bytes() -> usize {
-    100 * 1024
+    16 * 1024 * 1024
 }
 
 fn default_max_console_bytes() -> usize {

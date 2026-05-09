@@ -28,7 +28,7 @@ async fn init_toolsets() {
         }],
         ..Default::default()
     };
-    let toolsets = ToolSets::init(config, None, None).await.unwrap();
+    let toolsets = ToolSets::init(config, None, None, None).await.unwrap();
 
     // Anonymous subject still sees the unrestricted builtins — the new
     // trait defaults `is_visible` to `true`. Make sure init succeeded and

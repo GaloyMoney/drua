@@ -30,7 +30,7 @@ toolsets:
   compose:
     max_tool_calls: 50
     max_tool_result_bytes: 33554432
-    max_return_bytes: 102400
+    max_return_bytes: 16777216
     max_console_bytes: 8192
     memory_limit_bytes: 67108864
     stack_limit_bytes: 524288

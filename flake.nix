@@ -35,6 +35,11 @@
             (builtins.match ".*\.toml$" path != null) ||
             (builtins.match ".*\.jsonl$" path != null) ||
             (builtins.match ".*\.graphql$" path != null) ||
+            # Test fixtures with arbitrary extensions — `.log` files
+            # captured from upstream tools (concourse, etc.) used by
+            # `include_str!` in integration tests. Keep them inside
+            # `tests/fixtures/` so this carve-out stays narrow.
+            (builtins.match ".*/tests/fixtures/.*" path != null) ||
             craneLib.filterCargoSources path type;
         };
 

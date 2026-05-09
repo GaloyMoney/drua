@@ -128,8 +128,14 @@ galoyAgents:
       ## (logs, manifests) and filter them before returning. Sized to
       ## hold realistic Concourse build logs (95–99th percentile).
       maxToolResultBytes: "33554432"
-      ## Final-return cap. Bounded so the agent context stays clean.
-      maxReturnBytes: "102400"
+      ## Final-return hard ceiling vs runaway scripts. Compose
+      ## self-curates oversize returns via the walker (4 KiB
+      ## threshold) and persists full bytes to `tool_invocations`
+      ## for `tool_output_fetch` recovery — so this needs to sit
+      ## well above any realistic tool output (concourse logs
+      ## ~280 KiB, cargo logs in MiB) to avoid pre-empting the
+      ## walker. Pathological scripts get caught here.
+      maxReturnBytes: "16777216"
       ## Console buffer cap. Tail-truncated when exceeded — newest lines
       ## kept, oldest dropped. ~1% of agent context at 8 KiB.
       maxConsoleBytes: "8192"

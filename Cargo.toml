@@ -7,6 +7,8 @@ members = [
   "lib/zenduty-client",
   "core",
   "core/crates/library",
+  "core/crates/tool-cache",
+  "core/crates/tool-classifier",
   "mcp-gateway",
   "lib/sandbox",
   "lib/tracing-utils",

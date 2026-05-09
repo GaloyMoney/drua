@@ -81,7 +81,6 @@ impl UpstreamToolSet {
             .map(|description| ToolSetEntry {
                 name: description.name.to_string(),
                 description,
-                default_output_filter: None,
             })
             .collect();
 

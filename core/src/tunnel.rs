@@ -263,7 +263,6 @@ impl TunnelToolSet {
                 Some(ToolSetEntry {
                     name: tool.name.to_string(),
                     description: tool,
-                    default_output_filter: None,
                 })
             })
             .collect();

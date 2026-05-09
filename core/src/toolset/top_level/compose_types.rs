@@ -1,6 +1,4 @@
-//! `compose_types` — return TypeScript declarations for specific tools, for
-//! use with `compose`. A batched, code-focused alternative to `describe_tool`
-//! that gives agents typed function signatures before writing compose scripts.
+//! TypeScript declarations for tools, for use with `compose`.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock, RwLock};
@@ -18,6 +16,18 @@ use super::{parse_params, schema_for};
 struct ComposeTypesParams {
     /// Prefixed tool names. Use `"*"` as a single element for all visible tools.
     tool_names: Vec<String>,
+}
+
+fn matches_pattern(name: &str, pattern: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        name.starts_with(prefix)
+    } else {
+        name == pattern
+    }
+}
+
+fn any_match(name: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|p| matches_pattern(name, p))
 }
 
 pub struct ComposeTypes {
@@ -56,6 +66,9 @@ impl TopLevelTool for ComposeTypes {
     fn description(&self) -> &str {
         "Get TypeScript declarations for specific tools, for use with compose. \
          Returns typed function signatures with input parameters and output types. \
+         `tool_names` accepts exact names (`concourse_get_build_logs`), \
+         single-trailing-`*` prefix globs (`concourse_*`, `concourse_get_*`), \
+         and bare `\"*\"` (alone) for every visible tool. \
          Tools with `Promise<any>` return type have no declared output schema — \
          their result may be string or JSON depending on the tool."
     }
@@ -91,7 +104,7 @@ impl TopLevelTool for ComposeTypes {
             if !tool.composable() || !tool.is_visible(subject) {
                 continue;
             }
-            if !want_all && !params.tool_names.contains(name) {
+            if !want_all && !any_match(name, &params.tool_names) {
                 continue;
             }
             let params_ts = json_schema_ts::schema_to_ts_params(tool.input_schema());
@@ -113,7 +126,7 @@ impl TopLevelTool for ComposeTypes {
             let prefix = set.prefix().to_string();
             for entry in set.tools() {
                 let prefixed_name = format!("{}_{}", prefix, entry.name);
-                if !want_all && !params.tool_names.contains(&prefixed_name) {
+                if !want_all && !any_match(&prefixed_name, &params.tool_names) {
                     continue;
                 }
 
@@ -145,7 +158,7 @@ impl TopLevelTool for ComposeTypes {
             params
                 .tool_names
                 .iter()
-                .filter(|name| !matched.contains(name))
+                .filter(|pat| !matched.iter().any(|m| matches_pattern(m, pat)))
                 .cloned()
                 .collect()
         };
@@ -191,5 +204,53 @@ impl TopLevelTool for ComposeTypes {
         let mut result = CallToolResult::success(vec![Content::text(text)]);
         result.structured_content = Some(structured);
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn p(s: &str) -> String {
+        s.to_string()
+    }
+
+    #[test]
+    fn exact_name_matches() {
+        assert!(matches_pattern(
+            "concourse_get_build_logs",
+            "concourse_get_build_logs"
+        ));
+        assert!(!matches_pattern(
+            "concourse_get_build_logs",
+            "concourse_get_build_log"
+        ));
+    }
+
+    #[test]
+    fn trailing_star_is_prefix_glob() {
+        assert!(matches_pattern("concourse_get_build_logs", "concourse_*"));
+        assert!(matches_pattern("concourse_list_jobs", "concourse_*"));
+        assert!(!matches_pattern("github_list_prs", "concourse_*"));
+
+        assert!(matches_pattern(
+            "concourse_get_build_logs",
+            "concourse_get_*"
+        ));
+        assert!(!matches_pattern("concourse_list_jobs", "concourse_get_*"));
+    }
+
+    #[test]
+    fn bare_star_matches_anything_under_any_match() {
+        assert!(any_match("concourse_get_build_logs", &[p("*")]));
+        assert!(any_match("anything_at_all", &[p("*")]));
+    }
+
+    #[test]
+    fn any_match_unions_patterns() {
+        let patterns = vec![p("github_list_*"), p("concourse_get_build_logs")];
+        assert!(any_match("github_list_prs", &patterns));
+        assert!(any_match("concourse_get_build_logs", &patterns));
+        assert!(!any_match("concourse_list_jobs", &patterns));
     }
 }

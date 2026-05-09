@@ -41,12 +41,14 @@ teardown_file() {
   echo "$RESP" | jq -r '.output' | grep -qE "Shell exited before completing the command.*exit_code=42"
 }
 
-@test "sandbox: bash returns error from sub-shell non-zero exit" {
+@test "sandbox: bash sub-shell non-zero exit surfaces in structured output" {
   RESP=$(sandbox_execute '{"tool":"bash","input":{"command":"bash -c '\''exit 42'\''"}}')
   echo "$RESP"
 
-  echo "$RESP" | jq -e '.is_error == true'
-  echo "$RESP" | jq -r '.output' | grep -q "Exit code 42"
+  # Sub-shell exit keeps the parent session alive, so HTTP returns ok.
+  # The exit code lands in the structured BashCommandOutput body.
+  echo "$RESP" | jq -e '.is_error == false'
+  echo "$RESP" | jq -r '.output' | jq -e '.exit_code == 42'
 }
 
 @test "sandbox: bash restart returns success" {
@@ -131,17 +133,18 @@ teardown_file() {
 
 # ── Text editor: view (file) ────────────────────────────────────────
 
-@test "sandbox: text editor views a file with line numbers" {
-  # Create file first
+@test "sandbox: text editor views a file" {
+  # Sandbox returns plain bytes; cat -n line numbering is applied
+  # at the tool layer (core/), not at /execute.
   echo -e "alpha\nbeta\ngamma" > "$SANDBOX_WORK/viewme.txt"
 
   RESP=$(sandbox_execute "{\"tool\":\"str_replace_based_edit_tool\",\"input\":{\"command\":\"view\",\"path\":\"$SANDBOX_WORK/viewme.txt\"}}")
   echo "$RESP"
 
   echo "$RESP" | jq -e '.is_error == false'
-  echo "$RESP" | jq -r '.output' | grep -q "1: alpha"
-  echo "$RESP" | jq -r '.output' | grep -q "2: beta"
-  echo "$RESP" | jq -r '.output' | grep -q "3: gamma"
+  [ "$(echo "$RESP" | jq -r '.output')" = "alpha
+beta
+gamma" ]
 }
 
 @test "sandbox: text editor views a file with view_range" {
@@ -151,13 +154,9 @@ teardown_file() {
   echo "$RESP"
 
   echo "$RESP" | jq -e '.is_error == false'
-  OUTPUT=$(echo "$RESP" | jq -r '.output')
-  echo "$OUTPUT" | grep -q "2: b"
-  echo "$OUTPUT" | grep -q "3: c"
-  echo "$OUTPUT" | grep -q "4: d"
-  # Should NOT contain lines outside the range
-  ! echo "$OUTPUT" | grep -q "1: a"
-  ! echo "$OUTPUT" | grep -q "5: e"
+  [ "$(echo "$RESP" | jq -r '.output')" = "b
+c
+d" ]
 }
 
 @test "sandbox: text editor view nonexistent file returns error" {

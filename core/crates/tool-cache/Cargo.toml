@@ -1,0 +1,18 @@
+[package]
+name = "drua-tool-cache"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+drua-tool-classifier = { path = "../tool-classifier" }
+chrono = { version = "0.4", features = ["clock", "serde"], default-features = false }
+regex = "1"
+rmcp = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+schemars = { workspace = true }
+sha2 = { workspace = true }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json", "macros"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true, features = ["v4", "serde"] }

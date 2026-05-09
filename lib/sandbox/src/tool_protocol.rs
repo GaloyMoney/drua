@@ -52,12 +52,13 @@ impl BashCommandInput {
     }
 }
 
-/// Typed response for the `bash` tool. Same wire shape as the generic
-/// `/execute` envelope — this is a renamed alias on the wire.
+/// Typed response for the `bash` tool with stdout and stderr kept separate.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct BashCommandOutput {
-    pub output: String,
-    pub is_error: bool,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    pub duration_ms: u64,
 }
 
 #[derive(Debug, Error)]
@@ -131,7 +132,9 @@ pub struct GrepInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub glob: Option<String>,
 
-    /// File type to search (e.g. `rust`, `py`, `js`).
+    /// Ripgrep language tag for type-based filtering (e.g. `rust`, `py`,
+    /// `js`, `ts`, `md`, `json`, `toml`, `yaml`). Use `glob` for filename
+    /// patterns. Omit when not filtering by language.
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub type_: Option<String>,
 
@@ -415,12 +418,16 @@ mod tests {
     fn bash_output_roundtrip() {
         for case in [
             BashCommandOutput {
-                output: "hello\n".to_string(),
-                is_error: false,
+                stdout: "hello\n".to_string(),
+                stderr: String::new(),
+                exit_code: 0,
+                duration_ms: 12,
             },
             BashCommandOutput {
-                output: "Exit code 1\noops".to_string(),
-                is_error: true,
+                stdout: String::new(),
+                stderr: "oops\n".to_string(),
+                exit_code: 1,
+                duration_ms: 4,
             },
         ] {
             let json = serde_json::to_value(&case).unwrap();

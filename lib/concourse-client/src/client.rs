@@ -58,10 +58,10 @@ impl ConcourseClient {
                 .headers(self.auth.auth_headers().await)
                 .send()
                 .await?;
-            return Self::handle_response(resp).await;
+            return Self::handle_response("GET", path, resp).await;
         }
 
-        Self::handle_response(resp).await
+        Self::handle_response("GET", path, resp).await
     }
 
     /// POST (empty body) with auth, automatic 401 retry.
@@ -88,13 +88,15 @@ impl ConcourseClient {
                 .headers(self.auth.auth_headers().await)
                 .send()
                 .await?;
-            return Self::handle_response(resp).await;
+            return Self::handle_response("POST", path, resp).await;
         }
 
-        Self::handle_response(resp).await
+        Self::handle_response("POST", path, resp).await
     }
 
     async fn handle_response<T: serde::de::DeserializeOwned>(
+        method: &str,
+        path: &str,
         resp: reqwest::Response,
     ) -> Result<T, ConcourseError> {
         let status = resp.status();
@@ -103,7 +105,9 @@ impl ConcourseClient {
             let body = resp.text().await.unwrap_or_default();
             return Err(ConcourseError::Api {
                 status: code,
-                message: body,
+                method: method.to_string(),
+                path: path.to_string(),
+                message: build_id_hint_for(code, path, &body),
             });
         }
         let body = resp.json::<T>().await?;
@@ -125,15 +129,31 @@ impl ConcourseClient {
         self.get(&format!("/teams/{team}/pipelines")).await
     }
 
-    /// Falls back to the configured default team if the pipeline isn't found.
+    /// Errors with `PipelineNotFound` rather than silently falling back to the configured default team.
     #[tracing::instrument(name = "concourse_client.resolve_pipeline_team", skip_all)]
     pub async fn resolve_pipeline_team(&self, pipeline: &str) -> Result<String, ConcourseError> {
         let pipelines = self.list_all_pipelines().await?;
         if let Some(p) = pipelines.iter().find(|p| p.name == pipeline) {
-            Ok(p.team_name.clone())
-        } else {
-            Ok(self.team.clone())
+            return Ok(p.team_name.clone());
         }
+        let mut names: Vec<&str> = pipelines.iter().map(|p| p.name.as_str()).collect();
+        names.sort_unstable();
+        let available = if names.is_empty() {
+            "<none visible>".to_string()
+        } else {
+            const CAP: usize = 30;
+            if names.len() > CAP {
+                let head = names[..CAP].join(", ");
+                let rest = names.len() - CAP;
+                format!("{head}, … (+{rest} more)")
+            } else {
+                names.join(", ")
+            }
+        };
+        Err(ConcourseError::PipelineNotFound {
+            pipeline: pipeline.to_string(),
+            available,
+        })
     }
 
     #[tracing::instrument(name = "concourse_client.list_jobs", skip_all)]
@@ -225,7 +245,8 @@ impl ConcourseClient {
         build_id: i64,
     ) -> Result<reqwest::Response, ConcourseError> {
         self.auth.ensure_token(&self.http, &self.base_url).await?;
-        let url = self.api_url(&format!("/builds/{build_id}/events"))?;
+        let path = format!("/builds/{build_id}/events");
+        let url = self.api_url(&path)?;
 
         let resp = self
             .http
@@ -240,7 +261,9 @@ impl ConcourseClient {
             let body = resp.text().await.unwrap_or_default();
             return Err(ConcourseError::Api {
                 status,
-                message: body,
+                method: "GET".to_string(),
+                path: path.clone(),
+                message: build_id_hint_for(status, &path, &body),
             });
         }
 
@@ -254,6 +277,24 @@ impl ConcourseClient {
             "/teams/{team}/pipelines/{pipeline}/jobs/{job}/builds"
         ))
         .await
+    }
+}
+
+// Concourse returns empty 404 bodies for build-scoped lookups; attach a hint
+// about the global-id-vs-name confusion that's the usual cause.
+fn build_id_hint_for(status: u16, path: &str, body: &str) -> String {
+    if status == 404 && path.starts_with("/builds/") {
+        let extra = "build_id is the global Concourse build id (numeric), \
+             not the per-job build name from URLs like `.../jobs/foo/builds/597`. \
+             Use list_builds_for_job(pipeline, job) and read `build_id` off the \
+             returned build whose `name` matches the URL segment.";
+        if body.is_empty() {
+            extra.to_string()
+        } else {
+            format!("{body} | hint: {extra}")
+        }
+    } else {
+        body.to_string()
     }
 }
 

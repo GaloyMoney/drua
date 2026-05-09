@@ -18,7 +18,6 @@ use crate::audit::Audit;
 use crate::auth::AuthSubject;
 
 use super::super::error::ToolSetsError;
-use super::super::filter::OutputFilter;
 use super::super::traits::{SearchableToolSet, TopLevelTool};
 use super::schema_for;
 
@@ -29,7 +28,6 @@ pub struct CatalogEntry {
     pub category: String,
     pub brief_description: String,
     pub full_tool: Tool,
-    pub default_output_filter: Option<OutputFilter>,
 }
 
 pub struct SearchCatalog {
@@ -168,7 +166,6 @@ struct DescribeToolOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::toolset::any_json_schema")]
     output_schema: Option<serde_json::Value>,
-    default_output_filter: String,
 }
 
 static SEARCH_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
@@ -196,13 +193,25 @@ impl TopLevelTool for SearchCatalog {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
+        Audit::record_action("search_tools");
         let args = arguments.as_ref();
         let query = args.and_then(|a| a.get("query")).and_then(|v| v.as_str());
         let category = args
             .and_then(|a| a.get("category"))
             .and_then(|v| v.as_str());
         let results = self.execute_search(subject, query, category);
-        let text = Self::format_results(&results);
+        let text = if results.is_empty() {
+            format!(
+                "No tools found matching {:?}.\n\n\
+                 search_tools matches by tool name, category, and description. \
+                 Try keywords describing the *action* you want \
+                 (e.g. `build`, `concourse`, `github`, `k8s`, `postgres`), \
+                 not project or repo names.",
+                query.unwrap_or(""),
+            )
+        } else {
+            Self::format_results(&results)
+        };
         let out = SearchToolsOutput {
             total: results.len(),
             tools: results
@@ -245,13 +254,6 @@ impl DescribeCatalogTool {
             .unwrap_or("No description available.");
         let schema =
             serde_json::to_string_pretty(&tool.input_schema).unwrap_or_else(|_| "{}".into());
-        let filter_desc = match &entry.default_output_filter {
-            Some(f) => format!("tool default: {}", f.describe()),
-            None => format!(
-                "global default: {}",
-                OutputFilter::global_default().describe()
-            ),
-        };
         let output_section = tool
             .output_schema
             .as_ref()
@@ -277,7 +279,7 @@ impl DescribeCatalogTool {
         );
 
         format!(
-            "## {}\n\nUpstream: {}\nCategory: {}\n\n{}\n\n### Parameters\n```json\n{}\n```{}{}\n\n### Default output filter\n{}\n\nUse call_tool(\"{}\", {{...}}) to execute.",
+            "## {}\n\nUpstream: {}\nCategory: {}\n\n{}\n\n### Parameters\n```json\n{}\n```{}{}\n\nUse call_tool(\"{}\", {{...}}) to execute.",
             entry.prefixed_name,
             entry.upstream_name,
             entry.category,
@@ -285,7 +287,6 @@ impl DescribeCatalogTool {
             schema,
             output_section,
             ts_signature,
-            filter_desc,
             entry.prefixed_name,
         )
     }
@@ -334,13 +335,6 @@ impl TopLevelTool for DescribeCatalogTool {
             Some(entry) => {
                 let text = Self::format_entry(&entry);
                 let tool = &entry.full_tool;
-                let filter_desc = match &entry.default_output_filter {
-                    Some(f) => format!("tool default: {}", f.describe()),
-                    None => format!(
-                        "global default: {}",
-                        OutputFilter::global_default().describe()
-                    ),
-                };
                 let out = DescribeToolOutput {
                     name: entry.prefixed_name,
                     upstream: entry.upstream_name,
@@ -351,7 +345,6 @@ impl TopLevelTool for DescribeCatalogTool {
                         .output_schema
                         .as_ref()
                         .map(|s| serde_json::Value::Object(s.as_ref().clone())),
-                    default_output_filter: filter_desc,
                 };
                 let structured =
                     serde_json::to_value(&out).expect("DescribeToolOutput serialization");
@@ -366,22 +359,30 @@ impl TopLevelTool for DescribeCatalogTool {
     }
 }
 
-/// Dispatches into the visible + executable `SearchableToolSet` for the
-/// caller and applies an optional output filter.
 pub struct CallCatalogTool {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
+    tool_invocations: Option<Arc<super::super::tool_invocations::ToolInvocations>>,
+    classifiers: Arc<super::super::classifier::ClassifierRegistry>,
 }
 
 impl CallCatalogTool {
-    pub fn new(sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>) -> Self {
-        Self { sets }
+    pub fn new(
+        sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
+        tool_invocations: Option<Arc<super::super::tool_invocations::ToolInvocations>>,
+        classifiers: Arc<super::super::classifier::ClassifierRegistry>,
+    ) -> Self {
+        Self {
+            sets,
+            tool_invocations,
+            classifiers,
+        }
     }
 
     fn find_set(
         &self,
         subject: &AuthSubject,
         prefixed_name: &str,
-    ) -> Option<(Arc<dyn SearchableToolSet>, String, Option<OutputFilter>)> {
+    ) -> Option<(Arc<dyn SearchableToolSet>, String)> {
         let sets = self.sets.read().expect("toolset lock poisoned");
         for set in sets.iter() {
             if !set.is_visible(subject) {
@@ -389,12 +390,8 @@ impl CallCatalogTool {
             }
             let prefix = format!("{}_", set.prefix());
             if let Some(tool_name) = prefixed_name.strip_prefix(&prefix) {
-                if let Some(entry) = set.tools().iter().find(|t| t.name == tool_name) {
-                    return Some((
-                        Arc::clone(set),
-                        tool_name.to_string(),
-                        entry.default_output_filter.clone(),
-                    ));
+                if set.tools().iter().any(|t| t.name == tool_name) {
+                    return Some((Arc::clone(set), tool_name.to_string()));
                 }
             }
         }
@@ -413,10 +410,6 @@ static CALL_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             "arguments": {
                 "type": "object",
                 "description": "Tool arguments matching the schema from describe_tool"
-            },
-            "output_filter": {
-                "type": "object",
-                "description": "Optional post-processing filter applied to the tool's output (head / tail / grep / invert_match / context_lines). Falls back to the tool's default or the global default when omitted."
             }
         },
         "required": ["tool_name"]
@@ -431,10 +424,19 @@ impl TopLevelTool for CallCatalogTool {
     fn description(&self) -> &str {
         "Execute an upstream tool by its prefixed name with the provided \
          arguments. Use describe_tool first to understand the parameters. \
-         Supports an optional output_filter to trim large outputs."
+         Oversize results are auto-classified and persisted; recover full \
+         bytes via tool_output_fetch(invocation_id, query)."
     }
     fn input_schema(&self) -> &serde_json::Value {
         &CALL_SCHEMA
+    }
+
+    fn bypass_universal_pipeline(&self) -> bool {
+        true
+    }
+
+    fn records_own_pipeline_metrics(&self) -> bool {
+        true
     }
 
     async fn call(
@@ -451,24 +453,93 @@ impl TopLevelTool for CallCatalogTool {
             serde_json::Value::Object(obj) => Some(obj),
             _ => None,
         });
-        let output_filter: Option<OutputFilter> = args
-            .remove("output_filter")
-            .and_then(|v| serde_json::from_value(v).ok());
 
-        let (set, name, tool_default_filter) = self
+        let extra_keys: Vec<String> = args.keys().cloned().collect();
+
+        let (set, name) = self
             .find_set(subject, &tool_name)
             .ok_or_else(|| ToolSetsError::ToolNotFound(tool_name.clone()))?;
 
-        // Override entrypoint action with the concrete upstream tool name —
-        // terminal handler, no domain service involved.
         Audit::record_action(format!("catalog: {}", tool_name));
 
-        let result = set.call(subject, &name, inner_args).await;
-        let filter = output_filter
-            .or(tool_default_filter)
-            .unwrap_or_else(OutputFilter::global_default);
-        result.and_then(|r| filter.apply(r))
+        let started_at = chrono::Utc::now();
+        let start = std::time::Instant::now();
+        let result = set.call(subject, &name, inner_args.clone()).await;
+        let duration_ms = start.elapsed().as_millis() as u64;
+
+        let result = annotate_envelope_mistake(result, &tool_name, &extra_keys)?;
+
+        let recorded_args = inner_args
+            .map(serde_json::Value::Object)
+            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
+
+        let Some(invocations) = self.tool_invocations.as_ref() else {
+            let raw_bytes = super::super::estimate_text_bytes(&result);
+            super::super::record_pipeline_metrics(raw_bytes, raw_bytes, "bypass", false);
+            return Ok(result);
+        };
+        let classification =
+            self.classifiers
+                .classify(&super::super::classifier::ClassifierContext {
+                    tool_name: &tool_name,
+                    args: &recorded_args,
+                    raw: &result,
+                    exit_code: None,
+                });
+        let raw_bytes = classification.canonical_text.len() as u64;
+        let classifier_kind = classification.summary.kind().to_string();
+        let kept_bytes = classification.summary.kept_bytes(raw_bytes);
+        if classification.summary.is_passthrough() {
+            super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, false);
+            return Ok(result);
+        }
+        let Some(owner) = super::super::invocation_owner(subject) else {
+            super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, false);
+            return Ok(result);
+        };
+        let outcome = invocations
+            .persist_and_envelope(
+                owner,
+                &tool_name,
+                &recorded_args,
+                classification,
+                &result,
+                duration_ms,
+                started_at,
+            )
+            .await;
+        let persisted = outcome.is_some();
+        super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, persisted);
+        match outcome {
+            Some((wrapped, invocation_id)) => {
+                crate::audit::Audit::record_tool_invocation_id(invocation_id);
+                Ok(wrapped)
+            }
+            None => Ok(result),
+        }
     }
+}
+
+fn annotate_envelope_mistake(
+    result: Result<CallToolResult, ToolSetsError>,
+    tool_name: &str,
+    extra_keys: &[String],
+) -> Result<CallToolResult, ToolSetsError> {
+    if extra_keys.is_empty() {
+        return result;
+    }
+    let Err(err) = result else {
+        return result;
+    };
+    let stray = extra_keys.join(", ");
+    let raw = err.to_string();
+    Err(ToolSetsError::InvalidArgument(format!(
+        "{raw}\nHint: call_tool envelope is {{tool_name, arguments:{{…}}}}; \
+         these top-level fields were ignored: {stray}. \
+         Likely you wrote `call_tool({{tool_name:\"{tool_name}\", {stray}: …}})` — \
+         move them inside `arguments`: \
+         `call_tool({{tool_name:\"{tool_name}\", arguments:{{{stray}: …}}}})`."
+    )))
 }
 
 fn visible_entries(
@@ -494,7 +565,6 @@ fn visible_entries(
                 category: set.category().to_string(),
                 brief_description: brief,
                 full_tool: desc.clone(),
-                default_output_filter: tool.default_output_filter.clone(),
             });
         }
     }
@@ -535,7 +605,6 @@ mod tests {
                         ToolSetEntry {
                             name: name.to_string(),
                             description: tool,
-                            default_output_filter: None,
                         }
                     })
                     .collect(),
@@ -565,7 +634,6 @@ mod tests {
                 entries: vec![ToolSetEntry {
                     name: name.to_string(),
                     description: tool,
-                    default_output_filter: None,
                 }],
             }
         }
@@ -731,6 +799,46 @@ mod tests {
         assert_eq!(SearchCatalog::normalize("list-pipelines"), "list pipelines");
         assert_eq!(SearchCatalog::normalize("Search_Code"), "search code");
         assert_eq!(SearchCatalog::normalize("no changes"), "no changes");
+    }
+
+    #[test]
+    fn envelope_mistake_hint_is_prepended_when_extra_keys_present() {
+        let inner = Err(ToolSetsError::InvalidArgument(
+            "missing field `build_id`".to_string(),
+        ));
+        let wrapped =
+            annotate_envelope_mistake(inner, "concourse_get_build_logs", &["build_id".to_string()]);
+        let msg = wrapped.unwrap_err().to_string();
+        assert!(
+            msg.contains("missing field `build_id`"),
+            "underlying error preserved: {msg}"
+        );
+        assert!(
+            msg.contains("call_tool envelope"),
+            "envelope hint added: {msg}"
+        );
+        assert!(
+            msg.contains("arguments:{build_id: …}"),
+            "fix shape suggested: {msg}"
+        );
+    }
+
+    #[test]
+    fn envelope_mistake_passthrough_when_no_extra_keys() {
+        let inner = Err(ToolSetsError::InvalidArgument("oops".to_string()));
+        let out = annotate_envelope_mistake(inner, "concourse_get_build_logs", &[]);
+        assert_eq!(
+            out.unwrap_err().to_string(),
+            "ToolSetsError - InvalidArgument: oops"
+        );
+    }
+
+    #[test]
+    fn envelope_mistake_passthrough_on_success() {
+        let ok: Result<CallToolResult, ToolSetsError> =
+            Ok(CallToolResult::success(vec![Content::text("ok")]));
+        let out = annotate_envelope_mistake(ok, "x", &["stray".to_string()]);
+        assert!(out.is_ok());
     }
 
     /// Strict MCP clients (e.g. Claude Code) reject boolean schemas inside

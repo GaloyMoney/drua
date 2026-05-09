@@ -41,8 +41,8 @@ pub struct JsEngine {
     /// Cap on a single inner-tool result, in bytes. Scripts can pull large
     /// payloads and filter them before returning.
     max_tool_result_bytes: usize,
-    /// Cap on the script's final return value, in bytes — bounded so the
-    /// agent context stays clean.
+    // Anti-runaway hard ceiling only — must stay well above the walker's
+    // threshold or it pre-empts the universal pipeline.
     max_return_bytes: usize,
     /// Cap on the console buffer in bytes. Drops oldest entries (tail
     /// truncation) when exceeded. Console is a debug sidecar, not primary
@@ -64,7 +64,7 @@ impl JsEngine {
             stack_limit: 512 * 1024,
             max_tool_calls: 50,
             max_tool_result_bytes: 4 * 1024 * 1024,
-            max_return_bytes: 100 * 1024,
+            max_return_bytes: 16 * 1024 * 1024,
             max_console_bytes: 8 * 1024,
         }
     }
@@ -513,8 +513,9 @@ fn register_tool_bridge(
                             return encode_error(&format!(
                                 "Tool result too large ({} bytes, max {max_tool_result_bytes}). \
                                  The tool returned more data than compose can hold in a single \
-                                 result. Try a more specific query (e.g. limit/filter parameters) \
-                                 or fall back to call_tool with output_filter.",
+                                 result. Try a more specific upstream query (limit/filter \
+                                 parameters), or recover the persisted bytes via \
+                                 tool_output_fetch(invocation_id, query).",
                                 result_json.len()
                             ));
                         }
