@@ -21,7 +21,8 @@ pub use config::*;
 pub use error::*;
 pub use searchable::*;
 pub use tool_invocations::{
-    FetchQuery, FetchResult, InvocationOwner, NewToolInvocation, ToolInvocation,
+    substitute_recovery_placeholder, FetchQuery, FetchResult, InvocationOwner, NewToolInvocation,
+    ToolInvocation,
     ToolInvocationError, ToolInvocationId, ToolInvocationOwnerId, ToolInvocations,
 };
 pub use top_level::{
