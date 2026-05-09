@@ -326,12 +326,14 @@ impl SegmentedText {
             "wrap_verbatim_lines: line_transform must preserve line count",
         );
 
-        let mut replacement_text = String::with_capacity(before.len() + transformed.len() + after.len());
+        let mut replacement_text =
+            String::with_capacity(before.len() + transformed.len() + after.len());
         replacement_text.push_str(before);
         replacement_text.push_str(&transformed);
         replacement_text.push_str(after);
 
-        self.log.replace_range(byte_start..byte_end, &replacement_text);
+        self.log
+            .replace_range(byte_start..byte_end, &replacement_text);
 
         let synthetic_before_lines = count_lines(before);
         let synthetic_after_lines = count_lines(after);

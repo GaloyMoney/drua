@@ -3,8 +3,7 @@
 use std::ops::Range;
 
 use crate::string_summarizer::{
-    apply_runs, build_marker, collect_runs, escape_attr, SegmentedText, StringSummarizer,
-    VerbatimRegion,
+    apply_runs, collect_runs, escape_attr, SegmentedText, StringSummarizer, VerbatimRegion,
 };
 
 pub struct NixCopyRun;
@@ -182,11 +181,8 @@ impl StringSummarizer for NixDerivationPreprocessor {
     }
 
     fn can_summarize(&self, ctx: &SegmentedText) -> bool {
-        ctx.verbatim_regions().any(|r| {
-            r.text
-                .lines()
-                .any(|l| derivation_prefix(l).is_some())
-        })
+        ctx.verbatim_regions()
+            .any(|r| r.text.lines().any(|l| derivation_prefix(l).is_some()))
     }
 
     fn apply(&self, ctx: &mut SegmentedText) -> bool {
@@ -256,7 +252,10 @@ mod tests {
     #[test]
     fn derivation_prefix_recognises_typical_names() {
         assert_eq!(derivation_prefix("drua> X\n"), Some("drua"));
-        assert_eq!(derivation_prefix("drua-conf.json> X\n"), Some("drua-conf.json"));
+        assert_eq!(
+            derivation_prefix("drua-conf.json> X\n"),
+            Some("drua-conf.json")
+        );
         assert_eq!(derivation_prefix("drua.tar.gz> X"), Some("drua.tar.gz"));
         assert_eq!(derivation_prefix("plain line\n"), None);
         assert_eq!(derivation_prefix(">> not a prefix\n"), None);
