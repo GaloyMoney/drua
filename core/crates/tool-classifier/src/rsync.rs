@@ -15,11 +15,24 @@ fn is_rsync_path_line(line: &str) -> bool {
     line.contains('/') || line.contains('.') || line == "./"
 }
 
+fn is_rsync_anchor(line: &str) -> bool {
+    line.starts_with("sending incremental file list")
+        || line.starts_with("receiving incremental file list")
+        || line.starts_with("total size is ")
+        || (line.starts_with("sent ") && line.contains(" received ") && line.contains(" bytes"))
+}
+
 impl StringSummarizer for RsyncFileList {
     fn name(&self) -> &'static str {
         "rsync-files"
     }
     fn can_summarize(&self, ctx: &SegmentedText) -> bool {
+        let has_anchor = ctx
+            .verbatim_regions()
+            .any(|r| r.text.lines().any(is_rsync_anchor));
+        if !has_anchor {
+            return false;
+        }
         ctx.verbatim_regions()
             .any(|r| r.text.lines().any(is_rsync_path_line))
     }
@@ -116,5 +129,15 @@ mod tests {
         let log = ctx.log();
         assert!(!log.contains("<rsync-files"));
         assert!(log.contains("indented/path1.tf"));
+    }
+
+    #[test]
+    fn ls_output_without_rsync_anchor_passes_through() {
+        let raw = "file1.txt\nfile2.txt\nfile3.txt\n";
+        let ctx = run(raw);
+        let log = ctx.log();
+        assert!(!log.contains("<rsync-files"));
+        assert!(log.contains("file1.txt"));
+        assert!(log.contains("file3.txt"));
     }
 }
