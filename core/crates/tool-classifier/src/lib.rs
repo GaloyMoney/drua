@@ -247,11 +247,13 @@ impl ResultClassifier for GenericFallback {
     }
 }
 
-/// Render the canonical text representation of a value for grep-mode
-/// fetches. Single-string-field objects (`{logs: "…"}`) extract the
-/// inner string so newlines are real line breaks for line-grep;
-/// anything else pretty-prints.
-pub(crate) fn canonical_text_for(value: &serde_json::Value) -> String {
+/// Canonical text representation of a value: plain strings dump
+/// verbatim; single-string-field objects (`{logs: "…"}`) extract
+/// the inner string; anything else pretty-prints. Used for both
+/// grep-mode fetches and envelope rendering — exported so
+/// `tool-cache::envelope_text` can reuse instead of duplicating
+/// (cursor #3212927244, #3212927247).
+pub fn canonical_text_for(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(s) => s.clone(),
         serde_json::Value::Object(map) if map.len() == 1 => match map.values().next() {

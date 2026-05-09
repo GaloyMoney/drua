@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::instrument;
 
-use drua_tool_classifier::{Classification, ToolResultSummary};
+use drua_tool_classifier::{canonical_text_for, Classification, ToolResultSummary};
 use repo::ToolInvocationRepo;
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
@@ -295,8 +295,7 @@ fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId, raw_size_byt
                 }
             }
             out.push_str("=== kept ===\n");
-            let pretty = serde_json::to_string_pretty(kept).unwrap_or_else(|_| kept.to_string());
-            out.push_str(&pretty);
+            out.push_str(&canonical_text_for(kept));
             out
         }
         ToolResultSummary::Typed { typed_kind, body } => {
@@ -305,26 +304,12 @@ fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId, raw_size_byt
                 "[{typed_kind}: {raw_size_bytes} original bytes; \
                  fetch raw via tool_output_fetch(invocation_id=\"{id}\")]\n",
             ));
-            out.push_str(&render_typed_body(body));
+            out.push_str(&canonical_text_for(body));
             if !out.ends_with('\n') {
                 out.push('\n');
             }
             out
         }
-    }
-}
-
-/// Single-string-field objects (e.g. `{logs: "…"}`) get the inner
-/// string dumped verbatim — pretty-print would escape newlines and
-/// break line-grep. Anything else pretty-prints.
-fn render_typed_body(body: &serde_json::Value) -> String {
-    match body {
-        serde_json::Value::String(s) => s.clone(),
-        serde_json::Value::Object(map) if map.len() == 1 => match map.values().next() {
-            Some(serde_json::Value::String(s)) => s.clone(),
-            _ => serde_json::to_string_pretty(body).unwrap_or_default(),
-        },
-        _ => serde_json::to_string_pretty(body).unwrap_or_default(),
     }
 }
 
