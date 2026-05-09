@@ -313,9 +313,18 @@ fn walk_object(
     // peeled to a sentinel — its descendant paths reference
     // locations that won't exist in `kept`). Cursor review
     // #3207731468 caught the orphan-paths shape.
+    //
+    // Capture each child's PRE-walk size before recursion. Used by
+    // `peel_object_keys` to populate `ElidedPath.bytes` and the
+    // sentinel's `bytes` field with the real original size — using
+    // the post-walk size would underreport when recursion already
+    // shrunk inner strings. Cursor review #3212527301.
     let mut walked: Map<String, Value> = Map::new();
     let mut per_key_paths: Vec<(String, Vec<ElidedPath>)> = Vec::with_capacity(map.len());
+    let mut original_sizes: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::with_capacity(map.len());
     for (k, v) in map.iter() {
+        original_sizes.insert(k.clone(), json_size(v));
         let mut child_paths = Vec::new();
         let walked_v = walk(
             v,
@@ -335,7 +344,7 @@ fn walk_object(
         }
         return walked_value;
     }
-    peel_object_keys(walked, threshold, path, paths, per_key_paths)
+    peel_object_keys(walked, threshold, path, paths, per_key_paths, original_sizes)
 }
 
 fn peel_object_keys(
@@ -344,6 +353,7 @@ fn peel_object_keys(
     path: &str,
     paths: &mut Vec<ElidedPath>,
     mut per_key_paths: Vec<(String, Vec<ElidedPath>)>,
+    original_sizes: std::collections::HashMap<String, usize>,
 ) -> Value {
     // Track running serialized size incrementally so we don't clone
     // the entire map and re-serialize it on every loop iteration
@@ -357,13 +367,19 @@ fn peel_object_keys(
         if current_size < threshold {
             break;
         }
-        // Largest verbatim (non-sentinel) value wins the peel.
+        // Pick the largest verbatim (non-sentinel) value to peel.
+        // Selection uses the POST-walk size (we want maximum
+        // current-size reduction). Reporting uses the ORIGINAL
+        // pre-walk size from `original_sizes` so `ElidedPath.bytes`
+        // and the sentinel's `bytes` reflect what was actually
+        // dropped from the input — not the recursion-shrunk
+        // intermediate size.
         let candidate = walked
             .iter()
             .filter(|(_, v)| !is_sentinel(v))
             .map(|(k, v)| (k.clone(), json_size(v)))
             .max_by_key(|(_, size)| *size);
-        let Some((key, value_size)) = candidate else {
+        let Some((key, post_walk_size)) = candidate else {
             // Nothing left to peel — give up; the parent's
             // post-walk size check will route us back to
             // Passthrough if we made things worse.
@@ -383,23 +399,28 @@ fn peel_object_keys(
                 break;
             }
         };
+        let original_size = original_sizes
+            .get(&key)
+            .copied()
+            .unwrap_or(post_walk_size);
         // Drop the peeled key's child paths — those positions are
         // gone in the sentinel-replaced subtree.
         per_key_paths.retain(|(k, _)| k != &key);
         paths.push(ElidedPath {
             path: format!("{path}.{key}"),
             kind,
-            bytes: value_size as u64,
+            bytes: original_size as u64,
             length,
             preview: None,
         });
-        let sentinel = sentinel_for(kind, value_size, length);
+        let sentinel = sentinel_for(kind, original_size, length);
         let sentinel_size = json_size(&sentinel);
         walked.insert(key, sentinel);
-        // Update running size: `value` was replaced by `sentinel`,
-        // every other byte stays the same.
+        // Running size accounting uses POST-walk size (what was
+        // actually in the serialized map) — only the reported
+        // bytes care about the original pre-walk size.
         current_size = current_size
-            .saturating_sub(value_size)
+            .saturating_sub(post_walk_size)
             .saturating_add(sentinel_size);
     }
     // Flush kept keys' child paths — they reference locations that
@@ -561,6 +582,58 @@ mod tests {
         assert!(elided_paths
             .iter()
             .any(|p| p.path == "$" && matches!(p.kind, ElisionKind::Array)));
+    }
+
+    /// Cursor review #3212527301: when a child value gets
+    /// byte-elided by recursion AND its key is later peeled into
+    /// a sentinel, both `ElidedPath.bytes` and the sentinel's
+    /// `bytes` field MUST report the ORIGINAL pre-walk size — not
+    /// the recursion-shrunk intermediate. Otherwise agents see a
+    /// smaller "dropped bytes" count than reality.
+    #[test]
+    fn peeled_object_key_reports_original_pre_walk_bytes() {
+        // Reproduce the cursor #3212527301 bug shape: many large
+        // string fields. Recursion byte-elides each (now ~520
+        // bytes), but the post-walk map is still well over
+        // threshold, so peel fires on a recursion-shrunk field.
+        // The reported `bytes` must reference the ORIGINAL 50 KB
+        // pre-walk size, not the ~520-byte post-walk slice.
+        let original_string_size = 50_000;
+        let mut obj = serde_json::Map::new();
+        for i in 0..50 {
+            obj.insert(
+                format!("field_{i:02}"),
+                Value::String("z".repeat(original_string_size)),
+            );
+        }
+        let v = Value::Object(obj);
+        let outcome = classify_value(&v, 4096, None);
+        let WalkOutcome::Elided { elided_paths, .. } = outcome else {
+            panic!("expected Elided");
+        };
+
+        // At least one field got peeled (the largest post-walk
+        // string sentinel — but in practice many will be peeled).
+        let peeled = elided_paths
+            .iter()
+            .find(|p| {
+                p.path.starts_with("$.field_")
+                    && matches!(p.kind, ElisionKind::String)
+                    && p.bytes > 1_000 // would be ~520 if bug present
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected a peeled field with bytes ≈ original size; \
+                     got: {:?}",
+                    elided_paths.iter().map(|p| (p.path.clone(), p.bytes)).collect::<Vec<_>>(),
+                )
+            });
+        // Should be ~50 KB + 2 (quotes), not the byte-elided ~520.
+        assert!(
+            peeled.bytes as usize >= original_string_size,
+            "peeled bytes should report original size; got {}",
+            peeled.bytes,
+        );
     }
 
     /// Object with one massively-large value: peel that key, others
