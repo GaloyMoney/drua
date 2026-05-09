@@ -272,8 +272,10 @@ impl ToolInvocations {
     /// Persist the captured raw output and decorate the original
     /// `CallToolResult` with an `envelope.invocation_id` so the caller
     /// can recover detail through `tool_output_fetch`. Returns the
-    /// original raw result on persistence failure (the model still
-    /// gets a usable result; the failure is logged).
+    /// wrapped result paired with the persisted invocation_id so the
+    /// dispatcher can stamp the audit row (cursor #3212593021).
+    /// Returns `None` on persistence failure — the dispatcher then
+    /// forwards the raw result unmodified; failure is logged.
     #[instrument(name = "tool_cache.persist_and_envelope", skip_all)]
     #[allow(clippy::too_many_arguments)]
     pub async fn persist_and_envelope(
@@ -285,7 +287,7 @@ impl ToolInvocations {
         raw: &CallToolResult,
         duration_ms: u64,
         started_at: chrono::DateTime<chrono::Utc>,
-    ) -> Option<CallToolResult> {
+    ) -> Option<(CallToolResult, ToolInvocationId)> {
         let persisted = self
             .persist_classification(
                 owner,
@@ -317,7 +319,7 @@ impl ToolInvocations {
             persisted.raw_size_bytes,
         ))];
         wrapped.structured_content = Some(envelope);
-        Some(wrapped)
+        Some((wrapped, persisted.invocation_id))
     }
 }
 

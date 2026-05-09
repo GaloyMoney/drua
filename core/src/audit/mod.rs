@@ -83,7 +83,11 @@ impl Audit {
         Self::update_context(|ctx| Self::set_resource_id(ctx, "skill_id", skill_id));
     }
 
-    pub fn record_tool_invocation_id(id: crate::primitives::ToolInvocationId) {
+    /// Generic over `Into<uuid::Uuid>` so the dispatcher can pass the
+    /// `drua_tool_cache::ToolInvocationId` returned by
+    /// `persist_and_envelope` directly. The local
+    /// `crate::primitives` newtype was removed (cursor #3212593021).
+    pub fn record_tool_invocation_id(id: impl Into<uuid::Uuid>) {
         Self::update_context(|ctx| Self::set_resource_id(ctx, "tool_invocation_id", id));
     }
 

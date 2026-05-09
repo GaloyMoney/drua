@@ -603,7 +603,10 @@ impl ToolSets {
                                     )
                                     .await
                                 {
-                                    Some(wrapped) => (wrapped, true),
+                                    Some((wrapped, invocation_id)) => {
+                                        Audit::record_tool_invocation_id(invocation_id);
+                                        (wrapped, true)
+                                    }
                                     None => (raw, false),
                                 }
                             }

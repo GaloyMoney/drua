@@ -517,7 +517,7 @@ impl TopLevelTool for CallCatalogTool {
             super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, false);
             return Ok(result);
         };
-        let wrapped = invocations
+        let outcome = invocations
             .persist_and_envelope(
                 owner,
                 &tool_name,
@@ -528,9 +528,15 @@ impl TopLevelTool for CallCatalogTool {
                 started_at,
             )
             .await;
-        let persisted = wrapped.is_some();
+        let persisted = outcome.is_some();
         super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, persisted);
-        Ok(wrapped.unwrap_or(result))
+        match outcome {
+            Some((wrapped, invocation_id)) => {
+                crate::audit::Audit::record_tool_invocation_id(invocation_id);
+                Ok(wrapped)
+            }
+            None => Ok(result),
+        }
     }
 }
 

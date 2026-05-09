@@ -22,7 +22,6 @@ es_entity::entity_id! {
     ProjectSecretId,
     SkillId,
     NoteId,
-    ToolInvocationId,
     WorkflowDefinitionId,
     WorkflowRunId;
 
