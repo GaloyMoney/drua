@@ -234,11 +234,10 @@ fn reify_json_structured_content(result: &mut CallToolResult) {
     if !(trimmed.starts_with('{') || trimmed.starts_with('[')) {
         return;
     }
-    match serde_json::from_str::<serde_json::Value>(trimmed) {
-        Ok(v @ (serde_json::Value::Object(_) | serde_json::Value::Array(_))) => {
-            result.structured_content = Some(v);
-        }
-        _ => {}
+    if let Ok(v @ (serde_json::Value::Object(_) | serde_json::Value::Array(_))) =
+        serde_json::from_str::<serde_json::Value>(trimmed)
+    {
+        result.structured_content = Some(v);
     }
 }
 
