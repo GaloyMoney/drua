@@ -387,6 +387,68 @@ fn escape_attr(v: &str) -> String {
         .replace('>', "&gt;")
 }
 
+pub fn collect_runs<F: Fn(&str) -> bool>(ctx: &SegmentedText, pred: F) -> Vec<Range<u32>> {
+    let mut runs = Vec::new();
+    for region in ctx.verbatim_regions() {
+        let lines: Vec<&str> = region.text.lines().collect();
+        let mut start: Option<u32> = None;
+        for (i, line) in lines.iter().enumerate() {
+            let abs = region.current.start + i as u32;
+            if pred(line) {
+                if start.is_none() {
+                    start = Some(abs);
+                }
+            } else if let Some(s) = start.take() {
+                if abs - s >= 2 {
+                    runs.push(s..abs);
+                }
+            }
+        }
+        if let Some(s) = start.take() {
+            if region.current.end - s >= 2 {
+                runs.push(s..region.current.end);
+            }
+        }
+    }
+    runs
+}
+
+pub fn apply_runs<F: Fn(u32, u64) -> String>(
+    ctx: &mut SegmentedText,
+    runs: Vec<Range<u32>>,
+    tag: &'static str,
+    body_for: F,
+) -> bool {
+    if runs.is_empty() {
+        return false;
+    }
+    let run_count = runs.len();
+    let metas: Vec<(Range<u32>, Range<u32>, u64)> = runs
+        .into_iter()
+        .map(|r| {
+            let orig = ctx.current_to_original_range(&r);
+            let bytes = ctx.byte_len_of_lines(r.clone());
+            (r, orig, bytes)
+        })
+        .collect();
+    let total_lines: u32 = metas.iter().map(|(r, _, _)| r.end - r.start).sum();
+    let total_bytes: u64 = metas.iter().map(|(_, _, b)| *b).sum();
+    for (run, original_range, original_bytes) in metas.into_iter().rev() {
+        let count = run.end - run.start;
+        let body = body_for(count, original_bytes);
+        let marker = build_marker(tag, original_range, original_bytes, &body, &[]);
+        ctx.replace_with_summary(run, &marker, tag);
+    }
+    tracing::debug!(
+        pass = tag,
+        run_count,
+        lines_collapsed = total_lines,
+        bytes_collapsed = total_bytes,
+        "drua_tool_classifier.string_summarizer.fired",
+    );
+    true
+}
+
 pub trait StringSummarizer: Send + Sync + 'static {
     fn name(&self) -> &'static str;
     fn can_summarize(&self, ctx: &SegmentedText) -> bool;

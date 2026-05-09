@@ -117,11 +117,8 @@ fn extract_structured(result: &CallToolResult) -> &serde_json::Value {
 #[tokio::test]
 async fn compose_with_small_result_no_elision() {
     let pool = pool().await;
-    let (toolsets, _) = build_toolsets_with_invocations(
-        &pool,
-        StubSet::new("stub", "list_items", 0),
-    )
-    .await;
+    let (toolsets, _) =
+        build_toolsets_with_invocations(&pool, StubSet::new("stub", "list_items", 0)).await;
 
     let user_id = insert_user(&pool).await;
     let subject = AuthSubject::User(user_id);

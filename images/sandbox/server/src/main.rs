@@ -2349,8 +2349,7 @@ mod tests {
         assert!(
             !post.shell_died,
             "shell must survive reset; stdout={:?} stderr={:?}",
-            post.stdout,
-            post.stderr,
+            post.stdout, post.stderr,
         );
         assert!(
             post.stdout.contains("persistent_shell_alive"),
