@@ -1314,7 +1314,7 @@ mod tests {
         let result = execute_text_editor(&test_session(), view_input)
             .await
             .unwrap();
-        assert_eq!(result, "b\nc");
+        assert_eq!(result, "b\nc\nd");
         assert!(result.contains("3: c"));
         assert!(result.contains("4: d"));
         assert!(!result.contains("1: a"));

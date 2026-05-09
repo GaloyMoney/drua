@@ -110,11 +110,16 @@ impl TopLevelTool for TextEditor {
             let space_result: Option<String> = match action {
                 TextEditorAction::View { path, view_range } => {
                     let range = view_range.map(|[s, e]| (s, e));
+                    let number_range = view_range.map(|[s, e]| {
+                        let start = s.max(1) as usize;
+                        let end = if e == -1 { usize::MAX } else { e as usize };
+                        (start, end)
+                    });
                     self.space_fs
                         .view_file(subject, &path, range)
                         .await?
                         .map(|view| match view {
-                            FileView::File(text) => text,
+                            FileView::File(text) => sandbox::number_lines(&text, number_range),
                             FileView::Dir(entries) => entries.join("\n"),
                         })
                 }
@@ -170,15 +175,35 @@ impl TopLevelTool for TextEditor {
                 .await
         }?;
 
+        // For `view` only, the sandbox now returns raw clipped text;
+        // wrap with `number_lines` so the response matches Anthropic's
+        // `str_replace_based_edit_tool view` (cat -n numbered).
+        // create / str_replace / insert return success messages —
+        // no numbering applied.
+        let view_range = match input.clone().resolve() {
+            Ok(TextEditorAction::View { view_range, .. }) => view_range.map(|[s, e]| {
+                let start = s.max(1) as usize;
+                let end = if e == -1 { usize::MAX } else { e as usize };
+                (start, end)
+            }),
+            _ => None,
+        };
+        let is_view = matches!(input.clone().resolve(), Ok(TextEditorAction::View { .. }));
+
         match client.execute_text_editor(&input).await {
             Ok(resp) => {
+                let formatted = if is_view && !resp.is_error {
+                    sandbox::number_lines(&resp.output, view_range)
+                } else {
+                    resp.output
+                };
                 let out = TextOutput {
-                    output: resp.output.clone(),
+                    output: formatted.clone(),
                 };
                 Ok(if resp.is_error {
-                    TEXT_EDITOR_OUTPUT.error(resp.output, &out)
+                    TEXT_EDITOR_OUTPUT.error(formatted, &out)
                 } else {
-                    TEXT_EDITOR_OUTPUT.success(resp.output, &out)
+                    TEXT_EDITOR_OUTPUT.success(formatted, &out)
                 })
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
