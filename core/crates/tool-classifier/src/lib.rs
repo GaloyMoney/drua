@@ -10,6 +10,7 @@ mod git;
 mod nix;
 mod string_summarizer;
 mod terraform_install;
+mod terraform_state;
 mod walker;
 
 pub use bash::BashClassifier;
@@ -25,6 +26,7 @@ pub use string_summarizer::{
     StringSummarizerChain, VerbatimRegion,
 };
 pub use terraform_install::TerraformInstallRun;
+pub use terraform_state::{TerraformDataSourceRun, TerraformRefreshRun};
 
 pub const DEFAULT_GENERIC_THRESHOLD_BYTES: usize = 4096;
 
@@ -282,6 +284,8 @@ pub fn default_summarizer_chain() -> StringSummarizerChain {
         .register(cargo::CargoCompileRun)
         .register(cargo::CargoCheckRun)
         .register(terraform_install::TerraformInstallRun)
+        .register(terraform_state::TerraformRefreshRun)
+        .register(terraform_state::TerraformDataSourceRun)
         .register(git::GitCloneProgress)
         .register(string_summarizer::BulkElide::default())
 }
