@@ -198,7 +198,7 @@ async fn compose_with_large_return_curated() {
 async fn compose_sub_invocations_directory_lists_only_persisted_calls() {
     let pool = pool().await;
     let (toolsets, _) =
-        build_toolsets_with_invocations(&pool, StubSet::new("stub", "list_items", 8000)).await;
+        build_toolsets_with_invocations(&pool, StubSet::new("stub", "list_items", 16_000)).await;
 
     let user_id = insert_user(&pool).await;
     let subject = AuthSubject::User(user_id);
@@ -253,7 +253,7 @@ async fn compose_sub_invocations_directory_lists_only_persisted_calls() {
 async fn compose_under_workflow_executor_no_persistence() {
     let pool = pool().await;
     let (toolsets, _) =
-        build_toolsets_with_invocations(&pool, StubSet::new("stub", "list_items", 8000)).await;
+        build_toolsets_with_invocations(&pool, StubSet::new("stub", "list_items", 16_000)).await;
 
     let subject = AuthSubject::workflow_executor(
         ProjectId::new(),
@@ -296,7 +296,7 @@ async fn compose_under_workflow_executor_no_persistence() {
 async fn tool_output_fetch_inside_compose_engine() {
     let pool = pool().await;
     let (toolsets, _) =
-        build_toolsets_with_invocations(&pool, StubSet::new("stub", "list_items", 8000)).await;
+        build_toolsets_with_invocations(&pool, StubSet::new("stub", "list_items", 16_000)).await;
 
     let user_id = insert_user(&pool).await;
     let subject = AuthSubject::User(user_id);

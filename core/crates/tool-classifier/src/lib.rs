@@ -389,7 +389,7 @@ mod tests {
 
     #[test]
     fn large_text_input_emits_structured_elision_with_string_kept() {
-        let lines: Vec<String> = (0..500).map(|i| format!("line-{i:04}")).collect();
+        let lines: Vec<String> = (0..1000).map(|i| format!("line-{i:04}")).collect();
         let body = lines.join("\n");
         assert!(body.len() >= DEFAULT_GENERIC_THRESHOLD_BYTES);
         let raw = result_with(&body);
