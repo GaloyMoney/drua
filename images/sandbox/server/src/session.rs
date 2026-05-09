@@ -612,7 +612,7 @@ mod tests {
         assert!(result.is_ok(), "execute failed: {:?}", result.err());
         let r = result.unwrap();
         assert_eq!(r.exit_code, 0);
-        assert!(r.output.contains("hello-session"));
+        assert!(r.stdout.contains("hello-session"));
     }
 
     #[tokio::test]
@@ -645,7 +645,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.exit_code, 0);
-        assert!(r.output.contains("persistent"));
+        assert!(r.stdout.contains("persistent"));
     }
 
     #[tokio::test]
@@ -704,7 +704,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            r.output.contains("empty"),
+            r.stdout.contains("empty"),
             "variable should be cleared after restart"
         );
     }
@@ -727,7 +727,7 @@ mod tests {
         // Next call should auto-create a new session
         let r = session.execute("echo recovered", DEFAULT_TIMEOUT_MS).await;
         assert!(r.is_ok(), "should recover: {:?}", r.err());
-        assert!(r.unwrap().output.contains("recovered"));
+        assert!(r.unwrap().stdout.contains("recovered"));
     }
 
     #[tokio::test]
@@ -751,7 +751,7 @@ mod tests {
             .execute("echo after-timeout", DEFAULT_TIMEOUT_MS)
             .await;
         assert!(r.is_ok(), "should recover after timeout: {:?}", r.err());
-        assert!(r.unwrap().output.contains("after-timeout"));
+        assert!(r.unwrap().stdout.contains("after-timeout"));
     }
 
     #[tokio::test]
@@ -800,7 +800,7 @@ mod tests {
             .execute("echo still-alive", DEFAULT_TIMEOUT_MS)
             .await;
         assert!(r.is_ok(), "should work after timeout: {:?}", r.err());
-        assert!(r.unwrap().output.contains("still-alive"));
+        assert!(r.unwrap().stdout.contains("still-alive"));
 
         let _ = tokio::fs::remove_file(&tmp).await;
     }

@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use super::string_summarizer::{SegmentedText, StringSummarizerChain};
+use super::string_summarizer::StringSummarizerChain;
 use super::walker::{self, WalkOutcome};
 use super::{
     Classification, ClassifierContext, ClassifierError, ResultClassifier, ToolResultSummary,
@@ -35,8 +35,12 @@ impl ResultClassifier for BashClassifier {
     }
 
     fn classify(&self, ctx: &ClassifierContext<'_>) -> Result<Classification, ClassifierError> {
-        let parsed = parse_bash_body(ctx.raw);
-        let (stdout, stderr, exit_code, duration_ms) = parsed.unwrap_or_default();
+        let (stdout, stderr, exit_code, duration_ms) =
+            parse_bash_body(ctx.raw).ok_or(ClassifierError::Failed {
+                classifier: "bash::v1",
+                message: "missing structured_content {stdout, stderr, exit_code, duration_ms}"
+                    .to_string(),
+            })?;
 
         let stdout_compacted = compact(&stdout, self.chain.as_deref());
         let stderr_compacted = compact(&stderr, self.chain.as_deref());

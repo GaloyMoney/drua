@@ -2354,13 +2354,15 @@ mod tests {
             .expect("post-reset execute must succeed");
         assert!(
             !post.shell_died,
-            "shell must survive reset; output={:?}",
-            post.output
+            "shell must survive reset; stdout={:?} stderr={:?}",
+            post.stdout,
+            post.stderr,
         );
         assert!(
-            post.output.contains("persistent_shell_alive"),
-            "follow-up command must run on the same shell; output={:?}",
-            post.output
+            post.stdout.contains("persistent_shell_alive"),
+            "follow-up command must run on the same shell; stdout={:?} stderr={:?}",
+            post.stdout,
+            post.stderr,
         );
     }
 }
