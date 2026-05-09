@@ -473,8 +473,8 @@ impl TopLevelTool for CallCatalogTool {
             .map(serde_json::Value::Object)
             .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
 
-        let raw_bytes = super::super::estimate_text_bytes(&result);
         let Some(invocations) = self.tool_invocations.as_ref() else {
+            let raw_bytes = super::super::estimate_text_bytes(&result);
             super::super::record_pipeline_metrics(raw_bytes, raw_bytes, "bypass", false);
             return Ok(result);
         };
@@ -486,6 +486,13 @@ impl TopLevelTool for CallCatalogTool {
                     raw: &result,
                     exit_code: None,
                 });
+        // Cursor #3212853186: baseline raw_bytes against
+        // canonical_text — same as the top-level dispatcher in
+        // mod.rs. Tools with structured_content (Concourse) have a
+        // canonical_text extracted from there, not from
+        // content[].text — using estimate_text_bytes would compare
+        // mismatched baselines against summary_kept_bytes.
+        let raw_bytes = classification.canonical_text.len() as u64;
         let classifier_kind = classification.summary.kind().to_string();
         let kept_bytes = super::super::summary_kept_bytes(&classification.summary, raw_bytes);
         if classification.summary.is_passthrough() {
