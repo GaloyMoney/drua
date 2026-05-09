@@ -215,6 +215,80 @@ fn bulk_elide_bounds_unstructured_log_size() {
     assert!(logs.contains("tail line"));
 }
 
+/// Non-Concourse long-log shape (e.g. k8s pod logs returning
+/// `{logs: "<huge text>"}`): the walker descends into the
+/// structured root, hits the `logs` string leaf, runs the chain
+/// in place, and the ROOT object structure stays intact —
+/// schema-faithful to whatever the upstream tool's output_schema
+/// declares.
+#[test]
+fn k8s_shape_preserves_root_object_structure() {
+    let mut huge_logs = String::new();
+    for i in 0..3_000 {
+        huge_logs.push_str(&format!(
+            "[2026-05-09T06:00:{:02}Z] some-pod: line {i:04} verbose\n",
+            i % 60
+        ));
+    }
+    // Realistic k8s-pod-logs output_schema shape: an object with
+    // `logs`, `pod`, `namespace`, `container` siblings.
+    let upstream = serde_json::json!({
+        "logs": huge_logs,
+        "pod": "drua-server-abc",
+        "namespace": "default",
+        "container": "drua",
+    });
+    let mut result = CallToolResult::success(vec![Content::text(
+        serde_json::to_string(&upstream).unwrap(),
+    )]);
+    result.structured_content = Some(upstream.clone());
+    let args = serde_json::json!({"pod": "drua-server-abc"});
+    let ctx = ClassifierContext {
+        tool_name: "kubernetes_get_pod_logs",
+        args: &args,
+        raw: &result,
+        exit_code: None,
+    };
+    let registry = ClassifierRegistry::with_default();
+    let classification = registry.classify(&ctx);
+
+    let kept = match classification.summary {
+        ToolResultSummary::StructuredElision { kept, .. } => kept,
+        ToolResultSummary::Passthrough { value } => value,
+        other => panic!("unexpected summary shape: {other:?}"),
+    };
+
+    // Root is still an object — schema-faithful to upstream's
+    // declared shape. Sibling fields untouched.
+    let obj = kept.as_object().expect("root remained an object");
+    assert_eq!(
+        obj.get("pod").and_then(|v| v.as_str()),
+        Some("drua-server-abc")
+    );
+    assert_eq!(
+        obj.get("namespace").and_then(|v| v.as_str()),
+        Some("default")
+    );
+    assert_eq!(
+        obj.get("container").and_then(|v| v.as_str()),
+        Some("drua")
+    );
+
+    // `logs` is still a String (type-preserved at the leaf), and
+    // BulkElide bracketed it with <head>/<tail> markers.
+    let logs = obj
+        .get("logs")
+        .and_then(|v| v.as_str())
+        .expect("logs is still a string");
+    assert!(logs.contains("<head>"));
+    assert!(logs.contains("<bulk-elided"));
+    assert!(logs.contains("<tail>"));
+    // Some lines from the head and tail survive; middle is gone.
+    assert!(logs.contains("line 0000"));
+    assert!(logs.contains("line 2999"));
+    assert!(!logs.contains("line 1500"));
+}
+
 #[test]
 fn unrelated_bash_output_passes_through() {
     let registry = ClassifierRegistry::with_default();

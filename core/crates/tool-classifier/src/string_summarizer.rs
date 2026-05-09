@@ -163,63 +163,90 @@ impl SegmentedText {
         self.original_lines
     }
 
-    /// Terminal compaction primitive: discard every line before
-    /// `keep_from_line` (current coords) and prepend a single
-    /// `<bulk-elided>` marker covering the dropped range. Resets
-    /// the segment map to `[Summary-marker, Verbatim-tail]` —
-    /// finer-grained mappings from earlier passes are gone, which
-    /// is fine because [`BulkElide`] is the chain's last pass.
-    pub fn elide_head_keep_tail(&mut self, keep_from_line: u32) -> bool {
-        if keep_from_line == 0 || keep_from_line >= self.current_lines() {
+    /// Terminal compaction: keep the first `head_lines` AND the
+    /// last `tail_lines` of the current log; replace the middle
+    /// with a single `<bulk-elided>` marker, wrap head and tail in
+    /// `<head>` / `<tail>` tags. Finer-grained segment mappings from
+    /// earlier passes are flattened — this is the chain's last pass.
+    ///
+    /// Boundary snapping: if `head_lines` would split a `Summary`
+    /// segment (cutting between e.g. `<nix-cache>` and
+    /// `</nix-cache>`), we extend head past the segment's end so
+    /// the marker survives intact. Symmetrical pull-back for the
+    /// tail boundary. Already-summarised markers in head/tail
+    /// regions are preserved verbatim.
+    ///
+    /// Returns `false` if `head_lines + tail_lines >= current_lines`
+    /// or post-snap boundaries leave no middle to elide.
+    pub fn elide_middle_keep_head_and_tail(
+        &mut self,
+        head_lines: u32,
+        tail_lines: u32,
+    ) -> bool {
+        let total = self.current_lines();
+        if head_lines + tail_lines >= total {
             return false;
         }
-        let cutoff_byte = self.line_offsets[keep_from_line as usize];
-        let elided_bytes = cutoff_byte as u64;
-        let kept_lines_count = self.current_lines() - keep_from_line;
-        // Original-line coords for the marker — the elided range
-        // covers original lines 0..(orig of the kept-tail's first
-        // line). Without this translation `original-lines` would
-        // be wrong for any log where earlier passes already
-        // collapsed content.
-        let original_keep_from = self.current_to_original_line(keep_from_line);
-        let elided_original_lines = original_keep_from;
-        let body = format!(
-            "{} lines · {} bytes elided · showing last {} lines\n",
-            elided_original_lines, elided_bytes, kept_lines_count,
+        let middle_start_line = self.snap_after_summary(head_lines);
+        let middle_end_line = self.snap_before_summary(total - tail_lines);
+        if middle_start_line >= middle_end_line {
+            return false;
+        }
+        let middle_start_byte = self.line_offsets[middle_start_line as usize];
+        let middle_end_byte = self.line_offsets[middle_end_line as usize];
+        let elided_bytes = (middle_end_byte - middle_start_byte) as u64;
+        let elided_lines = middle_end_line - middle_start_line;
+
+        // Original-line coords for the marker. Translates head/tail
+        // boundaries via the segment map so earlier-pass markers
+        // surviving in head/tail still report correct absolute
+        // input ranges.
+        let head_original_end = self.current_to_original_line(middle_start_line);
+        let tail_original_start = self.current_to_original_line(middle_end_line);
+
+        let head_text = self.log[..middle_start_byte].to_string();
+        let tail_text = self.log[middle_end_byte..].to_string();
+
+        let middle_body = format!(
+            "{} lines · {} bytes elided\n",
+            elided_lines, elided_bytes,
         );
-        let marker = build_marker(
+        let middle_marker = build_marker(
             "bulk-elided",
-            0..original_keep_from,
+            head_original_end..tail_original_start,
             elided_bytes,
-            &body,
+            &middle_body,
             &[],
         );
-        let marker_lines = count_lines(&marker);
 
-        let mut new_log = String::with_capacity(marker.len() + (self.log.len() - cutoff_byte));
-        new_log.push_str(&marker);
-        new_log.push_str(&self.log[cutoff_byte..]);
+        let mut new_log = String::with_capacity(self.log.len());
+        new_log.push_str("<head>\n");
+        new_log.push_str(&head_text);
+        if !head_text.ends_with('\n') {
+            new_log.push('\n');
+        }
+        new_log.push_str("</head>\n");
+        new_log.push_str(&middle_marker);
+        new_log.push_str("<tail>\n");
+        new_log.push_str(&tail_text);
+        if !tail_text.ends_with('\n') {
+            new_log.push('\n');
+        }
+        new_log.push_str("</tail>\n");
+
         self.log = new_log;
         self.line_offsets = compute_line_offsets(&self.log);
 
-        let original_lines = self.original_lines;
-        let kept_orig_start = original_lines.saturating_sub(kept_lines_count);
-        self.segments = vec![
-            Segment {
-                current: 0..marker_lines,
-                original: 0..kept_orig_start,
-                kind: SegmentKind::Summary {
-                    by: "bulk-elide",
-                    kept_bytes: marker.len().min(u32::MAX as usize) as u32,
-                    original_bytes: elided_bytes,
-                },
-            },
-            Segment {
-                current: marker_lines..(marker_lines + kept_lines_count),
-                original: kept_orig_start..original_lines,
-                kind: SegmentKind::Verbatim,
-            },
-        ];
+        // Segment map is approximate — bulk-elide is terminal so
+        // downstream consumers only read `log`, not the map. We
+        // emit one Verbatim segment covering the full new log
+        // for inspector compatibility.
+        let total_new = self.current_lines();
+        self.segments = vec![Segment {
+            current: 0..total_new,
+            original: 0..self.original_lines,
+            kind: SegmentKind::Verbatim,
+        }];
         true
     }
 
@@ -325,6 +352,39 @@ impl SegmentedText {
         self.segments.splice(seg_idx..=seg_idx, replacement);
         self.recompute_line_offsets();
         self.normalise_segments_after_splice();
+    }
+
+    /// If `line` falls inside a `Summary` segment, return the
+    /// segment's `current.end` (one past the marker's last line);
+    /// else return `line` unchanged. Used by `BulkElide` to push
+    /// the head boundary past a straddling marker so the marker's
+    /// open and close tags stay in the same kept region.
+    fn snap_after_summary(&self, line: u32) -> u32 {
+        for seg in &self.segments {
+            if matches!(seg.kind, SegmentKind::Summary { .. })
+                && line > seg.current.start
+                && line < seg.current.end
+            {
+                return seg.current.end;
+            }
+        }
+        line
+    }
+
+    /// If `line` falls inside a `Summary` segment, return the
+    /// segment's `current.start`; else return `line` unchanged.
+    /// Used by `BulkElide` to pull the tail boundary back so a
+    /// marker straddling the boundary stays whole inside the tail.
+    fn snap_before_summary(&self, line: u32) -> u32 {
+        for seg in &self.segments {
+            if matches!(seg.kind, SegmentKind::Summary { .. })
+                && line > seg.current.start
+                && line < seg.current.end
+            {
+                return seg.current.start;
+            }
+        }
+        line
     }
 
     fn find_verbatim_covering(&self, current_lines: &Range<u32>) -> Option<usize> {
@@ -484,16 +544,31 @@ impl Default for StringSummarizerChain {
 }
 
 /// Terminal fallback: if the post-chain log is still over
-/// `max_total_bytes`, keep the last `tail_lines` lines and replace
-/// everything before with a single `<bulk-elided>` marker.
+/// `max_total_bytes`, keep the first `head_lines` AND the last
+/// `tail_lines`, and replace the middle with a single
+/// `<bulk-elided>` marker. Renders like:
 ///
-/// Deliberately dumb — no scoring, no per-region heuristics. The
-/// agent gets the most-recent context (which for build logs is
-/// usually where the failure / completion signal lives) plus a
-/// breadcrumb noting how much was dropped; if it needs more, it
-/// fetches via `tool_output_fetch(invocation_id, range=…)`.
+/// ```text
+/// <head>
+/// {first head_lines verbatim — usually setup chatter, task
+///  markers, early `<nix-copy>` summaries from prior passes}
+/// </head>
+/// <bulk-elided original-lines="N-M" original-bytes="…">
+/// K lines · X bytes elided
+/// </bulk-elided>
+/// <tail>
+/// {last tail_lines verbatim — completion / failure / status}
+/// </tail>
+/// ```
+///
+/// Deliberately dumb — no per-region scoring, no segment-kind
+/// awareness. Head and tail are just absolute line ranges from the
+/// post-chain log. If markers from earlier passes happen to be in
+/// the head or tail, they survive verbatim; if they were in the
+/// middle, they're elided along with everything else.
 pub struct BulkElide {
     pub max_total_bytes: usize,
+    pub head_lines: u32,
     pub tail_lines: u32,
 }
 
@@ -501,6 +576,7 @@ impl Default for BulkElide {
     fn default() -> Self {
         Self {
             max_total_bytes: 16 * 1024,
+            head_lines: 30,
             tail_lines: 100,
         }
     }
@@ -509,6 +585,11 @@ impl Default for BulkElide {
 impl BulkElide {
     pub fn with_max_bytes(mut self, n: usize) -> Self {
         self.max_total_bytes = n;
+        self
+    }
+
+    pub fn with_head_lines(mut self, n: u32) -> Self {
+        self.head_lines = n;
         self
     }
 
@@ -529,11 +610,12 @@ impl StringSummarizer for BulkElide {
 
     fn apply(&self, ctx: &mut SegmentedText) -> bool {
         let total = ctx.current_lines();
-        if total <= self.tail_lines {
+        if total <= self.head_lines + self.tail_lines {
+            // Already shorter than head+tail combined — nothing
+            // useful to elide.
             return false;
         }
-        let keep_from = total - self.tail_lines;
-        ctx.elide_head_keep_tail(keep_from)
+        ctx.elide_middle_keep_head_and_tail(self.head_lines, self.tail_lines)
     }
 }
 
@@ -748,7 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn bulk_elide_keeps_last_n_lines_drops_head() {
+    fn bulk_elide_keeps_head_and_tail_with_wrappers() {
         let mut raw = String::new();
         for i in 0..1000 {
             raw.push_str(&format!("line {i:04} of unstructured chatter\n"));
@@ -756,35 +838,40 @@ mod tests {
         let mut ctx = SegmentedText::from_initial(&raw);
         BulkElide {
             max_total_bytes: 2_048,
+            head_lines: 5,
             tail_lines: 20,
         }
         .apply(&mut ctx);
         let log = ctx.log();
-        assert!(log.starts_with("<bulk-elided"), "log starts: {log:.80}…");
+        // Head wrapper present, with first 5 lines verbatim.
+        assert!(log.starts_with("<head>\n"), "log starts: {log:.120}");
+        assert!(log.contains("</head>\n"));
+        assert!(log.contains("line 0000 of unstructured chatter"));
+        assert!(log.contains("line 0004 of unstructured chatter"));
+        // Middle elided.
+        assert!(log.contains("<bulk-elided"));
         assert!(log.contains("</bulk-elided>"));
-        assert!(
-            log.contains("980 lines"),
-            "elided count in body: {log:.300}"
-        );
-        // Last 20 lines survive in order.
+        assert!(log.contains("975 lines"));
+        // Tail wrapper present, with last 20 lines verbatim.
+        assert!(log.contains("<tail>\n"));
+        assert!(log.contains("</tail>\n"));
         assert!(log.contains("line 0980 of unstructured chatter"));
         assert!(log.contains("line 0999 of unstructured chatter"));
-        // Earlier lines are gone.
+        // Middle lines gone.
         assert!(!log.contains("line 0500 of unstructured chatter"));
-        assert!(!log.contains("line 0000 of unstructured chatter"));
     }
 
     #[test]
-    fn bulk_elide_skips_when_total_under_tail_lines() {
-        // Log is small (5 lines, 10 bytes), well under the byte
-        // budget *and* the tail_lines knob — so apply is a no-op.
+    fn bulk_elide_skips_when_total_under_head_plus_tail() {
+        // Log is small (5 lines), under head_lines + tail_lines
+        // combined — cannot meaningfully elide.
         let mut ctx = SegmentedText::from_initial("a\nb\nc\nd\ne\n");
         let pass = BulkElide {
             max_total_bytes: 4,
+            head_lines: 30,
             tail_lines: 100,
         };
         assert!(pass.can_summarize(&ctx));
-        // 5 lines ≤ 100 tail_lines → cannot keep "last 100", no-op.
         assert!(!pass.apply(&mut ctx));
         assert_eq!(ctx.log(), "a\nb\nc\nd\ne\n");
     }
@@ -798,17 +885,55 @@ mod tests {
     }
 
     #[test]
-    fn elide_head_keep_tail_preserves_trailing_marker() {
-        // Tail of the log is a Summary segment; elide_head_keep_tail
-        // doesn't care about segment kinds — it just keeps the last
-        // N lines verbatim, including any markers that happen to be
-        // there.
-        let mut ctx = SegmentedText::from_initial("a\nb\nc\nd\ne\nf\ng\nh\ni\nj\n");
-        ctx.replace_with_summary(7..10, "<sum>tail</sum>\n", "p");
-        // current is now: a b c d e f g <sum> (8 lines)
-        ctx.elide_head_keep_tail(5);
+    fn elide_middle_does_not_split_marker_across_head_boundary() {
+        // A multi-line marker straddles where head=5 would land.
+        // Boundary-snapping pushes head_end to the marker's
+        // current.end, so the open and close tags stay in the
+        // same kept region. Without snapping, the open tag would
+        // be in head and the close tag would be in the elided
+        // middle — broken XML.
+        let mut raw = String::new();
+        raw.push_str("a\nb\nc\nd\nstraddle-1\nstraddle-2\nstraddle-3\nstraddle-4\n");
+        for i in 0..200 {
+            raw.push_str(&format!("middle line {i}\n"));
+        }
+        raw.push_str("tail-1\ntail-2\ntail-3\n");
+        let mut ctx = SegmentedText::from_initial(&raw);
+        // Replace lines 4..8 (current 0-indexed) with a 3-line
+        // marker — straddles the head=5 boundary.
+        ctx.replace_with_summary(4..8, "<sum>\nstraddle body\n</sum>\n", "p");
+        ctx.elide_middle_keep_head_and_tail(5, 3);
         let log = ctx.log();
-        assert!(log.starts_with("<bulk-elided"));
-        assert!(log.contains("<sum>tail</sum>"));
+        assert!(log.contains("<sum>"));
+        assert!(log.contains("straddle body"));
+        assert!(log.contains("</sum>"));
+        // Head wrapper closes after the full marker, not in the
+        // middle of it.
+        let head_end = log.find("</head>\n").expect("head closes");
+        let head_section = &log[..head_end];
+        assert!(head_section.contains("<sum>"));
+        assert!(head_section.contains("</sum>"));
+    }
+
+    #[test]
+    fn elide_middle_preserves_marker_in_head_when_in_first_n_lines() {
+        // A marker emitted by an earlier pass that lands in the
+        // head region survives verbatim inside <head>...</head>.
+        let mut raw = String::new();
+        raw.push_str("a\nb\nfoo\nfoo\nfoo\nd\ne\n");
+        for i in 0..200 {
+            raw.push_str(&format!("middle line {i}\n"));
+        }
+        raw.push_str("tail-1\ntail-2\ntail-3\n");
+        let mut ctx = SegmentedText::from_initial(&raw);
+        ctx.replace_with_summary(2..5, "<sum>3 foos</sum>\n", "p");
+        ctx.elide_middle_keep_head_and_tail(5, 3);
+        let log = ctx.log();
+        assert!(log.starts_with("<head>"));
+        assert!(log.contains("<sum>3 foos</sum>"));
+        assert!(log.contains("<bulk-elided"));
+        assert!(log.contains("<tail>"));
+        assert!(log.contains("tail-1"));
+        assert!(log.contains("tail-3"));
     }
 }

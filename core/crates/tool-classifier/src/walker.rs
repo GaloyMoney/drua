@@ -367,16 +367,21 @@ fn peel_object_keys(
         if current_size < threshold {
             break;
         }
-        // Pick the largest verbatim (non-sentinel) value to peel.
-        // Selection uses the POST-walk size (we want maximum
-        // current-size reduction). Reporting uses the ORIGINAL
-        // pre-walk size from `original_sizes` so `ElidedPath.bytes`
-        // and the sentinel's `bytes` reflect what was actually
-        // dropped from the input — not the recursion-shrunk
-        // intermediate size.
+        // Pick the largest peelable (non-sentinel, non-string) value.
+        // String values already had the chain (and byte-elide
+        // fallback) applied at the leaf level — replacing them
+        // with a `_elided` sentinel here would destroy the
+        // chain's structured output (e.g. `<head>…<bulk-elided>…
+        // <tail>` from `BulkElide`). Schema-preservation goal:
+        // a `{logs: String}` upstream value stays a
+        // `{logs: String}` after walking. Selection uses POST-walk
+        // size for max current-size reduction; reporting uses
+        // ORIGINAL pre-walk size so `ElidedPath.bytes` reflects
+        // what was actually dropped (cursor #3212527301).
         let candidate = walked
             .iter()
             .filter(|(_, v)| !is_sentinel(v))
+            .filter(|(_, v)| !matches!(v, Value::String(_)))
             .map(|(k, v)| (k.clone(), json_size(v)))
             .max_by_key(|(_, size)| *size);
         let Some((key, post_walk_size)) = candidate else {
@@ -584,20 +589,15 @@ mod tests {
             .any(|p| p.path == "$" && matches!(p.kind, ElisionKind::Array)));
     }
 
-    /// Cursor review #3212527301: when a child value gets
-    /// byte-elided by recursion AND its key is later peeled into
-    /// a sentinel, both `ElidedPath.bytes` and the sentinel's
-    /// `bytes` field MUST report the ORIGINAL pre-walk size — not
-    /// the recursion-shrunk intermediate. Otherwise agents see a
-    /// smaller "dropped bytes" count than reality.
+    /// Cursor review #3212527301: ensure `ElidedPath.bytes` for
+    /// elided string fields reports the ORIGINAL pre-walk size,
+    /// not the post-walk byte-elided size. Strings are now
+    /// elided exclusively at the leaf via `byte_elide_string`
+    /// (peel_object_keys skips strings to keep schema-faithful
+    /// `{logs: String}` shapes intact); this test verifies the
+    /// leaf-level byte_elide reporting hasn't regressed.
     #[test]
-    fn peeled_object_key_reports_original_pre_walk_bytes() {
-        // Reproduce the cursor #3212527301 bug shape: many large
-        // string fields. Recursion byte-elides each (now ~520
-        // bytes), but the post-walk map is still well over
-        // threshold, so peel fires on a recursion-shrunk field.
-        // The reported `bytes` must reference the ORIGINAL 50 KB
-        // pre-walk size, not the ~520-byte post-walk slice.
+    fn elided_string_field_reports_original_pre_walk_bytes() {
         let original_string_size = 50_000;
         let mut obj = serde_json::Map::new();
         for i in 0..50 {
