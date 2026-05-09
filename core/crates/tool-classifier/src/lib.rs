@@ -27,9 +27,9 @@ pub use string_summarizer::{
     build_marker, close_tag, open_tag, BulkElide, SegmentedText, StringSummarizer,
     StringSummarizerChain, VerbatimRegion,
 };
-pub use walker::RECOVERY_INVOCATION_PLACEHOLDER;
 pub use terraform_install::TerraformInstallRun;
 pub use terraform_state::{TerraformDataSourceRun, TerraformRefreshRun};
+pub use walker::RECOVERY_INVOCATION_PLACEHOLDER;
 
 pub const DEFAULT_GENERIC_THRESHOLD_BYTES: usize = 8192;
 

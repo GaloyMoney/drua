@@ -302,8 +302,7 @@ pub fn apply_fetch_query(
         FetchQuery::JsonPath { path } => {
             let root = structured.ok_or_else(|| {
                 ToolInvocationError::InvalidPattern(
-                    "json_path requested but invocation has no structured_content"
-                        .to_string(),
+                    "json_path requested but invocation has no structured_content".to_string(),
                 )
             })?;
             let value = resolve_json_path(root, path).ok_or_else(|| {
@@ -581,7 +580,8 @@ mod tests {
 
     #[test]
     fn range_slices_bytes() {
-        let r = apply_fetch_query(sample(), None, &FetchQuery::Range { offset: 0, len: 5 }).unwrap();
+        let r =
+            apply_fetch_query(sample(), None, &FetchQuery::Range { offset: 0, len: 5 }).unwrap();
         assert_eq!(r.content, "alpha");
     }
 

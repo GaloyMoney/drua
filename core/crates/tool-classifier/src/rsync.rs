@@ -110,7 +110,8 @@ mod tests {
 
     #[test]
     fn indented_path_lines_not_collapsed() {
-        let raw = "header\n   indented/path1.tf\n   indented/path2.tf\n   indented/path3.tf\nfooter\n";
+        let raw =
+            "header\n   indented/path1.tf\n   indented/path2.tf\n   indented/path3.tf\nfooter\n";
         let ctx = run(raw);
         let log = ctx.log();
         assert!(!log.contains("<rsync-files"));
