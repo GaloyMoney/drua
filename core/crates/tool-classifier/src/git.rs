@@ -1,12 +1,5 @@
-//! `GitCloneProgress` — collapses the chatter `git clone` produces
-//! when its stderr is captured to a log. Every `\r`-separated
-//! progress update typically lands as its own newline-terminated
-//! line, so a single clone of a moderately-sized repo can dump
-//! hundreds of `remote: Counting objects: ...%` rows.
-//!
-//! Marker emitted: `<git-clone>`. Body is just the run length;
-//! the agent keeps the surrounding `Cloning into 'X'...` line
-//! and the post-clone status verbatim.
+//! `GitCloneProgress` — collapses `git clone` stderr chatter
+//! (`remote: Counting objects:`, etc.) into a `<git-clone>` marker.
 
 use std::ops::Range;
 

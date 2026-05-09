@@ -427,21 +427,13 @@ impl TopLevelTool for CallCatalogTool {
     }
 
     fn bypass_universal_pipeline(&self) -> bool {
-        // We run the universal pipeline ourselves (below) with the
-        // *inner* tool's name + args as identity, so the persisted
-        // `tool_invocations` row is indistinguishable from a direct
-        // upstream invocation. Letting the dispatcher also run the
-        // pipeline would persist a second row keyed on `call_tool`
-        // and double-classify.
+        // We run the pipeline below with the inner tool's identity;
+        // letting the dispatcher do it again would double-classify.
         true
     }
 
     fn records_own_pipeline_metrics(&self) -> bool {
-        // We emit `record_pipeline_metrics` from inside `call` with
-        // the inner tool's true raw / kept byte counts; the
-        // dispatcher's default bypass-branch metrics would otherwise
-        // claim `compression_ratio = 1.0` for every `call_tool`
-        // dispatch (cursor bugbot review #3210558743).
+        // Cursor #3210558743: we emit metrics with inner-tool counts.
         true
     }
 
@@ -460,19 +452,14 @@ impl TopLevelTool for CallCatalogTool {
             _ => None,
         });
 
-        // After tool_name/arguments are consumed, anything left is an
-        // extra top-level key — almost always a flat call like
-        // `{tool_name, build_id: 597}` instead of `{tool_name, arguments:{build_id:597}}`.
-        // We let the call proceed (the inner schema may still accept it via
-        // `additionalProperties`), but if it errors we'll wrap with a hint.
+        // Extra top-level keys after consuming tool_name/arguments
+        // — flat-call shape. Hinted on inner-tool error.
         let extra_keys: Vec<String> = args.keys().cloned().collect();
 
         let (set, name) = self
             .find_set(subject, &tool_name)
             .ok_or_else(|| ToolSetsError::ToolNotFound(tool_name.clone()))?;
 
-        // Override entrypoint action with the concrete upstream tool name —
-        // terminal handler, no domain service involved.
         Audit::record_action(format!("catalog: {}", tool_name));
 
         let started_at = chrono::Utc::now();
@@ -482,18 +469,10 @@ impl TopLevelTool for CallCatalogTool {
 
         let result = annotate_envelope_mistake(result, &tool_name, &extra_keys)?;
 
-        // Snapshot the inner args under the same key the upstream tool
-        // saw — this is what gets persisted as `tool_invocations.args`.
         let recorded_args = inner_args
             .map(serde_json::Value::Object)
             .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
 
-        // Run the universal pipeline ourselves with the *inner* identity:
-        // typed classifiers (e.g. `concourse_logs`) match on tool_name,
-        // and the persisted row's `tool_name`/`args` reflect the upstream
-        // tool, not the `call_tool` envelope. Falls back to the raw
-        // result if persistence isn't wired (test paths) or the subject
-        // has no scope.
         let raw_bytes = super::super::estimate_text_bytes(&result);
         let Some(invocations) = self.tool_invocations.as_ref() else {
             super::super::record_pipeline_metrics(raw_bytes, raw_bytes, "bypass", false);

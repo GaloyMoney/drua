@@ -574,15 +574,7 @@ impl ToolSets {
                         exit_code: None,
                     });
 
-                    // Capture pipeline metrics before classification is
-                    // potentially moved into persist_and_envelope. Same
-                    // shape across passthrough / bypass / persisted so
-                    // the inspector's compression-ratio column has a
-                    // value for every audit row.
                     let raw_bytes = classification.canonical_text.len() as u64;
-                    // Convert to owned so subsequent move of
-                    // `classification` into `persist_and_envelope`
-                    // doesn't conflict with this borrow.
                     let classifier_kind = classification.summary.kind().to_string();
                     let kept_bytes = summary_kept_bytes(&classification.summary, raw_bytes);
                     let summary_is_passthrough = classification.summary.is_passthrough();
@@ -613,13 +605,8 @@ impl ToolSets {
                             _ => (raw, false),
                         };
 
-                    // When persistence didn't happen (subject had no
-                    // owner, or persist_classification logged-and-
-                    // bailed), the model received the raw bytes —
-                    // not the classifier's kept_bytes. Reporting the
-                    // classifier's intended kept_bytes would lie to
-                    // the inspector's compression-ratio column.
-                    // Cursor review #3208216149.
+                    // Cursor #3208216149: when persistence didn't happen
+                    // the model received raw bytes, not classifier kept_bytes.
                     let effective_kept_bytes = if persisted { kept_bytes } else { raw_bytes };
                     record_pipeline_metrics(
                         raw_bytes,
@@ -674,40 +661,27 @@ pub(crate) fn estimate_text_bytes(result: &CallToolResult) -> u64 {
         .sum()
 }
 
-/// Bytes the model ends up seeing for a given summary. For
-/// `Passthrough` it equals the raw input (no elision); for elided
-/// shapes it's the summary's own kept_bytes counter.
+/// Bytes the model sees for a given summary. `Typed` extracts the
+/// inner string of single-string-field bodies (e.g. `{logs: String}`).
 pub(crate) fn summary_kept_bytes(summary: &ToolResultSummary, raw_bytes: u64) -> u64 {
     match summary {
         ToolResultSummary::Passthrough { .. } => raw_bytes,
         ToolResultSummary::StructuredElision { kept_bytes, .. } => *kept_bytes as u64,
-        ToolResultSummary::Typed { body, .. } => {
-            // Approximate kept bytes from the body. For typed
-            // bodies whose canonical projection is a string (e.g.
-            // `{logs: String}`), the inner string is what the
-            // agent reads inline. Falls back to the JSON
-            // serialisation length for arbitrary bodies.
-            match body {
-                serde_json::Value::String(s) => s.len() as u64,
-                serde_json::Value::Object(map) if map.len() == 1 => match map.values().next() {
-                    Some(serde_json::Value::String(s)) => s.len() as u64,
-                    _ => serde_json::to_string(body)
-                        .map(|s| s.len() as u64)
-                        .unwrap_or(0),
-                },
+        ToolResultSummary::Typed { body, .. } => match body {
+            serde_json::Value::String(s) => s.len() as u64,
+            serde_json::Value::Object(map) if map.len() == 1 => match map.values().next() {
+                Some(serde_json::Value::String(s)) => s.len() as u64,
                 _ => serde_json::to_string(body)
                     .map(|s| s.len() as u64)
                     .unwrap_or(0),
-            }
-        }
+            },
+            _ => serde_json::to_string(body)
+                .map(|s| s.len() as u64)
+                .unwrap_or(0),
+        },
     }
 }
 
-/// Attach pipeline metrics to the audit row's metadata. Recorded for
-/// every successful tool dispatch — bypass, passthrough, persisted —
-/// so the workflow-run inspector's compression column always has a
-/// value. `compression_ratio` of 1.0 is informative on its own
-/// (says "this call hit the threshold but didn't shrink").
 pub(crate) fn record_pipeline_metrics(
     raw_bytes: u64,
     kept_bytes: u64,

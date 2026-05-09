@@ -1,14 +1,7 @@
-//! `ResultClassifier` plus the universal `GenericFallback` and
-//! per-tool classifiers (currently: concourse build logs).
-//! Real per-tool classifiers for the rest of the catalog (cargo, nextest,
-//! nix, kubernetes, …) land in follow-up PRs.
-//!
-//! The dispatcher branches on the variant emitted by `classify`:
-//! `Passthrough` keeps the fast path (no envelope, no persistence); every
-//! other variant triggers the universal envelope. The threshold gating
-//! lives inside `GenericFallback`, not as a separate dispatcher gate, so
-//! tool-specific classifiers can opt to wrap unconditionally — a typed
-//! shape is the value, even at small sizes.
+//! `ResultClassifier` + universal `GenericFallback` + per-tool
+//! classifiers. The dispatcher branches on the variant emitted by
+//! `classify`: `Passthrough` keeps the fast path; every other variant
+//! triggers the universal envelope.
 
 use rmcp::model::CallToolResult;
 use serde::{Deserialize, Serialize};
@@ -28,85 +21,39 @@ pub use string_summarizer::{
 };
 
 /// Default byte threshold for [`GenericFallback`]. Below → `Passthrough`;
-/// at-or-above → the JSON-aware walker emits `StructuredElision`. 4 KB is
-/// roughly aligned with the brief's `019e019e` cold-shell pathology;
-/// tunable per-deployment by constructing `GenericFallback` with a
-/// custom `threshold_bytes`.
+/// at-or-above → walker emits `StructuredElision`. Tunable per-deployment.
 pub const DEFAULT_GENERIC_THRESHOLD_BYTES: usize = 4096;
 
-/// What the classifier produces. The dispatcher branches on the variant.
-///
-/// Three shapes only:
-/// - `Passthrough` — the result is small enough / generic enough to
-///   forward verbatim. No persistence, no envelope.
-/// - `StructuredElision` — the JSON walker shrank the value in place;
-///   `kept` is a partial JSON value with sentinels marking dropped
-///   branches.
-/// - `Typed` — generic typed body. Each classifier picks its own
-///   `typed_kind` discriminator (e.g. `"concourse_logs"`,
-///   `"github_pr"`) and ships a `body: Value` that **MUST conform
-///   to the upstream MCP tool's `output_schema`**. Adding a new
-///   typed classifier touches only the classifier — no enum
-///   surgery, no central match arms.
+/// What the classifier produces. Three shapes:
+/// - `Passthrough` — forward verbatim, no envelope.
+/// - `StructuredElision` — JSON walker shrank the value in place.
+/// - `Typed` — generic typed body. New typed classifiers slot in
+///   without touching this enum: pick a `typed_kind`, ship a
+///   `body: Value` matching the upstream tool's `output_schema`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolResultSummary {
-    /// Below the threshold and no typed classifier opted in — the
-    /// agent already received the full output, no envelope is added.
-    /// Carries `Value` rather than `String` so structured tool
-    /// results (compose, github_get_pr, honeycomb queries) keep
-    /// their programmatic shape end-to-end. Plain-text tools land
-    /// here as `Value::String(text)`; the old `text` field is
-    /// recoverable with `value.as_str()`.
-    Passthrough { value: serde_json::Value },
+    Passthrough {
+        value: serde_json::Value,
+    },
 
-    /// JSON-aware elision. The walker preserves shape — strings get
-    /// byte-elided in place (type stays `String`), arrays/objects too
-    /// big to walk into get replaced with typed sentinels in `kept`.
-    /// Each elided branch is also enumerated in `elided_paths` so the
-    /// agent can reason about what was dropped without inspecting the
-    /// kept structure.
     StructuredElision {
-        /// Partial JSON value — always parseable. Branches that didn't
-        /// fit the budget appear as `{"_elided": true, "kind": "...",
-        /// "bytes": ..., ...}` sentinels (see `kept` walker rules).
         kept: serde_json::Value,
         elided_paths: Vec<ElidedPath>,
         total_bytes: u64,
         kept_bytes: u32,
     },
 
-    /// Generic typed summary. Adding a new typed classifier (Concourse,
-    /// future GitHub PR, Honeycomb query, …) is purely additive —
-    /// the classifier picks its own `typed_kind` and ships a
-    /// schema-faithful `body`. JSON-on-the-wire shape:
-    ///
-    /// ```json
-    /// {"kind": "typed", "typed_kind": "concourse_logs", "body": {...}}
-    /// ```
-    ///
-    /// `ToolResultSummary::kind()` returns `typed_kind` (not the
-    /// outer serde tag), so the `kind` text column on
-    /// `tool_invocations` carries the classifier-specific
-    /// discriminator and remains filterable.
+    /// JSON-on-the-wire: `{"kind": "typed", "typed_kind": "...", "body": {...}}`.
+    /// `kind()` returns the inner `typed_kind` so the PG `kind` column
+    /// carries the classifier-specific discriminator.
     Typed {
         typed_kind: String,
-        /// Schema-faithful body — should match the upstream MCP
-        /// tool's declared `output_schema`. The dispatcher
-        /// persists this verbatim in the `summary` JSONB column;
-        /// strict-validating clients reading the structured
-        /// envelope will accept it iff the upstream schema
-        /// permits the projection.
         body: serde_json::Value,
     },
 }
 
 impl ToolResultSummary {
-    /// Discriminator used as the `kind` text column on
-    /// `tool_invocations`. For `Typed` we surface the inner
-    /// `typed_kind` rather than the literal serde tag (`"typed"`)
-    /// — callers filter rows by classifier identity, not by enum
-    /// shape.
     pub fn kind(&self) -> &str {
         match self {
             Self::Passthrough { .. } => "passthrough",
@@ -115,31 +62,20 @@ impl ToolResultSummary {
         }
     }
 
-    /// Fast-path test — true means the dispatcher emits the raw result
-    /// unchanged.
     pub fn is_passthrough(&self) -> bool {
         matches!(self, Self::Passthrough { .. })
     }
 }
 
-/// One branch of a `StructuredElision`'s `kept` value that the walker
-/// replaced with a sentinel. Recorded so the agent can scan
-/// `elided_paths` to discover what was dropped without recursing
-/// through `kept` to find sentinels.
+/// One branch of `StructuredElision::kept` that the walker replaced
+/// with a sentinel. Path is JSON-pointer-ish: `$.steps[12].log`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElidedPath {
-    /// JSON-pointer-style path: `$.steps[12].log`,
-    /// `$.builds`, `$.["weird key"]`. Roots at `$`.
     pub path: String,
     pub kind: ElisionKind,
     pub bytes: u64,
-    /// For arrays — element count of the original branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub length: Option<usize>,
-    /// First ~200 chars of a string sentinel, head sample of an
-    /// array sentinel, etc. — small enough to inline without
-    /// blowing the budget. `None` when the walker had no preview
-    /// budget left.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
 }
@@ -168,14 +104,6 @@ pub enum ClassifierError {
     },
 }
 
-/// What a classifier returns. Bundles the typed summary with the bytes
-/// the summary's offsets refer to so the dispatcher persists exactly
-/// what the classifier saw — fixes drift between classifier-side text
-/// extraction (e.g. Concourse reading `structured_content.logs`) and
-/// dispatcher-side persistence (which used to re-extract from
-/// `content[].text`). After this trait shape, `tool_output_fetch` is
-/// guaranteed to return bytes whose offsets match the summary's
-/// `head`/`tail` slicing.
 #[derive(Debug, Clone)]
 pub struct Classification {
     pub summary: ToolResultSummary,
@@ -184,16 +112,12 @@ pub struct Classification {
 
 pub trait ResultClassifier: Send + Sync + 'static {
     fn name(&self) -> &str;
-    /// Identity-based match (tool_name + args). Cheap; first match
-    /// wins. Content-aware classification happens at string leaves
-    /// inside the walker via `StringClassifier`, not at this level.
     fn matches(&self, tool_name: &str, args: &serde_json::Value) -> bool;
     fn classify(&self, ctx: &ClassifierContext<'_>) -> Result<Classification, ClassifierError>;
 }
 
-/// First-match dispatch. Order matters — most-specific classifiers go first;
-/// `GenericFallback` is registered last so it always catches anything earlier
-/// classifiers declined.
+/// First-match dispatch. `GenericFallback` is registered last so it
+/// always catches anything earlier classifiers declined.
 pub struct ClassifierRegistry {
     classifiers: Vec<Box<dyn ResultClassifier>>,
 }
@@ -205,13 +129,6 @@ impl ClassifierRegistry {
         }
     }
 
-    /// Pre-built registry with every shipping classifier registered in
-    /// most-specific → fallback order. New classifiers slot in here.
-    /// Identity-matchers (concourse) run first; content-sniff
-    /// classifiers (Nix) run between identity and `GenericFallback`.
-    /// `GenericFallback` carries a `StringClassifierChain` (NixString,
-    /// future Cargo / Nextest / cpp-compile) consulted at every string
-    /// leaf during walk.
     pub fn with_default() -> Self {
         let chain = std::sync::Arc::new(default_summarizer_chain());
         Self::new()
@@ -227,13 +144,6 @@ impl ClassifierRegistry {
     }
 
     pub fn classify(&self, ctx: &ClassifierContext<'_>) -> Classification {
-        // First-match dispatch. Identity-aware classifiers
-        // (Concourse, future GitHubPR, K8sPodLogs) come earliest in
-        // the chain and claim the result for tools they recognise.
-        // `GenericFallback` is registered last and matches everything
-        // — it owns the structural walker and consults the
-        // `StringClassifierChain` at every string leaf (Nix, future
-        // Cargo / Nextest / cpp-compile).
         for classifier in &self.classifiers {
             if !classifier.matches(ctx.tool_name, ctx.args) {
                 continue;
@@ -249,7 +159,6 @@ impl ClassifierRegistry {
                 }
             }
         }
-        // Empty registry safety net.
         let canonical_text = extract_text(ctx.raw);
         Classification {
             summary: ToolResultSummary::Passthrough {
@@ -266,29 +175,12 @@ impl Default for ClassifierRegistry {
     }
 }
 
-/// Last-resort classifier. Always matches; runs the JSON-aware
-/// walker over a `Value` reconstructed from the call result.
-///
-/// The walker handles both shapes uniformly:
-/// - Plain-text tools (bash, k8s logs) arrive with no
-///   `structured_content`; the helper wraps `content[].text` as
-///   `Value::String(text)`. The walker's string branch byte-elides
-///   in place — the kept value is still a `String`, agents reading
-///   `summary.value.as_str()` keep working.
-/// - Structured tools (compose, github_get_pr) carry
-///   `structured_content` directly. The walker descends, byte-eliding
-///   leaf strings and sentinel-replacing oversize collections only
-///   after recursion has had a chance to shrink them.
-///
-/// `output_schema` is irrelevant at runtime — declared shape is for
-/// registration-time contracts (workflow `ToolStep` validator).
+/// Last-resort classifier — runs the JSON walker over a `Value`
+/// reconstructed from the call result. Plain-text tools wrap as
+/// `Value::String`; structured tools carry `structured_content`
+/// directly. The chain runs at every string leaf.
 pub struct GenericFallback {
     pub threshold_bytes: usize,
-    /// Consulted at every string leaf in the walker. Each pass
-    /// rewrites contiguous matching runs in place, replacing them
-    /// with XML-tag marker blocks while keeping the value's
-    /// `String` JSON type. After the chain runs, byte-elision
-    /// fallback handles whatever's still over threshold.
     pub summarizer_chain: Option<std::sync::Arc<StringSummarizerChain>>,
 }
 
@@ -308,9 +200,8 @@ impl GenericFallback {
     }
 }
 
-/// Chain registered by [`ClassifierRegistry::with_default`]. Order:
-/// structured passes first (each claims its content shape); then
-/// [`BulkElide`] last as the dumb tail-keep fallback.
+/// Default chain: structured passes first, [`BulkElide`] last as
+/// the dumb tail-keep fallback.
 pub fn default_summarizer_chain() -> StringSummarizerChain {
     StringSummarizerChain::new()
         .register(nix::NixDrvList)
@@ -333,21 +224,6 @@ impl ResultClassifier for GenericFallback {
 
     fn classify(&self, ctx: &ClassifierContext<'_>) -> Result<Classification, ClassifierError> {
         let value = canonical_value(ctx.raw);
-        // canonical_text is the bytes `tool_output_fetch` will operate
-        // on. Goal: a multi-line representation where line-oriented
-        // grep is meaningful. Three shapes:
-        //
-        // - `Value::String(s)` — plain-text tools (bash, k8s logs).
-        //   Use the string verbatim; agents grep over real lines.
-        // - Single-string-field object like `{"logs": "<multi-line>"}`
-        //   (concourse, k8s pod logs, github raw fetch, bash via
-        //   tunnel). Compact JSON would collapse the embedded `\n`s
-        //   into the literal two-character sequence and grep would
-        //   see the whole document as one line. Extract the inner
-        //   string so each newline is a real line break.
-        // - Anything else — pretty-printed JSON. Multi-line, grep-able
-        //   on keys + values; less optimal than a typed classifier
-        //   but useful as a fallback.
         let canonical_text = canonical_text_for(&value);
         let chain = self.summarizer_chain.as_deref();
         let summary = match walker::classify_value(&value, self.threshold_bytes, chain) {
@@ -371,9 +247,10 @@ impl ResultClassifier for GenericFallback {
     }
 }
 
-/// Render the canonical text representation of a JSON value for
-/// downstream grep-mode fetches. See `GenericFallback::classify`
-/// for the rationale on each branch.
+/// Render the canonical text representation of a value for grep-mode
+/// fetches. Single-string-field objects (`{logs: "…"}`) extract the
+/// inner string so newlines are real line breaks for line-grep;
+/// anything else pretty-prints.
 pub(crate) fn canonical_text_for(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(s) => s.clone(),
@@ -385,9 +262,6 @@ pub(crate) fn canonical_text_for(value: &serde_json::Value) -> String {
     }
 }
 
-/// Build a `Value` from the call result. `structured_content` wins
-/// when set; otherwise the joined content text is wrapped as
-/// `Value::String` so the walker has a single uniform input shape.
 fn canonical_value(result: &CallToolResult) -> serde_json::Value {
     if let Some(sc) = result.structured_content.as_ref() {
         return sc.clone();
@@ -395,8 +269,6 @@ fn canonical_value(result: &CallToolResult) -> serde_json::Value {
     serde_json::Value::String(extract_text(result))
 }
 
-/// Extract concatenated text content from a `CallToolResult`. Mirrors the
-/// helper in `filter.rs` — duplicated here to avoid exporting it crate-wide.
 fn extract_text(result: &CallToolResult) -> String {
     result
         .content
@@ -415,8 +287,6 @@ mod tests {
     use rmcp::model::Content;
 
     fn ctx<'a>(tool_name: &'a str, raw: &'a CallToolResult) -> ClassifierContext<'a> {
-        // Static reference required by ClassifierContext lifetime; for
-        // tests the args value is just an empty object.
         static EMPTY_ARGS: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
         let args = EMPTY_ARGS.get_or_init(|| serde_json::json!({}));
         ClassifierContext {
@@ -436,32 +306,18 @@ mod tests {
         let raw = result_with("just a small bit of stdout");
         let registry = ClassifierRegistry::with_default();
         let classification = registry.classify(&ctx("bash", &raw));
-        assert!(
-            classification.summary.is_passthrough(),
-            "got: {:?}",
-            classification.summary
-        );
+        assert!(classification.summary.is_passthrough());
         assert_eq!(classification.canonical_text, "just a small bit of stdout");
     }
 
     #[test]
     fn large_text_input_emits_structured_elision_with_string_kept() {
-        // Plain-text tools (no `structured_content`) arrive as
-        // `Value::String(text)` after `canonical_value`. The walker
-        // keeps the type as `String` — head + ellipsis + tail in
-        // place — so agents reading `summary.kept.as_str()` keep
-        // working.
         let lines: Vec<String> = (0..500).map(|i| format!("line-{i:04}")).collect();
         let body = lines.join("\n");
-        assert!(
-            body.len() >= DEFAULT_GENERIC_THRESHOLD_BYTES,
-            "test body should exceed default threshold"
-        );
+        assert!(body.len() >= DEFAULT_GENERIC_THRESHOLD_BYTES);
         let raw = result_with(&body);
         let registry = ClassifierRegistry::with_default();
         let classification = registry.classify(&ctx("bash", &raw));
-        // canonical_text is the bytes the summary's offsets refer to —
-        // exactly what the dispatcher will persist.
         assert_eq!(classification.canonical_text, body);
         match classification.summary {
             ToolResultSummary::StructuredElision {
@@ -484,9 +340,6 @@ mod tests {
 
     #[test]
     fn structured_object_walks_into_oversized_string_field() {
-        // Bash-shape: `{"output": "<huge text>"}`. The walker keeps
-        // the wrapper object verbatim; the inner string is byte-elided
-        // in place so `kept.output` is still a JSON string.
         let huge = "x".repeat(10_000);
         let mut sc = serde_json::Map::new();
         sc.insert("output".into(), serde_json::Value::String(huge.clone()));
@@ -503,7 +356,7 @@ mod tests {
                     .get("output")
                     .and_then(|v| v.as_str())
                     .expect("output key still a JSON string");
-                assert!(output.len() < huge.len(), "output should be byte-elided");
+                assert!(output.len() < huge.len());
                 assert_eq!(elided_paths.len(), 1);
                 assert_eq!(elided_paths[0].path, "$.output");
                 assert!(matches!(elided_paths[0].kind, ElisionKind::String));
@@ -543,12 +396,6 @@ mod tests {
 
     #[test]
     fn walker_chain_substitutes_in_place_at_string_leaf() {
-        // Walker is the spine; the StringSummarizer chain rewrites
-        // string leaves in place. A bash result whose stdout looks
-        // like nix output lands in `StructuredElision { kept }` where
-        // `kept` is still a `Value::String` — just with copy-run
-        // chatter collapsed into XML markers. Failure headers stay
-        // inline as ordinary text.
         let registry = ClassifierRegistry::with_default();
         let mut nix_output = String::from("preparing to build\n");
         nix_output.push_str("building '/nix/store/aaaa-foo.drv'\n");
@@ -570,18 +417,14 @@ mod tests {
             other => panic!("unexpected summary shape: {other:?}"),
         };
         let s = kept.as_str().expect("kept is still Value::String");
-        assert!(s.contains("<nix-copy"), "got: {s}");
-        assert!(s.contains("</nix-copy>"), "got: {s}");
-        // Failure header stays inline as plain text — no dedicated marker.
-        assert!(s.contains("error: builder for"), "got: {s}");
-        assert!(s.contains("some compiler error"), "got: {s}");
+        assert!(s.contains("<nix-copy"));
+        assert!(s.contains("</nix-copy>"));
+        assert!(s.contains("error: builder for"));
+        assert!(s.contains("some compiler error"));
     }
 
     #[test]
     fn threshold_is_configurable() {
-        // A custom 4-byte threshold makes any non-trivial input trip
-        // elision; the walker emits StructuredElision when the post-
-        // walk form is smaller than the input.
         let registry = ClassifierRegistry::new().register(GenericFallback {
             threshold_bytes: 4,
             summarizer_chain: None,
@@ -603,10 +446,6 @@ mod tests {
 
     #[test]
     fn canonical_text_extracts_single_string_field() {
-        // {"logs": "<multi-line>"} is the universal shape for log-emitting
-        // structured tools (concourse, k8s pod logs, github raw, bash via
-        // tunnel). Without this carve-out, grep against the persisted
-        // raw_text sees one line — the JSON envelope.
         let v = serde_json::json!({"logs": "first\nsecond\nthird"});
         assert_eq!(canonical_text_for(&v), "first\nsecond\nthird");
     }
@@ -615,21 +454,16 @@ mod tests {
     fn canonical_text_pretty_prints_multi_field_object() {
         let v = serde_json::json!({"name": "alice", "age": 30});
         let canonical = canonical_text_for(&v);
-        // Pretty-print produces line-per-field — grep can match keys
-        // and values independently.
-        assert!(canonical.contains("\n"), "pretty-printed: {canonical}");
-        assert!(canonical.contains("\"name\""), "{canonical}");
-        assert!(canonical.contains("\"age\""), "{canonical}");
+        assert!(canonical.contains("\n"));
+        assert!(canonical.contains("\"name\""));
+        assert!(canonical.contains("\"age\""));
     }
 
     #[test]
     fn canonical_text_single_field_non_string_falls_back_to_pretty() {
         let v = serde_json::json!({"items": [1, 2, 3]});
         let canonical = canonical_text_for(&v);
-        // Single-field heuristic is restricted to string values; a
-        // single-field object whose value is e.g. an array should
-        // pretty-print so the array's elements are line-grep-able.
-        assert!(canonical.contains("\n"), "{canonical}");
-        assert!(canonical.contains("\"items\""), "{canonical}");
+        assert!(canonical.contains("\n"));
+        assert!(canonical.contains("\"items\""));
     }
 }

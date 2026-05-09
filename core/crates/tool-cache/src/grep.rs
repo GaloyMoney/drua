@@ -1,28 +1,18 @@
 //! Line-grep helpers used by `apply_fetch_query`'s `Grep` mode.
 
-/// Args bundle for [`filter_lines_rich`] — keeps the function signature
-/// readable as the option set grew (asymmetric context, line numbers,
-/// invert, head_limit).
 pub(super) struct FilterArgs<'a, 'r> {
     pub lines: &'a [&'a str],
     pub re: &'r regex::Regex,
     pub invert: bool,
-    /// Lines of context before each match (`rg -B`).
     pub before: usize,
-    /// Lines of context after each match (`rg -A`).
     pub after: usize,
-    /// Prefix kept lines with `<1-based-line-no>:` (`rg -n`).
     pub line_numbers: bool,
-    /// Cap output to first N kept lines after context expansion.
     pub head_limit: Option<usize>,
 }
 
-/// `invert=true` keeps non-matching lines (rg's `-v`); context expansion
-/// applies only when `invert=false`. `before`/`after` are independent and
-/// asymmetric — `rg -A 3 -B 1` is `before=1, after=3`. Context-separator
-/// `--` is emitted between non-contiguous match windows. Returned strings
-/// are owned only when `line_numbers=true`; otherwise they're borrowed
-/// from the input (zero-copy).
+/// rg-flavoured grep over `lines`. `invert` keeps non-matches.
+/// `before`/`after` are asymmetric. `--` separates non-contiguous
+/// match windows.
 pub(super) fn filter_lines_rich(args: FilterArgs<'_, '_>) -> Vec<String> {
     let FilterArgs {
         lines,
@@ -197,8 +187,6 @@ mod tests {
     fn head_limit_after_context_expansion() {
         let re = regex::Regex::new("MATCH").unwrap();
         let lines = vec!["a", "MATCH", "b", "c", "MATCH", "d"];
-        // before=1 + after=1 with a separator would give 8 lines; head_limit
-        // truncates to first 3.
         let out = filter_lines_rich(FilterArgs {
             before: 1,
             after: 1,

@@ -1,12 +1,9 @@
-//! Nix-shaped [`StringSummarizer`] passes. Each one collapses a
-//! particular noisy run into an XML marker block.
-//!
-//! Markers emitted:
-//!   - `<nix-copy>`           — `copying path '/nix/store/...' from ...` runs
-//!   - `<nix-drv-list>`       — `these N derivations will be built:` + indented `.drv` paths
-//!   - `<nix-fetch-list>`     — `these N paths will be fetched (...):` + indented store paths
-//!   - `<nix-building>`       — `building '/nix/store/...drv'...` runs
-//!   - `<nix-cache>`          — any contiguous run of `nix-cache: ...` lines
+//! Nix-shaped [`StringSummarizer`] passes. Markers emitted:
+//!   - `<nix-copy>`       — `copying path '/nix/store/...' from ...` runs
+//!   - `<nix-drv-list>`   — `these N derivations will be built:` + paths
+//!   - `<nix-fetch-list>` — `these N paths will be fetched (...):` + paths
+//!   - `<nix-building>`   — `building '/nix/store/...drv'...` runs
+//!   - `<nix-cache>`      — any contiguous run of `nix-cache: ...` lines
 
 use std::ops::Range;
 
@@ -123,9 +120,6 @@ impl StringSummarizer for NixFetchList {
     }
 }
 
-/// Collect "header line + indented store-path body" blocks. The
-/// `body_ok` predicate gates which `/nix/store/...` lines count as
-/// part of the body — `.drv` for drv-list, anything for fetch-list.
 fn collect_list_block<HF, BF>(r: &VerbatimRegion<'_>, is_header: HF, body_ok: BF) -> Vec<Range<u32>>
 where
     HF: Fn(&str) -> bool,
@@ -304,9 +298,6 @@ mod tests {
 
     #[test]
     fn cache_activity_collapses_run_including_status_lines() {
-        // The new pass eats every contiguous `nix-cache: …` line —
-        // not just `removing /nix-cache/…` but also `cache size`,
-        // `deleted N files so far`, `pruning done`, etc.
         let raw = "before\n\
                    nix-cache: saving new store paths to local cache...\n\
                    nix-cache: calculating cache size...\n\
@@ -325,14 +316,11 @@ mod tests {
         assert!(log.contains("</nix-cache>"));
         assert!(log.contains("before"));
         assert!(log.contains("after"));
-        // No raw nix-cache: lines remain (they're all inside one marker).
         assert_eq!(log.matches("nix-cache: ").count(), 0);
     }
 
     #[test]
     fn lone_nix_cache_line_is_left_alone() {
-        // A single `nix-cache: …` line surrounded by other content
-        // doesn't trigger the pass — the run length must be ≥ 2.
         let raw = "=== with-nix-cache: start ===\n\
                    nix-cache: local cache found (25G), restoring\n\
                    === with-nix-cache: setup done ===\n";
@@ -378,48 +366,34 @@ final
         assert!(log.contains("final"));
     }
 
+    /// Regression: marker `original-lines` must reference input
+    /// coords even after earlier passes shifted current line numbers.
     #[test]
     fn original_lines_attribute_refers_to_input_coords_across_passes() {
-        // Regression: when an early pass shrinks the log, a later
-        // pass's current line numbers diverge from the original.
-        // Marker `original-lines` must always be input coords.
         let mut raw = String::new();
-        // Lines 1-50 of the input: a copy run that NixCopyRun will
-        // collapse to a single 3-line marker.
         for i in 0..50 {
             raw.push_str(&format!(
                 "copying path '/nix/store/p{i:03}-thing' from 'cache'\n"
             ));
         }
-        // Lines 51-58: spacer.
         for i in 0..8 {
             raw.push_str(&format!("spacer line {i}\n"));
         }
-        // Lines 59-70: a building run that NixBuildingRun
-        // collapses. After NixCopyRun ran, this content's CURRENT
-        // line numbers are 4..16-ish, but its ORIGINAL line range
-        // is 59..70.
         for i in 0..12 {
             raw.push_str(&format!("building '/nix/store/b{i:02}-foo.drv'...\n"));
         }
         let ctx = run_chain(&raw);
         let log = ctx.log();
-        // The nix-building marker's `original-lines` must reflect
-        // input lines 59..70 — not whatever current coords it had
-        // when NixBuildingRun ran.
         let buildings: Vec<&str> = log
             .lines()
             .filter(|l| l.starts_with("<nix-building"))
             .collect();
-        assert_eq!(buildings.len(), 1, "exactly one building marker");
+        assert_eq!(buildings.len(), 1);
         let attr = buildings[0]
             .split_whitespace()
             .find(|s| s.starts_with("original-lines="))
             .expect("original-lines present");
-        assert_eq!(
-            attr, "original-lines=\"59-70\"",
-            "marker must reference input coords (1-indexed); got: {attr}",
-        );
+        assert_eq!(attr, "original-lines=\"59-70\"");
     }
 
     #[test]
@@ -430,9 +404,6 @@ final
                    tail\n";
         let ctx = run_chain(raw);
         let log = ctx.log();
-        // Tag should advertise what got dropped (`original-bytes`,
-        // `original-lines`) — never `kept-bytes` (the agent reads
-        // the marker itself, no need to redundantly count).
         assert!(log.contains("original-lines="));
         assert!(log.contains("original-bytes="));
         assert!(!log.contains("kept-bytes="));

@@ -99,9 +99,6 @@ impl ToolInvocationRepo {
         ))
     }
 
-    /// Most-recent matching invocation for `(owner, args_hash)` — the
-    /// cache-aware-diff probe. Walks whichever owner column is set on
-    /// the lookup `owner`.
     pub async fn find_latest_by_args_hash(
         &self,
         owner: InvocationOwner,

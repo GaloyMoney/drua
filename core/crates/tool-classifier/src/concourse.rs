@@ -1,16 +1,7 @@
-//! Concourse build-log handling, split into two pieces:
-//!
-//! - [`ConcourseBuildLogPreprocessor`] — strips ANSI + the leading
-//!   `[HH:MM:SS] ` timestamp from each line so the summarizer chain
-//!   sees clean line bodies.
-//!
-//! - [`ConcourseBuildLogClassifier`] — top-level [`ResultClassifier`]
-//!   for `concourse_get_build_logs`. Preprocesses, hands the stripped
-//!   log to the walker (which runs the same `StringSummarizerChain`
-//!   that `GenericFallback` uses), and wraps the compacted result in
-//!   a [`ToolResultSummary::Typed`] whose `body` is exactly
-//!   `{ logs: String }` — schema-faithful to the upstream MCP tool's
-//!   declared `output_schema`.
+//! Concourse `concourse_get_build_logs` classifier — preprocesses
+//! (strip ANSI + `[HH:MM:SS]`), then delegates to the walker. Emits
+//! `Typed { typed_kind: "concourse_logs", body: { logs: String } }`,
+//! schema-faithful to the upstream tool's `output_schema`.
 
 use std::sync::{Arc, OnceLock};
 
@@ -23,15 +14,10 @@ use super::{
     DEFAULT_GENERIC_THRESHOLD_BYTES,
 };
 
-/// Discriminator used by [`ToolResultSummary::Typed::typed_kind`].
-/// Surfaced through `summary.kind()` and lands in the `kind`
-/// column on `tool_invocations` for filterability.
 pub const CONCOURSE_LOGS_KIND: &str = "concourse_logs";
 
-/// Strips ANSI + leading `[HH:MM:SS] ` from each line of a raw
-/// Concourse log. Output is line-aligned with the input — every
-/// input line maps to one output line — so summarizer-pass
-/// `original-lines` attributes refer to consistent coordinates.
+/// Strips ANSI + leading `[HH:MM:SS] ` from each line. Output is
+/// line-aligned with the input.
 pub struct ConcourseBuildLogPreprocessor;
 
 impl ConcourseBuildLogPreprocessor {
@@ -48,9 +34,6 @@ impl ConcourseBuildLogPreprocessor {
     }
 }
 
-/// Identity-matched call-level wrapper for `concourse_get_build_logs`.
-/// Concourse's only unique work is preprocessing — line-shaped
-/// compaction lives in the shared chain via the walker.
 #[derive(Default)]
 pub struct ConcourseBuildLogClassifier {
     chain: Option<Arc<StringSummarizerChain>>,
@@ -75,8 +58,6 @@ impl ResultClassifier for ConcourseBuildLogClassifier {
         let raw = extract_text(ctx.raw);
         let stripped = ConcourseBuildLogPreprocessor::run(&raw);
 
-        // Hand the stripped log to the walker; same uniform path
-        // every other string-leaf classifier uses.
         let value = serde_json::Value::String(stripped.clone());
         let kept_value = match walker::classify_value(
             &value,
@@ -88,8 +69,6 @@ impl ResultClassifier for ConcourseBuildLogClassifier {
         };
         let logs = kept_value.as_str().unwrap_or(&stripped).to_string();
 
-        // Body is schema-faithful: matches `concourse_get_build_logs`
-        // output_schema (`{logs: String}`).
         let body = serde_json::json!({ "logs": logs });
 
         Ok(Classification {
@@ -97,9 +76,6 @@ impl ResultClassifier for ConcourseBuildLogClassifier {
                 typed_kind: CONCOURSE_LOGS_KIND.to_string(),
                 body,
             },
-            // canonical_text is the bytes `tool_output_fetch`
-            // operates on; stripped log so marker `original-lines`
-            // attributes line up with the persisted bytes.
             canonical_text: stripped,
         })
     }
@@ -197,9 +173,8 @@ mod tests {
         };
         assert_eq!(typed_kind, CONCOURSE_LOGS_KIND);
 
-        // Body must match Concourse's output_schema: { logs: String }.
         let obj = body.as_object().expect("body is an object");
-        assert_eq!(obj.len(), 1, "only `logs` field; got: {obj:?}");
+        assert_eq!(obj.len(), 1);
         let logs = obj
             .get("logs")
             .and_then(|v| v.as_str())
@@ -247,7 +222,6 @@ mod tests {
             })
             .expect("classify")
             .summary;
-        // Filterable column gets `concourse_logs`, not `typed`.
         assert_eq!(summary.kind(), CONCOURSE_LOGS_KIND);
     }
 }

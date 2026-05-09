@@ -1,16 +1,7 @@
-//! Persistent layer for the tool-output universal pipeline. The dispatcher
-//! calls into [`ToolInvocations`] when a `ResultClassifier` emits anything
-//! other than `Passthrough`; the captured raw output is persisted so the
-//! agent can recover detail later via the `tool_output_fetch` MCP tool.
-//!
-//! Boilerplate scope (issue 019e01c5): no hot-tier in-process cache, no TTL
-//! sweeper, no compression. The PG row is the single source of truth and is
-//! cheap enough that every `tool_output_fetch` is a SELECT round-trip.
-//!
-//! No coupling to the auth or audit subsystems: callers pass in an
-//! [`InvocationOwner`] (a flat `(agent_id, user_id)` pair derived from
-//! whatever subject model they use) and receive a `Persisted...` shape;
-//! audit-log writes are the caller's job.
+//! Persistent layer for the tool-output universal pipeline. The
+//! dispatcher calls into [`ToolInvocations`] when a `ResultClassifier`
+//! emits anything other than `Passthrough`. Auth-agnostic: callers
+//! pass a flat [`InvocationOwner`] derived from their subject model.
 
 mod entity;
 mod error;
@@ -30,8 +21,6 @@ use tracing::instrument;
 use drua_tool_classifier::{Classification, ToolResultSummary};
 use repo::ToolInvocationRepo;
 
-/// What the agent asked to retrieve from a persisted invocation. Exactly one
-/// mode at a time — kept tagged so the wire schema is unambiguous.
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum FetchQuery {
@@ -45,45 +34,30 @@ pub enum FetchQuery {
         offset: u64,
         len: u32,
     },
-    /// Line-grep with rg-style flags. Flag spelling mirrors the top-level
-    /// `Grep` tool so the model can transfer the shape directly. Operates
-    /// over the persisted `raw_text` line-by-line; cross-line patterns
-    /// are not currently supported (no `--multiline-dotall` equivalent).
+    /// Line-grep with rg-style flags. Operates over the persisted
+    /// `raw_text` line-by-line; cross-line patterns not supported.
     Grep {
-        /// Regular expression pattern matched against each line.
         pattern: String,
 
-        /// Case-insensitive search (rg's `-i`). Equivalent to prefixing
-        /// `pattern` with `(?i)`, but explicit for discoverability.
         #[serde(rename = "-i", default)]
         case_insensitive: bool,
 
-        /// Lines of context after each match (rg's `-A`).
         #[serde(rename = "-A", default, skip_serializing_if = "Option::is_none")]
         after_context: Option<u32>,
 
-        /// Lines of context before each match (rg's `-B`).
         #[serde(rename = "-B", default, skip_serializing_if = "Option::is_none")]
         before_context: Option<u32>,
 
-        /// Symmetric pre/post context — equivalent to setting both
-        /// `-A` and `-B` to the same value (rg's `-C`). Ignored when
-        /// either `-A` or `-B` is set.
+        /// Symmetric -C; ignored when -A or -B is set.
         #[serde(rename = "-C", default, skip_serializing_if = "Option::is_none")]
         context: Option<u32>,
 
-        /// Prefix kept lines with their 1-based line number from the
-        /// original `raw_text` (rg's `-n`). Useful as input to a later
-        /// `range`/`head`/`tail` query against the same invocation.
-        /// Default: true.
         #[serde(rename = "-n", default = "default_true")]
         line_numbers: bool,
 
-        /// Drop matches; keep non-matching lines (rg's `-v`).
         #[serde(default)]
         invert_match: bool,
 
-        /// Cap output to first N kept lines (after context expansion).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         head_limit: Option<u32>,
     },
@@ -95,41 +69,22 @@ fn default_true() -> bool {
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct FetchResult {
-    /// Model-facing slice. When the slice exceeded the response cap,
-    /// the head fits and a `[… N bytes elided …]` trailer is appended
-    /// with refinement guidance — `elision` carries the same info
-    /// structurally for programmatic callers.
     pub content: String,
-
-    /// Total size of the persisted `raw_text` for this invocation, in bytes.
-    /// Useful for budgeting follow-up `range` queries. Not the size of
-    /// `content` — `content` is the slice you asked for.
     pub total_bytes: u64,
-
-    /// `Some(...)` when the slice the query produced exceeded the
-    /// response cap. The persisted invocation is the canonical source
-    /// of truth, so we do NOT persist a new row for the elided slice;
-    /// agents refine against the original `invocation_id` instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elision: Option<FetchElision>,
 }
 
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct FetchElision {
-    /// Size in bytes the slice would have been if uncapped.
     pub slice_bytes: u64,
-    /// Size in bytes actually returned in `content` (excluding trailer).
     pub kept_bytes: u64,
-    /// Per-mode advice for narrowing the next query so the slice fits.
     pub hint: String,
 }
 
-/// Maximum length of a `Grep` regex.
 const MAX_GREP_PATTERN_LENGTH: usize = 1000;
 
-/// Hard ceiling on the bytes a single `tool_output_fetch` may return. The
-/// fetch escape hatch is meant to surface targeted detail, not to ship the
-/// whole blob back through the model context — that defeats the elision.
+/// Hard ceiling for a single `tool_output_fetch` response.
 const MAX_FETCH_RESPONSE_BYTES: usize = 32 * 1024;
 
 #[derive(Clone)]
@@ -144,7 +99,7 @@ impl ToolInvocations {
         }
     }
 
-    #[instrument(name = "core.tool_invocations.persist", skip_all)]
+    #[instrument(name = "tool_cache.persist", skip_all)]
     pub async fn persist(
         &self,
         new: NewToolInvocation,
@@ -152,7 +107,7 @@ impl ToolInvocations {
         Ok(self.repo.create(new).await?)
     }
 
-    #[instrument(name = "core.tool_invocations.find_by_id", skip(self))]
+    #[instrument(name = "tool_cache.find_by_id", skip(self))]
     pub async fn find_by_id(
         &self,
         id: ToolInvocationId,
@@ -160,7 +115,7 @@ impl ToolInvocations {
         Ok(self.repo.find_by_id(id).await?)
     }
 
-    #[instrument(name = "core.tool_invocations.fetch", skip(self))]
+    #[instrument(name = "tool_cache.fetch", skip(self))]
     pub async fn fetch(
         &self,
         id: ToolInvocationId,
@@ -170,11 +125,7 @@ impl ToolInvocations {
         apply_fetch_query(&invocation.raw_text, &query)
     }
 
-    /// Cache-aware diff probe — most-recent invocation matching
-    /// `(owner, args_hash)`. The consuming `Diff` summary variant lands
-    /// in a follow-up PR; the `(scope, args_hash)` partial indexes are
-    /// in place so each lookup is a single index hit.
-    #[instrument(name = "core.tool_invocations.find_for_diff", skip(self))]
+    #[instrument(name = "tool_cache.find_for_diff", skip(self))]
     pub async fn find_for_diff(
         &self,
         owner: InvocationOwner,
@@ -184,16 +135,7 @@ impl ToolInvocations {
     }
 
     /// Persist the classifier's output as a `tool_invocations` row.
-    /// Pure persistence — no `CallToolResult` mutation, no envelope
-    /// construction, no audit-log write (callers wire that themselves
-    /// after observing the returned `invocation_id`).
-    ///
-    /// Returns `None` when:
-    /// - summary or args fail to serialize (logged + skipped);
-    /// - the PG insert errors (logged + skipped).
-    ///
-    /// Callers gate on owner-availability themselves: `Anonymous` /
-    /// workflow-executor subjects in drua-core never reach this fn.
+    /// Returns `None` on serialization or insert failure (logged).
     #[instrument(name = "tool_cache.persist_classification", skip_all)]
     #[allow(clippy::too_many_arguments)]
     pub async fn persist_classification(
@@ -211,9 +153,6 @@ impl ToolInvocations {
             summary,
             canonical_text,
         } = classification;
-        // `canonical_text` IS the bytes the summary's offsets point at —
-        // persist exactly those so subsequent `tool_output_fetch` calls
-        // return text whose line numbers match the summary's slicing.
         let raw_size_bytes = canonical_text.len() as i64;
 
         let summary_value = match serde_json::to_value(&summary) {
@@ -269,13 +208,10 @@ impl ToolInvocations {
         })
     }
 
-    /// Persist the captured raw output and decorate the original
-    /// `CallToolResult` with an `envelope.invocation_id` so the caller
-    /// can recover detail through `tool_output_fetch`. Returns the
-    /// wrapped result paired with the persisted invocation_id so the
-    /// dispatcher can stamp the audit row (cursor #3212593021).
-    /// Returns `None` on persistence failure — the dispatcher then
-    /// forwards the raw result unmodified; failure is logged.
+    /// Persist + decorate the raw result with an
+    /// `envelope.invocation_id`. Returns `(wrapped, invocation_id)`
+    /// so the dispatcher can stamp the audit row. `None` on
+    /// persistence failure.
     #[instrument(name = "tool_cache.persist_and_envelope", skip_all)]
     #[allow(clippy::too_many_arguments)]
     pub async fn persist_and_envelope(
@@ -300,13 +236,6 @@ impl ToolInvocations {
             )
             .await?;
 
-        // No `fetch_hint` here — `tool_output_fetch` is a visible
-        // top-level tool, so its `description()` already carries the
-        // call shape and per-mode args. The terse `fetch via
-        // tool_output_fetch(invocation_id="…")` line emitted by
-        // `envelope_text` is enough to point the agent at recovery;
-        // duplicating the schema in every persisted envelope is
-        // pure context noise.
         let envelope = serde_json::json!({
             "invocation_id": uuid::Uuid::from(persisted.invocation_id).to_string(),
             "summary": persisted.summary_value,
@@ -323,10 +252,6 @@ impl ToolInvocations {
     }
 }
 
-/// Result of [`ToolInvocations::persist_classification`]. Carries the
-/// pieces both the dispatcher (envelope construction) and compose
-/// (sub_invocations directory) need to inspect after persistence —
-/// without re-classifying or re-loading the persisted row.
 pub struct PersistedClassification {
     pub invocation_id: ToolInvocationId,
     pub summary: ToolResultSummary,
@@ -337,9 +262,6 @@ pub struct PersistedClassification {
 fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId, raw_size_bytes: u64) -> String {
     match summary {
         ToolResultSummary::Passthrough { value } => match value {
-            // Plain-text tools land here as Value::String — emit the
-            // raw string. Structured tools land as a Value; pretty-
-            // print so the model can read it.
             serde_json::Value::String(s) => s.clone(),
             other => serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
         },
@@ -349,11 +271,6 @@ fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId, raw_size_byt
             total_bytes,
             kept_bytes,
         } => {
-            // Pretty-printed `kept` so agents/humans read structure
-            // naturally; the elided_paths list is rendered as a
-            // structured table so the agent can scan what was
-            // dropped without recursing through `kept` to find
-            // sentinels.
             let mut out = String::new();
             out.push_str(&format!(
                 "[json elided: {kept_bytes}/{total_bytes} bytes kept; \
@@ -383,13 +300,6 @@ fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId, raw_size_byt
             out
         }
         ToolResultSummary::Typed { typed_kind, body } => {
-            // Generic typed-body rendering — works for any classifier
-            // that produces a Typed summary. Reports the ORIGINAL
-            // byte count so the agent knows what's recoverable via
-            // `tool_output_fetch`. Body content is shown inline:
-            // a single-string-field object (e.g. `{logs: "…"}` from
-            // Concourse) gets the raw string dumped; otherwise the
-            // body pretty-prints as JSON.
             let mut out = String::new();
             out.push_str(&format!(
                 "[{typed_kind}: {raw_size_bytes} original bytes; \
@@ -404,12 +314,9 @@ fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId, raw_size_byt
     }
 }
 
-/// Render a `Typed` summary's `body` value for inline display.
-/// Single-string-field objects (the canonical shape for log-emitting
-/// tools that conform to a `{logs: String}` output_schema) get their
-/// inner string dumped verbatim — pretty-printed JSON would escape
-/// embedded newlines into `\n` and break line-grep. Anything else
-/// pretty-prints.
+/// Single-string-field objects (e.g. `{logs: "…"}`) get the inner
+/// string dumped verbatim — pretty-print would escape newlines and
+/// break line-grep. Anything else pretty-prints.
 fn render_typed_body(body: &serde_json::Value) -> String {
     match body {
         serde_json::Value::String(s) => s.clone(),
@@ -444,7 +351,6 @@ pub fn apply_fetch_query(
                 String::new()
             } else {
                 let end = (start + *len as usize).min(raw.len());
-                // Snap to a UTF-8 char boundary so the slice is valid utf8.
                 let end = floor_char_boundary(raw, end);
                 let start = floor_char_boundary(raw, start);
                 raw[start..end].to_string()
@@ -472,8 +378,6 @@ pub fn apply_fetch_query(
                 .map_err(|e| ToolInvocationError::InvalidPattern(format!("invalid regex: {e}")))?;
             let lines: Vec<&str> = raw.lines().collect();
 
-            // -A / -B win over -C when either is set; otherwise -C
-            // applies symmetrically; otherwise no context.
             let (before, after) = match (before_context, after_context) {
                 (None, None) => {
                     let c = context.map(|c| c as usize).unwrap_or(0);
@@ -531,11 +435,6 @@ pub fn apply_fetch_query(
     })
 }
 
-/// Per-mode advice for narrowing a follow-up query when the previous
-/// slice exceeded the response cap. The persisted raw at the parent
-/// `invocation_id` is the source of truth — refinement always goes
-/// back to it, never to a slice-of-a-slice (which we deliberately
-/// don't persist).
 fn refine_hint(query: &FetchQuery) -> String {
     match query {
         FetchQuery::Tail { lines } => format!(
@@ -575,8 +474,7 @@ fn refine_hint(query: &FetchQuery) -> String {
     }
 }
 
-/// `str::floor_char_boundary` is unstable on stable Rust 1.x. Reimplement it
-/// here so byte-offset truncation never panics on a multi-byte UTF-8 boundary.
+/// `str::floor_char_boundary` is unstable on stable.
 fn floor_char_boundary(s: &str, idx: usize) -> usize {
     if idx >= s.len() {
         return s.len();
@@ -715,13 +613,10 @@ mod tests {
             },
         )
         .unwrap();
-        let elision = r
-            .elision
-            .expect("oversize slice should produce elision metadata");
+        let elision = r.elision.expect("oversize slice produces elision metadata");
         assert_eq!(elision.kept_bytes, MAX_FETCH_RESPONSE_BYTES as u64);
         assert_eq!(elision.slice_bytes, big.len() as u64);
         assert!(elision.hint.contains("`len`"));
-        // content carries the kept head followed by the trailer.
         assert!(r.content.starts_with(&"x".repeat(MAX_FETCH_RESPONSE_BYTES)));
         assert!(r.content.contains("byte slice elided"));
         assert!(r.content.contains("refine:"));
@@ -740,8 +635,8 @@ mod tests {
             head_limit: None,
         };
         let h = refine_hint(&q);
-        assert!(h.contains("set `head_limit`"), "got: {h}");
-        assert!(h.contains("tighten the pattern"), "got: {h}");
+        assert!(h.contains("set `head_limit`"));
+        assert!(h.contains("tighten the pattern"));
     }
 
     #[test]
@@ -757,8 +652,8 @@ mod tests {
             head_limit: Some(100),
         };
         let h = refine_hint(&q);
-        assert!(h.contains("lower `head_limit`"), "got: {h}");
-        assert!(h.contains("`-A`/`-B`"), "got: {h}");
+        assert!(h.contains("lower `head_limit`"));
+        assert!(h.contains("`-A`/`-B`"));
     }
 
     #[test]
@@ -766,7 +661,6 @@ mod tests {
         let s = "ab\u{1F600}cd";
         assert_eq!(floor_char_boundary(s, 0), 0);
         assert_eq!(floor_char_boundary(s, 2), 2);
-        // mid-emoji index snaps down
         assert_eq!(floor_char_boundary(s, 3), 2);
         assert_eq!(floor_char_boundary(s, 6), 6);
         assert_eq!(floor_char_boundary(s, 100), s.len());

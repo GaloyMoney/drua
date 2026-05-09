@@ -1,32 +1,20 @@
 //! JSON-aware elision walker — depth-first descent that byte-elides
 //! strings in place (preserving the `String` JSON type) and
 //! sentinel-replaces oversize arrays/objects only after recursion.
-//!
-//! Invariant: `kept_bytes < total_bytes` whenever `WalkOutcome::Elided`
-//! is returned. The walker checks the post-walk size of `kept` against
-//! the input's serialized size and bails to `Passthrough` if elision
-//! didn't actually shrink — same precaution that fixes the line-count
-//! overlap bug for plain-text inputs.
+//! Bails to `Passthrough` if elision didn't actually shrink.
 
 use serde_json::{Map, Value};
 
 use super::string_summarizer::{SegmentedText, StringSummarizerChain};
 use super::{ElidedPath, ElisionKind};
 
-/// Per-string head/tail char count when byte-eliding. Picked to keep
-/// the elided form well under `DEFAULT_GENERIC_THRESHOLD_BYTES` so a
-/// single oversize string field doesn't dominate its parent's budget.
 const STRING_ELIDE_HEAD_CHARS: usize = 256;
 const STRING_ELIDE_TAIL_CHARS: usize = 256;
 const STRING_ELIDE_MARKER: &str = "…";
 
-/// Per-array sentinel head/tail item count. Decremented on the way
-/// down when even the trimmed sample exceeds the budget.
 const ARRAY_SENTINEL_HEAD: usize = 3;
 const ARRAY_SENTINEL_TAIL: usize = 3;
 
-/// Soft cap for an emitted sentinel object's serialized size. The
-/// walker drops head/tail items in the sentinel until it fits.
 const SENTINEL_BYTE_BUDGET: usize = 2048;
 
 #[derive(Debug)]
@@ -60,22 +48,12 @@ pub fn classify_value(
     if kept == *value {
         return WalkOutcome::Passthrough(value.clone());
     }
-    // Walker bailout: if elision alone (no typed substitutions) didn't
-    // shrink, the kept form is just churn — passthrough wins. Typed
-    // substitutions are kept regardless of size: a structured shape is
-    // strictly more useful to the agent than the raw bytes even when
-    // it's a few bytes longer.
     if typed_replacements == 0 && kept_bytes >= total_bytes {
         return WalkOutcome::Passthrough(value.clone());
     }
-    // A typed substitution can produce a kept value larger than the
-    // raw input (small nix snippet → typed sentinel with summary
-    // metadata). Clamp `kept_bytes` at `total_bytes` so the envelope
-    // text and compression-ratio metric stay sensible — the agent's
-    // view is *strictly more useful* than the raw bytes regardless of
-    // byte count, but reporting `kept_bytes > total_bytes` would
-    // render nonsense like "[json elided: 500/200 bytes kept]" and a
-    // negative compression ratio (cursor bugbot review #3210144802).
+    // Clamp `kept_bytes` at `total_bytes` so a typed substitution
+    // larger than the raw input doesn't render a negative
+    // compression ratio (cursor #3210144802).
     let reported_kept = kept_bytes.min(total_bytes);
     WalkOutcome::Elided {
         kept,
@@ -94,16 +72,6 @@ fn walk(
     typed_replacements: &mut usize,
 ) -> Value {
     match value {
-        // Strings always get the chain offered, regardless of size —
-        // a 200-byte nix copy run is worth collapsing even when no
-        // byte-elision is needed. The chain mutates the string in
-        // place (preserving Value::String); its terminal `BulkElide`
-        // pass owns the total-size bound, so when a chain ran we
-        // trust its output even when still over `threshold` (the
-        // chain may have its own, larger bound). Only when no chain
-        // is wired do we fall through to char-level byte-elision —
-        // that path is now strictly the legacy / no-classifier
-        // safety net.
         Value::String(s) => {
             if let Some(c) = chain {
                 let mut ctx = SegmentedText::from_initial(s);
@@ -154,7 +122,6 @@ fn walk(
                 typed_replacements,
             )
         }
-        // Numbers, booleans, null can't be over-threshold in practice.
         _ => value.clone(),
     }
 }
@@ -169,14 +136,10 @@ fn byte_elide_string(
     let tail_target = s.len().saturating_sub(STRING_ELIDE_TAIL_CHARS);
     let tail_start = ceil_char_boundary(s, tail_target.max(head_end));
     if head_end >= tail_start {
-        // Head and tail would overlap — nothing to elide meaningfully.
-        // Rare edge case: the string trips `json_size > threshold`
-        // due to escape expansion (each `\` becomes `\\` in the
-        // serialized form, doubling apparent size) while its
-        // character count stays below `head + tail`. Don't push an
-        // ElidedPath: that would mislead agents reasoning over
-        // `elided_paths` into thinking content was dropped when the
-        // bytes are identical. Cursor review #3208271652.
+        // Edge case: json_size > threshold via escape expansion
+        // (`\` → `\\`) while char count stays below head + tail.
+        // Don't push an ElidedPath — bytes are identical (cursor
+        // #3208271652).
         return Value::String(s.to_string());
     }
     let elided = format!(
@@ -204,11 +167,6 @@ fn walk_array(
     original_bytes: usize,
     typed_replacements: &mut usize,
 ) -> Value {
-    // Snapshot the elided-paths length before recursing. If the
-    // post-walk array still doesn't fit and we have to sentinel-
-    // replace the whole thing, drop any child entries pushed during
-    // recursion — they reference locations inside `walked` that
-    // won't exist in `kept` (cursor review #3207731468).
     let paths_before = paths.len();
     let walked: Vec<Value> = items
         .iter()
@@ -228,6 +186,9 @@ fn walk_array(
     if json_size(&walked_value) < threshold {
         return walked_value;
     }
+    // Drop child paths pushed during recursion — they reference
+    // positions inside `walked` that won't exist in the sentinel
+    // (cursor #3207731468).
     paths.truncate(paths_before);
     sentinel_array(&walked, items.len(), path, paths, original_bytes)
 }
@@ -307,18 +268,10 @@ fn walk_object(
     _original_bytes: usize,
     typed_replacements: &mut usize,
 ) -> Value {
-    // Walk each key into a LOCAL elided-paths bucket per child.
-    // peel_object_keys then either flushes a key's bucket to `paths`
-    // (when the key stays verbatim) or drops it (when the key is
-    // peeled to a sentinel — its descendant paths reference
-    // locations that won't exist in `kept`). Cursor review
-    // #3207731468 caught the orphan-paths shape.
-    //
-    // Capture each child's PRE-walk size before recursion. Used by
-    // `peel_object_keys` to populate `ElidedPath.bytes` and the
-    // sentinel's `bytes` field with the real original size — using
-    // the post-walk size would underreport when recursion already
-    // shrunk inner strings. Cursor review #3212527301.
+    // Capture each child's PRE-walk size before recursion — used by
+    // `peel_object_keys` to populate `ElidedPath.bytes` accurately
+    // (cursor #3212527301). Per-key paths bucketed locally so peeled
+    // keys' descendant paths get dropped (cursor #3207731468).
     let mut walked: Map<String, Value> = Map::new();
     let mut per_key_paths: Vec<(String, Vec<ElidedPath>)> = Vec::with_capacity(map.len());
     let mut original_sizes: std::collections::HashMap<String, usize> =
@@ -362,29 +315,17 @@ fn peel_object_keys(
     mut per_key_paths: Vec<(String, Vec<ElidedPath>)>,
     original_sizes: std::collections::HashMap<String, usize>,
 ) -> Value {
-    // Track running serialized size incrementally so we don't clone
-    // the entire map and re-serialize it on every loop iteration
-    // (cursor review #3208216140 — for objects with many oversize
-    // keys this was O(n × map_size)). After each peel, the
-    // serialized size delta is exactly
-    // `json_size(sentinel) - json_size(peeled_value)` since keys,
-    // commas, and braces are unchanged.
+    // Track running serialized size incrementally — cursor #3208216140
+    // caught the O(n × map_size) re-clone-and-serialise cost.
     let mut current_size = json_size(&Value::Object(walked.clone()));
     loop {
         if current_size < threshold {
             break;
         }
-        // Pick the largest peelable (non-sentinel, non-string) value.
-        // String values already had the chain (and byte-elide
-        // fallback) applied at the leaf level — replacing them
-        // with a `_elided` sentinel here would destroy the
-        // chain's structured output (e.g. `<head>…<bulk-elided>…
-        // <tail>` from `BulkElide`). Schema-preservation goal:
-        // a `{logs: String}` upstream value stays a
-        // `{logs: String}` after walking. Selection uses POST-walk
-        // size for max current-size reduction; reporting uses
-        // ORIGINAL pre-walk size so `ElidedPath.bytes` reflects
-        // what was actually dropped (cursor #3212527301).
+        // Skip strings: chain + byte-elide already handled them at
+        // the leaf, replacing with `_elided` would destroy the
+        // chain's structured output. Keeps `{logs: String}` schemas
+        // intact across walking.
         let candidate = walked
             .iter()
             .filter(|(_, v)| !is_sentinel(v))
@@ -392,9 +333,6 @@ fn peel_object_keys(
             .map(|(k, v)| (k.clone(), json_size(v)))
             .max_by_key(|(_, size)| *size);
         let Some((key, post_walk_size)) = candidate else {
-            // Nothing left to peel — give up; the parent's
-            // post-walk size check will route us back to
-            // Passthrough if we made things worse.
             break;
         };
         let value = walked
@@ -404,16 +342,12 @@ fn peel_object_keys(
             Value::String(_) => (ElisionKind::String, None),
             Value::Array(a) => (ElisionKind::Array, Some(a.len())),
             Value::Object(o) => (ElisionKind::Object, Some(o.len())),
-            // Scalars can't be peeled into a useful sentinel; reinsert
-            // and stop.
             _ => {
                 walked.insert(key, value);
                 break;
             }
         };
         let original_size = original_sizes.get(&key).copied().unwrap_or(post_walk_size);
-        // Drop the peeled key's child paths — those positions are
-        // gone in the sentinel-replaced subtree.
         per_key_paths.retain(|(k, _)| k != &key);
         paths.push(ElidedPath {
             path: format!("{path}.{key}"),
@@ -425,15 +359,10 @@ fn peel_object_keys(
         let sentinel = sentinel_for(kind, original_size, length);
         let sentinel_size = json_size(&sentinel);
         walked.insert(key, sentinel);
-        // Running size accounting uses POST-walk size (what was
-        // actually in the serialized map) — only the reported
-        // bytes care about the original pre-walk size.
         current_size = current_size
             .saturating_sub(post_walk_size)
             .saturating_add(sentinel_size);
     }
-    // Flush kept keys' child paths — they reference locations that
-    // do still exist in `kept`.
     for (_, child_paths) in per_key_paths {
         paths.extend(child_paths);
     }
@@ -486,9 +415,6 @@ fn ceil_char_boundary(s: &str, idx: usize) -> usize {
 mod tests {
     use super::*;
 
-    /// Walker outputs `Elided` only when the elided form is strictly
-    /// smaller than the raw input — load-bearing invariant for every
-    /// downstream consumer of `kept_bytes`/`total_bytes`.
     #[test]
     fn walker_never_inflates_serialized_form() {
         let v = serde_json::json!((0..400).collect::<Vec<_>>());
@@ -497,17 +423,11 @@ mod tests {
         match outcome {
             WalkOutcome::Passthrough(passed) => assert_eq!(passed, v),
             WalkOutcome::Elided { kept_bytes, .. } => {
-                assert!(
-                    (kept_bytes as usize) < raw_bytes,
-                    "kept_bytes ({kept_bytes}) must be strictly smaller \
-                     than raw_bytes ({raw_bytes}) — invariant violated"
-                );
+                assert!((kept_bytes as usize) < raw_bytes);
             }
         }
     }
 
-    /// Deeply-nested value: byte-elide the leaf string only; every
-    /// ancestor object stays verbatim and is reachable by key.
     #[test]
     fn walker_preserves_structure_to_leaf() {
         let huge = "x".repeat(20_000);
@@ -532,16 +452,12 @@ mod tests {
             .and_then(|x| x.get("d"))
             .and_then(|v| v.as_str())
             .expect("leaf string preserved as String");
-        assert!(leaf.len() < 20_000, "leaf must be byte-elided");
+        assert!(leaf.len() < 20_000);
         assert_eq!(elided_paths.len(), 1);
         assert_eq!(elided_paths[0].path, "$.a.b.c.d");
         assert!(matches!(elided_paths[0].kind, ElisionKind::String));
     }
 
-    /// Bash-shaped wrapper `{output: "<huge>"}`: wrapper object
-    /// verbatim, inner string byte-elided in place. Critically, the
-    /// `output` key is still a JSON string — scripts reading
-    /// `result.output.split(...)` keep working.
     #[test]
     fn walker_string_elision_preserves_type() {
         let huge = "y".repeat(10_000);
@@ -551,21 +467,12 @@ mod tests {
             panic!("expected Elided");
         };
         let output = kept.get("output").expect("key present");
-        assert!(
-            output.is_string(),
-            "output field must remain a JSON string after walking"
-        );
+        assert!(output.is_string());
         let s = output.as_str().unwrap();
-        assert!(s.len() < 10_000, "string must shrink");
-        assert!(
-            s.contains(STRING_ELIDE_MARKER),
-            "ellipsis marker present in elided string"
-        );
+        assert!(s.len() < 10_000);
+        assert!(s.contains(STRING_ELIDE_MARKER));
     }
 
-    /// Many small array items totalling over threshold: recursion
-    /// can't shrink each item, walker emits a typed sentinel with
-    /// head/tail samples.
     #[test]
     fn walker_emits_array_sentinel_when_items_irreducible() {
         let items: Vec<Value> = (0..200)
@@ -593,13 +500,7 @@ mod tests {
             .any(|p| p.path == "$" && matches!(p.kind, ElisionKind::Array)));
     }
 
-    /// Cursor review #3212527301: ensure `ElidedPath.bytes` for
-    /// elided string fields reports the ORIGINAL pre-walk size,
-    /// not the post-walk byte-elided size. Strings are now
-    /// elided exclusively at the leaf via `byte_elide_string`
-    /// (peel_object_keys skips strings to keep schema-faithful
-    /// `{logs: String}` shapes intact); this test verifies the
-    /// leaf-level byte_elide reporting hasn't regressed.
+    /// Cursor #3212527301: byte-elide reports original pre-walk size.
     #[test]
     fn elided_string_field_reports_original_pre_walk_bytes() {
         let original_string_size = 50_000;
@@ -615,36 +516,25 @@ mod tests {
         let WalkOutcome::Elided { elided_paths, .. } = outcome else {
             panic!("expected Elided");
         };
-
-        // At least one field got peeled (the largest post-walk
-        // string sentinel — but in practice many will be peeled).
         let peeled = elided_paths
             .iter()
             .find(|p| {
                 p.path.starts_with("$.field_")
                     && matches!(p.kind, ElisionKind::String)
-                    && p.bytes > 1_000 // would be ~520 if bug present
+                    && p.bytes > 1_000
             })
             .unwrap_or_else(|| {
                 panic!(
-                    "expected a peeled field with bytes ≈ original size; \
-                     got: {:?}",
+                    "expected peeled field with bytes ≈ original; got: {:?}",
                     elided_paths
                         .iter()
                         .map(|p| (p.path.clone(), p.bytes))
                         .collect::<Vec<_>>(),
                 )
             });
-        // Should be ~50 KB + 2 (quotes), not the byte-elided ~520.
-        assert!(
-            peeled.bytes as usize >= original_string_size,
-            "peeled bytes should report original size; got {}",
-            peeled.bytes,
-        );
+        assert!(peeled.bytes as usize >= original_string_size);
     }
 
-    /// Object with one massively-large value: peel that key, others
-    /// stay verbatim.
     #[test]
     fn walker_peels_largest_object_key_when_recursion_didnt_help() {
         let huge_items: Vec<Value> = (0..200)
@@ -670,18 +560,9 @@ mod tests {
             kept.get("summary").and_then(|s| s.get("count")),
             Some(&Value::from(200))
         );
-        assert!(
-            elided_paths.iter().any(|p| p.path.contains("huge_array")),
-            "expected an elided path mentioning huge_array; got {:?}",
-            elided_paths
-                .iter()
-                .map(|p| p.path.as_str())
-                .collect::<Vec<_>>()
-        );
+        assert!(elided_paths.iter().any(|p| p.path.contains("huge_array")));
     }
 
-    /// `classify_value` short-circuits on small input, the walker
-    /// itself is never called.
     #[test]
     fn walker_passthroughs_below_threshold() {
         let v = serde_json::json!({"hi": "world"});
@@ -692,17 +573,9 @@ mod tests {
         }
     }
 
-    /// Cursor review #3207731468: when an array is sentinel-replaced
-    /// after recursion, child paths pushed during the walk reference
-    /// positions inside `walked` that aren't in `kept`. Every
-    /// elided_path entry must point to a location reachable in the
-    /// final `kept` value.
+    /// Cursor #3207731468: sentinel-replaced array drops orphan child paths.
     #[test]
     fn walker_no_orphaned_paths_under_array_sentinel() {
-        // Each item has an oversized inner string; child elision
-        // pushes paths like `$[i].output`. Then the array as a
-        // whole exceeds threshold (200 × 600B ≈ 120 KB), forcing
-        // sentinel replacement at the root.
         let items: Vec<Value> = (0..200)
             .map(|i| serde_json::json!({"id": i, "output": "z".repeat(600)}))
             .collect();
@@ -713,26 +586,17 @@ mod tests {
         else {
             panic!("expected Elided");
         };
-        // Every reported path must resolve in `kept`.
         for p in &elided_paths {
-            assert!(
-                resolves(&kept, &p.path),
-                "elided_path {} references a location absent from kept",
-                p.path
-            );
+            assert!(resolves(&kept, &p.path), "{} absent from kept", p.path);
         }
     }
 
-    /// Same invariant for objects: peeling a key with descendants
-    /// drops the child paths from the report.
     #[test]
     fn walker_no_orphaned_paths_under_peeled_object_key() {
         let huge_blob = "p".repeat(600);
         let big_array: Vec<Value> = (0..200)
             .map(|_| serde_json::json!({"line": huge_blob.clone()}))
             .collect();
-        // Keep `meta` small (verbatim survival); `huge` will get
-        // peeled because its serialized form dominates the object.
         let v = serde_json::json!({
             "meta": {"id": 1, "tag": "a"},
             "huge": big_array,
@@ -744,29 +608,14 @@ mod tests {
             panic!("expected Elided");
         };
         for p in &elided_paths {
-            assert!(
-                resolves(&kept, &p.path),
-                "elided_path {} references a location absent from kept",
-                p.path
-            );
+            assert!(resolves(&kept, &p.path), "{} absent from kept", p.path);
         }
-        // `huge` must be reported as peeled, AND its descendants
-        // (e.g. `$.huge[3].line`) must NOT appear in the report.
-        assert!(
-            elided_paths.iter().any(|p| p.path == "$.huge"),
-            "expected `$.huge` to be reported as peeled"
-        );
-        assert!(
-            !elided_paths
-                .iter()
-                .any(|p| p.path.starts_with("$.huge[") || p.path.starts_with("$.huge.")),
-            "no descendants of peeled `$.huge` should remain in elided_paths"
-        );
+        assert!(elided_paths.iter().any(|p| p.path == "$.huge"));
+        assert!(!elided_paths
+            .iter()
+            .any(|p| p.path.starts_with("$.huge[") || p.path.starts_with("$.huge.")));
     }
 
-    /// Walk the kept Value following a JSON-pointer-ish path
-    /// (`$.foo.bar[3].baz`) — returns true when the path resolves to
-    /// some node, false when any segment is missing.
     fn resolves(kept: &Value, path: &str) -> bool {
         if path == "$" {
             return true;

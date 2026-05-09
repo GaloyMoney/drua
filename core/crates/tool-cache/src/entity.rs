@@ -38,12 +38,8 @@ impl std::fmt::Display for ToolInvocationId {
     }
 }
 
-/// Newtype carrying any UUID that can own a persisted invocation —
-/// either an agent id or a user id, the discrimination opaque to
-/// this crate. Callers in drua-core (or any other host) provide
-/// `From<TheirAgentId> for ToolInvocationOwnerId` and similar so
-/// the boundary stays type-safe without this crate having to know
-/// about the host's identity types.
+/// Newtype for any UUID owning a persisted invocation (agent or user).
+/// Hosts provide `From<TheirAgentId> for ToolInvocationOwnerId`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ToolInvocationOwnerId(pub uuid::Uuid);
@@ -66,12 +62,8 @@ impl std::fmt::Display for ToolInvocationOwnerId {
     }
 }
 
-/// Owner of a persisted invocation — flat shape carrying the FK
-/// columns the table tracks (`agent_id`, `user_id`), exactly one of
-/// which is non-null per row. The crate is auth-system agnostic;
-/// callers populate the fields from whatever subject / principal
-/// model they use, going through `From` conversions into
-/// [`ToolInvocationOwnerId`].
+/// Owner of a persisted invocation. Auth-system agnostic — callers
+/// populate from their subject model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvocationOwner {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -95,12 +87,9 @@ impl InvocationOwner {
         }
     }
 
-    /// `true` when these rows belong to the same fetch scope. Match
-    /// on EITHER dimension: agent-side persistence with a user
-    /// attribution (e.g. `AgentOnBehalfOfUser` populates both
-    /// `agent_id` and `user_id`) lets the same logical user fetch
-    /// it later via an `ExportedAgent` bearer token (which only
-    /// supplies `user_id`). Cursor #3212630890.
+    /// Match on EITHER dimension. AgentOnBehalfOfUser populates both
+    /// fields so the same user can fetch later via ExportedAgent
+    /// (cursor #3212630890).
     pub fn matches(&self, other: &Self) -> bool {
         if let (Some(a), Some(b)) = (self.agent_id, other.agent_id) {
             if a == b {
@@ -140,25 +129,17 @@ mod tests {
 
     #[test]
     fn matches_cross_dimension_agent_with_user_attribution() {
-        // Stored: AgentOnBehalfOfUser populates both fields.
         let stored = InvocationOwner {
             agent_id: Some(id(1)),
             user_id: Some(id(2)),
         };
-        // Fetcher: ExportedAgent supplies user_id only.
         let fetcher = InvocationOwner::user(id(2));
-        assert!(
-            stored.matches(&fetcher),
-            "user-side fetch must find AgentOnBehalfOfUser invocations \
-             by user_id even when fetcher has no agent_id"
-        );
-        // Symmetric.
+        assert!(stored.matches(&fetcher));
         assert!(fetcher.matches(&stored));
     }
 
     #[test]
     fn no_match_pure_agent_to_user() {
-        // Pure Agent (no user attribution) vs unrelated user.
         let agent = InvocationOwner::agent(id(1));
         let user = InvocationOwner::user(id(2));
         assert!(!agent.matches(&user));
@@ -173,8 +154,6 @@ mod tests {
     }
 }
 
-/// One row from `tool_invocations`. Append-once after creation; all reads
-/// hit the same row by id.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolInvocation {
     pub id: ToolInvocationId,
@@ -186,11 +165,8 @@ pub struct ToolInvocation {
     pub summary: serde_json::Value,
     pub raw_text: String,
     pub raw_size_bytes: i64,
-    /// The upstream tool's `structured_content` verbatim, when present.
-    /// `tool_output_fetch` returns this as the response's
-    /// `structured_content` so compose JS callers see the same shape
-    /// they'd get from calling the original tool fresh. `None` for
-    /// plain-text tools (bash, k8s logs).
+    /// Upstream tool's `structured_content` verbatim. `None` for
+    /// plain-text tools.
     pub original_structured: Option<serde_json::Value>,
     pub exit_code: Option<i32>,
     pub duration_ms: i32,
@@ -198,9 +174,6 @@ pub struct ToolInvocation {
     pub created_at: DateTime<Utc>,
 }
 
-/// Insert-only payload for [`ToolInvocations::persist`]. Plain struct rather
-/// than a derive_builder shape because every field is required at dispatch
-/// time and the call sites are internal to the dispatcher.
 #[derive(Debug, Clone)]
 pub struct NewToolInvocation {
     pub owner: InvocationOwner,
