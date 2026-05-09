@@ -532,13 +532,6 @@ impl ToolSets {
                 "arguments": args_value,
             }));
 
-            // Two reasons the universal pipeline is skipped before the
-            // tool even runs: the tool itself opts out (e.g.
-            // `tool_output_fetch` is the recovery handle and must not
-            // be re-wrapped), or the subject has no scope key — most
-            // notably `AuthSubject::WorkflowExecutor`, whose dispatched
-            // tool's `structured_content` is the workflow step's typed
-            // output and would be corrupted by an envelope.
             let bypass_pipeline =
                 tool.bypass_universal_pipeline() || invocation_owner(subject).is_none();
             let start = std::time::Instant::now();
@@ -548,13 +541,6 @@ impl ToolSets {
 
             let final_result = match raw_result {
                 Ok(raw) if bypass_pipeline => {
-                    // Tools that run their own pipeline (e.g.
-                    // `call_tool`, future compose) emit accurate
-                    // metrics from inside their `call`. Skipping
-                    // the default `bypass + 1.0` write here avoids
-                    // a misleading `compression_ratio = 1.0`
-                    // overwrite of the inner tool's real numbers
-                    // (cursor bugbot review #3210558743).
                     if !tool.records_own_pipeline_metrics() {
                         let raw_bytes = estimate_text_bytes(&raw);
                         record_pipeline_metrics(raw_bytes, raw_bytes, "bypass", false);
@@ -605,8 +591,6 @@ impl ToolSets {
                             _ => (raw, false),
                         };
 
-                    // Cursor #3208216149: when persistence didn't happen
-                    // the model received raw bytes, not classifier kept_bytes.
                     let effective_kept_bytes = if persisted { kept_bytes } else { raw_bytes };
                     record_pipeline_metrics(
                         raw_bytes,

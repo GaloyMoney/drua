@@ -141,13 +141,6 @@ impl TopLevelTool for ComposeTool {
     }
 
     fn bypass_universal_pipeline(&self) -> bool {
-        // Compose owns its own envelope shape — richer than the
-        // standard `{invocation_id, summary, fetch_hint}` because it
-        // carries `result_invocation_id` (recovery for the JS return
-        // value) AND `sub_invocations[]` (recovery handles for each
-        // sub-tool call the script made). Letting the dispatcher
-        // re-wrap compose's structured_content with the standard
-        // envelope would clobber the `sub_invocations` directory.
         true
     }
 
@@ -168,10 +161,6 @@ impl TopLevelTool for ComposeTool {
 
         Audit::record_action("compose".to_string());
 
-        // Snapshot the agent-supplied params for persistence — the
-        // `tool_invocations.args` JSONB column is otherwise an opaque
-        // `{}` for compose rows since the dts-prepended `script` and
-        // `params` itself both get consumed below.
         let recorded_args = serde_json::json!({
             "script": params.script,
             "timeout_ms": params.timeout_ms,
@@ -183,7 +172,6 @@ impl TopLevelTool for ComposeTool {
             generate_dts(subject, &sets, &top)
         };
 
-        // Prepend type declarations as a JS block comment for error diagnostics.
         let script = if dts.is_empty() {
             params.script
         } else {
@@ -216,13 +204,6 @@ impl TopLevelTool for ComposeTool {
             .await
             .map_err(|e| ToolSetsError::Compose(e.to_string()))?;
 
-        // Self-curation: run the unified walker over the JS return
-        // value with the SAME threshold every other classifier uses.
-        // Below threshold → result is the verbatim Value, no
-        // result_invocation_id. Above threshold → walker produces
-        // either StructuredElision (kept Value with sentinels) or
-        // Passthrough (when elision wouldn't shrink). When elided,
-        // persist the full return so the agent can fetch it.
         let walker_classifier = GenericFallback::default();
         let walker_input = build_walker_input(&result.value);
         let classification = walker_classifier
@@ -245,12 +226,6 @@ impl TopLevelTool for ComposeTool {
                 (summary, Some(invocations)) => {
                     let canonical_text = classification.canonical_text;
                     let curated = render_curated_result(&summary);
-                    // Compose's own "structured_content" is the JS
-                    // return value — exactly what the script meant to
-                    // produce. Persist that as `original_structured`
-                    // so a future fetch of `result_invocation_id`
-                    // returns the same Value the script returned,
-                    // not the curated/elided form.
                     let original_structured = Some(result.value.clone());
                     let persisted = match super::super::invocation_owner(subject) {
                         Some(owner) => {
@@ -274,12 +249,7 @@ impl TopLevelTool for ComposeTool {
                     let invocation_id = persisted.map(|p| uuid::Uuid::from(p.invocation_id));
                     (curated, invocation_id)
                 }
-                (summary, None) => {
-                    // No PG wired (test path) — surface the curated
-                    // form so the agent still sees the elision shape,
-                    // just without a recovery handle.
-                    (render_curated_result(&summary), None)
-                }
+                (summary, None) => (render_curated_result(&summary), None),
             };
 
         let sub_invocations = sub_invocations
@@ -297,11 +267,6 @@ impl TopLevelTool for ComposeTool {
             execution_time_ms: result.execution_time.as_millis() as u64,
         };
 
-        // Prose rendering for the model's text content. Keep the
-        // legacy `=== Result ===` / `=== Console ===` / `=== Metadata ===`
-        // sections so existing agents reading the text form aren't
-        // broken; add a `=== Sub Invocations ===` section when there's
-        // anything to surface.
         let mut sections = Vec::new();
         let value_str =
             serde_json::to_string_pretty(&out.result).unwrap_or_else(|_| "null".to_string());

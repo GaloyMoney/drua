@@ -51,9 +51,6 @@ pub fn classify_value(
     if typed_replacements == 0 && kept_bytes >= total_bytes {
         return WalkOutcome::Passthrough(value.clone());
     }
-    // Clamp `kept_bytes` at `total_bytes` so a typed substitution
-    // larger than the raw input doesn't render a negative
-    // compression ratio (cursor #3210144802).
     let reported_kept = kept_bytes.min(total_bytes);
     WalkOutcome::Elided {
         kept,
@@ -136,10 +133,6 @@ fn byte_elide_string(
     let tail_target = s.len().saturating_sub(STRING_ELIDE_TAIL_CHARS);
     let tail_start = ceil_char_boundary(s, tail_target.max(head_end));
     if head_end >= tail_start {
-        // Edge case: json_size > threshold via escape expansion
-        // (`\` → `\\`) while char count stays below head + tail.
-        // Don't push an ElidedPath — bytes are identical (cursor
-        // #3208271652).
         return Value::String(s.to_string());
     }
     let elided = format!(
@@ -186,9 +179,6 @@ fn walk_array(
     if json_size(&walked_value) < threshold {
         return walked_value;
     }
-    // Drop child paths pushed during recursion — they reference
-    // positions inside `walked` that won't exist in the sentinel
-    // (cursor #3207731468).
     paths.truncate(paths_before);
     sentinel_array(&walked, items.len(), path, paths, original_bytes)
 }
@@ -268,10 +258,6 @@ fn walk_object(
     _original_bytes: usize,
     typed_replacements: &mut usize,
 ) -> Value {
-    // Capture each child's PRE-walk size before recursion — used by
-    // `peel_object_keys` to populate `ElidedPath.bytes` accurately
-    // (cursor #3212527301). Per-key paths bucketed locally so peeled
-    // keys' descendant paths get dropped (cursor #3207731468).
     let mut walked: Map<String, Value> = Map::new();
     let mut per_key_paths: Vec<(String, Vec<ElidedPath>)> = Vec::with_capacity(map.len());
     let mut original_sizes: std::collections::HashMap<String, usize> =
@@ -315,17 +301,11 @@ fn peel_object_keys(
     mut per_key_paths: Vec<(String, Vec<ElidedPath>)>,
     original_sizes: std::collections::HashMap<String, usize>,
 ) -> Value {
-    // Track running serialized size incrementally — cursor #3208216140
-    // caught the O(n × map_size) re-clone-and-serialise cost.
     let mut current_size = json_size(&Value::Object(walked.clone()));
     loop {
         if current_size < threshold {
             break;
         }
-        // Skip strings: chain + byte-elide already handled them at
-        // the leaf, replacing with `_elided` would destroy the
-        // chain's structured output. Keeps `{logs: String}` schemas
-        // intact across walking.
         let candidate = walked
             .iter()
             .filter(|(_, v)| !is_sentinel(v))

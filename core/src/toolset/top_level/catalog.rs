@@ -427,13 +427,10 @@ impl TopLevelTool for CallCatalogTool {
     }
 
     fn bypass_universal_pipeline(&self) -> bool {
-        // We run the pipeline below with the inner tool's identity;
-        // letting the dispatcher do it again would double-classify.
         true
     }
 
     fn records_own_pipeline_metrics(&self) -> bool {
-        // Cursor #3210558743: we emit metrics with inner-tool counts.
         true
     }
 
@@ -452,8 +449,6 @@ impl TopLevelTool for CallCatalogTool {
             _ => None,
         });
 
-        // Extra top-level keys after consuming tool_name/arguments
-        // — flat-call shape. Hinted on inner-tool error.
         let extra_keys: Vec<String> = args.keys().cloned().collect();
 
         let (set, name) = self
@@ -486,12 +481,6 @@ impl TopLevelTool for CallCatalogTool {
                     raw: &result,
                     exit_code: None,
                 });
-        // Cursor #3212853186: baseline raw_bytes against
-        // canonical_text — same as the top-level dispatcher in
-        // mod.rs. Tools with structured_content (Concourse) have a
-        // canonical_text extracted from there, not from
-        // content[].text — using estimate_text_bytes would compare
-        // mismatched baselines against summary_kept_bytes.
         let raw_bytes = classification.canonical_text.len() as u64;
         let classifier_kind = classification.summary.kind().to_string();
         let kept_bytes = super::super::summary_kept_bytes(&classification.summary, raw_bytes);
