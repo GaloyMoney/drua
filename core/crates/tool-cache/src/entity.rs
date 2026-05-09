@@ -95,13 +95,81 @@ impl InvocationOwner {
         }
     }
 
-    /// `true` when both rows would compare equal as fetch-scope keys.
+    /// `true` when these rows belong to the same fetch scope. Match
+    /// on EITHER dimension: agent-side persistence with a user
+    /// attribution (e.g. `AgentOnBehalfOfUser` populates both
+    /// `agent_id` and `user_id`) lets the same logical user fetch
+    /// it later via an `ExportedAgent` bearer token (which only
+    /// supplies `user_id`). Cursor #3212630890.
     pub fn matches(&self, other: &Self) -> bool {
-        match (self.agent_id, other.agent_id, self.user_id, other.user_id) {
-            (Some(a), Some(b), _, _) if a == b => true,
-            (None, None, Some(u), Some(v)) if u == v => true,
-            _ => false,
+        if let (Some(a), Some(b)) = (self.agent_id, other.agent_id) {
+            if a == b {
+                return true;
+            }
         }
+        if let (Some(u), Some(v)) = (self.user_id, other.user_id) {
+            if u == v {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(n: u128) -> ToolInvocationOwnerId {
+        ToolInvocationOwnerId(uuid::Uuid::from_u128(n))
+    }
+
+    #[test]
+    fn matches_same_agent() {
+        let a = InvocationOwner::agent(id(1));
+        let b = InvocationOwner::agent(id(1));
+        assert!(a.matches(&b));
+    }
+
+    #[test]
+    fn matches_same_user() {
+        let a = InvocationOwner::user(id(2));
+        let b = InvocationOwner::user(id(2));
+        assert!(a.matches(&b));
+    }
+
+    #[test]
+    fn matches_cross_dimension_agent_with_user_attribution() {
+        // Stored: AgentOnBehalfOfUser populates both fields.
+        let stored = InvocationOwner {
+            agent_id: Some(id(1)),
+            user_id: Some(id(2)),
+        };
+        // Fetcher: ExportedAgent supplies user_id only.
+        let fetcher = InvocationOwner::user(id(2));
+        assert!(
+            stored.matches(&fetcher),
+            "user-side fetch must find AgentOnBehalfOfUser invocations \
+             by user_id even when fetcher has no agent_id"
+        );
+        // Symmetric.
+        assert!(fetcher.matches(&stored));
+    }
+
+    #[test]
+    fn no_match_pure_agent_to_user() {
+        // Pure Agent (no user attribution) vs unrelated user.
+        let agent = InvocationOwner::agent(id(1));
+        let user = InvocationOwner::user(id(2));
+        assert!(!agent.matches(&user));
+        assert!(!user.matches(&agent));
+    }
+
+    #[test]
+    fn no_match_different_agents() {
+        let a = InvocationOwner::agent(id(1));
+        let b = InvocationOwner::agent(id(2));
+        assert!(!a.matches(&b));
     }
 }
 
