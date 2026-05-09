@@ -184,9 +184,7 @@ fn walk_array(
 }
 
 fn sentinel_budget(threshold: usize) -> usize {
-    threshold
-        .min(SENTINEL_HARD_CAP_BYTES)
-        .max(SENTINEL_MIN_BYTES)
+    threshold.clamp(SENTINEL_MIN_BYTES, SENTINEL_HARD_CAP_BYTES)
 }
 
 fn sentinel_array(
