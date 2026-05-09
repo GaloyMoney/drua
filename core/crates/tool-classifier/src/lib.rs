@@ -9,6 +9,7 @@ mod concourse;
 mod git;
 mod nix;
 mod string_summarizer;
+mod terraform_install;
 mod walker;
 
 pub use bash::BashClassifier;
@@ -23,6 +24,7 @@ pub use string_summarizer::{
     build_marker, close_tag, open_tag, BulkElide, SegmentedText, StringSummarizer,
     StringSummarizerChain, VerbatimRegion,
 };
+pub use terraform_install::TerraformInstallRun;
 
 pub const DEFAULT_GENERIC_THRESHOLD_BYTES: usize = 4096;
 
@@ -279,6 +281,7 @@ pub fn default_summarizer_chain() -> StringSummarizerChain {
         .register(cargo::CargoDownloadRun)
         .register(cargo::CargoCompileRun)
         .register(cargo::CargoCheckRun)
+        .register(terraform_install::TerraformInstallRun)
         .register(git::GitCloneProgress)
         .register(string_summarizer::BulkElide::default())
 }
