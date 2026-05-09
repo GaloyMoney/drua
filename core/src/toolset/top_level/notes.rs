@@ -20,58 +20,40 @@ fn default_list_limit() -> usize {
     20
 }
 
-#[derive(Deserialize)]
-#[serde(tag = "command", rename_all = "snake_case")]
-enum NotesParams {
-    Store {
-        title: String,
-        content: String,
-        #[serde(default)]
-        tags: Vec<String>,
-        #[serde(default)]
-        note_id: Option<NoteId>,
-    },
-    Get {
-        note_id: NoteId,
-    },
-    Search {
-        query: String,
-        #[serde(default = "default_search_limit")]
-        limit: usize,
-    },
-    List {
-        #[serde(default = "default_list_limit")]
-        limit: usize,
-    },
-    Pin {
-        note_id: NoteId,
-    },
-    Unpin {
-        note_id: NoteId,
-    },
-    Delete {
-        note_id: NoteId,
-    },
+#[derive(Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum NotesCommand {
+    Store,
+    Get,
+    Search,
+    List,
+    Pin,
+    Unpin,
+    Delete,
 }
 
-impl NotesParams {
-    fn command_name(&self) -> &'static str {
-        match self {
-            Self::Store { note_id, .. } => {
-                if note_id.is_some() {
-                    "update"
-                } else {
-                    "create"
-                }
-            }
-            Self::Get { .. } => "get",
-            Self::Search { .. } => "search",
-            Self::List { .. } => "list",
-            Self::Pin { .. } => "pin",
-            Self::Unpin { .. } => "unpin",
-            Self::Delete { .. } => "delete",
-        }
-    }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct NotesInput {
+    command: NotesCommand,
+    #[serde(default)]
+    note_id: Option<NoteId>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tags: Option<Vec<String>>,
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+fn missing(field: &str, command: &str) -> ToolSetsError {
+    ToolSetsError::Note(format!(
+        "notes.{command}: `{field}` is required for command={command}"
+    ))
 }
 
 /// Union output for all notes subcommands; fields are populated per subcommand.
@@ -124,7 +106,7 @@ static NOTES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             "tags": {
                 "type": "array",
                 "items": { "type": "string" },
-                "description": "Tags for categorization (store). Optional."
+                "description": "Tags for categorization (store)."
             },
             "note_id": {
                 "type": "string",
@@ -133,12 +115,12 @@ static NOTES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "query": {
                 "type": "string",
-                "description": "Search query — keywords or natural language (search)."
+                "description": "Search query (search)."
             },
             "limit": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Maximum number of results (search default 10, list default 20)."
+                "description": "Maximum results. Defaults: search=10, list=20."
             }
         },
         "required": ["command"],
@@ -204,17 +186,26 @@ impl TopLevelTool for NotesTool {
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let project_id = subject.project_id().ok_or(ToolSetsError::Unauthorized)?;
-        let params: NotesParams = parse_params(arguments)?;
+        let input: NotesInput = parse_params(arguments)?;
 
-        Audit::record_action(format!("notes.{}", params.command_name()));
+        let action_name = match (input.command, input.note_id.is_some()) {
+            (NotesCommand::Store, true) => "update",
+            (NotesCommand::Store, false) => "create",
+            (NotesCommand::Get, _) => "get",
+            (NotesCommand::Search, _) => "search",
+            (NotesCommand::List, _) => "list",
+            (NotesCommand::Pin, _) => "pin",
+            (NotesCommand::Unpin, _) => "unpin",
+            (NotesCommand::Delete, _) => "delete",
+        };
+        Audit::record_action(format!("notes.{action_name}"));
 
-        let (text, out) = match params {
-            NotesParams::Store {
-                title,
-                content,
-                tags,
-                note_id,
-            } => {
+        let (text, out) = match input.command {
+            NotesCommand::Store => {
+                let title = input.title.ok_or_else(|| missing("title", "store"))?;
+                let content = input.content.ok_or_else(|| missing("content", "store"))?;
+                let tags = input.tags.unwrap_or_default();
+                let note_id = input.note_id;
                 let project_name = resolve_project_name(&self.projects, subject).await?;
                 let note = self
                     .notes
@@ -246,7 +237,8 @@ impl TopLevelTool for NotesTool {
                 (text, out)
             }
 
-            NotesParams::Get { note_id } => {
+            NotesCommand::Get => {
+                let note_id = input.note_id.ok_or_else(|| missing("note_id", "get"))?;
                 let note = self
                     .notes
                     .find_by_id(subject, project_id, note_id)
@@ -265,7 +257,9 @@ impl TopLevelTool for NotesTool {
                 (text, out)
             }
 
-            NotesParams::Search { query, limit } => {
+            NotesCommand::Search => {
+                let query = input.query.ok_or_else(|| missing("query", "search"))?;
+                let limit = input.limit.unwrap_or_else(default_search_limit);
                 let hits = self
                     .notes
                     .search(subject, project_id, &query, limit)
@@ -307,7 +301,8 @@ impl TopLevelTool for NotesTool {
                 (text, out)
             }
 
-            NotesParams::Pin { note_id } => {
+            NotesCommand::Pin => {
+                let note_id = input.note_id.ok_or_else(|| missing("note_id", "pin"))?;
                 let note = self
                     .notes
                     .pin(subject, project_id, note_id)
@@ -324,7 +319,8 @@ impl TopLevelTool for NotesTool {
                 (text, out)
             }
 
-            NotesParams::Unpin { note_id } => {
+            NotesCommand::Unpin => {
+                let note_id = input.note_id.ok_or_else(|| missing("note_id", "unpin"))?;
                 let note = self
                     .notes
                     .unpin(subject, project_id, note_id)
@@ -341,7 +337,8 @@ impl TopLevelTool for NotesTool {
                 (text, out)
             }
 
-            NotesParams::Delete { note_id } => {
+            NotesCommand::Delete => {
+                let note_id = input.note_id.ok_or_else(|| missing("note_id", "delete"))?;
                 self.notes
                     .delete(subject, project_id, note_id)
                     .await
@@ -355,7 +352,8 @@ impl TopLevelTool for NotesTool {
                 (text, out)
             }
 
-            NotesParams::List { limit } => {
+            NotesCommand::List => {
+                let limit = input.limit.unwrap_or_else(default_list_limit);
                 let notes = self
                     .notes
                     .list(subject, project_id, limit)

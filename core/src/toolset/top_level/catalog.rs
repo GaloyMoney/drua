@@ -193,13 +193,25 @@ impl TopLevelTool for SearchCatalog {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
+        Audit::record_action("search_tools");
         let args = arguments.as_ref();
         let query = args.and_then(|a| a.get("query")).and_then(|v| v.as_str());
         let category = args
             .and_then(|a| a.get("category"))
             .and_then(|v| v.as_str());
         let results = self.execute_search(subject, query, category);
-        let text = Self::format_results(&results);
+        let text = if results.is_empty() {
+            format!(
+                "No tools found matching {:?}.\n\n\
+                 search_tools matches by tool name, category, and description. \
+                 Try keywords describing the *action* you want \
+                 (e.g. `build`, `concourse`, `github`, `k8s`, `postgres`), \
+                 not project or repo names.",
+                query.unwrap_or(""),
+            )
+        } else {
+            Self::format_results(&results)
+        };
         let out = SearchToolsOutput {
             total: results.len(),
             tools: results

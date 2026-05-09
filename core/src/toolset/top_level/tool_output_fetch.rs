@@ -4,8 +4,11 @@ use std::sync::{Arc, LazyLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
 
+use crate::audit::Audit;
 use crate::auth::AuthSubject;
 use drua_tool_cache::ToolInvocationId;
+
+const FETCH_MAX_UNQUERIED_BYTES: usize = 16_384;
 
 use super::super::error::ToolSetsError;
 use super::super::tool_invocations::{FetchQuery, FetchResult, ToolInvocations};
@@ -92,6 +95,7 @@ impl TopLevelTool for ToolOutputFetch {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
+        Audit::record_action("tool_output_fetch");
         let input: FetchInput = parse_params(arguments)?;
         let id = ToolInvocationId::from(input.invocation_id);
 
@@ -134,7 +138,20 @@ impl TopLevelTool for ToolOutputFetch {
                     }
                 }
             }
-            None => invocation.raw_text.clone(),
+            None => {
+                let total = invocation.raw_text.len();
+                if total > FETCH_MAX_UNQUERIED_BYTES {
+                    return Ok(CallToolResult::error(vec![Content::text(format!(
+                        "tool_output_fetch refused: invocation has {total} bytes \
+                         (no-query limit {FETCH_MAX_UNQUERIED_BYTES}). \
+                         Re-call with `query`: \
+                         `tail`/`head` (lines), `range` (offset+len), \
+                         or `grep` (pattern). \
+                         Use `view: \"summary\"` for the classifier summary."
+                    ))]));
+                }
+                invocation.raw_text.clone()
+            }
         };
 
         let mut ctr = CallToolResult::success(vec![Content::text(content_text)]);

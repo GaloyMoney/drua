@@ -132,7 +132,9 @@ pub struct GrepInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub glob: Option<String>,
 
-    /// File type to search (e.g. `rust`, `py`, `js`).
+    /// Ripgrep language tag for type-based filtering (e.g. `rust`, `py`,
+    /// `js`, `ts`, `md`, `json`, `toml`, `yaml`). Use `glob` for filename
+    /// patterns. Omit when not filtering by language.
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub type_: Option<String>,
 
