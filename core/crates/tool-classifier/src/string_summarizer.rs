@@ -1,8 +1,4 @@
-//! String → string compaction passes operating on log-shaped text.
-//! Each pass mutates a [`SegmentedText`] and substitutes runs of
-//! "boring" lines with XML-tag marker blocks; markers are XML tags
-//! (`<nix-copy>...</nix-copy>`). Passes only see `Verbatim` segments —
-//! already-summarised regions are skipped structurally.
+//! Log-text compaction: passes replace runs of boring lines with XML-tag markers.
 
 use std::ops::Range;
 
@@ -91,8 +87,6 @@ impl SegmentedText {
         (end - start) as u64
     }
 
-    /// Translate a current line range to its original input-line
-    /// range. `current` must lie wholly inside one `Verbatim` segment.
     pub fn current_to_original_range(&self, current: &Range<u32>) -> Range<u32> {
         if let Some(i) = self.find_verbatim_covering(current) {
             let seg = &self.segments[i];
@@ -103,8 +97,6 @@ impl SegmentedText {
         current.clone()
     }
 
-    /// Translate a single current-line index to original. Inside a
-    /// `Summary` segment, returns the segment's original start.
     pub fn current_to_original_line(&self, current_line: u32) -> u32 {
         for seg in &self.segments {
             if current_line >= seg.current.start && current_line < seg.current.end {
@@ -119,11 +111,6 @@ impl SegmentedText {
         self.original_lines
     }
 
-    /// Terminal compaction: keep first `head_lines` + last
-    /// `tail_lines`, replace the middle with a `<bulk-elided>`
-    /// marker, wrap head/tail in `<head>` / `<tail>` tags.
-    /// Boundary snapping extends past straddling `Summary` segments
-    /// so markers stay intact.
     pub fn elide_middle_keep_head_and_tail(&mut self, head_lines: u32, tail_lines: u32) -> bool {
         let total = self.current_lines();
         if head_lines + tail_lines >= total {
@@ -187,8 +174,6 @@ impl SegmentedText {
             .any(|s| matches!(s.kind, SegmentKind::Summary { .. }))
     }
 
-    /// Iterate `Verbatim` segments only — passes never see content a
-    /// previous pass already claimed.
     pub fn verbatim_regions(&self) -> impl Iterator<Item = VerbatimRegion<'_>> {
         self.segments
             .iter()
@@ -200,9 +185,7 @@ impl SegmentedText {
             })
     }
 
-    /// Replace `current_lines` (must lie wholly inside one
-    /// `Verbatim` segment) with `new_text`. Splits the covering
-    /// segment into `[head?][summary][tail?]` and shifts downstream.
+    /// Replace `current_lines` with `new_text`; range must lie within one `Verbatim` segment.
     pub fn replace_with_summary(
         &mut self,
         current_lines: Range<u32>,
@@ -361,8 +344,6 @@ fn count_lines(s: &str) -> u32 {
     (s.matches('\n').count() + trailing) as u32
 }
 
-/// Open tag with `original-lines` + `original-bytes` accounting attrs.
-/// Body lines sit between this and [`close_tag`].
 pub fn open_tag(
     name: &'static str,
     original_lines: Range<u32>,
@@ -443,11 +424,7 @@ impl Default for StringSummarizerChain {
     }
 }
 
-/// Terminal fallback. If the post-chain log is over `max_total_bytes`,
-/// keep first `head_lines` + last `tail_lines`, replace middle with
-/// a `<bulk-elided>` marker. Dumb by design — when this fires, the
-/// structured passes weren't specific enough; emits a `tracing::warn!`
-/// so an operator can audit.
+/// Terminal fallback when structured passes leave the log over `max_total_bytes`.
 pub struct BulkElide {
     pub max_total_bytes: usize,
     pub head_lines: u32,

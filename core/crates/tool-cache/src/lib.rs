@@ -1,7 +1,4 @@
-//! Persistent layer for the tool-output universal pipeline. The
-//! dispatcher calls into [`ToolInvocations`] when a `ResultClassifier`
-//! emits anything other than `Passthrough`. Auth-agnostic: callers
-//! pass a flat [`InvocationOwner`] derived from their subject model.
+//! Persistent storage for classified tool-invocation outputs.
 
 mod entity;
 mod error;
@@ -34,8 +31,7 @@ pub enum FetchQuery {
         offset: u64,
         len: u32,
     },
-    /// Line-grep with rg-style flags. Operates over the persisted
-    /// `raw_text` line-by-line; cross-line patterns not supported.
+    /// Line-grep with rg-style flags; cross-line patterns not supported.
     Grep {
         pattern: String,
 
@@ -84,7 +80,6 @@ pub struct FetchElision {
 
 const MAX_GREP_PATTERN_LENGTH: usize = 1000;
 
-/// Hard ceiling for a single `tool_output_fetch` response.
 const MAX_FETCH_RESPONSE_BYTES: usize = 32 * 1024;
 
 #[derive(Clone)]
@@ -134,8 +129,6 @@ impl ToolInvocations {
         Ok(self.repo.find_latest_by_args_hash(owner, args_hash).await?)
     }
 
-    /// Persist the classifier's output as a `tool_invocations` row.
-    /// Returns `None` on serialization or insert failure (logged).
     #[instrument(name = "tool_cache.persist_classification", skip_all)]
     #[allow(clippy::too_many_arguments)]
     pub async fn persist_classification(
@@ -208,10 +201,6 @@ impl ToolInvocations {
         })
     }
 
-    /// Persist + decorate the raw result with an
-    /// `envelope.invocation_id`. Returns `(wrapped, invocation_id)`
-    /// so the dispatcher can stamp the audit row. `None` on
-    /// persistence failure.
     #[instrument(name = "tool_cache.persist_and_envelope", skip_all)]
     #[allow(clippy::too_many_arguments)]
     pub async fn persist_and_envelope(
@@ -409,7 +398,7 @@ fn refine_hint(query: &FetchQuery) -> String {
     }
 }
 
-/// `str::floor_char_boundary` is unstable on stable.
+// `str::floor_char_boundary` is unstable on stable Rust.
 fn floor_char_boundary(s: &str, idx: usize) -> usize {
     if idx >= s.len() {
         return s.len();

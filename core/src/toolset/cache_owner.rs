@@ -1,5 +1,4 @@
-//! `AuthSubject` → `InvocationOwner` adapter. The cache crate stays
-//! auth-agnostic; this module lives at the boundary.
+//! `AuthSubject` → `InvocationOwner` adapter.
 
 use drua_tool_cache::{InvocationOwner, ToolInvocationOwnerId};
 
@@ -18,10 +17,8 @@ impl From<UserId> for ToolInvocationOwnerId {
     }
 }
 
-/// `AgentOnBehalfOfUser` populates BOTH `agent_id` and `user_id` so
-/// the same user can fetch later via an `ExportedAgent` token
-/// (cursor #3212630890). `Anonymous` / `WorkflowExecutor` yield
-/// `None` — dispatcher then short-circuits to passthrough.
+// cursor #3212630890: AgentOnBehalfOfUser populates BOTH agent_id and user_id
+// so the same user can fetch later via an ExportedAgent token.
 pub fn invocation_owner(subject: &AuthSubject) -> Option<InvocationOwner> {
     match subject {
         AuthSubject::Agent(_, agent_id, _) => Some(InvocationOwner::agent(*agent_id)),

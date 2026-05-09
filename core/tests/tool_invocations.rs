@@ -1,8 +1,4 @@
 //! End-to-end smoke for the universal-pipeline persistence + fetch loop.
-//!
-//! - Persist a synthetic invocation via [`ToolInvocations`].
-//! - Re-read it via the same service through every [`FetchQuery`] mode.
-//! - Confirm the FK + indexes resolve against a live PG.
 
 use std::sync::Arc;
 
@@ -35,10 +31,6 @@ async fn insert_project(pool: &sqlx::PgPool) -> ProjectId {
     id
 }
 
-/// Inserts a bare agents row so the `tool_invocations.agent_id` FK resolves
-/// without going through the full `Agents` service. Mirrors `insert_project`.
-/// `agents` is event-sourced (notes/agent pattern) — non-key columns live in
-/// the events JSONB, so the projected row just carries the FKs.
 async fn insert_agent(pool: &sqlx::PgPool, project_id: ProjectId) -> AgentId {
     let id = AgentId::new();
     sqlx::query(
@@ -65,10 +57,6 @@ fn sample_raw() -> String {
     lines.join("\n")
 }
 
-/// Inserts a bare users row so the `tool_invocations.user_id` FK
-/// resolves. `github_id` is unique-per-row in production — this fixture
-/// just needs a value that doesn't collide with parallel test runs, so
-/// we reuse the row id.
 async fn insert_user(pool: &sqlx::PgPool) -> UserId {
     let id = UserId::new();
     let github_id = format!("ti-test-{}", uuid::Uuid::from(id));
@@ -115,7 +103,6 @@ async fn persist_round_trip_and_fetch_modes() {
     assert_eq!(persisted.raw_size_bytes, raw.len() as i64);
     assert_eq!(persisted.raw_text, raw);
 
-    // Tail: last 3 lines of the synthetic body.
     let tail = invocations
         .fetch(persisted.id, FetchQuery::Tail { lines: 3 })
         .await
@@ -124,21 +111,18 @@ async fn persist_round_trip_and_fetch_modes() {
     assert!(tail.elision.is_none());
     assert_eq!(tail.total_bytes, raw.len() as u64);
 
-    // Head: first 2 lines.
     let head = invocations
         .fetch(persisted.id, FetchQuery::Head { lines: 2 })
         .await
         .expect("head fetch");
     assert_eq!(head.content, "line-0000\nline-0001");
 
-    // Range: byte slice covering the first line.
     let range = invocations
         .fetch(persisted.id, FetchQuery::Range { offset: 0, len: 9 })
         .await
         .expect("range fetch");
     assert_eq!(range.content, "line-0000");
 
-    // Grep: lands on the seeded error line.
     let grep = invocations
         .fetch(
             persisted.id,
@@ -158,10 +142,6 @@ async fn persist_round_trip_and_fetch_modes() {
     assert_eq!(grep.content, "error: this is the line we want to find");
 }
 
-/// Stub tool whose only behaviour is returning a fixed-size synthetic
-/// payload. The `bypass` flag toggles the universal-pipeline opt-out so
-/// one test exercises both branches without pulling in real upstream
-/// tools.
 struct StubTool {
     name: &'static str,
     body: String,
@@ -196,12 +176,8 @@ impl TopLevelTool for StubTool {
     }
 }
 
-/// Cursor Bugbot review on PR #309: `tool_output_fetch`'s response (up to
-/// 32 KB by design) was getting re-classified as `Generic` and wrapped in
-/// a fresh envelope, defeating the recovery escape hatch. Regression
-/// guard: a tool that opts out via `bypass_universal_pipeline()` must
-/// reach the model unchanged even when its body would otherwise trigger
-/// `GenericFallback`.
+// Regression guard for Cursor Bugbot review on PR #309: tools opting out via
+// `bypass_universal_pipeline()` must not be re-classified or wrapped.
 #[tokio::test]
 async fn bypass_universal_pipeline_skips_classifier_and_persistence() {
     let pool = pool().await;
@@ -218,8 +194,6 @@ async fn bypass_universal_pipeline_skips_classifier_and_persistence() {
     .await
     .expect("ToolSets::init");
 
-    // Both bodies are way over the 4 KB GenericFallback threshold; only
-    // the bypass flag should distinguish them.
     let body = "x".repeat(50_000);
     toolsets.register_top_level(StubTool {
         name: "stub-bypass",
@@ -232,17 +206,12 @@ async fn bypass_universal_pipeline_skips_classifier_and_persistence() {
         bypass: false,
     });
 
-    // Subject carries the agent_id so `subject.acting_agent_id()` lands
-    // in the persistence branch of the dispatcher; an Anonymous subject
-    // would short-circuit to passthrough regardless of the bypass flag.
     let agent_subject = AuthSubject::Agent(project_id, agent_id, Vec::new());
 
     let bypass_result = toolsets
         .call_top_level_tool(&agent_subject, "stub-bypass", None)
         .await
         .expect("bypass tool dispatch");
-    // Raw passthrough: text is the original body, structured_content
-    // unset, no envelope.
     let bypass_text: String = bypass_result
         .content
         .iter()
@@ -266,9 +235,6 @@ async fn bypass_universal_pipeline_skips_classifier_and_persistence() {
         .call_top_level_tool(&agent_subject, "stub-no-bypass", None)
         .await
         .expect("non-bypass tool dispatch");
-    // Confirm the test setup is real: the same body, without the
-    // bypass flag, DOES get wrapped — proves the bypass branch is
-    // load-bearing, not a no-op.
     let envelope = wrapped_result
         .structured_content
         .as_ref()
@@ -291,8 +257,6 @@ async fn find_for_diff_returns_latest_matching_args_hash() {
     let agent_id = insert_agent(&pool, project_id).await;
     let agent_owner = InvocationOwner::agent(agent_id);
 
-    // Two distinct invocations with the same args_hash; expect the most
-    // recent to come back.
     invocations
         .persist(build_new(agent_owner, "first"))
         .await
@@ -310,7 +274,6 @@ async fn find_for_diff_returns_latest_matching_args_hash() {
     assert_eq!(hit.id, second.id);
     assert_eq!(hit.raw_text, "second");
 
-    // Distinct hash → no hit.
     let miss = invocations
         .find_for_diff(agent_owner, &[9, 9, 9, 9])
         .await
@@ -318,13 +281,8 @@ async fn find_for_diff_returns_latest_matching_args_hash() {
     assert!(miss.is_none());
 }
 
-/// `AuthSubject::WorkflowExecutor` (introduced in PR #306) dispatches
-/// composable tools whose `structured_content` is the workflow step's
-/// typed output — wrapping that result in a recovery envelope would
-/// replace the structured payload with summary JSON the workflow
-/// can't consume. The pipeline must short-circuit to raw passthrough
-/// for this subject, exactly the way it does for `Anonymous`. This
-/// test guards the contract.
+// PR #306 contract: WorkflowExecutor subjects must short-circuit to passthrough
+// so workflow steps' typed `structured_content` survives intact.
 #[tokio::test]
 async fn workflow_executor_subject_skips_envelope_to_preserve_structured_output() {
     let pool = pool().await;
@@ -339,8 +297,6 @@ async fn workflow_executor_subject_skips_envelope_to_preserve_structured_output(
     .await
     .expect("ToolSets::init");
 
-    // 50 KB body — well over the 4 KB threshold; the only thing
-    // keeping it from getting wrapped is the subject's scope rule.
     let body = "z".repeat(50_000);
     toolsets.register_top_level(StubTool {
         name: "stub-workflow-tool",
@@ -379,12 +335,8 @@ async fn workflow_executor_subject_skips_envelope_to_preserve_structured_output(
     );
 }
 
-/// User-rooted dispatch: mcp-gateway external callers run with
-/// `AuthSubject::User`, no agent in scope. The universal pipeline
-/// must still wrap their oversized results — the recovery handle is
-/// the load-bearing part for cli/IDE-driven tool calls too. The
-/// previous shape that short-circuited any non-agent subject to raw
-/// passthrough is what this test guards against regressing into.
+// User-rooted (mcp-gateway) callers: oversized results must still be wrapped;
+// guards against regressing to a non-agent passthrough shortcut.
 #[tokio::test]
 async fn user_subject_gets_pipeline_wrapping_via_mcp_gateway_path() {
     let pool = pool().await;
@@ -436,10 +388,7 @@ async fn user_subject_gets_pipeline_wrapping_via_mcp_gateway_path() {
     );
 }
 
-/// User-rooted scope: mcp-gateway external callers (subject =
-/// `AuthSubject::User`) get their own diff probe. Agent and user
-/// scopes are independent — same `args_hash` under different owners
-/// must not collide.
+// Agent and user scopes are independent: same `args_hash` under different owners must not collide.
 #[tokio::test]
 async fn find_for_diff_user_scope_is_isolated_from_agent_scope() {
     let pool = pool().await;

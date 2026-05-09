@@ -1,5 +1,3 @@
-//! Line-grep helpers used by `apply_fetch_query`'s `Grep` mode.
-
 pub(super) struct FilterArgs<'a, 'r> {
     pub lines: &'a [&'a str],
     pub re: &'r regex::Regex,
@@ -10,9 +8,6 @@ pub(super) struct FilterArgs<'a, 'r> {
     pub head_limit: Option<usize>,
 }
 
-/// rg-flavoured grep over `lines`. `invert` keeps non-matches.
-/// `before`/`after` are asymmetric. `--` separates non-contiguous
-/// match windows.
 pub(super) fn filter_lines_rich(args: FilterArgs<'_, '_>) -> Vec<String> {
     let FilterArgs {
         lines,

@@ -1,8 +1,4 @@
-//! Shared `cat -n`-style line-number formatter for `Read` output.
-//! Same format Anthropic's `str_replace_based_edit_tool view` uses
-//! (right-aligned 6-char line number + tab + content), so the agent
-//! sees identical shape whether it reads a sandbox file or a
-//! `space:<slug>/...` file.
+//! `cat -n`-style line-number formatter (right-aligned 6-char number + tab + content).
 
 /// `(start, end)` are 1-based inclusive; `end` clamps to the line count.
 pub fn number_lines(content: &str, view_range: Option<(usize, usize)>) -> String {

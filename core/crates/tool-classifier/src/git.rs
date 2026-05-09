@@ -1,5 +1,4 @@
-//! `GitCloneProgress` — collapses `git clone` stderr chatter
-//! (`remote: Counting objects:`, etc.) into a `<git-clone>` marker.
+//! `git clone` stderr chatter collapser.
 
 use std::ops::Range;
 

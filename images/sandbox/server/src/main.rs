@@ -305,9 +305,7 @@ async fn editor_view(
         } else {
             (1, lines.len())
         };
-        // Return raw clipped text — line numbering is the Read
-        // tool's responsibility (`sandbox::number_lines`), so the
-        // sandbox protocol stays format-agnostic.
+        // Line numbering is the Read tool's responsibility, not the protocol.
         Ok(lines[start.saturating_sub(1)..end].join("\n"))
     }
 }
@@ -1324,10 +1322,6 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, "b\nc\nd");
-        assert!(result.contains("3: c"));
-        assert!(result.contains("4: d"));
-        assert!(!result.contains("1: a"));
-        assert!(!result.contains("5: e"));
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

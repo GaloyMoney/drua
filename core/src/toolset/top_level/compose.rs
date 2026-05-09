@@ -1,10 +1,4 @@
-//! `compose` — execute JavaScript that chains multiple MCP tool calls in a
-//! single round trip. The script has access to a `tools` proxy; each
-//! `tools.prefixed_name(args)` call dispatches to the backing catalog toolset
-//! and is individually audit-logged.
-//!
-//! Includes TypeScript declaration generation from catalog JSON Schemas so
-//! agents see typed APIs in the execution context.
+//! Execute JavaScript that chains multiple MCP tool calls in a single round trip.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock, RwLock};
@@ -41,16 +35,7 @@ struct ComposeParams {
 pub struct ComposeTool {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
     top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
-    /// `None` only in tests without a DB pool. Each sub-tool dispatch needs
-    /// it to persist its own audit row with its own outcome (memory
-    /// `019dfd6e`); without it the sub-tool action inherits the parent
-    /// compose call's outcome.
     audit: Option<Arc<Audit>>,
-    /// Same shape as `ToolSets::tool_invocations` — `None` in test paths.
-    /// When set, sub-tool dispatches inside the JS engine route through
-    /// `persist_classification` so each oversize sub-result lands in
-    /// `tool_invocations` and surfaces in compose's `sub_invocations`
-    /// directory. JS still receives the raw un-wrapped result.
     tool_invocations: Option<Arc<ToolInvocations>>,
     classifiers: Arc<ClassifierRegistry>,
     config: ComposeConfig,
@@ -80,25 +65,14 @@ static COMPOSE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct ComposeOutput {
-    /// The JS script's return value. Verbatim when small; under
-    /// elision the walker's `kept` form (with sentinels for
-    /// dropped branches). When elided, `result_invocation_id` is
-    /// also present and the full return is recoverable via
-    /// `tool_output_fetch`.
+    /// The JS script's return value. Curated when oversize; recoverable via `tool_output_fetch` using `result_invocation_id`.
     #[schemars(schema_with = "crate::toolset::any_json_schema")]
     result: serde_json::Value,
-    /// Set when `result` was curated by the walker. Pass to
-    /// `tool_output_fetch` to recover the full JS return value.
+    /// Set when `result` was curated; pass to `tool_output_fetch` to recover the full JS return.
     #[serde(skip_serializing_if = "Option::is_none")]
     result_invocation_id: Option<uuid::Uuid>,
-    /// Each sub-tool call worth recovering. Excludes Passthrough
-    /// (under-threshold) sub-calls, errored calls, and bypass-marked
-    /// calls — entries listed here always have a valid `invocation_id`
-    /// the agent can fetch.
+    /// Recoverable sub-tool calls; excludes passthrough, errored, and bypass-marked calls.
     sub_invocations: Vec<SubInvocation>,
-    /// Single fetch hint covering both `result_invocation_id` and any
-    /// `sub_invocations[].invocation_id`. Mirrors the universal
-    /// pipeline's hint shape so the agent learns one rule.
     fetch_hint: String,
     console: Vec<String>,
     tool_calls: usize,
@@ -312,10 +286,6 @@ impl TopLevelTool for ComposeTool {
     }
 }
 
-/// Wrap a JS return Value as a `CallToolResult` so the existing
-/// classifier surface can walk it. structured_content carries the
-/// Value verbatim; content[].text is set to the compact serialized
-/// form so any text-extraction fallback still works.
 fn build_walker_input(value: &serde_json::Value) -> CallToolResult {
     let text = serde_json::to_string(value).unwrap_or_default();
     let mut ctr = CallToolResult::success(vec![Content::text(text)]);
@@ -323,61 +293,34 @@ fn build_walker_input(value: &serde_json::Value) -> CallToolResult {
     ctr
 }
 
-/// For elided/non-Passthrough summaries, surface the walker's `kept`
-/// view inline as compose's `result` field (so the agent still sees
-/// data, just curated). Concourse / future typed shapes fall back
-/// to JSON-stringifying the entire summary — they won't be the
-/// shape compose's JS engine produces anyway.
 fn render_curated_result(summary: &ToolResultSummary) -> serde_json::Value {
     match summary {
         ToolResultSummary::Passthrough { value } => value.clone(),
         ToolResultSummary::StructuredElision { kept, .. } => kept.clone(),
-        // Typed bodies are already schema-faithful — forward the
-        // body verbatim. New typed classifiers slot in without any
-        // change here.
         ToolResultSummary::Typed { body, .. } => body.clone(),
     }
 }
 
-/// Compose-specific disambiguator. The `tool_output_fetch` call
-/// shape itself lives in that tool's `description()` — agents have
-/// it via the catalog and don't need it duplicated here. What's
-/// unique to compose is *which* invocation id to pass: compose
-/// emits both `result_invocation_id` (the full JS return) and a
-/// per-sub-call `sub_invocations[].invocation_id` directory.
 const COMPOSE_FETCH_HINT: &str = "invocation_id is either `result_invocation_id` (full JS return) \
      or any `sub_invocations[].invocation_id` (specific sub-call's \
      persisted output) — see `tool_output_fetch` for the full call shape.";
 
-/// One sub-tool dispatch's worth of recovery metadata. Accumulated by
-/// `CatalogDispatcher` while the JS script runs; surfaced in compose's
-/// final `structured_content.sub_invocations` directory so the agent
-/// can `tool_output_fetch(invocation_id, ...)` on any specific
-/// sub-call's persisted output.
+/// Recovery metadata for one sub-tool dispatch inside a compose script.
 #[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
 pub struct SubInvocation {
-    /// Order within the script — `seq=0` is the first `tools.foo()`
-    /// call, `seq=1` the second, etc. Stable across re-runs of the
-    /// same script.
+    /// Order within the script (0-based, stable across re-runs).
     pub seq: u32,
     pub tool_name: String,
-    /// Short human-readable identifier of the call. Format
-    /// `tool(key=value, ...)` truncated to 80 chars; lets agents pick
-    /// by call subject rather than by index.
+    /// `tool(key=value, ...)` truncated to 80 chars.
     pub args_digest: String,
-    /// `tool_invocations.id` — pass to `tool_output_fetch` to recover
-    /// elided detail.
+    /// `tool_invocations.id` — pass to `tool_output_fetch`.
     pub invocation_id: uuid::Uuid,
-    /// `summary.kind` discriminator (e.g. `"concourse"`,
-    /// `"structured_elision"`, `"generic"`).
+    /// Summary kind discriminator (e.g. `concourse`, `structured_elision`, `generic`).
     pub kind: String,
     pub raw_size_bytes: u64,
     pub summary_size_bytes: u64,
 }
 
-/// Bridges the JS engine's [`js_engine::ToolDispatcher`] trait to both the
-/// catalog (SearchableToolSet) dispatch path and the top-level tool registry,
-/// preserving visibility filtering, audit logging, and output filtering.
 struct CatalogDispatcher {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
     top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
@@ -385,11 +328,6 @@ struct CatalogDispatcher {
     audit: Option<Arc<Audit>>,
     tool_invocations: Option<Arc<ToolInvocations>>,
     classifiers: Arc<ClassifierRegistry>,
-    /// Accumulator threaded through every sub-tool call. Compose reads
-    /// this after the JS engine finishes and emits the entries as
-    /// `structured_content.sub_invocations`. `Mutex` (sync, not async)
-    /// because mutations are short and uncontended — the JS engine
-    /// dispatches sub-calls sequentially.
     sub_invocations: Arc<StdMutex<Vec<SubInvocation>>>,
     seq_counter: Arc<AtomicU32>,
 }
@@ -428,9 +366,6 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
 
                 let result = match dispatch_result {
                     Ok((raw, value)) => {
-                        // Run the universal pipeline as a side-effect.
-                        // JS still gets `value`; persist + accumulate
-                        // for the sub_invocations directory.
                         dispatcher
                             .maybe_persist_sub_invocation(
                                 &name_owned,
@@ -463,7 +398,6 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
 }
 
 impl CatalogDispatcher {
-    /// Same logic as `CallCatalogTool::find_set()`.
     fn find_set(
         &self,
         prefixed_name: &str,
@@ -552,9 +486,6 @@ impl CatalogDispatcher {
         .await
     }
 
-    /// Lightweight clone of the persistence-relevant fields. Used to
-    /// hand a borrow of the persistence machinery into the per-call
-    /// async block without holding a `&self` across the await.
     fn clone_for_persistence(&self) -> CatalogDispatcherShared {
         CatalogDispatcherShared {
             subject: self.subject.clone(),
@@ -566,10 +497,6 @@ impl CatalogDispatcher {
     }
 }
 
-/// Persistence-side view of [`CatalogDispatcher`] — fields the
-/// per-call async block needs to record a `SubInvocation`. Cloned
-/// once per dispatch so the closure can move it without holding a
-/// borrow on the dispatcher.
 #[derive(Clone)]
 struct CatalogDispatcherShared {
     subject: AuthSubject,
@@ -580,15 +507,6 @@ struct CatalogDispatcherShared {
 }
 
 impl CatalogDispatcherShared {
-    /// Run the universal pipeline as a side-effect. Skipped when:
-    ///   - no `ToolInvocations` is wired (test paths)
-    ///   - the subject doesn't yield an owner (`Anonymous`,
-    ///     `WorkflowExecutor`)
-    ///   - the classifier returned `Passthrough` (no recoverable
-    ///     detail; agent already has every byte via the JS-facing
-    ///     `Value`)
-    ///   - persistence itself failed (logged inside
-    ///     `persist_classification`)
     async fn maybe_persist_sub_invocation(
         &self,
         tool_name: &str,
@@ -649,9 +567,6 @@ impl CatalogDispatcherShared {
     }
 }
 
-/// Format `tool(key1=value1, key2=value2)` truncated to ~80 chars.
-/// Reads better than a raw uuid for the agent scanning
-/// `sub_invocations`.
 fn args_digest(tool_name: &str, args: &serde_json::Value) -> String {
     let mut out = String::from(tool_name);
     out.push('(');
@@ -675,12 +590,6 @@ fn args_digest(tool_name: &str, args: &serde_json::Value) -> String {
     out.chars().take(80).collect()
 }
 
-/// Inner dispatch for a [`SearchableToolSet`] — returns both the raw
-/// `CallToolResult` (for classifier + `tool_output_fetch` recovery)
-/// and the JS-facing `Value`. No pre-classification trimming: the
-/// dispatcher's universal pipeline handles oversize results, and
-/// compose JS scripts get the full shape so they can filter /
-/// cross-reference in JS (compose's value proposition).
 async fn run_searchable_call(
     set: Arc<dyn SearchableToolSet>,
     subject: &AuthSubject,
@@ -702,8 +611,6 @@ async fn run_searchable_call(
     Ok((result, value))
 }
 
-/// Inner dispatch for a [`TopLevelTool`] — same shape as
-/// [`run_searchable_call`].
 async fn run_top_level_call(
     tool: Arc<dyn TopLevelTool>,
     subject: &AuthSubject,
@@ -724,11 +631,6 @@ async fn run_top_level_call(
     Ok((result, value))
 }
 
-/// Convert a `CallToolResult` to the `Value` shape JS expects:
-/// structured_content wins; falls back to JSON-parsed text; falls
-/// back further to `Value::String(text)`. Same logic both inner
-/// dispatch paths used inline before; extracted so the new
-/// `(CallToolResult, Value)` return type doesn't duplicate it.
 fn result_to_value(result: &CallToolResult) -> serde_json::Value {
     if let Some(structured) = &result.structured_content {
         return structured.clone();

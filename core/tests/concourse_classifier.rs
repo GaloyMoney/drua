@@ -1,14 +1,4 @@
-//! Drives [`ConcourseBuildLogClassifier`] against captured fixtures from
-//! ci.galoy.io's `galoy-agents-bin` pipeline (`check-code` job, builds #610
-//! and #609).
-//!
-//! Architecture under test:
-//! - Concourse classifier preprocesses (strips ANSI + timestamps) and
-//!   delegates to the walker, producing a `Typed` summary.
-//! - `typed_kind = "concourse_logs"` matches the upstream tool's
-//!   identity for filterable PG queries.
-//! - `body = { logs: String }` matches the upstream tool's
-//!   declared `output_schema`.
+//! `ConcourseBuildLogClassifier` against captured fixtures.
 
 use rmcp::model::{CallToolResult, Content};
 
@@ -39,7 +29,6 @@ fn classify(raw: &str) -> ToolResultSummary {
         .summary
 }
 
-/// Helper: extract the `logs` string from a `Typed` summary.
 fn typed_logs(summary: &ToolResultSummary) -> &str {
     match summary {
         ToolResultSummary::Typed { typed_kind, body } => {
@@ -60,19 +49,16 @@ fn build_610_succeeded_compacts_copy_runs_inline() {
     let summary = classify(BUILD_610_SUCCEEDED);
     let logs = typed_logs(&summary);
 
-    // 700+ `copying path` lines collapsed into <nix-copy>.
     assert!(logs.contains("<nix-copy"));
     assert!(logs.contains("</nix-copy>"));
     assert_eq!(logs.matches("copying path '/nix/store/").count(), 0);
 
-    // Total size is bounded by the BulkElide terminal pass.
     assert!(
         logs.len() <= 16 * 1024,
         "post-chain logs len {} exceeds BulkElide cap",
         logs.len()
     );
 
-    // Warning lines survive as ordinary text inside `logs`.
     assert!(logs.contains("warning:"));
 
     eprintln!(
@@ -87,9 +73,6 @@ fn build_609_failed_compacts_under_bulk_elide_cap() {
     let summary = classify(BUILD_609_FAILED);
     let logs = typed_logs(&summary);
 
-    // The chain compresses #609 well under the BulkElide cap.
-    // Failure header + indented `> ` log_tail stay inline as
-    // ordinary text — no marker, no special handling.
     assert!(logs.len() <= 16 * 1024);
     assert!(logs.contains("error: failed to build attribute"));
     assert!(logs.contains("drua-clippy"));
@@ -117,12 +100,9 @@ fn registry_routes_concourse_to_typed_classifier_with_concourse_logs_kind() {
         exit_code: None,
     };
     let classification = registry.classify(&ctx);
-    // PG `kind` column gets the typed_kind, not the serde tag.
     assert_eq!(classification.summary.kind(), "concourse_logs");
 }
 
-/// Schema-faithfulness check: the body conforms to the upstream
-/// MCP tool's `output_schema` (`{logs: String}`).
 #[test]
 fn typed_body_conforms_to_concourse_output_schema() {
     let summary = classify(BUILD_610_SUCCEEDED);
@@ -138,9 +118,6 @@ fn typed_body_conforms_to_concourse_output_schema() {
     );
 }
 
-/// Bash-shape result with nix-build chatter: walker descends to the
-/// string leaf, runs the chain, returns Value::String with markers
-/// substituted in place. Schema-faithful — kept stays a String.
 #[test]
 fn nix_summarizers_fire_on_bash_output_via_walker() {
     let mut nix_output = String::from("preparing to build /nix/store/aaaa-foo.drv\n");
@@ -177,9 +154,6 @@ fn nix_summarizers_fire_on_bash_output_via_walker() {
     assert!(!s.contains("copying path '/nix/store/"));
 }
 
-/// Pathological log: hundreds of KB of unstructured chatter that no
-/// structured pass matches. The terminal `BulkElide` pass must still
-/// bring the post-chain log under its byte budget.
 #[test]
 fn bulk_elide_bounds_unstructured_log_size() {
     let mut raw = String::from("[03:00:00] === with-nix-cache: start ===\n");
@@ -211,16 +185,9 @@ fn bulk_elide_bounds_unstructured_log_size() {
         logs.len()
     );
     assert!(logs.contains("<bulk-elided"));
-    // Simple tail-keep — head is dropped, tail survives.
     assert!(logs.contains("tail line"));
 }
 
-/// Non-Concourse long-log shape (e.g. k8s pod logs returning
-/// `{logs: "<huge text>"}`): the walker descends into the
-/// structured root, hits the `logs` string leaf, runs the chain
-/// in place, and the ROOT object structure stays intact —
-/// schema-faithful to whatever the upstream tool's output_schema
-/// declares.
 #[test]
 fn k8s_shape_preserves_root_object_structure() {
     let mut huge_logs = String::new();
@@ -230,8 +197,6 @@ fn k8s_shape_preserves_root_object_structure() {
             i % 60
         ));
     }
-    // Realistic k8s-pod-logs output_schema shape: an object with
-    // `logs`, `pod`, `namespace`, `container` siblings.
     let upstream = serde_json::json!({
         "logs": huge_logs,
         "pod": "drua-server-abc",
@@ -258,8 +223,6 @@ fn k8s_shape_preserves_root_object_structure() {
         other => panic!("unexpected summary shape: {other:?}"),
     };
 
-    // Root is still an object — schema-faithful to upstream's
-    // declared shape. Sibling fields untouched.
     let obj = kept.as_object().expect("root remained an object");
     assert_eq!(
         obj.get("pod").and_then(|v| v.as_str()),
@@ -271,8 +234,6 @@ fn k8s_shape_preserves_root_object_structure() {
     );
     assert_eq!(obj.get("container").and_then(|v| v.as_str()), Some("drua"));
 
-    // `logs` is still a String (type-preserved at the leaf), and
-    // BulkElide bracketed it with <head>/<tail> markers.
     let logs = obj
         .get("logs")
         .and_then(|v| v.as_str())
@@ -280,7 +241,6 @@ fn k8s_shape_preserves_root_object_structure() {
     assert!(logs.contains("<head>"));
     assert!(logs.contains("<bulk-elided"));
     assert!(logs.contains("<tail>"));
-    // Some lines from the head and tail survive; middle is gone.
     assert!(logs.contains("line 0000"));
     assert!(logs.contains("line 2999"));
     assert!(!logs.contains("line 1500"));

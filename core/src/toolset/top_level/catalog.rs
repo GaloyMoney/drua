@@ -347,13 +347,6 @@ impl TopLevelTool for DescribeCatalogTool {
     }
 }
 
-/// Dispatches into the visible + executable `SearchableToolSet` for the
-/// caller. Self-handles classify+persist+envelope so the universal-
-/// pipeline row reflects the **inner** tool's identity rather than
-/// `call_tool` — direct upstream invocations and `call_tool`-proxied
-/// invocations produce identical persisted shapes, and typed
-/// classifiers (concourse_logs, future cargo/nix/etc.) fire either
-/// way.
 pub struct CallCatalogTool {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
     tool_invocations: Option<Arc<super::super::tool_invocations::ToolInvocations>>,
@@ -515,10 +508,6 @@ impl TopLevelTool for CallCatalogTool {
     }
 }
 
-/// When the inner tool errors *and* the caller passed extra top-level keys
-/// alongside `tool_name`, wrap the error with a hint nudging them at the
-/// correct envelope shape. The original error message is preserved verbatim
-/// so the agent still sees the underlying validation failure.
 fn annotate_envelope_mistake(
     result: Result<CallToolResult, ToolSetsError>,
     tool_name: &str,

@@ -79,11 +79,7 @@ struct PipelineJobParams {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct BuildIdParams {
-    /// Global Concourse build id (numeric, returned as `build_id` by
-    /// `list_builds_for_job`). NOT the per-job build name from URLs like
-    /// `…/jobs/foo/builds/597`. To map a URL build name to its global id,
-    /// call `list_builds_for_job(pipeline, job)` and pick the entry whose
-    /// `name` matches the URL segment, then pass its `build_id` here.
+    /// Global Concourse `build_id` (numeric); not the per-job build name from a URL — map URL names via `list_builds_for_job`.
     #[serde(deserialize_with = "deserialize_liberal_i64")]
     build_id: i64,
 }

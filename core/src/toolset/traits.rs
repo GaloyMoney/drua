@@ -9,72 +9,43 @@ pub struct ToolSetEntry {
     pub description: Tool,
 }
 
-/// Dynamic-registration provenance: lets the container atomically replace all
-/// toolsets in a scope and reject stale cleanup calls from an evicted owner.
-/// Static toolsets return `None` and are never eligible for scope-based removal.
+/// Dynamic-registration provenance for atomic scope-based replacement of toolsets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolSetScope {
-    /// `deployment_id` selects *which* tunnel's toolsets to replace on takeover;
-    /// `session_id` identifies the current owner, so an evicted WS loop's late
-    /// cleanup can be distinguished from the live session.
     Tunnel {
         deployment_id: String,
         session_id: uuid::Uuid,
     },
 }
 
-/// One tool resolved by exact name. Unlike [`SearchableToolSet`] which
-/// bundles many upstream tools behind a prefix.
 #[async_trait::async_trait]
 pub trait TopLevelTool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn input_schema(&self) -> &serde_json::Value;
 
-    /// When present the MCP gateway includes it in the tool definition and
-    /// the tool MUST return `structured_content` in its `CallToolResult`.
+    /// When present, the tool MUST return `structured_content` in its `CallToolResult`.
     fn output_schema(&self) -> Option<&serde_json::Value> {
         None
     }
 
-    /// Default: always visible. Override to hide without blocking execution.
     fn is_visible(&self, _subject: &AuthSubject) -> bool {
         true
     }
 
-    /// Default `true`. Override to `false` only for meta-tools whose
-    /// semantics don't fit a JS bridge — `compose` (recursion),
-    /// `compose_types` (introspection-only), and `use_skill` (spawns a
-    /// nested agent). Project-admin tools (`agent`, `sandbox`,
-    /// `skill`, `workflow`, ...) ARE composable: their service methods
-    /// run `subject.can(...)` themselves and the dispatcher passes the
-    /// caller's subject through unchanged, so authz is preserved.
+    /// Whether the tool can be invoked from a `compose` JS script.
     fn composable(&self) -> bool {
         true
     }
 
-    /// `true` opts the tool's result out of the universal-pipeline
-    /// classify+persist+envelope stage in `ToolSets::call_top_level_tool`
-    /// — the raw `CallToolResult` is returned unchanged. Set on
-    /// `tool_output_fetch` so the recovery escape hatch's own response
-    /// (which can itself be tens of KB, deliberately) doesn't get
-    /// re-classified and wrapped in a fresh envelope, which would
-    /// defeat the point of the fetch tool.
+    /// Skip the universal classify+persist+envelope stage; raw result is returned unchanged.
     fn bypass_universal_pipeline(&self) -> bool {
         false
     }
 
-    /// `true` when the tool runs its own classify+persist+envelope
-    /// pipeline internally and emits accurate
-    /// `record_pipeline_metrics` itself. The dispatcher's bypass
-    /// branch then skips its default
-    /// `record_pipeline_metrics(raw, raw, "bypass", false)` write —
-    /// otherwise the audit row would carry a misleading
-    /// `compression_ratio = 1.0` even when the inner pipeline
-    /// achieved real compression (cursor bugbot review #3210558743).
-    /// Default: false — most bypass-marked tools (`tool_output_fetch`)
-    /// genuinely don't elide and the 1.0 baseline is correct for
-    /// them.
+    // cursor bugbot #3210558743: when true, dispatcher's bypass branch skips
+    // its default `record_pipeline_metrics(raw, raw, "bypass", false)` so an
+    // internally-compressing tool doesn't record a misleading 1.0 ratio.
     fn records_own_pipeline_metrics(&self) -> bool {
         false
     }
@@ -100,7 +71,6 @@ impl From<&dyn TopLevelTool> for llm::prompt::Tool {
 #[async_trait::async_trait]
 pub trait SearchableToolSet: Send + Sync {
     fn name(&self) -> &str;
-    /// Defaults to `name()`.
     fn prefix(&self) -> &str {
         self.name()
     }
@@ -108,13 +78,11 @@ pub trait SearchableToolSet: Send + Sync {
     fn category_description(&self) -> &str;
     fn tools(&self) -> &[ToolSetEntry];
 
-    /// Default: always visible. Override to hide behind a scope or role.
     fn is_visible(&self, _subject: &AuthSubject) -> bool {
         true
     }
 
-    /// `Some(..)` for dynamically-registered toolsets (e.g. tunnels);
-    /// static toolsets return `None`. See [`ToolSetScope`].
+    /// `Some(..)` for dynamically-registered toolsets (e.g. tunnels).
     fn scope(&self) -> Option<&ToolSetScope> {
         None
     }

@@ -1,7 +1,4 @@
-//! Concourse `concourse_get_build_logs` classifier — preprocesses
-//! (strip ANSI + `[HH:MM:SS]`), then delegates to the walker. Emits
-//! `Typed { typed_kind: "concourse_logs", body: { logs: String } }`,
-//! schema-faithful to the upstream tool's `output_schema`.
+//! Concourse build log classifier; emits `Typed { typed_kind: "concourse_logs" }`.
 
 use std::sync::{Arc, OnceLock};
 
@@ -16,8 +13,7 @@ use super::{
 
 pub const CONCOURSE_LOGS_KIND: &str = "concourse_logs";
 
-/// Strips ANSI + leading `[HH:MM:SS] ` from each line. Output is
-/// line-aligned with the input.
+/// Strips ANSI escapes and leading `[HH:MM:SS] ` timestamps; line-aligned with input.
 pub struct ConcourseBuildLogPreprocessor;
 
 impl ConcourseBuildLogPreprocessor {

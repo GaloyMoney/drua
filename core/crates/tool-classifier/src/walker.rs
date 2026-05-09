@@ -1,7 +1,4 @@
-//! JSON-aware elision walker — depth-first descent that byte-elides
-//! strings in place (preserving the `String` JSON type) and
-//! sentinel-replaces oversize arrays/objects only after recursion.
-//! Bails to `Passthrough` if elision didn't actually shrink.
+//! JSON-aware elision walker.
 
 use serde_json::{Map, Value};
 

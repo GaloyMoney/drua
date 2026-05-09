@@ -161,11 +161,7 @@ impl InstanceClient {
         Ok(resp)
     }
 
-    /// Typed wrapper over `/execute` for the `bash` tool. The
-    /// sandbox server encodes `BashCommandOutput` as JSON inside
-    /// `ExecuteResponse.output`; we parse it back here. On
-    /// `is_error` (shell died, parse failures), the error string
-    /// rides through `output` as plain text.
+    /// Typed wrapper over `/execute` for the `bash` tool.
     #[instrument(name = "sandbox.instance.execute_bash", skip_all)]
     pub async fn execute_bash(
         &self,

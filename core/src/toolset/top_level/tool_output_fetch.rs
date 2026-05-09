@@ -1,8 +1,4 @@
-//! `tool_output_fetch` — recovery handle for the universal-pipeline
-//! envelope. Mirrors what the original tool returned in
-//! `structured_content` (full disclosure by default). Optional
-//! `query` slices the persisted canonical text into `content[].text`.
-//! `view: "summary"` returns the typed classifier summary instead.
+//! Recovery handle for the universal-pipeline envelope.
 
 use std::sync::{Arc, LazyLock};
 
@@ -39,11 +35,10 @@ struct FetchInput {
 #[derive(Debug, Default, Clone, Copy, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum FetchView {
-    /// Full disclosure: upstream tool's `structured_content` verbatim.
+    /// Upstream tool's `structured_content` verbatim.
     #[default]
     Original,
-    /// Typed classifier summary (e.g. `Typed { typed_kind: "concourse_logs", body }`,
-    /// `StructuredElision { kept, … }`).
+    /// Typed classifier summary instead of the full output.
     Summary,
 }
 
@@ -88,8 +83,7 @@ impl TopLevelTool for ToolOutputFetch {
     }
 
     fn bypass_universal_pipeline(&self) -> bool {
-        // Re-classifying recovery output would assign a new
-        // invocation_id and loop on itself.
+        // Recovery output must not be re-classified or it loops on itself.
         true
     }
 
@@ -140,7 +134,7 @@ impl TopLevelTool for ToolOutputFetch {
                     }
                 }
             }
-            None => String::new(),
+            None => invocation.raw_text.clone(),
         };
 
         let mut ctr = CallToolResult::success(vec![Content::text(content_text)]);

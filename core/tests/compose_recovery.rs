@@ -1,8 +1,4 @@
-//! End-to-end tests for compose's recovery surface (`result_invocation_id` +
-//! `sub_invocations` directory + WorkflowExecutor bypass). Builds on the same
-//! stub-toolset shape as `compose_audit.rs` but adds a configurable per-call
-//! payload size so we can exercise both the Passthrough and StructuredElision
-//! branches of the walker, plus the sub-invocation accumulator.
+//! End-to-end tests for compose's recovery surface.
 
 use std::sync::Arc;
 
@@ -23,9 +19,6 @@ async fn pool() -> sqlx::PgPool {
     sqlx::PgPool::connect(&url).await.expect("connect to pg")
 }
 
-/// Stub set with a single tool whose response size is configurable.
-/// `payload_bytes` controls how much filler text the tool returns —
-/// used to trip / not trip the universal pipeline's threshold.
 struct StubSet {
     name: String,
     tools: Vec<ToolSetEntry>,
@@ -121,14 +114,11 @@ fn extract_structured(result: &CallToolResult) -> &serde_json::Value {
         .expect("compose always emits structured_content")
 }
 
-/// Small JS return → `result` is the verbatim Value, no
-/// `result_invocation_id`, no sub_invocations.
 #[tokio::test]
 async fn compose_with_small_result_no_elision() {
     let pool = pool().await;
     let (toolsets, _) = build_toolsets_with_invocations(
         &pool,
-        // Sub-tool not used in this test; payload size irrelevant.
         StubSet::new("stub", "list_items", 0),
     )
     .await;
@@ -162,9 +152,6 @@ async fn compose_with_small_result_no_elision() {
     assert!(subs.is_empty(), "no sub-tool calls were made");
 }
 
-/// Large JS return → `result` is the walker's elided form,
-/// `result_invocation_id` is present, `tool_output_fetch` recovers
-/// the full original return.
 #[tokio::test]
 async fn compose_with_large_return_curated() {
     let pool = pool().await;
@@ -174,8 +161,6 @@ async fn compose_with_large_return_curated() {
     let user_id = insert_user(&pool).await;
     let subject = AuthSubject::User(user_id);
 
-    // Build a JS return value well over the 4 KB threshold (200
-    // entries × 100 bytes each = ~20 KB after JSON encoding).
     let result = toolsets
         .call_top_level_tool(
             &subject,
@@ -198,8 +183,6 @@ async fn compose_with_large_return_curated() {
         .expect("large result must carry a recovery handle");
     let recovery_uuid: uuid::Uuid = recovery_id.parse().expect("invocation_id is a uuid");
 
-    // Sanity: the persisted row exists and its raw_text is the full
-    // original JS return value.
     let persisted = invocations
         .find_by_id(recovery_uuid.into())
         .await
@@ -214,14 +197,9 @@ async fn compose_with_large_return_curated() {
     );
 }
 
-/// Script makes three sub-tool calls — one tiny (Passthrough), two
-/// over threshold. `sub_invocations` lists exactly the two that got
-/// persisted, in call order, with valid invocation_ids.
 #[tokio::test]
 async fn compose_sub_invocations_directory_lists_only_persisted_calls() {
     let pool = pool().await;
-    // Stub returns 8 KB on every call — over threshold, every call
-    // is persisted.
     let (toolsets, _) =
         build_toolsets_with_invocations(&pool, StubSet::new("stub", "list_items", 8000)).await;
 
@@ -252,7 +230,6 @@ async fn compose_sub_invocations_directory_lists_only_persisted_calls() {
         3,
         "all three calls should land in the directory"
     );
-    // Each entry is a SubInvocation with seq + invocation_id.
     for (expected_seq, entry) in subs.iter().enumerate() {
         assert_eq!(
             entry.get("seq").and_then(|v| v.as_u64()),
@@ -274,12 +251,7 @@ async fn compose_sub_invocations_directory_lists_only_persisted_calls() {
     }
 }
 
-/// `WorkflowExecutor` subject: the universal pipeline short-circuits
-/// at the dispatcher layer, BUT compose's bypass only applies to its
-/// own envelope wrapping. With no owner, compose's
-/// `persist_classification` returns None; result is verbatim, no
-/// recovery handle. Sub-tool persistence is also skipped (same owner
-/// rule). The agent gets the JS return untouched.
+// WorkflowExecutor has no owner → no persistence, result is verbatim.
 #[tokio::test]
 async fn compose_under_workflow_executor_no_persistence() {
     let pool = pool().await;
@@ -323,10 +295,6 @@ async fn compose_under_workflow_executor_no_persistence() {
     );
 }
 
-/// `tool_output_fetch` is callable from inside the JS engine — agent
-/// can fetch a previously-persisted row mid-script and use it in the
-/// return value. Exercises the same recovery path the agent uses
-/// from outside compose, just one level deeper.
 #[tokio::test]
 async fn tool_output_fetch_inside_compose_engine() {
     let pool = pool().await;
@@ -336,18 +304,9 @@ async fn tool_output_fetch_inside_compose_engine() {
     let user_id = insert_user(&pool).await;
     let subject = AuthSubject::User(user_id);
 
-    // Script: call stub once (gets persisted via sub_invocations),
-    // then call tool_output_fetch with the recorded invocation_id.
-    // Verifies the JS namespace exposes tool_output_fetch and the
-    // fetch round-trip works mid-script.
-    //
-    // Implementation note: the script can't see compose's own
-    // sub_invocations directly (those are surfaced after JS exits).
-    // Instead it asserts the fetch tool is callable; a real-world
-    // pattern would use an invocation_id from a prior compose call.
-    // Rust's `\` line-continuation collapses newlines, so a multi-line
-    // JS script written with `\` ends up on one line — and a leading
-    // `//` comment swallows everything after it. Use real newlines.
+    // Rust's `\` line-continuation collapses newlines, so a multi-line JS
+    // script written with `\` ends up on one line — a leading `//` comment
+    // would then swallow the rest. Use real newlines.
     let result = toolsets
         .call_top_level_tool(
             &subject,

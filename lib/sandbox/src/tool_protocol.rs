@@ -52,10 +52,7 @@ impl BashCommandInput {
     }
 }
 
-/// Typed response for the `bash` tool. Streams stay split — the
-/// sandbox already captures stdout / stderr separately
-/// (`session.rs:208-211`); merging at the boundary throws away
-/// signal the agent's classifier needs.
+/// Typed response for the `bash` tool with stdout and stderr kept separate.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct BashCommandOutput {
     pub stdout: String,

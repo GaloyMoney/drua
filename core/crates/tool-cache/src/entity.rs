@@ -1,9 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-/// Strongly-typed UUID newtype for the persistence layer. Crate-local
-/// so the type doesn't leak `crate::primitives::ToolInvocationId`'s
-/// es-entity machinery into callers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ToolInvocationId(pub uuid::Uuid);
@@ -38,8 +35,6 @@ impl std::fmt::Display for ToolInvocationId {
     }
 }
 
-/// Newtype for any UUID owning a persisted invocation (agent or user).
-/// Hosts provide `From<TheirAgentId> for ToolInvocationOwnerId`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ToolInvocationOwnerId(pub uuid::Uuid);
@@ -62,8 +57,6 @@ impl std::fmt::Display for ToolInvocationOwnerId {
     }
 }
 
-/// Owner of a persisted invocation. Auth-system agnostic — callers
-/// populate from their subject model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InvocationOwner {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -87,9 +80,8 @@ impl InvocationOwner {
         }
     }
 
-    /// Match on EITHER dimension. AgentOnBehalfOfUser populates both
-    /// fields so the same user can fetch later via ExportedAgent
-    /// (cursor #3212630890).
+    // cursor #3212630890: AgentOnBehalfOfUser populates both fields so the
+    // same user can re-fetch later via ExportedAgent.
     pub fn matches(&self, other: &Self) -> bool {
         if let (Some(a), Some(b)) = (self.agent_id, other.agent_id) {
             if a == b {
@@ -165,8 +157,6 @@ pub struct ToolInvocation {
     pub summary: serde_json::Value,
     pub raw_text: String,
     pub raw_size_bytes: i64,
-    /// Upstream tool's `structured_content` verbatim. `None` for
-    /// plain-text tools.
     pub original_structured: Option<serde_json::Value>,
     pub exit_code: Option<i32>,
     pub duration_ms: i32,

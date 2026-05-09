@@ -1,7 +1,4 @@
-//! `ResultClassifier` + universal `GenericFallback` + per-tool
-//! classifiers. The dispatcher branches on the variant emitted by
-//! `classify`: `Passthrough` keeps the fast path; every other variant
-//! triggers the universal envelope.
+//! Tool-result classifiers and the universal `GenericFallback`.
 
 use rmcp::model::CallToolResult;
 use serde::{Deserialize, Serialize};
@@ -24,16 +21,8 @@ pub use string_summarizer::{
     StringSummarizerChain, VerbatimRegion,
 };
 
-/// Default byte threshold for [`GenericFallback`]. Below → `Passthrough`;
-/// at-or-above → walker emits `StructuredElision`. Tunable per-deployment.
 pub const DEFAULT_GENERIC_THRESHOLD_BYTES: usize = 4096;
 
-/// What the classifier produces. Three shapes:
-/// - `Passthrough` — forward verbatim, no envelope.
-/// - `StructuredElision` — JSON walker shrank the value in place.
-/// - `Typed` — generic typed body. New typed classifiers slot in
-///   without touching this enum: pick a `typed_kind`, ship a
-///   `body: Value` matching the upstream tool's `output_schema`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ToolResultSummary {
@@ -48,9 +37,6 @@ pub enum ToolResultSummary {
         kept_bytes: u32,
     },
 
-    /// JSON-on-the-wire: `{"kind": "typed", "typed_kind": "...", "body": {...}}`.
-    /// `kind()` returns the inner `typed_kind` so the PG `kind` column
-    /// carries the classifier-specific discriminator.
     Typed {
         typed_kind: String,
         body: serde_json::Value,
@@ -70,8 +56,6 @@ impl ToolResultSummary {
         matches!(self, Self::Passthrough { .. })
     }
 
-    /// Bytes the agent ends up reading. Owns kind-aware dispatch
-    /// so callers never inspect `Typed` bodies directly.
     pub fn kept_bytes(&self, raw_bytes: u64) -> u64 {
         match self {
             Self::Passthrough { .. } => raw_bytes,
@@ -96,9 +80,6 @@ impl ToolResultSummary {
         }
     }
 
-    /// Render the agent-visible envelope text. Owns kind-aware
-    /// rendering — `invocation_id_str` is the formatted UUID so
-    /// this crate stays free of `tool-cache` types.
     pub fn render_envelope_text(&self, invocation_id_str: &str, raw_size_bytes: u64) -> String {
         match self {
             Self::Passthrough { value } => match value {
@@ -157,8 +138,6 @@ impl ToolResultSummary {
     }
 }
 
-/// One branch of `StructuredElision::kept` that the walker replaced
-/// with a sentinel. Path is JSON-pointer-ish: `$.steps[12].log`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElidedPath {
     pub path: String,
@@ -206,8 +185,6 @@ pub trait ResultClassifier: Send + Sync + 'static {
     fn classify(&self, ctx: &ClassifierContext<'_>) -> Result<Classification, ClassifierError>;
 }
 
-/// First-match dispatch. `GenericFallback` is registered last so it
-/// always catches anything earlier classifiers declined.
 pub struct ClassifierRegistry {
     classifiers: Vec<Box<dyn ResultClassifier>>,
 }
@@ -266,10 +243,6 @@ impl Default for ClassifierRegistry {
     }
 }
 
-/// Last-resort classifier — runs the JSON walker over a `Value`
-/// reconstructed from the call result. Plain-text tools wrap as
-/// `Value::String`; structured tools carry `structured_content`
-/// directly. The chain runs at every string leaf.
 pub struct GenericFallback {
     pub threshold_bytes: usize,
     pub summarizer_chain: Option<std::sync::Arc<StringSummarizerChain>>,
@@ -291,8 +264,6 @@ impl GenericFallback {
     }
 }
 
-/// Default chain: structured passes first, [`BulkElide`] last as
-/// the dumb tail-keep fallback.
 pub fn default_summarizer_chain() -> StringSummarizerChain {
     StringSummarizerChain::new()
         .register(nix::NixDrvList)
@@ -341,9 +312,6 @@ impl ResultClassifier for GenericFallback {
     }
 }
 
-/// Canonical text representation of a value: plain strings dump
-/// verbatim; single-string-field objects (`{logs: "…"}`) extract
-/// the inner string; anything else pretty-prints.
 pub fn canonical_text_for(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(s) => s.clone(),

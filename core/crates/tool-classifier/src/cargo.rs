@@ -1,10 +1,4 @@
-//! Cargo-shaped string summarizer passes. Markers:
-//!   - `<cargo-downloads>`  — `(Downloading|Downloaded) <crate> v<X>` runs
-//!   - `<cargo-compiling>`  — `   Compiling <crate> v<X>` runs
-//!   - `<cargo-checking>`   — `    Checking <crate> v<X>` runs
-//!
-//! Diagnostic blocks (`warning:`, `error[Eddd]:`, `error: ...`) are
-//! deliberately NOT collapsed — agents need them verbatim.
+//! Cargo log summarizers. Diagnostic blocks (`warning:`, `error:`) are kept verbatim.
 
 use std::ops::Range;
 

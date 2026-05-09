@@ -139,15 +139,13 @@ fn normalize_for_strict_in_place(value: &mut serde_json::Value) {
     obj.insert("additionalProperties".to_string(), serde_json::json!(false));
 }
 
+const PERSIST_MIN_SAVINGS_BYTES: u64 = 100;
+
 pub struct ToolSets {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
     top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
     /// `None` only in tests without a DB pool.
     audit: Option<Arc<Audit>>,
-    /// Universal-pipeline persistence — when `Some`, classifier output that
-    /// isn't `Passthrough` is persisted and surfaced via an `invocation_id`
-    /// envelope. `None` in tests / pre-PG bootstrap paths short-circuits to
-    /// raw passthrough regardless of classifier shape.
     tool_invocations: Option<Arc<ToolInvocations>>,
     classifiers: Arc<ClassifierRegistry>,
     init_errors: Vec<(String, String)>,
@@ -489,12 +487,6 @@ impl ToolSets {
     }
 
     /// Records an audit entry when an [`Audit`] has been wired via [`set_audit`].
-    ///
-    /// The universal-pipeline scope key is derived from `subject` via
-    /// [`ToolInvocationOwner::from_subject`] — agent-rooted subjects key
-    /// off `agent_id`, user-rooted subjects (mcp-gateway external
-    /// callers, exported agents) key off `user_id`. Only `Anonymous`
-    /// short-circuits to raw passthrough.
     pub async fn call_top_level_tool(
         &self,
         subject: &AuthSubject,
@@ -564,7 +556,9 @@ impl ToolSets {
                     let raw_bytes = classification.canonical_text.len() as u64;
                     let classifier_kind = classification.summary.kind().to_string();
                     let kept_bytes = classification.summary.kept_bytes(raw_bytes);
-                    let summary_is_passthrough = classification.summary.is_passthrough();
+                    let saved_bytes = raw_bytes.saturating_sub(kept_bytes);
+                    let summary_is_passthrough = classification.summary.is_passthrough()
+                        || saved_bytes < PERSIST_MIN_SAVINGS_BYTES;
 
                     let owner = invocation_owner(subject);
                     let (wrapped, persisted) =
@@ -633,8 +627,6 @@ pub fn estimate_tokens(result: &CallToolResult) -> u64 {
     (total_chars / 4).max(1) as u64
 }
 
-/// Joined byte count of every text content block — used by the bypass
-/// branch where no canonical_text is computed.
 pub(crate) fn estimate_text_bytes(result: &CallToolResult) -> u64 {
     result
         .content

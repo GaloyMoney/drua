@@ -1,6 +1,4 @@
-//! `compose_types` — return TypeScript declarations for specific tools, for
-//! use with `compose`. A batched, code-focused alternative to `describe_tool`
-//! that gives agents typed function signatures before writing compose scripts.
+//! TypeScript declarations for tools, for use with `compose`.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock, RwLock};
@@ -16,15 +14,10 @@ use super::{parse_params, schema_for};
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct ComposeTypesParams {
-    /// Prefixed tool names. Each entry may be an exact name (`concourse_get_build_logs`)
-    /// or a single-trailing-`*` prefix glob (`concourse_*`, `concourse_get_*`).
-    /// Use `"*"` as the only element for every visible tool.
+    /// Prefixed tool names. Use `"*"` as a single element for all visible tools.
     tool_names: Vec<String>,
 }
 
-/// `"concourse_*"` → matches any name starting with `"concourse_"`.
-/// `"concourse_get_logs"` → exact match.
-/// Bare `"*"` is handled separately as the "all visible tools" sentinel.
 fn matches_pattern(name: &str, pattern: &str) -> bool {
     if let Some(prefix) = pattern.strip_suffix('*') {
         name.starts_with(prefix)
@@ -159,7 +152,6 @@ impl TopLevelTool for ComposeTypes {
             }
         }
 
-        // A glob pattern is "found" if it matched at least one tool.
         let not_found: Vec<String> = if want_all {
             Vec::new()
         } else {

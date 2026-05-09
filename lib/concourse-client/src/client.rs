@@ -129,10 +129,7 @@ impl ConcourseClient {
         self.get(&format!("/teams/{team}/pipelines")).await
     }
 
-    /// Errors with `ConcourseError::PipelineNotFound` when the pipeline isn't
-    /// visible — a previous silent fallback to the configured default team
-    /// produced opaque downstream 404s with no signal that the pipeline name
-    /// itself was wrong.
+    /// Errors with `PipelineNotFound` rather than silently falling back to the configured default team.
     #[tracing::instrument(name = "concourse_client.resolve_pipeline_team", skip_all)]
     pub async fn resolve_pipeline_team(&self, pipeline: &str) -> Result<String, ConcourseError> {
         let pipelines = self.list_all_pipelines().await?;
@@ -283,11 +280,8 @@ impl ConcourseClient {
     }
 }
 
-/// Concourse returns an empty 404 body for `/builds/{N}/events` and
-/// `/teams/.../pipelines/.../jobs/.../builds/{name}/...` lookups, so a
-/// bare `HTTP 404` gives the agent no signal. When we recognise a
-/// build-scoped path, attach a hint pointing at the global-id-vs-name
-/// confusion that's the usual cause.
+// Concourse returns empty 404 bodies for build-scoped lookups; attach a hint
+// about the global-id-vs-name confusion that's the usual cause.
 fn build_id_hint_for(status: u16, path: &str, body: &str) -> String {
     if status == 404 && path.starts_with("/builds/") {
         let extra = "build_id is the global Concourse build id (numeric), \

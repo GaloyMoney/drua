@@ -1,7 +1,4 @@
-//! Bash classifier — identity-matched on `tool_name == "bash"`.
-//! Reads the upstream tool's structured `{stdout, stderr, exit_code,
-//! duration_ms}` body, runs the chain over each stream
-//! independently, emits `Typed { typed_kind: "bash", body: {...} }`.
+//! Bash result classifier; emits `Typed { typed_kind: "bash" }`.
 
 use std::sync::Arc;
 

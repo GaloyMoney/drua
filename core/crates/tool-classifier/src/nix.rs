@@ -1,9 +1,4 @@
-//! Nix-shaped [`StringSummarizer`] passes. Markers emitted:
-//!   - `<nix-copy>`       — `copying path '/nix/store/...' from ...` runs
-//!   - `<nix-drv-list>`   — `these N derivations will be built:` + paths
-//!   - `<nix-fetch-list>` — `these N paths will be fetched (...):` + paths
-//!   - `<nix-building>`   — `building '/nix/store/...drv'...` runs
-//!   - `<nix-cache>`      — any contiguous run of `nix-cache: ...` lines
+//! Nix log summarizer passes.
 
 use std::ops::Range;
 
