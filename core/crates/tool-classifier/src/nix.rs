@@ -193,24 +193,30 @@ fn apply_runs<F: Fn(u32, u64) -> String>(
     if runs.is_empty() {
         return false;
     }
-    // Translate runs (current coords) to original coords BEFORE we
-    // start splicing — replace_with_summary mutates segment ranges,
-    // so consecutive lookups would race ahead of themselves. Pair
-    // with byte counts here too so all metadata is gathered up front.
+    let run_count = runs.len();
     let metas: Vec<(Range<u32>, Range<u32>, u64)> = runs
-        .iter()
+        .into_iter()
         .map(|r| {
-            let orig = ctx.current_to_original_range(r);
+            let orig = ctx.current_to_original_range(&r);
             let bytes = ctx.byte_len_of_lines(r.clone());
-            (r.clone(), orig, bytes)
+            (r, orig, bytes)
         })
         .collect();
+    let total_lines: u32 = metas.iter().map(|(r, _, _)| r.end - r.start).sum();
+    let total_bytes: u64 = metas.iter().map(|(_, _, b)| *b).sum();
     for (run, original_range, original_bytes) in metas.into_iter().rev() {
         let count = run.end - run.start;
         let body = body_for(count, original_bytes);
         let marker = build_marker(tag, original_range, original_bytes, &body, &[]);
         ctx.replace_with_summary(run, &marker, tag);
     }
+    tracing::debug!(
+        pass = tag,
+        run_count,
+        lines_collapsed = total_lines,
+        bytes_collapsed = total_bytes,
+        "drua_tool_classifier.string_summarizer.fired",
+    );
     true
 }
 

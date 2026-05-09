@@ -611,11 +611,28 @@ impl StringSummarizer for BulkElide {
     fn apply(&self, ctx: &mut SegmentedText) -> bool {
         let total = ctx.current_lines();
         if total <= self.head_lines + self.tail_lines {
-            // Already shorter than head+tail combined — nothing
-            // useful to elide.
             return false;
         }
-        ctx.elide_middle_keep_head_and_tail(self.head_lines, self.tail_lines)
+        let pre_bytes = ctx.log().len();
+        let did_elide =
+            ctx.elide_middle_keep_head_and_tail(self.head_lines, self.tail_lines);
+        if did_elide {
+            // Warn-level: BulkElide is the dumb fallback — when it
+            // fires, the structured passes weren't specific enough
+            // for this content. Surface the trigger so an operator
+            // can audit the log shape and decide if a new
+            // `StringSummarizer` for this pattern is worth adding.
+            tracing::warn!(
+                pass = "bulk-elide",
+                pre_bytes,
+                post_bytes = ctx.log().len(),
+                head_lines = self.head_lines,
+                tail_lines = self.tail_lines,
+                max_total_bytes = self.max_total_bytes,
+                "drua_tool_classifier.bulk_elide.fallback_fired",
+            );
+        }
+        did_elide
     }
 }
 
