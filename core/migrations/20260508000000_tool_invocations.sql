@@ -9,10 +9,10 @@
 -- (also flat sqlx in drua).
 --
 -- Scope key is polymorphic — either a user (mcp-gateway external callers,
--- exported agents) OR an agent (in-session agents). Mirrors the
--- `McpCredsOwner` shape. Exactly one of `agent_id` / `user_id` must be
--- set per row; both FKs cascade so a deleted user or agent prunes their
--- invocations.
+-- exported agents), an agent (in-session agents), or BOTH for
+-- AgentOnBehalfOfUser (so the same user can fetch later via an
+-- ExportedAgent token). At least one must be set; both FKs cascade so
+-- a deleted user or agent prunes their invocations. Cursor #3212819564.
 
 CREATE TABLE public.tool_invocations (
     id              uuid                     NOT NULL,
@@ -41,8 +41,8 @@ CREATE TABLE public.tool_invocations (
 
     PRIMARY KEY (id),
 
-    CONSTRAINT tool_invocations_owner_exactly_one
-        CHECK ((agent_id IS NOT NULL)::int + (user_id IS NOT NULL)::int = 1)
+    CONSTRAINT tool_invocations_owner_at_least_one
+        CHECK (agent_id IS NOT NULL OR user_id IS NOT NULL)
 );
 
 -- Listing within a scope, ordered by recency. Two partial indexes rather
