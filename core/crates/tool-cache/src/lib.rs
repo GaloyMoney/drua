@@ -332,11 +332,7 @@ pub struct PersistedClassification {
     pub raw_size_bytes: u64,
 }
 
-fn envelope_text(
-    summary: &ToolResultSummary,
-    id: ToolInvocationId,
-    raw_size_bytes: u64,
-) -> String {
+fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId, raw_size_bytes: u64) -> String {
     match summary {
         ToolResultSummary::Passthrough { value } => match value {
             // Plain-text tools land here as Value::String — emit the
