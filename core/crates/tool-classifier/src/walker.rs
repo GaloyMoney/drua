@@ -544,7 +544,13 @@ mod tests {
     #[test]
     fn floating_sentinel_budget_keeps_more_items_when_threshold_allows() {
         let items: Vec<Value> = (0..30)
-            .map(|i| serde_json::json!({"id": i, "name": format!("entry-{i:02}")}))
+            .map(|i| {
+                serde_json::json!({
+                    "id": i,
+                    "name": format!("entry-{i:02}"),
+                    "blob": "z".repeat(800),
+                })
+            })
             .collect();
         let v = serde_json::json!({"hits": items});
         let small_budget = classify_value(&v, 4096, None);
