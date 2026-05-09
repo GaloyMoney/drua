@@ -284,9 +284,8 @@ async fn editor_view(
             .await
             .map_err(|e| format!("Error: {e}"))?;
         let lines: Vec<&str> = content.lines().collect();
-
         let (start, end) = if let Some([s, e]) = view_range {
-            let s = s.max(1) as usize;
+            let s = (s.max(1) as usize).min(lines.len().max(1));
             let end = if e == -1 {
                 lines.len()
             } else {
@@ -296,14 +295,10 @@ async fn editor_view(
         } else {
             (1, lines.len())
         };
-
-        let numbered: Vec<String> = lines[start.saturating_sub(1)..end]
-            .iter()
-            .enumerate()
-            .map(|(i, line)| format!("{}: {line}", start + i))
-            .collect();
-
-        Ok(numbered.join("\n"))
+        // Return raw clipped text — line numbering is the Read
+        // tool's responsibility (`sandbox::number_lines`), so the
+        // sandbox protocol stays format-agnostic.
+        Ok(lines[start.saturating_sub(1)..end].join("\n"))
     }
 }
 
@@ -1290,9 +1285,7 @@ mod tests {
         let result = execute_text_editor(&test_session(), view_input)
             .await
             .unwrap();
-        assert!(result.contains("1: line one"));
-        assert!(result.contains("2: line two"));
-        assert!(result.contains("3: line three"));
+        assert_eq!(result, "line one\nline two\nline three");
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
@@ -1321,7 +1314,7 @@ mod tests {
         let result = execute_text_editor(&test_session(), view_input)
             .await
             .unwrap();
-        assert!(result.contains("2: b"));
+        assert_eq!(result, "b\nc");
         assert!(result.contains("3: c"));
         assert!(result.contains("4: d"));
         assert!(!result.contains("1: a"));

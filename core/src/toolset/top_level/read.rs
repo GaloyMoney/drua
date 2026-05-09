@@ -88,7 +88,14 @@ impl TopLevelTool for Read {
 
         if let Some(view) = space_view {
             let content = match view {
-                FileView::File(text) => text,
+                FileView::File(text) => {
+                    let range = view_range.map(|(s, e)| {
+                        let start = s.max(1) as usize;
+                        let end = if e == -1 { usize::MAX } else { e as usize };
+                        (start, end)
+                    });
+                    sandbox::number_lines(&text, range)
+                }
                 FileView::Dir(entries) => entries.join("\n"),
             };
             let out = ContentOutput {
@@ -124,13 +131,26 @@ impl TopLevelTool for Read {
 
         match client.execute(&req).await {
             Ok(resp) => {
+                // Sandbox returns raw clipped text — Read owns the
+                // line-number formatting so space-fs and sandbox
+                // branches produce identical agent-visible bytes.
+                let content = if resp.is_error {
+                    resp.output
+                } else {
+                    let range = view_range.map(|(s, e)| {
+                        let start = s.max(1) as usize;
+                        let end = if e == -1 { usize::MAX } else { e as usize };
+                        (start, end)
+                    });
+                    sandbox::number_lines(&resp.output, range)
+                };
                 let out = ContentOutput {
-                    content: resp.output.clone(),
+                    content: content.clone(),
                 };
                 Ok(if resp.is_error {
-                    READ_OUTPUT.error(resp.output, &out)
+                    READ_OUTPUT.error(content, &out)
                 } else {
-                    READ_OUTPUT.success(resp.output, &out)
+                    READ_OUTPUT.success(content, &out)
                 })
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(

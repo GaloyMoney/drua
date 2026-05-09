@@ -5,12 +5,14 @@
 pub mod admin_client;
 pub mod error;
 pub mod instance_client;
+pub mod line_numbering;
 pub mod tool_protocol;
 mod types;
 
 pub use admin_client::AdminClient;
 pub use error::{AdminError, InstanceError};
 pub use instance_client::InstanceClient;
+pub use line_numbering::number_lines;
 pub use tool_protocol::{
     BashCommandInput, BashCommandOutput, BashInputError, DeleteInput, GlobInput, GrepInput,
     GrepOutputMode, MoveInput, TextEditorAction, TextEditorCommand, TextEditorInput,
