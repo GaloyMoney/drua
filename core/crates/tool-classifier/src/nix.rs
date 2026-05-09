@@ -3,7 +3,8 @@
 use std::ops::Range;
 
 use crate::string_summarizer::{
-    apply_runs, build_marker, collect_runs, SegmentedText, StringSummarizer, VerbatimRegion,
+    apply_runs, build_marker, collect_runs, escape_attr, SegmentedText, StringSummarizer,
+    VerbatimRegion,
 };
 
 pub struct NixCopyRun;
@@ -149,6 +150,92 @@ where
     runs
 }
 
+pub struct NixDerivationPreprocessor;
+
+fn derivation_prefix(line: &str) -> Option<&str> {
+    let body = line.strip_suffix('\n').unwrap_or(line);
+    let idx = body.find("> ")?;
+    let prefix = &body[..idx];
+    if prefix.is_empty() {
+        return None;
+    }
+    if !prefix
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
+        return None;
+    }
+    Some(prefix)
+}
+
+fn strip_derivation_prefix<'a>(line: &'a str, prefix: &str) -> &'a str {
+    let head = line
+        .strip_prefix(prefix)
+        .and_then(|r| r.strip_prefix("> "))
+        .unwrap_or(line);
+    head
+}
+
+impl StringSummarizer for NixDerivationPreprocessor {
+    fn name(&self) -> &'static str {
+        "nix-derivation"
+    }
+
+    fn can_summarize(&self, ctx: &SegmentedText) -> bool {
+        ctx.verbatim_regions().any(|r| {
+            r.text
+                .lines()
+                .any(|l| derivation_prefix(l).is_some())
+        })
+    }
+
+    fn apply(&self, ctx: &mut SegmentedText) -> bool {
+        let mut runs: Vec<(Range<u32>, String)> = Vec::new();
+        for region in ctx.verbatim_regions() {
+            let lines: Vec<&str> = region.text.lines().collect();
+            let mut i = 0usize;
+            while i < lines.len() {
+                let prefix = match derivation_prefix(lines[i]) {
+                    Some(p) => p.to_string(),
+                    None => {
+                        i += 1;
+                        continue;
+                    }
+                };
+                let mut j = i + 1;
+                while j < lines.len() {
+                    match derivation_prefix(lines[j]) {
+                        Some(p) if p == prefix => j += 1,
+                        _ => break,
+                    }
+                }
+                let start_abs = region.current.start + i as u32;
+                let end_abs = region.current.start + j as u32;
+                runs.push((start_abs..end_abs, prefix));
+                i = j;
+            }
+        }
+        if runs.is_empty() {
+            return false;
+        }
+        let count = runs.len();
+        for (range, prefix) in runs.into_iter().rev() {
+            let before = format!("<nix-derivation name=\"{}\">\n", escape_attr(&prefix));
+            let after = String::from("</nix-derivation>\n");
+            let prefix_clone = prefix.clone();
+            ctx.wrap_verbatim_lines(range, &before, &after, move |line| {
+                strip_derivation_prefix(line, &prefix_clone).to_string()
+            });
+        }
+        tracing::debug!(
+            pass = "nix-derivation",
+            wrapped = count,
+            "drua_tool_classifier.string_summarizer.fired",
+        );
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,6 +251,39 @@ mod tests {
             .register(NixCacheActivity);
         chain.run(&mut ctx);
         ctx
+    }
+
+    #[test]
+    fn derivation_prefix_recognises_typical_names() {
+        assert_eq!(derivation_prefix("drua> X\n"), Some("drua"));
+        assert_eq!(derivation_prefix("drua-conf.json> X\n"), Some("drua-conf.json"));
+        assert_eq!(derivation_prefix("drua.tar.gz> X"), Some("drua.tar.gz"));
+        assert_eq!(derivation_prefix("plain line\n"), None);
+        assert_eq!(derivation_prefix(">> not a prefix\n"), None);
+        assert_eq!(derivation_prefix("> empty prefix\n"), None);
+    }
+
+    #[test]
+    fn nix_derivation_preprocessor_wraps_prefix_runs() {
+        let raw = "these 1 derivations will be built:\n\
+                   building '/nix/store/aaa-drua.drv'...\n\
+                   drua> Running phase: buildPhase\n\
+                   drua>    Compiling foo v0.1.0\n\
+                   drua>    Compiling bar v0.1.0\n\
+                   drua>    Finished `release` in 2m 09s\n";
+        let mut ctx = SegmentedText::from_initial(raw);
+        let chain = StringSummarizerChain::new()
+            .register(NixDerivationPreprocessor)
+            .register(crate::cargo::CargoCompileRun);
+        chain.run(&mut ctx);
+        let log = ctx.log();
+        assert!(log.contains("<nix-derivation name=\"drua\">"));
+        assert!(log.contains("</nix-derivation>"));
+        assert!(log.contains("Running phase: buildPhase"));
+        assert!(log.contains("Finished `release` in 2m 09s"));
+        assert!(log.contains("<cargo-compiling"));
+        assert!(log.contains("2 crates compiled"));
+        assert!(!log.contains("drua> "));
     }
 
     #[test]

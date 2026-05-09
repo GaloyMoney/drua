@@ -17,6 +17,10 @@ pub(crate) enum SegmentKind {
         kept_bytes: u32,
         original_bytes: u64,
     },
+    /// Lines injected by a preprocessor (e.g. wrapper tags). Render in
+    /// the output, are skipped by `verbatim_regions()`, contribute zero
+    /// original lines.
+    Synthetic,
 }
 
 #[derive(Debug, Clone)]
@@ -104,7 +108,7 @@ impl SegmentedText {
                     SegmentKind::Verbatim => {
                         seg.original.start + (current_line - seg.current.start)
                     }
-                    SegmentKind::Summary { .. } => seg.original.start,
+                    SegmentKind::Summary { .. } | SegmentKind::Synthetic => seg.original.start,
                 };
             }
         }
@@ -263,9 +267,128 @@ impl SegmentedText {
         self.normalise_segments_after_splice();
     }
 
+    /// Wrap a contiguous range of `Verbatim` lines with `Synthetic` open
+    /// and close tag lines, applying `line_transform` to each line in the
+    /// range. The wrapped run stays walkable (`Verbatim`) so subsequent
+    /// chain passes can still match its content; the synthetic tags
+    /// render in the output but are skipped by `verbatim_regions()` and
+    /// don't shift original line numbering.
+    ///
+    /// `before` and `after` must each end with `\n` and contribute one
+    /// synthetic line each. `line_transform` must preserve line count
+    /// (one input line → one output line, optionally with different
+    /// content). Range must lie within a single `Verbatim` segment.
+    pub fn wrap_verbatim_lines<F>(
+        &mut self,
+        current_lines: Range<u32>,
+        before: &str,
+        after: &str,
+        line_transform: F,
+    ) where
+        F: Fn(&str) -> String,
+    {
+        assert!(
+            current_lines.start < current_lines.end,
+            "wrap_verbatim_lines: empty range",
+        );
+        assert!(
+            before.ends_with('\n'),
+            "wrap_verbatim_lines: `before` must end with '\\n'",
+        );
+        assert!(
+            after.ends_with('\n'),
+            "wrap_verbatim_lines: `after` must end with '\\n'",
+        );
+
+        let seg_idx = self
+            .find_verbatim_covering(&current_lines)
+            .expect("wrap_verbatim_lines: range must lie within one Verbatim segment");
+        let seg = self.segments[seg_idx].clone();
+
+        let byte_start = self.line_offsets[current_lines.start as usize];
+        let byte_end = self.line_offsets[current_lines.end as usize];
+
+        let inner_text = &self.log[byte_start..byte_end];
+        let mut transformed = String::with_capacity(inner_text.len());
+        let mut transformed_lines: u32 = 0;
+        for raw_line in split_keep_newlines(inner_text) {
+            let (body, newline) = match raw_line.strip_suffix('\n') {
+                Some(b) => (b, "\n"),
+                None => (raw_line, ""),
+            };
+            transformed.push_str(&line_transform(body));
+            transformed.push_str(newline);
+            transformed_lines += 1;
+        }
+        assert_eq!(
+            transformed_lines,
+            current_lines.end - current_lines.start,
+            "wrap_verbatim_lines: line_transform must preserve line count",
+        );
+
+        let mut replacement_text = String::with_capacity(before.len() + transformed.len() + after.len());
+        replacement_text.push_str(before);
+        replacement_text.push_str(&transformed);
+        replacement_text.push_str(after);
+
+        self.log.replace_range(byte_start..byte_end, &replacement_text);
+
+        let synthetic_before_lines = count_lines(before);
+        let synthetic_after_lines = count_lines(after);
+        let inner_lines = transformed_lines;
+
+        let inner_original_start = seg.original.start + (current_lines.start - seg.current.start);
+        let inner_original_end = seg.original.start + (current_lines.end - seg.current.start);
+
+        let head_current = seg.current.start..current_lines.start;
+        let synthetic_before_start = current_lines.start;
+        let synthetic_before_end = synthetic_before_start + synthetic_before_lines;
+        let inner_start = synthetic_before_end;
+        let inner_end = inner_start + inner_lines;
+        let synthetic_after_start = inner_end;
+        let synthetic_after_end = synthetic_after_start + synthetic_after_lines;
+        let tail_current_start = synthetic_after_end;
+        let tail_current_end = tail_current_start + (seg.current.end - current_lines.end);
+
+        let mut replacement = Vec::with_capacity(5);
+        if head_current.start < head_current.end {
+            replacement.push(Segment {
+                current: head_current,
+                original: seg.original.start..inner_original_start,
+                kind: SegmentKind::Verbatim,
+            });
+        }
+        replacement.push(Segment {
+            current: synthetic_before_start..synthetic_before_end,
+            original: inner_original_start..inner_original_start,
+            kind: SegmentKind::Synthetic,
+        });
+        replacement.push(Segment {
+            current: inner_start..inner_end,
+            original: inner_original_start..inner_original_end,
+            kind: SegmentKind::Verbatim,
+        });
+        replacement.push(Segment {
+            current: synthetic_after_start..synthetic_after_end,
+            original: inner_original_end..inner_original_end,
+            kind: SegmentKind::Synthetic,
+        });
+        if tail_current_start < tail_current_end {
+            replacement.push(Segment {
+                current: tail_current_start..tail_current_end,
+                original: inner_original_end..seg.original.end,
+                kind: SegmentKind::Verbatim,
+            });
+        }
+
+        self.segments.splice(seg_idx..=seg_idx, replacement);
+        self.recompute_line_offsets();
+        self.normalise_segments_after_splice();
+    }
+
     fn snap_after_summary(&self, line: u32) -> u32 {
         for seg in &self.segments {
-            if matches!(seg.kind, SegmentKind::Summary { .. })
+            if !matches!(seg.kind, SegmentKind::Verbatim)
                 && line > seg.current.start
                 && line < seg.current.end
             {
@@ -277,7 +400,7 @@ impl SegmentedText {
 
     fn snap_before_summary(&self, line: u32) -> u32 {
         for seg in &self.segments {
-            if matches!(seg.kind, SegmentKind::Summary { .. })
+            if !matches!(seg.kind, SegmentKind::Verbatim)
                 && line > seg.current.start
                 && line < seg.current.end
             {
@@ -344,6 +467,24 @@ fn count_lines(s: &str) -> u32 {
     (s.matches('\n').count() + trailing) as u32
 }
 
+fn split_keep_newlines(s: &str) -> impl Iterator<Item = &str> {
+    let mut start = 0usize;
+    let bytes = s.as_bytes();
+    std::iter::from_fn(move || {
+        if start >= bytes.len() {
+            return None;
+        }
+        let mut i = start;
+        while i < bytes.len() && bytes[i] != b'\n' {
+            i += 1;
+        }
+        let end = if i < bytes.len() { i + 1 } else { i };
+        let slice = &s[start..end];
+        start = end;
+        Some(slice)
+    })
+}
+
 pub fn open_tag(
     name: &'static str,
     original_lines: Range<u32>,
@@ -380,7 +521,7 @@ pub fn build_marker(
     format!("{open}{body}{close}")
 }
 
-fn escape_attr(v: &str) -> String {
+pub fn escape_attr(v: &str) -> String {
     v.replace('&', "&amp;")
         .replace('"', "&quot;")
         .replace('<', "&lt;")

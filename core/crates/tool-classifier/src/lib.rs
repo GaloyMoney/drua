@@ -15,7 +15,10 @@ pub use bash::BashClassifier;
 pub use cargo::{CargoCheckRun, CargoCompileRun, CargoDownloadRun};
 pub use concourse::{ConcourseBuildLogClassifier, ConcourseBuildLogPreprocessor};
 pub use git::GitCloneProgress;
-pub use nix::{NixBuildingRun, NixCacheActivity, NixCopyRun, NixDrvList, NixFetchList};
+pub use nix::{
+    NixBuildingRun, NixCacheActivity, NixCopyRun, NixDerivationPreprocessor, NixDrvList,
+    NixFetchList,
+};
 pub use string_summarizer::{
     build_marker, close_tag, open_tag, BulkElide, SegmentedText, StringSummarizer,
     StringSummarizerChain, VerbatimRegion,
@@ -266,6 +269,7 @@ impl GenericFallback {
 
 pub fn default_summarizer_chain() -> StringSummarizerChain {
     StringSummarizerChain::new()
+        .register(nix::NixDerivationPreprocessor)
         .register(nix::NixDrvList)
         .register(nix::NixFetchList)
         .register(nix::NixCopyRun)
