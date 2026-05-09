@@ -406,7 +406,7 @@ mod tests {
                 assert!((kept_bytes as u64) < total_bytes);
                 let kept_str = kept.as_str().expect("string-typed kept");
                 assert!(kept_str.starts_with("line-0000"));
-                assert!(kept_str.ends_with("line-0499"));
+                assert!(kept_str.ends_with("line-0999"));
                 assert_eq!(elided_paths.len(), 1);
                 assert_eq!(elided_paths[0].path, "$");
                 assert!(matches!(elided_paths[0].kind, ElisionKind::String));
