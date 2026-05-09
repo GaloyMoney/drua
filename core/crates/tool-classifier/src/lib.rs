@@ -17,7 +17,7 @@ pub use concourse::{ConcourseBuildLogClassifier, ConcourseBuildLogPreprocessor};
 pub use git::GitCloneProgress;
 pub use nix::{
     NixBuildingRun, NixCacheActivity, NixCopyRun, NixDerivationPreprocessor, NixDrvList,
-    NixFetchList,
+    NixFetchList, NixImageLayerRun,
 };
 pub use string_summarizer::{
     build_marker, close_tag, open_tag, BulkElide, SegmentedText, StringSummarizer,
@@ -275,6 +275,7 @@ pub fn default_summarizer_chain() -> StringSummarizerChain {
         .register(nix::NixCopyRun)
         .register(nix::NixBuildingRun)
         .register(nix::NixCacheActivity)
+        .register(nix::NixImageLayerRun)
         .register(cargo::CargoDownloadRun)
         .register(cargo::CargoCompileRun)
         .register(cargo::CargoCheckRun)
