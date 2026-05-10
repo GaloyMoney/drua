@@ -177,11 +177,6 @@ galoyAgents:
     #     - actions_list
     #     - actions_get
     #     - get_job_logs
-    # - name: lingo
-    #   url: https://mcp.lingo.dev/account
-    #   authHeaderName: x-api-key
-    #   category: localization
-    #   categoryDescription: "AI-powered localization engine management and translation"
     ## GitHub App configuration for token auto-provisioning.
     ## When enabled, sandbox agents receive a `github-token` file secret.
     ## The PEM private key is read from the main drua secret (key: github-app-private-key).
