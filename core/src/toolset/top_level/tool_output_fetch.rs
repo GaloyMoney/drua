@@ -56,12 +56,16 @@ const DESCRIPTION: &str = "Fetch a previously-persisted tool result. Same respon
      structured_content; `view: 'summary'` returns the typed \
      classifier summary instead. \
      `query` is optional — when present, content[].text carries a \
-     slice (`tail`/`head`/`range`/`grep`); when absent, no slicing. \
-     Per-mode args: `tail`/`head` take `lines`; `range` takes \
-     `offset` + `len`; `grep` takes `pattern` plus rg-style flags — \
-     `-i` (case_insensitive), `-A`/`-B`/`-C` (context, asymmetric or \
-     symmetric), `-n` (line numbers, default true), `invert_match` \
-     (`-v`), and `head_limit` (cap kept lines).";
+     slice. Modes: `tail`/`head` (lines), `range` (offset+len bytes), \
+     `grep` (pattern + rg-style flags), `json_path` (resolve a path \
+     in structured_content), `json_array_slice` (resolve a path to \
+     an array, return [offset..offset+len]). Per-mode args: \
+     `tail`/`head` take `lines`; `range` takes `offset` + `len`; \
+     `grep` takes `pattern` plus `-i`/`-A`/`-B`/`-C`/`-n`/`invert_match`/`head_limit`; \
+     `json_path` takes `path` (e.g. `$.data.rows`); `json_array_slice` \
+     takes `path` + `offset` + `len`. The `_recover` template inside \
+     elided array sentinels gives you ready-made `json_array_slice` \
+     args.";
 
 #[async_trait::async_trait]
 impl TopLevelTool for ToolOutputFetch {
@@ -121,15 +125,26 @@ impl TopLevelTool for ToolOutputFetch {
             )]));
         }
 
+        let invocation_id_str = uuid::Uuid::from(invocation.id).to_string();
         let structured = match input.view {
             FetchView::Original => invocation.original_structured.clone(),
-            FetchView::Summary => Some(invocation.summary.clone()),
+            FetchView::Summary => {
+                let mut s = invocation.summary.clone();
+                crate::toolset::tool_invocations::substitute_recovery_placeholder(
+                    &mut s,
+                    &invocation_id_str,
+                );
+                Some(s)
+            }
         };
 
         let content_text = match input.query {
             Some(q) => {
-                match crate::toolset::tool_invocations::apply_fetch_query(&invocation.raw_text, &q)
-                {
+                match crate::toolset::tool_invocations::apply_fetch_query(
+                    &invocation.raw_text,
+                    invocation.original_structured.as_ref(),
+                    &q,
+                ) {
                     Ok(r) => r.content,
                     Err(e) => {
                         return Ok(CallToolResult::error(vec![Content::text(format!(
@@ -221,6 +236,19 @@ mod tests {
             (
                 "grep",
                 serde_json::json!({"mode": "grep", "pattern": "error"}),
+            ),
+            (
+                "json_path",
+                serde_json::json!({"mode": "json_path", "path": "$.foo"}),
+            ),
+            (
+                "json_array_slice",
+                serde_json::json!({
+                    "mode": "json_array_slice",
+                    "path": "$.hits",
+                    "offset": 3,
+                    "len": 50,
+                }),
             ),
         ] {
             assert!(DESCRIPTION.contains(&format!("`{mode}`")));

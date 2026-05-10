@@ -8,7 +8,10 @@ mod cargo;
 mod concourse;
 mod git;
 mod nix;
+mod rsync;
 mod string_summarizer;
+mod terraform_install;
+mod terraform_state;
 mod walker;
 
 pub use bash::BashClassifier;
@@ -17,14 +20,18 @@ pub use concourse::{ConcourseBuildLogClassifier, ConcourseBuildLogPreprocessor};
 pub use git::GitCloneProgress;
 pub use nix::{
     NixBuildingRun, NixCacheActivity, NixCopyRun, NixDerivationPreprocessor, NixDrvList,
-    NixFetchList,
+    NixFetchList, NixImageLayerRun,
 };
+pub use rsync::RsyncFileList;
 pub use string_summarizer::{
     build_marker, close_tag, open_tag, BulkElide, SegmentedText, StringSummarizer,
     StringSummarizerChain, VerbatimRegion,
 };
+pub use terraform_install::TerraformInstallRun;
+pub use terraform_state::{TerraformDataSourceRun, TerraformRefreshRun};
+pub use walker::RECOVERY_INVOCATION_PLACEHOLDER;
 
-pub const DEFAULT_GENERIC_THRESHOLD_BYTES: usize = 4096;
+pub const DEFAULT_GENERIC_THRESHOLD_BYTES: usize = 8192;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -275,9 +282,14 @@ pub fn default_summarizer_chain() -> StringSummarizerChain {
         .register(nix::NixCopyRun)
         .register(nix::NixBuildingRun)
         .register(nix::NixCacheActivity)
+        .register(nix::NixImageLayerRun)
         .register(cargo::CargoDownloadRun)
         .register(cargo::CargoCompileRun)
         .register(cargo::CargoCheckRun)
+        .register(terraform_install::TerraformInstallRun)
+        .register(terraform_state::TerraformRefreshRun)
+        .register(terraform_state::TerraformDataSourceRun)
+        .register(rsync::RsyncFileList)
         .register(git::GitCloneProgress)
         .register(string_summarizer::BulkElide::default())
 }
@@ -377,7 +389,7 @@ mod tests {
 
     #[test]
     fn large_text_input_emits_structured_elision_with_string_kept() {
-        let lines: Vec<String> = (0..500).map(|i| format!("line-{i:04}")).collect();
+        let lines: Vec<String> = (0..1000).map(|i| format!("line-{i:04}")).collect();
         let body = lines.join("\n");
         assert!(body.len() >= DEFAULT_GENERIC_THRESHOLD_BYTES);
         let raw = result_with(&body);
@@ -394,7 +406,7 @@ mod tests {
                 assert!((kept_bytes as u64) < total_bytes);
                 let kept_str = kept.as_str().expect("string-typed kept");
                 assert!(kept_str.starts_with("line-0000"));
-                assert!(kept_str.ends_with("line-0499"));
+                assert!(kept_str.ends_with("line-0999"));
                 assert_eq!(elided_paths.len(), 1);
                 assert_eq!(elided_paths[0].path, "$");
                 assert!(matches!(elided_paths[0].kind, ElisionKind::String));

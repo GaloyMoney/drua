@@ -12,7 +12,10 @@ const STRING_ELIDE_MARKER: &str = "…";
 const ARRAY_SENTINEL_HEAD: usize = 3;
 const ARRAY_SENTINEL_TAIL: usize = 3;
 
-const SENTINEL_BYTE_BUDGET: usize = 2048;
+const SENTINEL_HARD_CAP_BYTES: usize = 16 * 1024;
+const SENTINEL_MIN_BYTES: usize = 512;
+
+pub const RECOVERY_INVOCATION_PLACEHOLDER: &str = "<this-invocation>";
 
 #[derive(Debug)]
 pub enum WalkOutcome {
@@ -177,7 +180,11 @@ fn walk_array(
         return walked_value;
     }
     paths.truncate(paths_before);
-    sentinel_array(&walked, items.len(), path, paths, original_bytes)
+    sentinel_array(&walked, items.len(), path, paths, original_bytes, threshold)
+}
+
+fn sentinel_budget(threshold: usize) -> usize {
+    threshold.clamp(SENTINEL_MIN_BYTES, SENTINEL_HARD_CAP_BYTES)
 }
 
 fn sentinel_array(
@@ -186,7 +193,9 @@ fn sentinel_array(
     path: &str,
     paths: &mut Vec<ElidedPath>,
     original_bytes: usize,
+    threshold: usize,
 ) -> Value {
+    let budget = sentinel_budget(threshold);
     let mut head_count = ARRAY_SENTINEL_HEAD.min(walked_items.len());
     let max_tail = walked_items.len().saturating_sub(head_count);
     let mut tail_count = ARRAY_SENTINEL_TAIL.min(max_tail);
@@ -196,8 +205,9 @@ fn sentinel_array(
         tail_count,
         original_length,
         original_bytes,
+        path,
     );
-    while json_size(&sentinel) > SENTINEL_BYTE_BUDGET && (head_count > 0 || tail_count > 0) {
+    while json_size(&sentinel) > budget && (head_count > 0 || tail_count > 0) {
         if tail_count > 0 {
             tail_count -= 1;
         } else {
@@ -209,6 +219,7 @@ fn sentinel_array(
             tail_count,
             original_length,
             original_bytes,
+            path,
         );
     }
     paths.push(ElidedPath {
@@ -227,6 +238,7 @@ fn make_array_sentinel(
     tail_count: usize,
     length: usize,
     bytes: usize,
+    path: &str,
 ) -> Value {
     let head: Vec<Value> = walked_items.iter().take(head_count).cloned().collect();
     let tail: Vec<Value> = walked_items
@@ -236,6 +248,21 @@ fn make_array_sentinel(
         .rev()
         .cloned()
         .collect();
+    let missing_offset = head_count;
+    let missing_len = length.saturating_sub(head_count + tail_count);
+    let recover = serde_json::json!({
+        "tool": "tool_output_fetch",
+        "args_template": {
+            "invocation_id": RECOVERY_INVOCATION_PLACEHOLDER,
+            "view": "original",
+            "query": {
+                "mode": "json_array_slice",
+                "path": path,
+                "offset": missing_offset,
+                "len": missing_len,
+            },
+        },
+    });
     serde_json::json!({
         "_elided": true,
         "kind": "array",
@@ -243,6 +270,7 @@ fn make_array_sentinel(
         "bytes": bytes,
         "head": head,
         "tail": tail,
+        "_recover": recover,
     })
 }
 
@@ -475,6 +503,87 @@ mod tests {
         assert!(elided_paths
             .iter()
             .any(|p| p.path == "$" && matches!(p.kind, ElisionKind::Array)));
+    }
+
+    #[test]
+    fn array_sentinel_carries_recover_template_with_placeholder() {
+        let items: Vec<Value> = (0..50)
+            .map(|i| serde_json::json!({"id": i, "blob": "z".repeat(200)}))
+            .collect();
+        let v = serde_json::json!({"hits": items});
+        let outcome = classify_value(&v, 4096, None);
+        let WalkOutcome::Elided { kept, .. } = outcome else {
+            panic!("expected Elided");
+        };
+        let hits = kept.get("hits").expect("hits key present");
+        assert_eq!(hits.get("_elided"), Some(&Value::Bool(true)));
+        let recover = hits.get("_recover").expect("_recover present");
+        assert_eq!(
+            recover.get("tool"),
+            Some(&Value::String("tool_output_fetch".to_string()))
+        );
+        let args = recover.get("args_template").expect("args_template");
+        assert_eq!(
+            args.get("invocation_id"),
+            Some(&Value::String(RECOVERY_INVOCATION_PLACEHOLDER.to_string()))
+        );
+        assert_eq!(
+            args.get("view"),
+            Some(&Value::String("original".to_string()))
+        );
+        let q = args.get("query").expect("query");
+        assert_eq!(
+            q.get("mode"),
+            Some(&Value::String("json_array_slice".to_string()))
+        );
+        assert_eq!(q.get("path"), Some(&Value::String("$.hits".to_string())));
+        assert!(q.get("offset").and_then(|v| v.as_u64()).is_some());
+        assert!(q.get("len").and_then(|v| v.as_u64()).is_some());
+    }
+
+    #[test]
+    fn floating_sentinel_budget_keeps_more_items_when_threshold_allows() {
+        let items: Vec<Value> = (0..30)
+            .map(|i| {
+                serde_json::json!({
+                    "id": i,
+                    "name": format!("entry-{i:02}"),
+                    "blob": "z".repeat(800),
+                })
+            })
+            .collect();
+        let v = serde_json::json!({"hits": items});
+        let small_budget = classify_value(&v, 4096, None);
+        let large_budget = classify_value(&v, 16 * 1024, None);
+        match (small_budget, large_budget) {
+            (
+                WalkOutcome::Elided {
+                    kept: small_kept, ..
+                },
+                WalkOutcome::Elided {
+                    kept: large_kept, ..
+                },
+            ) => {
+                let small_head = small_kept
+                    .get("hits")
+                    .and_then(|v| v.get("head"))
+                    .and_then(|h| h.as_array())
+                    .expect("small budget head");
+                let large_head = large_kept
+                    .get("hits")
+                    .and_then(|v| v.get("head"))
+                    .and_then(|h| h.as_array())
+                    .expect("large budget head");
+                assert!(
+                    large_head.len() >= small_head.len(),
+                    "larger threshold should keep at least as many head items \
+                     (small={} large={})",
+                    small_head.len(),
+                    large_head.len(),
+                );
+            }
+            outcomes => panic!("expected both Elided, got {outcomes:?}"),
+        }
     }
 
     /// Cursor #3212527301: byte-elide reports original pre-walk size.

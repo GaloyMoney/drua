@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::instrument;
 
-use drua_tool_classifier::{Classification, ToolResultSummary};
+use drua_tool_classifier::{Classification, ToolResultSummary, RECOVERY_INVOCATION_PLACEHOLDER};
 use repo::ToolInvocationRepo;
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
@@ -29,6 +29,18 @@ pub enum FetchQuery {
     },
     Range {
         offset: u64,
+        len: u32,
+    },
+    /// JSON-path lookup against the persisted `original_structured`.
+    /// `path` like `$.foo.bar[3]`; returns the value at that path.
+    JsonPath {
+        path: String,
+    },
+    /// JSON-path lookup that resolves to an array, then slices it.
+    /// `path` like `$.hits`; returns `array[offset..offset+len]`.
+    JsonArraySlice {
+        path: String,
+        offset: u32,
         len: u32,
     },
     /// Line-grep with rg-style flags; cross-line patterns not supported.
@@ -117,7 +129,11 @@ impl ToolInvocations {
         query: FetchQuery,
     ) -> Result<FetchResult, ToolInvocationError> {
         let invocation = self.repo.find_by_id(id).await?;
-        apply_fetch_query(&invocation.raw_text, &query)
+        apply_fetch_query(
+            &invocation.raw_text,
+            invocation.original_structured.as_ref(),
+            &query,
+        )
     }
 
     #[instrument(name = "tool_cache.find_for_diff", skip(self))]
@@ -225,9 +241,13 @@ impl ToolInvocations {
             )
             .await?;
 
+        let invocation_id_str = uuid::Uuid::from(persisted.invocation_id).to_string();
+        let mut summary_value = persisted.summary_value;
+        substitute_recovery_placeholder(&mut summary_value, &invocation_id_str);
+
         let envelope = serde_json::json!({
-            "invocation_id": uuid::Uuid::from(persisted.invocation_id).to_string(),
-            "summary": persisted.summary_value,
+            "invocation_id": invocation_id_str,
+            "summary": summary_value,
         });
 
         let mut wrapped = raw.clone();
@@ -252,13 +272,70 @@ fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId, raw_size_byt
     summary.render_envelope_text(&uuid::Uuid::from(id).to_string(), raw_size_bytes)
 }
 
+pub fn substitute_recovery_placeholder(value: &mut serde_json::Value, invocation_id: &str) {
+    match value {
+        serde_json::Value::String(s) if s == RECOVERY_INVOCATION_PLACEHOLDER => {
+            *s = invocation_id.to_string();
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                substitute_recovery_placeholder(item, invocation_id);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for v in map.values_mut() {
+                substitute_recovery_placeholder(v, invocation_id);
+            }
+        }
+        _ => {}
+    }
+}
+
 pub fn apply_fetch_query(
     raw: &str,
+    structured: Option<&serde_json::Value>,
     query: &FetchQuery,
 ) -> Result<FetchResult, ToolInvocationError> {
     let total_bytes = raw.len() as u64;
 
     let content = match query {
+        FetchQuery::JsonPath { path } => {
+            let root = structured.ok_or_else(|| {
+                ToolInvocationError::InvalidPattern(
+                    "json_path requested but invocation has no structured_content".to_string(),
+                )
+            })?;
+            let value = resolve_json_path(root, path).ok_or_else(|| {
+                ToolInvocationError::InvalidPattern(format!(
+                    "json_path {path:?} did not resolve in structured_content"
+                ))
+            })?;
+            serde_json::to_string_pretty(value).unwrap_or_default()
+        }
+        FetchQuery::JsonArraySlice { path, offset, len } => {
+            let root = structured.ok_or_else(|| {
+                ToolInvocationError::InvalidPattern(
+                    "json_array_slice requested but invocation has no structured_content"
+                        .to_string(),
+                )
+            })?;
+            let value = resolve_json_path(root, path).ok_or_else(|| {
+                ToolInvocationError::InvalidPattern(format!(
+                    "json_array_slice path {path:?} did not resolve in structured_content"
+                ))
+            })?;
+            let array = value.as_array().ok_or_else(|| {
+                ToolInvocationError::InvalidPattern(format!(
+                    "json_array_slice path {path:?} resolved to {} not an array",
+                    json_kind_name(value)
+                ))
+            })?;
+            let total = array.len();
+            let start = (*offset as usize).min(total);
+            let end = (start + *len as usize).min(total);
+            let slice: Vec<&serde_json::Value> = array[start..end].iter().collect();
+            serde_json::to_string_pretty(&slice).unwrap_or_default()
+        }
         FetchQuery::Tail { lines } => {
             let n = *lines as usize;
             let collected: Vec<&str> = raw.lines().collect();
@@ -395,6 +472,75 @@ fn refine_hint(query: &FetchQuery) -> String {
             ));
             parts.join("; ")
         }
+        FetchQuery::JsonPath { path } => format!(
+            "narrow `path` (currently {path:?}); or switch to `json_array_slice` for an array slice"
+        ),
+        FetchQuery::JsonArraySlice { path, len, .. } => format!(
+            "lower `len` (currently {len}) at `path` {path:?}; or step the slice with `offset`"
+        ),
+    }
+}
+
+pub fn resolve_json_path<'a>(
+    root: &'a serde_json::Value,
+    path: &str,
+) -> Option<&'a serde_json::Value> {
+    let trimmed = path.trim();
+    let trimmed = trimmed.strip_prefix('$').unwrap_or(trimmed);
+    let trimmed = trimmed.strip_prefix('.').unwrap_or(trimmed);
+    if trimmed.is_empty() {
+        return Some(root);
+    }
+    let mut current = root;
+    let mut segment = String::new();
+    let mut chars = trimmed.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '.' => {
+                if !segment.is_empty() {
+                    current = current.get(segment.as_str())?;
+                    segment.clear();
+                }
+            }
+            '[' => {
+                if !segment.is_empty() {
+                    current = current.get(segment.as_str())?;
+                    segment.clear();
+                }
+                let mut idx = String::new();
+                let mut closed = false;
+                while let Some(&c) = chars.peek() {
+                    if c == ']' {
+                        chars.next();
+                        closed = true;
+                        break;
+                    }
+                    idx.push(c);
+                    chars.next();
+                }
+                if !closed {
+                    return None;
+                }
+                let i: usize = idx.parse().ok()?;
+                current = current.get(i)?;
+            }
+            _ => segment.push(c),
+        }
+    }
+    if !segment.is_empty() {
+        current = current.get(segment.as_str())?;
+    }
+    Some(current)
+}
+
+fn json_kind_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
     }
 }
 
@@ -420,7 +566,7 @@ mod tests {
 
     #[test]
     fn tail_returns_last_n_lines() {
-        let r = apply_fetch_query(sample(), &FetchQuery::Tail { lines: 2 }).unwrap();
+        let r = apply_fetch_query(sample(), None, &FetchQuery::Tail { lines: 2 }).unwrap();
         assert_eq!(r.content, "echo\nfoxtrot");
         assert!(r.elision.is_none());
         assert_eq!(r.total_bytes, sample().len() as u64);
@@ -428,13 +574,14 @@ mod tests {
 
     #[test]
     fn head_returns_first_n_lines() {
-        let r = apply_fetch_query(sample(), &FetchQuery::Head { lines: 1 }).unwrap();
+        let r = apply_fetch_query(sample(), None, &FetchQuery::Head { lines: 1 }).unwrap();
         assert_eq!(r.content, "alpha");
     }
 
     #[test]
     fn range_slices_bytes() {
-        let r = apply_fetch_query(sample(), &FetchQuery::Range { offset: 0, len: 5 }).unwrap();
+        let r =
+            apply_fetch_query(sample(), None, &FetchQuery::Range { offset: 0, len: 5 }).unwrap();
         assert_eq!(r.content, "alpha");
     }
 
@@ -453,7 +600,7 @@ mod tests {
 
     #[test]
     fn grep_matches_lines() {
-        let r = apply_fetch_query(sample(), &grep_pattern("error")).unwrap();
+        let r = apply_fetch_query(sample(), None, &grep_pattern("error")).unwrap();
         assert_eq!(r.content, "bravo error one\ndelta error two");
     }
 
@@ -463,13 +610,13 @@ mod tests {
         if let FetchQuery::Grep { context, .. } = &mut q {
             *context = Some(1);
         }
-        let r = apply_fetch_query(sample(), &q).unwrap();
+        let r = apply_fetch_query(sample(), None, &q).unwrap();
         assert_eq!(r.content, "alpha\nbravo error one\ncharlie");
     }
 
     #[test]
     fn grep_invalid_regex_errors() {
-        let err = apply_fetch_query(sample(), &grep_pattern("[invalid")).unwrap_err();
+        let err = apply_fetch_query(sample(), None, &grep_pattern("[invalid")).unwrap_err();
         assert!(matches!(err, ToolInvocationError::InvalidPattern(_)));
     }
 
@@ -482,7 +629,7 @@ mod tests {
         {
             *case_insensitive = true;
         }
-        let r = apply_fetch_query(sample(), &q).unwrap();
+        let r = apply_fetch_query(sample(), None, &q).unwrap();
         assert_eq!(r.content, "bravo error one\ndelta error two");
     }
 
@@ -492,7 +639,7 @@ mod tests {
         if let FetchQuery::Grep { invert_match, .. } = &mut q {
             *invert_match = true;
         }
-        let r = apply_fetch_query(sample(), &q).unwrap();
+        let r = apply_fetch_query(sample(), None, &q).unwrap();
         assert_eq!(r.content, "alpha\ncharlie\necho\nfoxtrot");
     }
 
@@ -502,7 +649,7 @@ mod tests {
         if let FetchQuery::Grep { line_numbers, .. } = &mut q {
             *line_numbers = true;
         }
-        let r = apply_fetch_query(sample(), &q).unwrap();
+        let r = apply_fetch_query(sample(), None, &q).unwrap();
         assert_eq!(r.content, "2:bravo error one\n4:delta error two");
     }
 
@@ -512,7 +659,7 @@ mod tests {
         if let FetchQuery::Grep { after_context, .. } = &mut q {
             *after_context = Some(1);
         }
-        let r = apply_fetch_query(sample(), &q).unwrap();
+        let r = apply_fetch_query(sample(), None, &q).unwrap();
         assert_eq!(r.content, "bravo error one\ncharlie");
     }
 
@@ -522,7 +669,7 @@ mod tests {
         if let FetchQuery::Grep { head_limit, .. } = &mut q {
             *head_limit = Some(1);
         }
-        let r = apply_fetch_query(sample(), &q).unwrap();
+        let r = apply_fetch_query(sample(), None, &q).unwrap();
         assert_eq!(r.content, "bravo error one");
     }
 
@@ -531,6 +678,7 @@ mod tests {
         let big = "x".repeat(MAX_FETCH_RESPONSE_BYTES + 1024);
         let r = apply_fetch_query(
             &big,
+            None,
             &FetchQuery::Range {
                 offset: 0,
                 len: u32::MAX,
@@ -588,5 +736,118 @@ mod tests {
         assert_eq!(floor_char_boundary(s, 3), 2);
         assert_eq!(floor_char_boundary(s, 6), 6);
         assert_eq!(floor_char_boundary(s, 100), s.len());
+    }
+
+    #[test]
+    fn resolve_json_path_root() {
+        let v = serde_json::json!({"a": 1});
+        assert_eq!(resolve_json_path(&v, "$"), Some(&v));
+        assert_eq!(resolve_json_path(&v, ""), Some(&v));
+    }
+
+    #[test]
+    fn resolve_json_path_nested_keys_and_index() {
+        let v = serde_json::json!({"hits": [{"id": 1}, {"id": 2}, {"id": 3}]});
+        assert_eq!(
+            resolve_json_path(&v, "$.hits[1].id"),
+            Some(&serde_json::json!(2))
+        );
+        assert_eq!(
+            resolve_json_path(&v, "hits[0]"),
+            Some(&serde_json::json!({"id": 1}))
+        );
+    }
+
+    #[test]
+    fn resolve_json_path_missing_returns_none() {
+        let v = serde_json::json!({"a": 1});
+        assert!(resolve_json_path(&v, "$.b").is_none());
+        assert!(resolve_json_path(&v, "$.a[0]").is_none());
+    }
+
+    #[test]
+    fn json_path_query_returns_value_at_path() {
+        let structured = serde_json::json!({"user": {"name": "alice", "id": 42}});
+        let r = apply_fetch_query(
+            "irrelevant raw",
+            Some(&structured),
+            &FetchQuery::JsonPath {
+                path: "$.user.name".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(r.content.trim(), "\"alice\"");
+    }
+
+    #[test]
+    fn json_array_slice_returns_requested_range() {
+        let structured = serde_json::json!({
+            "hits": [
+                {"id": 0}, {"id": 1}, {"id": 2}, {"id": 3}, {"id": 4},
+                {"id": 5}, {"id": 6}, {"id": 7}, {"id": 8}, {"id": 9}
+            ]
+        });
+        let r = apply_fetch_query(
+            "irrelevant raw",
+            Some(&structured),
+            &FetchQuery::JsonArraySlice {
+                path: "$.hits".into(),
+                offset: 3,
+                len: 4,
+            },
+        )
+        .unwrap();
+        assert!(r.content.contains("\"id\": 3"));
+        assert!(r.content.contains("\"id\": 6"));
+        assert!(!r.content.contains("\"id\": 7"));
+        assert!(!r.content.contains("\"id\": 2"));
+    }
+
+    #[test]
+    fn json_array_slice_clamps_to_array_length() {
+        let structured = serde_json::json!({"hits": [0, 1, 2]});
+        let r = apply_fetch_query(
+            "irrelevant raw",
+            Some(&structured),
+            &FetchQuery::JsonArraySlice {
+                path: "$.hits".into(),
+                offset: 1,
+                len: 100,
+            },
+        )
+        .unwrap();
+        assert!(r.content.contains('1'));
+        assert!(r.content.contains('2'));
+    }
+
+    #[test]
+    fn json_path_without_structured_errors_helpfully() {
+        let err = apply_fetch_query(
+            "raw text only",
+            None,
+            &FetchQuery::JsonPath {
+                path: "$.foo".into(),
+            },
+        )
+        .unwrap_err();
+        let s = err.to_string().to_lowercase();
+        assert!(s.contains("structured_content"));
+    }
+
+    #[test]
+    fn json_array_slice_on_non_array_errors() {
+        let structured = serde_json::json!({"foo": "not an array"});
+        let err = apply_fetch_query(
+            "raw text only",
+            Some(&structured),
+            &FetchQuery::JsonArraySlice {
+                path: "$.foo".into(),
+                offset: 0,
+                len: 10,
+            },
+        )
+        .unwrap_err();
+        let s = err.to_string().to_lowercase();
+        assert!(s.contains("not an array") || s.contains("string"));
     }
 }

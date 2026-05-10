@@ -11,6 +11,7 @@ pub struct NixDrvList;
 pub struct NixFetchList;
 pub struct NixBuildingRun;
 pub struct NixCacheActivity;
+pub struct NixImageLayerRun;
 
 const COPYING_PREFIX: &str = "copying path '/nix/store/";
 const DRV_LIST_HEADER_SUFFIX: &str = "derivations will be built:";
@@ -18,6 +19,12 @@ const FETCH_LIST_HEADER_INFIX: &str = "paths will be fetched";
 const STORE_PATH_PREFIX: &str = "/nix/store/";
 const BUILDING_PREFIX: &str = "building '/nix/store/";
 const NIX_CACHE_PREFIX: &str = "nix-cache: ";
+const IMAGE_LAYER_PREFIX: &str = "Creating layer ";
+const IMAGE_LAYER_INFIX: &str = " from paths: ";
+
+fn is_image_layer_line(line: &str) -> bool {
+    line.starts_with(IMAGE_LAYER_PREFIX) && line.contains(IMAGE_LAYER_INFIX)
+}
 
 fn is_drv_list_header(line: &str) -> bool {
     let t = line.trim_end();
@@ -73,6 +80,22 @@ impl StringSummarizer for NixCacheActivity {
         let runs = collect_runs(ctx, |line| line.starts_with(NIX_CACHE_PREFIX));
         apply_runs(ctx, runs, "nix-cache", |count, _bytes| {
             format!("{count} cache activity lines\n")
+        })
+    }
+}
+
+impl StringSummarizer for NixImageLayerRun {
+    fn name(&self) -> &'static str {
+        "nix-image-layers"
+    }
+    fn can_summarize(&self, ctx: &SegmentedText) -> bool {
+        ctx.verbatim_regions()
+            .any(|r| r.text.lines().any(is_image_layer_line))
+    }
+    fn apply(&self, ctx: &mut SegmentedText) -> bool {
+        let runs = collect_runs(ctx, is_image_layer_line);
+        apply_runs(ctx, runs, "nix-image-layers", |count, _bytes| {
+            format!("{count} layers\n")
         })
     }
 }
@@ -260,6 +283,32 @@ mod tests {
         assert_eq!(derivation_prefix("plain line\n"), None);
         assert_eq!(derivation_prefix(">> not a prefix\n"), None);
         assert_eq!(derivation_prefix("> empty prefix\n"), None);
+    }
+
+    #[test]
+    fn nix_image_layer_run_collapses_creating_layer_lines_inside_derivation_wrap() {
+        let raw = "checking outputs of '/nix/store/aaa-drua.tar.gz.drv'...\n\
+                   drua.tar.gz> No 'fromImage' provided\n\
+                   drua.tar.gz> Creating layer 1 from paths: ['/nix/store/aaa-foo']\n\
+                   drua.tar.gz> Creating layer 2 from paths: ['/nix/store/bbb-bar']\n\
+                   drua.tar.gz> Creating layer 3 from paths: ['/nix/store/ccc-baz']\n\
+                   drua.tar.gz> Creating layer 4 with customisation...\n\
+                   drua.tar.gz> Adding manifests...\n\
+                   drua.tar.gz> Done.\n";
+        let mut ctx = SegmentedText::from_initial(raw);
+        let chain = StringSummarizerChain::new()
+            .register(NixDerivationPreprocessor)
+            .register(NixImageLayerRun);
+        chain.run(&mut ctx);
+        let log = ctx.log();
+        assert!(log.contains("<nix-derivation name=\"drua.tar.gz\">"));
+        assert!(log.contains("<nix-image-layers"));
+        assert!(log.contains("3 layers"));
+        assert!(log.contains("Creating layer 4 with customisation"));
+        assert!(log.contains("Adding manifests"));
+        assert!(log.contains("Done."));
+        assert!(!log.contains("Creating layer 1 from paths"));
+        assert!(!log.contains("drua.tar.gz> "));
     }
 
     #[test]
