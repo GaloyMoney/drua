@@ -99,19 +99,19 @@ resource "kubernetes_secret" "galoy_agents" {
     # Read-only DSN for the postgres-mcp sidecar. `?sslmode=require` is
     # required — Cloud SQL's pg_hba.conf rejects unencrypted connections
     # and dbhub crash-loops without it.
-    "pg-mcp-uri"                 = "postgres://${module.postgresql.creds["galoy-agents"].readonly_users["mcp"].user}:${module.postgresql.creds["galoy-agents"].readonly_users["mcp"].password}@${module.postgresql.creds["galoy-agents"].host}:5432/galoy-agents?sslmode=require"
-    "github-client-secret"       = var.github_client_secret
-    "gcs-creds"                  = file("${path.module}/gcs-creds.json")
-    "concourse-username"         = var.concourse_username
-    "concourse-password"         = var.concourse_password
-    "honeycomb-auth-header"               = var.honeycomb_api_key != "" ? "Bearer ${var.honeycomb_api_key}" : ""
-    "github-auth-header"                  = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
-    "github_actions-auth-header"          = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
-    "github_pull_requests-auth-header"    = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
-    "anthropic-api-key"          = var.anthropic_api_key
-    "openai-api-key"             = var.openrouter_api_key
-    "zenduty-api-token"          = var.zenduty_api_token
-    "github-app-private-key"     = local.github_app_private_key
+    "pg-mcp-uri"                       = "postgres://${module.postgresql.creds["galoy-agents"].readonly_users["mcp"].user}:${module.postgresql.creds["galoy-agents"].readonly_users["mcp"].password}@${module.postgresql.creds["galoy-agents"].host}:5432/galoy-agents?sslmode=require"
+    "github-client-secret"             = var.github_client_secret
+    "gcs-creds"                        = file("${path.module}/gcs-creds.json")
+    "concourse-username"               = var.concourse_username
+    "concourse-password"               = var.concourse_password
+    "honeycomb-auth-header"            = var.honeycomb_api_key != "" ? "Bearer ${var.honeycomb_api_key}" : ""
+    "github-auth-header"               = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
+    "github_actions-auth-header"       = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
+    "github_pull_requests-auth-header" = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
+    "anthropic-api-key"                = var.anthropic_api_key
+    "openai-api-key"                   = var.openrouter_api_key
+    "zenduty-api-token"                = var.zenduty_api_token
+    "github-app-private-key"           = local.github_app_private_key
   }
 
   depends_on = [kubernetes_namespace.galoy_agents]
