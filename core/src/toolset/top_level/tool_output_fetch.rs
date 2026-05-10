@@ -56,17 +56,21 @@ const DESCRIPTION: &str = "Fetch a previously-persisted tool result. Same respon
      structured_content; `view: 'summary'` returns the typed \
      classifier summary instead — always succeeds with no `query` \
      (summary is bounded). \
-     `query` is optional. Text-body modes \
-     (`tail`/`head`/`range`/`grep`) put the slice in `content[].text`. \
-     Structured modes (`json_path`/`json_array_slice`) replace \
-     `structured_content` with the slice so MCP-aware consumers see \
-     it directly (text mirrors the same JSON). \
+     `query` is optional. Two axes: \
+     (1) WHAT TEXT BODY to operate on — text-body modes accept an optional \
+     `path` (default = whole `raw_text`; `$.foo.bar` addresses a string \
+     within `structured_content`). Line numbers (`-n`) are relative to \
+     the resolved body. \
+     (2) HOW TO SLICE — `tail`/`head` (lines), `range` (offset+len bytes), \
+     `grep` (pattern + rg-style flags), or structural navigation \
+     (`json_path`/`json_array_slice`) which replace `structured_content` \
+     with the slice. \
      Per-mode args: `tail`/`head` take `lines`; `range` takes `offset` + `len`; \
      `grep` takes `pattern` plus `-i`/`-A`/`-B`/`-C`/`-n`/`invert_match`/`head_limit`; \
      `json_path` takes `path` (e.g. `$.data.rows`); `json_array_slice` \
-     takes `path` + `offset` + `len`. The `_recover` template inside \
-     elided sentinels (or in `elided_paths[]._recover`) gives you \
-     ready-made args.";
+     takes `path` + `offset` + `len`. \
+     The `_recover` template in `elided_paths[]._recover` (or inline on \
+     array/object sentinels) gives you ready-made args.";
 
 #[async_trait::async_trait]
 impl TopLevelTool for ToolOutputFetch {
@@ -237,7 +241,10 @@ mod tests {
         });
         let parsed: FetchInput = serde_json::from_value(raw).expect("view + query parse");
         assert!(matches!(parsed.view, FetchView::Original));
-        assert!(matches!(parsed.query, Some(FetchQuery::Tail { lines: 10 })));
+        assert!(matches!(
+            parsed.query,
+            Some(FetchQuery::Tail { lines: 10, .. })
+        ));
     }
 
     #[test]
