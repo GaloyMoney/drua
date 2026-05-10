@@ -8,11 +8,14 @@ mod cargo;
 mod concourse;
 mod git;
 mod nix;
+mod reify;
 mod rsync;
 mod string_summarizer;
 mod terraform_install;
 mod terraform_state;
 mod walker;
+
+pub use reify::ensure_structured_content;
 
 pub use bash::BashClassifier;
 pub use cargo::{CargoCheckRun, CargoCompileRun, CargoDownloadRun};

@@ -467,7 +467,8 @@ impl TopLevelTool for CallCatalogTool {
         let result = set.call(subject, &name, inner_args.clone()).await;
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        let result = annotate_envelope_mistake(result, &tool_name, &extra_keys)?;
+        let mut result = annotate_envelope_mistake(result, &tool_name, &extra_keys)?;
+        super::super::classifier::ensure_structured_content(&mut result);
 
         let recorded_args = inner_args
             .map(serde_json::Value::Object)

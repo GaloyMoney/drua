@@ -7,7 +7,6 @@ pub use drua_tool_cache as tool_invocations;
 mod cache_owner;
 pub use cache_owner::invocation_owner;
 mod auto_parse_args;
-mod reify;
 pub mod top_level;
 mod traits;
 
@@ -541,7 +540,7 @@ impl ToolSets {
             let start = std::time::Instant::now();
             let raw_result = tool.call(subject, arguments).await.map(|mut raw| {
                 if !bypass_pipeline {
-                    reify::reify_json_structured_content(&mut raw);
+                    classifier::ensure_structured_content(&mut raw);
                 }
                 raw
             });

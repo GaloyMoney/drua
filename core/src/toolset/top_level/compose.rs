@@ -606,7 +606,7 @@ async fn run_searchable_call(
         .call(subject, tool_name, inner_args)
         .await
         .map_err(|e| e.to_string())?;
-    super::super::reify::reify_json_structured_content(&mut result);
+    super::super::classifier::ensure_structured_content(&mut result);
 
     let value = result_to_value(&result);
     Ok((result, value))
@@ -629,7 +629,7 @@ async fn run_top_level_call(
         .await
         .map_err(|e| e.to_string())?;
     if !bypass {
-        super::super::reify::reify_json_structured_content(&mut result);
+        super::super::classifier::ensure_structured_content(&mut result);
     }
 
     let value = result_to_value(&result);
