@@ -15,7 +15,7 @@ mod terraform_install;
 mod terraform_state;
 mod walker;
 
-pub use reify::ensure_structured_content;
+pub use reify::{ensure_structured_content, wrap_non_record};
 
 pub use bash::BashClassifier;
 pub use cargo::{CargoCheckRun, CargoCompileRun, CargoDownloadRun};

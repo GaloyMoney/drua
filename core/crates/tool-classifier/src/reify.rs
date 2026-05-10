@@ -44,13 +44,24 @@ pub fn reify(text: String) -> Value {
         return wrap_string(text);
     }
     match serde_json::from_str::<Value>(text.trim()) {
-        Ok(Value::Object(obj)) => Value::Object(obj),
-        Ok(Value::Array(items)) => json!({ "items": items, "_shape": "array" }),
-        Ok(Value::String(s)) => json!({ "value": s, "_shape": "string" }),
-        Ok(Value::Number(n)) => json!({ "value": n, "_shape": "number" }),
-        Ok(Value::Bool(b)) => json!({ "value": b, "_shape": "boolean" }),
-        Ok(Value::Null) => json!({ "value": null, "_shape": "null" }),
+        Ok(v) => wrap_non_record(v),
         Err(_) => wrap_string(text),
+    }
+}
+
+/// Wrap a `Value` so the result is always a JSON object.
+///
+/// Mirror of [`reify`] for the case where the caller already has a
+/// parsed `Value` (e.g. `tool_output_fetch` slice/json-mode outputs).
+/// Objects pass through unchanged so the function is idempotent.
+pub fn wrap_non_record(v: Value) -> Value {
+    match v {
+        Value::Object(_) => v,
+        Value::Array(items) => json!({ "items": items, "_shape": "array" }),
+        Value::String(s) => json!({ "value": s, "_shape": "string" }),
+        Value::Number(n) => json!({ "value": n, "_shape": "number" }),
+        Value::Bool(b) => json!({ "value": b, "_shape": "boolean" }),
+        Value::Null => json!({ "value": null, "_shape": "null" }),
     }
 }
 
@@ -180,6 +191,44 @@ mod tests {
         let sc = r.structured_content.expect("set");
         assert_eq!(sc.get("_shape"), Some(&json!("string")));
         assert_eq!(sc.get("value"), Some(&json!("")));
+    }
+
+    #[test]
+    fn wrap_non_record_object_passes_through() {
+        let v = json!({"k": 1});
+        assert_eq!(wrap_non_record(v.clone()), v);
+    }
+
+    #[test]
+    fn wrap_non_record_array_string_number_bool_null() {
+        assert_eq!(
+            wrap_non_record(json!([1, 2, 3])),
+            json!({"items":[1,2,3],"_shape":"array"})
+        );
+        assert_eq!(
+            wrap_non_record(json!("hello")),
+            json!({"value":"hello","_shape":"string"})
+        );
+        assert_eq!(
+            wrap_non_record(json!(7)),
+            json!({"value":7,"_shape":"number"})
+        );
+        assert_eq!(
+            wrap_non_record(json!(false)),
+            json!({"value":false,"_shape":"boolean"})
+        );
+        assert_eq!(
+            wrap_non_record(json!(null)),
+            json!({"value":null,"_shape":"null"})
+        );
+    }
+
+    #[test]
+    fn wrap_non_record_is_idempotent_on_envelopes() {
+        let env = json!({"value":"x","_shape":"string"});
+        assert_eq!(wrap_non_record(env.clone()), env);
+        let arr_env = json!({"items":[1,2],"_shape":"array"});
+        assert_eq!(wrap_non_record(arr_env.clone()), arr_env);
     }
 
     #[test]
