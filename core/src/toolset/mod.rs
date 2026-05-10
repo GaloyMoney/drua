@@ -536,8 +536,7 @@ impl ToolSets {
                 "arguments": args_value,
             }));
 
-            let bypass_pipeline =
-                tool.bypass_universal_pipeline() || invocation_owner(subject).is_none();
+            let bypass_pipeline = should_bypass_universal_pipeline(tool.as_ref(), subject);
             let start = std::time::Instant::now();
             let raw_result = tool.call(subject, arguments).await.map(|mut raw| {
                 if !bypass_pipeline {
@@ -641,6 +640,12 @@ pub fn estimate_tokens(result: &CallToolResult) -> u64 {
         })
         .sum();
     (total_chars / 4).max(1) as u64
+}
+
+fn should_bypass_universal_pipeline(tool: &dyn TopLevelTool, subject: &AuthSubject) -> bool {
+    tool.bypass_universal_pipeline()
+        || tool.output_schema().is_some()
+        || invocation_owner(subject).is_none()
 }
 
 pub(crate) fn estimate_text_bytes(result: &CallToolResult) -> u64 {
@@ -1055,6 +1060,38 @@ mod tests {
         ) -> Result<CallToolResult, ToolSetsError> {
             unreachable!("stub tool not invoked in find_for_workflow tests")
         }
+    }
+
+    #[test]
+    fn typed_output_tools_bypass_universal_pipeline() {
+        let tool = StubTopLevelTool::new("typed", true, true);
+        let subject = AuthSubject::User(crate::primitives::UserId::new());
+
+        assert!(
+            should_bypass_universal_pipeline(&tool, &subject),
+            "tools that advertise an MCP output_schema must preserve their structured_content shape"
+        );
+    }
+
+    #[test]
+    fn untyped_user_tools_still_use_universal_pipeline() {
+        let tool = StubTopLevelTool::new("untyped", true, false);
+        let subject = AuthSubject::User(crate::primitives::UserId::new());
+
+        assert!(
+            !should_bypass_universal_pipeline(&tool, &subject),
+            "untyped tools with an invocation owner should still get classify/persist/envelope handling"
+        );
+    }
+
+    #[test]
+    fn unattributed_tools_bypass_universal_pipeline() {
+        let tool = StubTopLevelTool::new("untyped", true, false);
+
+        assert!(
+            should_bypass_universal_pipeline(&tool, &AuthSubject::Anonymous),
+            "subjects without an invocation owner cannot use persisted-output recovery"
+        );
     }
 
     #[test]

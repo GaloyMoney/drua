@@ -166,6 +166,7 @@ struct StubTool {
     name: &'static str,
     body: String,
     bypass: bool,
+    has_output_schema: bool,
 }
 
 #[async_trait::async_trait]
@@ -182,6 +183,21 @@ impl TopLevelTool for StubTool {
             serde_json::json!({"type": "object", "properties": {}, "additionalProperties": false})
         })
     }
+    fn output_schema(&self) -> Option<&serde_json::Value> {
+        static OUTPUT: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+        self.has_output_schema.then(|| {
+            OUTPUT.get_or_init(|| {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "value": { "type": "string" }
+                    },
+                    "required": ["value"],
+                    "additionalProperties": false
+                })
+            })
+        })
+    }
     fn bypass_universal_pipeline(&self) -> bool {
         self.bypass
     }
@@ -190,9 +206,11 @@ impl TopLevelTool for StubTool {
         _subject: &AuthSubject,
         _arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        Ok(CallToolResult::success(vec![Content::text(
-            self.body.clone(),
-        )]))
+        let mut result = CallToolResult::success(vec![Content::text(self.body.clone())]);
+        if self.has_output_schema {
+            result.structured_content = Some(serde_json::json!({ "value": self.body }));
+        }
+        Ok(result)
     }
 }
 
@@ -219,11 +237,13 @@ async fn bypass_universal_pipeline_skips_classifier_and_persistence() {
         name: "stub-bypass",
         body: body.clone(),
         bypass: true,
+        has_output_schema: false,
     });
     toolsets.register_top_level(StubTool {
         name: "stub-no-bypass",
         body: body.clone(),
         bypass: false,
+        has_output_schema: false,
     });
 
     let agent_subject = AuthSubject::Agent(project_id, agent_id, Vec::new());
@@ -322,6 +342,7 @@ async fn workflow_executor_subject_skips_envelope_to_preserve_structured_output(
         name: "stub-workflow-tool",
         body: body.clone(),
         bypass: false,
+        has_output_schema: false,
     });
 
     let subject = AuthSubject::workflow_executor(
@@ -377,6 +398,7 @@ async fn user_subject_gets_pipeline_wrapping_via_mcp_gateway_path() {
         name: "stub-user-call",
         body: body.clone(),
         bypass: false,
+        has_output_schema: false,
     });
 
     let user_subject = AuthSubject::User(user_id);
@@ -405,6 +427,53 @@ async fn user_subject_gets_pipeline_wrapping_via_mcp_gateway_path() {
         persisted.owner,
         InvocationOwner::user(user_id),
         "user-rooted call must persist with the User owner shape",
+    );
+}
+
+// MCP outputSchema contract: typed tools must preserve their declared
+// structured_content shape even for oversized outputs. They must not be
+// replaced by the persisted-output recovery envelope, because that envelope
+// would not validate against the tool's advertised outputSchema.
+#[tokio::test]
+async fn typed_output_tool_preserves_structured_content_for_oversized_user_call() {
+    let pool = pool().await;
+    let user_id = insert_user(&pool).await;
+
+    let tool_invocations = Arc::new(ToolInvocations::new(&pool));
+    let toolsets = ToolSets::init(
+        ToolSetsConfig::default(),
+        None,
+        None,
+        Some(Arc::clone(&tool_invocations)),
+    )
+    .await
+    .expect("ToolSets::init");
+
+    let body = "typed".repeat(12_000);
+    toolsets.register_top_level(StubTool {
+        name: "stub-typed-user-call",
+        body: body.clone(),
+        bypass: false,
+        has_output_schema: true,
+    });
+
+    let result = toolsets
+        .call_top_level_tool(
+            &AuthSubject::User(user_id),
+            "stub-typed-user-call",
+            None,
+        )
+        .await
+        .expect("typed user-scoped dispatch");
+
+    let structured = result
+        .structured_content
+        .as_ref()
+        .expect("typed tool must return structured_content");
+    assert_eq!(structured, &serde_json::json!({ "value": body }));
+    assert!(
+        structured.get("invocation_id").is_none(),
+        "typed output must not be replaced by a persisted-output recovery envelope"
     );
 }
 

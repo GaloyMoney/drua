@@ -25,6 +25,11 @@ pub trait TopLevelTool: Send + Sync {
     fn input_schema(&self) -> &serde_json::Value;
 
     /// When present, the tool MUST return `structured_content` in its `CallToolResult`.
+    ///
+    /// Typed-output tools are exempt from the universal classify/persist/envelope
+    /// stage in `ToolSets::call_top_level_tool`: replacing their
+    /// `structured_content` with a recovery envelope would violate the advertised
+    /// MCP `outputSchema` and cause clients/servers to reject the result.
     fn output_schema(&self) -> Option<&serde_json::Value> {
         None
     }
