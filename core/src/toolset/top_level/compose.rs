@@ -366,6 +366,7 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
 
                 let result = match dispatch_result {
                     Ok((raw, value)) => {
+                        Audit::record_tokens(super::super::estimate_tokens(&raw));
                         dispatcher
                             .maybe_persist_sub_invocation(
                                 &name_owned,
@@ -457,6 +458,7 @@ impl CatalogDispatcher {
 
             let result = match dispatch_result {
                 Ok((raw, value)) => {
+                    Audit::record_tokens(super::super::estimate_tokens(&raw));
                     if !bypass {
                         dispatcher
                             .maybe_persist_sub_invocation(
@@ -515,25 +517,36 @@ impl CatalogDispatcherShared {
         duration_ms: u64,
         started_at: chrono::DateTime<chrono::Utc>,
     ) {
-        let Some(invocations) = self.tool_invocations.as_ref() else {
-            return;
-        };
+        // Even when there's nothing to persist, classify and emit pipeline
+        // metrics so dashboards see compose sub-calls — parity with the
+        // regular path which always records.
         let classification = self.classifiers.classify(&ClassifierContext {
             tool_name,
             args,
             raw,
             exit_code: None,
         });
+        let raw_bytes = classification.canonical_text.len() as u64;
+        let classifier_kind = classification.summary.kind().to_string();
+        let kept_bytes = classification.summary.kept_bytes(raw_bytes);
+
         if classification.summary.is_passthrough() {
+            super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, false);
             return;
         }
+
         let summary_value_size = serde_json::to_string(
             &serde_json::to_value(&classification.summary).unwrap_or_default(),
         )
         .map(|s| s.len() as u64)
         .unwrap_or(0);
 
+        let Some(invocations) = self.tool_invocations.as_ref() else {
+            super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, false);
+            return;
+        };
         let Some(owner) = super::super::invocation_owner(&self.subject) else {
+            super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, false);
             return;
         };
         let Some(persisted): Option<PersistedClassification> = invocations
@@ -548,8 +561,12 @@ impl CatalogDispatcherShared {
             )
             .await
         else {
+            super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, false);
             return;
         };
+
+        super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, true);
+        Audit::record_tool_invocation_id(persisted.invocation_id);
 
         let seq = self.seq_counter.fetch_add(1, Ordering::Relaxed);
         let entry = SubInvocation {
