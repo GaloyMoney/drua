@@ -362,8 +362,7 @@ pub fn apply_fetch_query(
             let total = array.len();
             let start = (*offset as usize).min(total);
             let end = (start + *len as usize).min(total);
-            let slice: Vec<serde_json::Value> = array[start..end].iter().cloned().collect();
-            Some(serde_json::Value::Array(slice))
+            Some(serde_json::Value::Array(array[start..end].to_vec()))
         }
         _ => None,
     };
