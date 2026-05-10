@@ -404,18 +404,8 @@ impl CatalogDispatcher {
         prefixed_name: &str,
     ) -> Result<(Arc<dyn SearchableToolSet>, String), ToolSetsError> {
         let sets = self.sets.read().expect("toolset lock poisoned");
-        for set in sets.iter() {
-            if !set.is_visible(&self.subject) {
-                continue;
-            }
-            let prefix = format!("{}_", set.prefix());
-            if let Some(tool_name) = prefixed_name.strip_prefix(&prefix) {
-                if set.tools().iter().any(|t| t.name == tool_name) {
-                    return Ok((Arc::clone(set), tool_name.to_string()));
-                }
-            }
-        }
-        Err(ToolSetsError::ToolNotFound(prefixed_name.to_string()))
+        super::super::dispatch::find_searchable(sets.iter(), &self.subject, prefixed_name)
+            .ok_or_else(|| ToolSetsError::ToolNotFound(prefixed_name.to_string()))
     }
 
     async fn call_top_level(

@@ -7,6 +7,7 @@ pub use drua_tool_cache as tool_invocations;
 mod cache_owner;
 pub use cache_owner::invocation_owner;
 mod auto_parse_args;
+mod dispatch;
 pub mod top_level;
 mod traits;
 

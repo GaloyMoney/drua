@@ -384,18 +384,7 @@ impl CallCatalogTool {
         prefixed_name: &str,
     ) -> Option<(Arc<dyn SearchableToolSet>, String)> {
         let sets = self.sets.read().expect("toolset lock poisoned");
-        for set in sets.iter() {
-            if !set.is_visible(subject) {
-                continue;
-            }
-            let prefix = format!("{}_", set.prefix());
-            if let Some(tool_name) = prefixed_name.strip_prefix(&prefix) {
-                if set.tools().iter().any(|t| t.name == tool_name) {
-                    return Some((Arc::clone(set), tool_name.to_string()));
-                }
-            }
-        }
-        None
+        super::super::dispatch::find_searchable(sets.iter(), subject, prefixed_name)
     }
 }
 
