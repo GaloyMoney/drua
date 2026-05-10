@@ -19,9 +19,6 @@ variable "honeycomb_api_key" {
 variable "github_pat" {
   default = ""
 }
-variable "lingo_api_key" {
-  default = ""
-}
 variable "anthropic_api_key" {
   default = ""
 }
@@ -111,7 +108,6 @@ resource "kubernetes_secret" "galoy_agents" {
     "github-auth-header"                  = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
     "github_actions-auth-header"          = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
     "github_pull_requests-auth-header"    = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
-    "lingo-auth-header"          = var.lingo_api_key
     "anthropic-api-key"          = var.anthropic_api_key
     "openai-api-key"             = var.openrouter_api_key
     "zenduty-api-token"          = var.zenduty_api_token

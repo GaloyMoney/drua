@@ -60,7 +60,7 @@ A complete `.env.example` is provided at the repo root.
 | `CONCOURSE_USERNAME` | No | — | Concourse CI basic-auth username (when concourse toolset is enabled). |
 | `CONCOURSE_PASSWORD` | No | — | Concourse CI basic-auth password. |
 | `ZENDUTY_API_TOKEN` | No | — | Zenduty API token (sent as `Authorization: Token <token>`). Required when the zenduty toolset is enabled. |
-| `{UPSTREAM}_AUTH_HEADER` | No | — | Auth header for each MCP upstream. Name is uppercased from the config, e.g. `HONEYCOMB_AUTH_HEADER`, `GITHUB_AUTH_HEADER`, `LINGO_AUTH_HEADER`. |
+| `{UPSTREAM}_AUTH_HEADER` | No | — | Auth header for each MCP upstream. Name is uppercased from the config, e.g. `HONEYCOMB_AUTH_HEADER`, `GITHUB_AUTH_HEADER`. |
 | `GITHUB_APP_PRIVATE_KEY_PATH` | No | — | Filesystem path to the GitHub App PEM private key (for sandbox token auto-provisioning). Requires `github_app` section in config. |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | No | `http://localhost:4317` | OpenTelemetry OTLP gRPC endpoint. |
 | `OTEL_SDK_DISABLED` | No | `false` | Set to `true` to disable OpenTelemetry tracing entirely. |
@@ -207,4 +207,3 @@ charts/         Helm chart for Kubernetes deployment
 | `make build-sandbox` | Build only the sandbox tool server |
 | `make sqlx-prepare` | Regenerate SQLx offline query data |
 | `make start` | Full reset: `reset-deps` then server with dev login |
-

@@ -132,8 +132,3 @@ toolsets:
       # and we don't want any agent flow ever discovering it.
       allowed_tools:
         - create_pull_request
-    - name: lingo
-      url: https://mcp.lingo.dev/account
-      auth_header_name: x-api-key
-      category: localization
-      category_description: "AI-powered localization engine management and translation"

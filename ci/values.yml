@@ -31,7 +31,6 @@ deploy_lana_bank_cachix_auth_token: ((lana-bank-cachix-token.token))
 deploy_lana_bank_cachix_public_key: ""
 honeycomb_api_key: ((mcp-upstream.honeycomb_api_key))
 github_pat: ((mcp-upstream.github_pat))
-lingo_api_key: ((mcp-upstream.lingo_dev_api_key))
 zenduty_api_token: ((zenduty.api_key))
 deploy_anthropic_api_key: ((anthropic-api-key.key))
 deploy_openrouter_api_key: ((openrouter-api-key.key))
