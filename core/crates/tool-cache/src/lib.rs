@@ -15,22 +15,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::instrument;
 
-use drua_tool_classifier::{
-    unwrap_at_owned, wrap_non_record, Classification, ToolResultSummary,
-    RECOVERY_INVOCATION_PLACEHOLDER,
-};
+use drua_tool_classifier::{Classification, ToolResultSummary, RECOVERY_INVOCATION_PLACEHOLDER};
 use repo::ToolInvocationRepo;
-
-/// Reapply the transport-level record wrapping over an unwrapped value
-/// stored at `root_path`. Object roots pass through unchanged; array,
-/// string, and scalar roots get re-enveloped via `wrap_non_record`.
-pub fn wrap_for_transport(value: serde_json::Value, root_path: &str) -> serde_json::Value {
-    if root_path == "$" {
-        value
-    } else {
-        wrap_non_record(value)
-    }
-}
 
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "mode", rename_all = "snake_case")]
@@ -192,11 +178,6 @@ impl ToolInvocations {
             root_path,
         } = classification;
         let raw_size_bytes = canonical_text.len() as i64;
-        // Storage holds the upstream's *unwrapped* value, not the transport
-        // envelope. The wrapping at `root_path` is reapplied at fetch time
-        // via `wrap_for_transport`. Records pass through; arrays / scalars
-        // are unwrapped here.
-        let original_structured = original_structured.map(|v| unwrap_at_owned(&root_path, v));
 
         let summary_value = match serde_json::to_value(&summary) {
             Ok(v) => v,
@@ -264,13 +245,20 @@ impl ToolInvocations {
         duration_ms: u64,
         started_at: chrono::DateTime<chrono::Utc>,
     ) -> Option<(CallToolResult, ToolInvocationId)> {
+        // Storage holds the upstream's canonical value, regardless of which
+        // channel the upstream used. `raw.structured_content` is `None` for
+        // non-record upstreams (the response keeps the text channel clean
+        // for the agent), but we still want `original_structured` populated
+        // for arrays / scalars so json_path / json_array_slice `_recover`
+        // templates the walker emits for those shapes round-trip cleanly.
+        let original_structured = drua_tool_classifier::canonicalize(raw);
         let persisted = self
             .persist_classification(
                 owner,
                 tool_name,
                 args,
                 classification,
-                raw.structured_content.clone(),
+                original_structured,
                 duration_ms,
                 started_at,
             )

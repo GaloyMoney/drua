@@ -15,10 +15,7 @@ mod terraform_install;
 mod terraform_state;
 mod walker;
 
-pub use reify::{
-    ensure_structured_content, root_path_of_unwrapped, root_path_of_wrapped, unwrap_at,
-    unwrap_at_owned, wrap_non_record,
-};
+pub use reify::{canonicalize, ensure_structured_content, root_path_of_unwrapped};
 
 pub use bash::BashClassifier;
 pub use cargo::{CargoCheckRun, CargoCompileRun, CargoDownloadRun};
@@ -325,16 +322,17 @@ impl ResultClassifier for GenericFallback {
     }
 
     fn classify(&self, ctx: &ClassifierContext<'_>) -> Result<Classification, ClassifierError> {
-        let wrapped = canonical_value(ctx.raw);
-        // The walker, canonical-text rendering, and emitted `_recover`
-        // templates all operate on the upstream's *unwrapped* shape. The
-        // wrapping in `structured_content` exists only to satisfy the MCP
-        // transport's record-only contract.
-        let root_path = reify::root_path_of_wrapped(&wrapped);
-        let unwrapped = reify::unwrap_at(root_path, &wrapped);
-        let canonical_text = canonical_text_for(unwrapped);
+        // Walker, canonical-text rendering, and emitted `_recover` templates
+        // all operate on the upstream's *unwrapped* shape. `canonicalize`
+        // pulls the parsed value from whichever channel the upstream used
+        // (or `Value::String(text)` as a last-ditch fallback when the
+        // upstream emitted plain non-JSON text).
+        let value = reify::canonicalize(ctx.raw)
+            .unwrap_or_else(|| serde_json::Value::String(extract_text(ctx.raw)));
+        let root_path = reify::root_path_of_unwrapped(&value);
+        let canonical_text = canonical_text_for(&value);
         let chain = self.summarizer_chain.as_deref();
-        let summary = match walker::classify_value(unwrapped, self.threshold_bytes, chain) {
+        let summary = match walker::classify_value(&value, self.threshold_bytes, chain) {
             walker::WalkOutcome::Passthrough(v) => ToolResultSummary::Passthrough { value: v },
             walker::WalkOutcome::Elided {
                 kept,
@@ -365,13 +363,6 @@ pub fn canonical_text_for(value: &serde_json::Value) -> String {
         },
         _ => serde_json::to_string_pretty(value).unwrap_or_default(),
     }
-}
-
-fn canonical_value(result: &CallToolResult) -> serde_json::Value {
-    if let Some(sc) = result.structured_content.as_ref() {
-        return sc.clone();
-    }
-    serde_json::Value::String(extract_text(result))
 }
 
 fn extract_text(result: &CallToolResult) -> String {

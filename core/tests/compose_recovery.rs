@@ -299,10 +299,15 @@ async fn compose_under_workflow_executor_no_persistence() {
 struct ArrayRootStub {
     name: String,
     tools: Vec<ToolSetEntry>,
+    array_size: usize,
 }
 
 impl ArrayRootStub {
     fn new() -> Self {
+        Self::with_size(3)
+    }
+
+    fn with_size(array_size: usize) -> Self {
         let mut tool = Tool::default();
         tool.name = "list_things".to_string().into();
         tool.description = Some("returns a top-level JSON array".to_string().into());
@@ -313,6 +318,7 @@ impl ArrayRootStub {
                 name: "list_things".to_string(),
                 description: tool,
             }],
+            array_size,
         }
     }
 }
@@ -337,13 +343,14 @@ impl SearchableToolSet for ArrayRootStub {
         _tool_name: &str,
         _arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let arr = json!([{"id":1,"name":"a"},{"id":2,"name":"b"},{"id":3,"name":"c"}]);
-        let text = serde_json::to_string(&arr).unwrap();
+        let arr: Vec<_> = (0..self.array_size)
+            .map(|i| json!({ "id": i, "blob": "x".repeat(200) }))
+            .collect();
+        let text = serde_json::to_string(&serde_json::Value::Array(arr)).unwrap();
         // Deliberately do NOT pre-populate structured_content — the
         // dispatcher's `ensure_structured_content` is responsible for
-        // wrapping the text into the transport envelope, and root_path
-        // metadata is what tells `result_to_value` to unwrap before
-        // exposing to JS.
+        // shape detection. Non-record upstreams flow through the text
+        // channel; storage canonicalises so json modes still work.
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 }
@@ -398,6 +405,127 @@ async fn compose_top_level_array_persists_with_items_root_path() {
 }
 
 #[tokio::test]
+async fn array_root_persists_canonicalized_for_recovery_round_trip() {
+    // Regression pin for the Bugbot finding (PR #323): when a non-record
+    // upstream is dispatched and elided, `persist_and_envelope` /
+    // `maybe_persist_sub_invocation` used to store
+    // `raw.structured_content.clone()` — which is `None` for arrays after
+    // the unwrap-return-channel change. The walker still emits
+    // `json_array_slice` `_recover` templates for array elision, so the
+    // agent following those templates would hit "json_array_slice
+    // requested but invocation has no structured_content".
+    //
+    // This test goes through the real dispatch path (no manual seeding),
+    // pulls the elided `_recover.args_template.query` out of the summary
+    // the agent receives, then runs that exact query through
+    // `tool_output_fetch` and asserts it actually returns the requested
+    // slice instead of an error.
+    let pool = pool().await;
+    let audit = Arc::new(Audit::new(&pool));
+    let invocations = Arc::new(ToolInvocations::new(&pool));
+    let toolsets = ToolSets::init(
+        ToolSetsConfig::default(),
+        Some(Arc::clone(&audit)),
+        None,
+        Some(Arc::clone(&invocations)),
+    )
+    .await
+    .expect("init toolsets");
+    // 50 items * ~200B blob each → ~10KB+ raw, comfortably above the
+    // walker's elision threshold so a `_recover` template gets emitted.
+    toolsets.register_searchable(ArrayRootStub::with_size(50));
+
+    let user_id = insert_user(&pool).await;
+    let subject = AuthSubject::User(user_id);
+
+    // 1. Dispatch the array-root stub via compose so it gets persisted.
+    let dispatch = toolsets
+        .call_top_level_tool(
+            &subject,
+            "compose",
+            compose_args("return await tools.stub.list_things({});"),
+        )
+        .await
+        .expect("compose dispatch");
+
+    // 2. Locate the persisted sub-invocation.
+    let env = extract_structured(&dispatch);
+    let subs = env
+        .get("sub_invocations")
+        .and_then(|v| v.as_array())
+        .expect("sub_invocations");
+    assert_eq!(subs.len(), 1, "exactly one elided sub-call");
+    let sub_id = subs[0]
+        .get("invocation_id")
+        .and_then(|v| v.as_str())
+        .expect("sub-invocation invocation_id");
+
+    // 3. Read back the persisted summary so we have the *real*
+    //    `_recover.args_template.query` the agent would see.
+    let inv_uuid: uuid::Uuid = sub_id.parse().unwrap();
+    let persisted = invocations
+        .find_by_id(inv_uuid.into())
+        .await
+        .expect("persisted row");
+    assert_eq!(
+        persisted.root_path, "$.items",
+        "array-rooted upstream must persist root_path '$.items'"
+    );
+    assert!(
+        persisted.original_structured.is_some(),
+        "Bugbot regression: original_structured must be Some for array roots, \
+         else `_recover` templates with json modes can't resolve"
+    );
+    assert!(
+        persisted.original_structured.as_ref().unwrap().is_array(),
+        "original_structured holds the unwrapped array, not an envelope"
+    );
+
+    let recover_query = persisted
+        .summary
+        .get("elided_paths")
+        .and_then(|v| v.get(0))
+        .and_then(|p| p.get("_recover"))
+        .and_then(|r| r.get("args_template"))
+        .and_then(|t| t.get("query"))
+        .cloned()
+        .expect("array elision must emit a _recover template with a query");
+
+    // 4. Run the literal recover template and assert it actually returns
+    //    the requested slice (no "no structured_content" error).
+    let mut fetch_args = JsonObject::new();
+    fetch_args.insert("invocation_id".to_string(), json!(sub_id));
+    fetch_args.insert("query".to_string(), recover_query);
+    fetch_args.insert("view".to_string(), json!("original"));
+    let fetched = toolsets
+        .call_top_level_tool(&subject, "tool_output_fetch", Some(fetch_args))
+        .await
+        .expect("recover template dispatch");
+
+    assert!(
+        !fetched.is_error.unwrap_or(false),
+        "the gateway-emitted _recover template must round-trip without error"
+    );
+    // Slice result is a non-record (array) → goes in content channel.
+    assert!(
+        fetched.structured_content.is_none(),
+        "array slice does NOT set structured_content (no envelope leak)"
+    );
+    let text: String = fetched
+        .content
+        .iter()
+        .filter_map(|c| match &c.raw {
+            rmcp::model::RawContent::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        text.contains("\"id\""),
+        "recovered slice text should contain the array's items"
+    );
+}
+
+#[tokio::test]
 async fn compose_inner_array_root_is_unwrapped_for_js() {
     let pool = pool().await;
     let audit = Arc::new(Audit::new(&pool));
@@ -439,7 +567,7 @@ async fn compose_inner_array_root_is_unwrapped_for_js() {
     );
     assert_eq!(
         env.get("result").and_then(|v| v.get("first_id")),
-        Some(&json!(1))
+        Some(&json!(0))
     );
 }
 
