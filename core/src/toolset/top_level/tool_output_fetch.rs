@@ -193,15 +193,23 @@ impl TopLevelTool for ToolOutputFetch {
         // contract holds for every recovery template the gateway emits.
         // Objects pass through unchanged.
         //
-        // Without `query`, structured_content reflects the requested view
-        // (full original / typed summary) — already a record post-reify.
-        let final_structured = match &query_outcome {
-            Some(r) => Some(drua_tool_classifier::wrap_non_record(
+        // Without `query`:
+        // - `view: "summary"` returns the typed summary (always a record).
+        // - `view: "original"` returns the *unwrapped* upstream value as
+        //   stored. Reapply the transport envelope so the response shape
+        //   honours the wrapper contract — for record roots this is a no-op,
+        //   for array / string / scalar roots it produces `{items|value,
+        //   _shape}`.
+        let final_structured = match (&query_outcome, input.view) {
+            (Some(r), _) => Some(drua_tool_classifier::wrap_non_record(
                 r.structured
                     .clone()
                     .unwrap_or_else(|| serde_json::Value::String(r.content.clone())),
             )),
-            None => view_structured,
+            (None, FetchView::Original) => {
+                view_structured.map(drua_tool_classifier::wrap_non_record)
+            }
+            (None, FetchView::Summary) => view_structured,
         };
 
         let mut ctr = CallToolResult::success(vec![Content::text(content_text)]);

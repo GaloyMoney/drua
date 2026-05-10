@@ -83,6 +83,7 @@ fn build_new(owner: InvocationOwner, raw: &str) -> NewToolInvocation {
         exit_code: None,
         duration_ms: 42,
         started_at: Utc::now(),
+        root_path: "$".to_string(),
     }
 }
 

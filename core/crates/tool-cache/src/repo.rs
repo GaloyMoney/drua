@@ -23,9 +23,9 @@ impl ToolInvocationRepo {
             INSERT INTO tool_invocations (
                 id, agent_id, user_id, tool_name, args, args_hash, classifier,
                 summary, raw_text, raw_size_bytes, original_structured,
-                exit_code, duration_ms, started_at
+                exit_code, duration_ms, started_at, root_path
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
             RETURNING created_at
             "#,
             id_uuid,
@@ -42,6 +42,7 @@ impl ToolInvocationRepo {
             new.exit_code,
             new.duration_ms,
             new.started_at,
+            new.root_path,
         )
         .fetch_one(&self.pool)
         .await?;
@@ -61,6 +62,7 @@ impl ToolInvocationRepo {
             duration_ms: new.duration_ms,
             started_at: new.started_at,
             created_at: row.created_at,
+            root_path: new.root_path,
         })
     }
 
@@ -71,7 +73,7 @@ impl ToolInvocationRepo {
             SELECT
                 id, agent_id, user_id, tool_name, args, args_hash, classifier,
                 summary, raw_text, raw_size_bytes, original_structured,
-                exit_code, duration_ms, started_at, created_at
+                exit_code, duration_ms, started_at, created_at, root_path
             FROM tool_invocations
             WHERE id = $1
             "#,
@@ -96,6 +98,7 @@ impl ToolInvocationRepo {
             row.duration_ms,
             row.started_at,
             row.created_at,
+            row.root_path,
         ))
     }
 
@@ -123,7 +126,7 @@ impl ToolInvocationRepo {
             SELECT
                 id, agent_id, user_id, tool_name, args, args_hash, classifier,
                 summary, raw_text, raw_size_bytes, original_structured,
-                exit_code, duration_ms, started_at, created_at
+                exit_code, duration_ms, started_at, created_at, root_path
             FROM tool_invocations
             WHERE agent_id = $1 AND args_hash = $2
             ORDER BY created_at DESC
@@ -152,6 +155,7 @@ impl ToolInvocationRepo {
                 r.duration_ms,
                 r.started_at,
                 r.created_at,
+                r.root_path,
             )
         }))
     }
@@ -166,7 +170,7 @@ impl ToolInvocationRepo {
             SELECT
                 id, agent_id, user_id, tool_name, args, args_hash, classifier,
                 summary, raw_text, raw_size_bytes, original_structured,
-                exit_code, duration_ms, started_at, created_at
+                exit_code, duration_ms, started_at, created_at, root_path
             FROM tool_invocations
             WHERE user_id = $1 AND args_hash = $2
             ORDER BY created_at DESC
@@ -195,6 +199,7 @@ impl ToolInvocationRepo {
                 r.duration_ms,
                 r.started_at,
                 r.created_at,
+                r.root_path,
             )
         }))
     }
@@ -217,6 +222,7 @@ fn hydrate_row(
     duration_ms: i32,
     started_at: chrono::DateTime<chrono::Utc>,
     created_at: chrono::DateTime<chrono::Utc>,
+    root_path: String,
 ) -> ToolInvocation {
     let owner = InvocationOwner {
         agent_id: agent_id.map(Into::into),
@@ -237,5 +243,6 @@ fn hydrate_row(
         duration_ms,
         started_at,
         created_at,
+        root_path,
     }
 }

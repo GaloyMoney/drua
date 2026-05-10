@@ -2,37 +2,50 @@
 //!
 //! Every dispatch path (regular MCP, compose, catalog) calls this once before
 //! classification, so the universal pipeline always sees the same shape:
-//! `result.structured_content` is `Some(_)`, never `None`, and always a
-//! JSON **object** (record) — never a raw string, array, number, bool, or null.
+//! `result.structured_content` is `Some(record)` on return, never `None` and
+//! never a raw string / array / scalar.
 //!
 //! Resolution order:
-//! 1. If `structured_content` is already attached → leave it alone.
+//! 1. If `structured_content` is already attached and is already a record →
+//!    leave it alone, root_path is `$`. If it's a non-record, idempotently
+//!    wrap it (so a buggy upstream that pre-populated with `Value::Array`
+//!    can't escape the transport contract).
 //! 2. Combine `content[].text` parts.
 //! 3. Try to parse the combined text as JSON.
-//!    - Object → attach as-is.
-//!    - Array  → attach `{ "items": [...], "_shape": "array" }`.
-//!    - String → attach `{ "value": "...", "_shape": "string" }`.
-//!    - Number → attach `{ "value": N, "_shape": "number" }`.
-//!    - Bool   → attach `{ "value": B, "_shape": "boolean" }`.
-//!    - Null   → attach `{ "value": null, "_shape": "null" }`.
-//! 4. Parse failure → attach `{ "value": <raw_text>, "_shape": "string" }`.
+//!    - Object → attach as-is, root_path `$`.
+//!    - Array  → attach `{ "items": [...], "_shape": "array" }`, root_path `$.items`.
+//!    - String → attach `{ "value": "...", "_shape": "string" }`, root_path `$.value`.
+//!    - Number → attach `{ "value": N, "_shape": "number" }`, root_path `$.value`.
+//!    - Bool   → attach `{ "value": B, "_shape": "boolean" }`, root_path `$.value`.
+//!    - Null   → attach `{ "value": null, "_shape": "null" }`, root_path `$.value`.
+//! 4. Parse failure → attach `{ "value": <raw_text>, "_shape": "string" }`,
+//!    root_path `$.value`.
 //!
-//! Why a record envelope: the MCP transport requires `structured_content` to
-//! be a JSON object. Wrapping non-object values here means every downstream
-//! consumer (walker, classifier, query layer, recovery template generator,
-//! gateway emission) sees a record uniformly — and `tool_output_fetch` slice
-//! results round-trip through the same path without breaking the wrapper.
+//! `root_path` rides alongside the wrapped value through the rest of the
+//! pipeline so consumers (walker, canonical-text rendering, `tool_output_fetch`,
+//! compose JS engine) can address the unwrapped upstream value directly. The
+//! envelope only exists to satisfy the MCP transport's record-only
+//! `structuredContent` validation.
 
 use rmcp::model::CallToolResult;
 use serde_json::{json, Value};
 
 /// Mutates `result` so `structured_content` is `Some(record)` on return.
-pub fn ensure_structured_content(result: &mut CallToolResult) {
-    if result.structured_content.is_some() {
-        return;
+/// Returns the root_path: where the *unwrapped* upstream value lives within
+/// the wrapped envelope (`$` for records, `$.items` for arrays, `$.value`
+/// for strings / scalars / non-JSON text).
+pub fn ensure_structured_content(result: &mut CallToolResult) -> &'static str {
+    if let Some(existing) = result.structured_content.take() {
+        let path = root_path_of_unwrapped(&existing);
+        let wrapped = wrap_non_record(existing);
+        result.structured_content = Some(wrapped);
+        return path;
     }
     let combined = combined_text(result);
-    result.structured_content = Some(reify(combined));
+    let v = reify(combined);
+    let path = root_path_of_wrapped(&v);
+    result.structured_content = Some(v);
+    path
 }
 
 /// Wrap an arbitrary tool-output text into a record-shaped JSON value.
@@ -69,6 +82,62 @@ fn wrap_string(s: String) -> Value {
     json!({ "value": s, "_shape": "string" })
 }
 
+/// Where the unwrapped value lives within a wrapped envelope. Pure shape
+/// inspection — used at `ensure_structured_content` time to record the
+/// root_path metadata that the rest of the pipeline keys off.
+pub fn root_path_of_wrapped(v: &Value) -> &'static str {
+    if let Value::Object(map) = v {
+        if map.len() == 2 {
+            if let Some(Value::String(shape)) = map.get("_shape") {
+                match shape.as_str() {
+                    "array" if map.contains_key("items") => return "$.items",
+                    "string" | "number" | "boolean" | "null" if map.contains_key("value") => {
+                        return "$.value"
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    "$"
+}
+
+/// Inverse of `root_path_of_wrapped`: where would we wrap an unwrapped value?
+pub fn root_path_of_unwrapped(v: &Value) -> &'static str {
+    match v {
+        Value::Object(_) => "$",
+        Value::Array(_) => "$.items",
+        _ => "$.value",
+    }
+}
+
+/// Look through a wrapped envelope at `root_path` to the unwrapped upstream
+/// value. Returns the input unchanged for `$` (records).
+pub fn unwrap_at<'a>(root_path: &str, v: &'a Value) -> &'a Value {
+    match root_path {
+        "$" => v,
+        "$.items" => v.get("items").unwrap_or(v),
+        "$.value" => v.get("value").unwrap_or(v),
+        _ => v,
+    }
+}
+
+/// Owning version of `unwrap_at`.
+pub fn unwrap_at_owned(root_path: &str, v: Value) -> Value {
+    match root_path {
+        "$" => v,
+        "$.items" => match v {
+            Value::Object(mut map) => map.remove("items").unwrap_or(Value::Object(map)),
+            other => other,
+        },
+        "$.value" => match v {
+            Value::Object(mut map) => map.remove("value").unwrap_or(Value::Object(map)),
+            other => other,
+        },
+        _ => v,
+    }
+}
+
 fn combined_text(result: &CallToolResult) -> String {
     let mut combined = String::new();
     for part in &result.content {
@@ -92,7 +161,8 @@ mod tests {
         let mut r = CallToolResult::success(vec![Content::text(
             r#"{"total":2,"items":[{"id":1},{"id":2}]}"#.to_string(),
         )]);
-        ensure_structured_content(&mut r);
+        let path = ensure_structured_content(&mut r);
+        assert_eq!(path, "$");
         let sc = r.structured_content.expect("structured_content set");
         assert_eq!(sc.get("total"), Some(&json!(2)));
         assert!(sc.get("items").unwrap().is_array());
@@ -104,7 +174,8 @@ mod tests {
         let mut r = CallToolResult::success(vec![Content::text(
             r#"[{"a":1},{"a":2},{"a":3}]"#.to_string(),
         )]);
-        ensure_structured_content(&mut r);
+        let path = ensure_structured_content(&mut r);
+        assert_eq!(path, "$.items");
         let sc = r.structured_content.expect("set");
         assert!(sc.is_object(), "array must be wrapped as an object");
         assert_eq!(sc.get("_shape"), Some(&json!("array")));
@@ -112,18 +183,47 @@ mod tests {
     }
 
     #[test]
-    fn skips_when_already_set() {
+    fn preset_record_passes_through_with_root_dollar() {
         let mut r = CallToolResult::success(vec![Content::text(r#"{"a":1}"#.to_string())]);
         r.structured_content = Some(json!({"existing": true}));
-        ensure_structured_content(&mut r);
+        let path = ensure_structured_content(&mut r);
+        assert_eq!(path, "$");
         assert_eq!(r.structured_content, Some(json!({"existing": true})));
+    }
+
+    #[test]
+    fn preset_array_idempotently_wraps() {
+        // Defends the transport contract against an upstream that bypasses
+        // text content and stuffs `Value::Array(_)` into `structured_content`
+        // directly.
+        let mut r = CallToolResult::success(vec![]);
+        r.structured_content = Some(json!([1, 2, 3]));
+        let path = ensure_structured_content(&mut r);
+        assert_eq!(path, "$.items");
+        assert_eq!(
+            r.structured_content,
+            Some(json!({"items":[1,2,3],"_shape":"array"})),
+        );
+    }
+
+    #[test]
+    fn preset_string_idempotently_wraps() {
+        let mut r = CallToolResult::success(vec![]);
+        r.structured_content = Some(json!("hi"));
+        let path = ensure_structured_content(&mut r);
+        assert_eq!(path, "$.value");
+        assert_eq!(
+            r.structured_content,
+            Some(json!({"value":"hi","_shape":"string"})),
+        );
     }
 
     #[test]
     fn non_json_text_wraps_as_string_envelope() {
         let raw = "NAME    READY   STATUS\nfoo     1/1     Running\n".to_string();
         let mut r = CallToolResult::success(vec![Content::text(raw.clone())]);
-        ensure_structured_content(&mut r);
+        let path = ensure_structured_content(&mut r);
+        assert_eq!(path, "$.value");
         let sc = r.structured_content.expect("set");
         assert_eq!(sc.get("_shape"), Some(&json!("string")));
         assert_eq!(sc.get("value"), Some(&Value::String(raw)));
@@ -229,6 +329,54 @@ mod tests {
         assert_eq!(wrap_non_record(env.clone()), env);
         let arr_env = json!({"items":[1,2],"_shape":"array"});
         assert_eq!(wrap_non_record(arr_env.clone()), arr_env);
+    }
+
+    #[test]
+    fn root_path_of_wrapped_recognises_each_envelope() {
+        assert_eq!(root_path_of_wrapped(&json!({"a":1})), "$");
+        assert_eq!(
+            root_path_of_wrapped(&json!({"items":[1],"_shape":"array"})),
+            "$.items"
+        );
+        assert_eq!(
+            root_path_of_wrapped(&json!({"value":"x","_shape":"string"})),
+            "$.value"
+        );
+        assert_eq!(
+            root_path_of_wrapped(&json!({"value":7,"_shape":"number"})),
+            "$.value"
+        );
+        // Object that happens to have keys named like the envelope but a
+        // different `_shape` value should NOT be recognised.
+        assert_eq!(
+            root_path_of_wrapped(&json!({"value":"x","_shape":"custom"})),
+            "$"
+        );
+        // Three keys ≠ envelope.
+        assert_eq!(
+            root_path_of_wrapped(&json!({"value":"x","_shape":"string","extra":1})),
+            "$"
+        );
+    }
+
+    #[test]
+    fn unwrap_at_returns_inner_for_each_root_path() {
+        let env = json!({"items":[1,2,3],"_shape":"array"});
+        assert_eq!(unwrap_at("$.items", &env), &json!([1, 2, 3]));
+        let env = json!({"value":"x","_shape":"string"});
+        assert_eq!(unwrap_at("$.value", &env), &json!("x"));
+        let plain = json!({"k":1});
+        assert_eq!(unwrap_at("$", &plain), &plain);
+    }
+
+    #[test]
+    fn unwrap_at_owned_consumes() {
+        let env = json!({"items":[1,2,3],"_shape":"array"});
+        assert_eq!(unwrap_at_owned("$.items", env), json!([1, 2, 3]));
+        let env = json!({"value":"x","_shape":"string"});
+        assert_eq!(unwrap_at_owned("$.value", env), json!("x"));
+        let plain = json!({"k":1});
+        assert_eq!(unwrap_at_owned("$", plain.clone()), plain);
     }
 
     #[test]
