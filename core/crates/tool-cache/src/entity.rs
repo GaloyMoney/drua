@@ -157,11 +157,21 @@ pub struct ToolInvocation {
     pub summary: serde_json::Value,
     pub raw_text: String,
     pub raw_size_bytes: i64,
+    /// Verbatim copy of the upstream tool's structured value, **unwrapped**.
+    /// `None` for plain-text tools (kubectl tables, log dumps). When the
+    /// upstream returned a top-level array, this holds the array directly,
+    /// not the `{items, _shape}` envelope. The transport-level wrapping is
+    /// reapplied at fetch time via [`crate::wrap_for_transport`].
     pub original_structured: Option<serde_json::Value>,
     pub exit_code: Option<i32>,
     pub duration_ms: i32,
     pub started_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
+    /// `$`, `$.items`, or `$.value` — where the unwrapped value lives within
+    /// the wrapped envelope. Recorded so renderings, fetch queries, and
+    /// compose JS exposure can reconstruct the upstream's actual shape
+    /// without sniffing the envelope keys.
+    pub root_path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -178,4 +188,5 @@ pub struct NewToolInvocation {
     pub exit_code: Option<i32>,
     pub duration_ms: i32,
     pub started_at: DateTime<Utc>,
+    pub root_path: String,
 }

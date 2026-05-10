@@ -192,6 +192,8 @@ impl TopLevelTool for ComposeTool {
                     value: result.value.clone(),
                 },
                 canonical_text: serde_json::to_string(&result.value).unwrap_or_default(),
+                root_path: super::super::classifier::root_path_of_unwrapped(&result.value)
+                    .to_string(),
             });
 
         let (curated_result, result_invocation_id) =
@@ -199,6 +201,7 @@ impl TopLevelTool for ComposeTool {
                 (ToolResultSummary::Passthrough { value }, _) => (value, None),
                 (summary, Some(invocations)) => {
                     let canonical_text = classification.canonical_text;
+                    let root_path = classification.root_path;
                     let curated = render_curated_result(&summary);
                     let original_structured = Some(result.value.clone());
                     let persisted = match super::super::invocation_owner(subject) {
@@ -211,6 +214,7 @@ impl TopLevelTool for ComposeTool {
                                     Classification {
                                         summary,
                                         canonical_text,
+                                        root_path,
                                     },
                                     original_structured,
                                     result.execution_time.as_millis() as u64,
@@ -286,10 +290,17 @@ impl TopLevelTool for ComposeTool {
     }
 }
 
+/// Build the synthetic `CallToolResult` the classifier walks for compose's
+/// top-level return value. Mirrors what `ensure_structured_content` produces
+/// on the regular dispatch path: non-record values are wrapped into the
+/// transport envelope so the classifier's `root_path_of_wrapped` detection
+/// returns the correct path (`$.items` for arrays, `$.value` for strings /
+/// scalars / non-JSON text), not `$`.
 fn build_walker_input(value: &serde_json::Value) -> CallToolResult {
     let text = serde_json::to_string(value).unwrap_or_default();
+    let wrapped = drua_tool_classifier::wrap_non_record(value.clone());
     let mut ctr = CallToolResult::success(vec![Content::text(text)]);
-    ctr.structured_content = Some(value.clone());
+    ctr.structured_content = Some(wrapped);
     ctr
 }
 
@@ -623,9 +634,9 @@ async fn run_searchable_call(
         .call(subject, tool_name, inner_args)
         .await
         .map_err(|e| e.to_string())?;
-    super::super::classifier::ensure_structured_content(&mut result);
+    let root_path = super::super::classifier::ensure_structured_content(&mut result);
 
-    let value = result_to_value(&result);
+    let value = result_to_value(&result, root_path);
     Ok((result, value))
 }
 
@@ -654,17 +665,26 @@ async fn run_top_level_call(
         .call(subject, inner_args)
         .await
         .map_err(|e| e.to_string())?;
-    if !bypass {
-        super::super::classifier::ensure_structured_content(&mut result);
-    }
+    let root_path = if bypass {
+        // top-level tools that opt out of the universal pipeline already
+        // emit a record-shaped `structured_content` (or none). Treat them
+        // as `$` from JS's perspective.
+        "$"
+    } else {
+        super::super::classifier::ensure_structured_content(&mut result)
+    };
 
-    let value = result_to_value(&result);
+    let value = result_to_value(&result, root_path);
     Ok((result, value))
 }
 
-fn result_to_value(result: &CallToolResult) -> serde_json::Value {
+/// JS-engine view of a sub-call's result. Always returns the upstream's
+/// **unwrapped** shape so compose scripts see the same value they would get
+/// by parsing the upstream's text directly — no `_shape` / `value` /
+/// `items` envelope leakage.
+fn result_to_value(result: &CallToolResult, root_path: &str) -> serde_json::Value {
     if let Some(structured) = &result.structured_content {
-        return structured.clone();
+        return drua_tool_classifier::unwrap_at(root_path, structured).clone();
     }
     let text = extract_text(result);
     match serde_json::from_str::<serde_json::Value>(&text) {

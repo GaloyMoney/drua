@@ -15,7 +15,10 @@ mod terraform_install;
 mod terraform_state;
 mod walker;
 
-pub use reify::{ensure_structured_content, wrap_non_record};
+pub use reify::{
+    ensure_structured_content, root_path_of_unwrapped, root_path_of_wrapped, unwrap_at,
+    unwrap_at_owned, wrap_non_record,
+};
 
 pub use bash::BashClassifier;
 pub use cargo::{CargoCheckRun, CargoCompileRun, CargoDownloadRun};
@@ -196,6 +199,11 @@ pub enum ClassifierError {
 pub struct Classification {
     pub summary: ToolResultSummary,
     pub canonical_text: String,
+    /// Where the unwrapped upstream value lives within the wrapped
+    /// `structured_content` envelope. Carried alongside the summary so the
+    /// persistence layer can store the unwrapped form (and the agent's
+    /// fetch/render path can reconstruct the upstream's actual shape).
+    pub root_path: String,
 }
 
 pub trait ResultClassifier: Send + Sync + 'static {
@@ -252,6 +260,10 @@ impl ClassifierRegistry {
                 value: serde_json::Value::String(canonical_text.clone()),
             },
             canonical_text,
+            // Last-ditch fallback path; classifier never inspected the
+            // wrapped form, so we conservatively report "$" — the persistence
+            // layer reconciles by sniffing the actual `structured_content`.
+            root_path: "$".to_string(),
         }
     }
 }
@@ -313,10 +325,16 @@ impl ResultClassifier for GenericFallback {
     }
 
     fn classify(&self, ctx: &ClassifierContext<'_>) -> Result<Classification, ClassifierError> {
-        let value = canonical_value(ctx.raw);
-        let canonical_text = canonical_text_for(&value);
+        let wrapped = canonical_value(ctx.raw);
+        // The walker, canonical-text rendering, and emitted `_recover`
+        // templates all operate on the upstream's *unwrapped* shape. The
+        // wrapping in `structured_content` exists only to satisfy the MCP
+        // transport's record-only contract.
+        let root_path = reify::root_path_of_wrapped(&wrapped);
+        let unwrapped = reify::unwrap_at(root_path, &wrapped);
+        let canonical_text = canonical_text_for(unwrapped);
         let chain = self.summarizer_chain.as_deref();
-        let summary = match walker::classify_value(&value, self.threshold_bytes, chain) {
+        let summary = match walker::classify_value(unwrapped, self.threshold_bytes, chain) {
             walker::WalkOutcome::Passthrough(v) => ToolResultSummary::Passthrough { value: v },
             walker::WalkOutcome::Elided {
                 kept,
@@ -333,6 +351,7 @@ impl ResultClassifier for GenericFallback {
         Ok(Classification {
             summary,
             canonical_text,
+            root_path: root_path.to_string(),
         })
     }
 }

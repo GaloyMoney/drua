@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT\n                id, agent_id, user_id, tool_name, args, args_hash, classifier,\n                summary, raw_text, raw_size_bytes, original_structured,\n                exit_code, duration_ms, started_at, created_at\n            FROM tool_invocations\n            WHERE id = $1\n            ",
+  "query": "\n            SELECT\n                id, agent_id, user_id, tool_name, args, args_hash, classifier,\n                summary, raw_text, raw_size_bytes, original_structured,\n                exit_code, duration_ms, started_at, created_at, root_path\n            FROM tool_invocations\n            WHERE user_id = $1 AND args_hash = $2\n            ORDER BY created_at DESC\n            LIMIT 1\n            ",
   "describe": {
     "columns": [
       {
@@ -77,11 +77,17 @@
         "ordinal": 14,
         "name": "created_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 15,
+        "name": "root_path",
+        "type_info": "Text"
       }
     ],
     "parameters": {
       "Left": [
-        "Uuid"
+        "Uuid",
+        "Bytea"
       ]
     },
     "nullable": [
@@ -99,8 +105,9 @@
       true,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "3f27c8e562341552a5a522d572dd84955b99d64a8a6b03966d47c19bdb431785"
+  "hash": "7833d1b7e3e8e03bb2384e77474ca8bdb0db319cd1f70073cd162cc75ee99365"
 }

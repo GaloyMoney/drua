@@ -63,6 +63,9 @@ impl ResultClassifier for BashClassifier {
                 body,
             },
             canonical_text,
+            // Bash classifier produces a record-shaped body, so the
+            // transport-level wrapping is a no-op.
+            root_path: "$".to_string(),
         })
     }
 }

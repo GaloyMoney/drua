@@ -292,6 +292,157 @@ async fn compose_under_workflow_executor_no_persistence() {
     );
 }
 
+/// Stub whose upstream emits a top-level JSON array as `Content::Text` —
+/// mirrors `github_list_pull_requests`, `lingo_organizations_listEngines`,
+/// etc. The compose JS engine should see the *unwrapped* array, not the
+/// `{items, _shape}` envelope reify wraps for transport.
+struct ArrayRootStub {
+    name: String,
+    tools: Vec<ToolSetEntry>,
+}
+
+impl ArrayRootStub {
+    fn new() -> Self {
+        let mut tool = Tool::default();
+        tool.name = "list_things".to_string().into();
+        tool.description = Some("returns a top-level JSON array".to_string().into());
+        tool.input_schema = Arc::new(JsonObject::default());
+        Self {
+            name: "stub".to_string(),
+            tools: vec![ToolSetEntry {
+                name: "list_things".to_string(),
+                description: tool,
+            }],
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SearchableToolSet for ArrayRootStub {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn category(&self) -> &str {
+        "test"
+    }
+    fn category_description(&self) -> &str {
+        "compose unwrap test stub"
+    }
+    fn tools(&self) -> &[ToolSetEntry] {
+        &self.tools
+    }
+    async fn call(
+        &self,
+        _subject: &AuthSubject,
+        _tool_name: &str,
+        _arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        let arr = json!([{"id":1,"name":"a"},{"id":2,"name":"b"},{"id":3,"name":"c"}]);
+        let text = serde_json::to_string(&arr).unwrap();
+        // Deliberately do NOT pre-populate structured_content — the
+        // dispatcher's `ensure_structured_content` is responsible for
+        // wrapping the text into the transport envelope, and root_path
+        // metadata is what tells `result_to_value` to unwrap before
+        // exposing to JS.
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+}
+
+#[tokio::test]
+async fn compose_top_level_array_persists_with_items_root_path() {
+    // Regression pin for the Bugbot finding: when the JS script returns a
+    // top-level array, the compose top-level classifier used to record
+    // `root_path: "$"` because `build_walker_input` put the raw array
+    // straight into `structured_content`. The fix wraps the value first so
+    // `root_path_of_wrapped` detects the shape correctly. This guarantees
+    // any future consumer of `invocation.root_path` for compose results
+    // sees the upstream's actual shape.
+    let pool = pool().await;
+    let (toolsets, invocations) =
+        build_toolsets_with_invocations(&pool, StubSet::new("stub", "noop", 0)).await;
+
+    let user_id = insert_user(&pool).await;
+    let subject = AuthSubject::User(user_id);
+
+    let big = "x".repeat(200);
+    let result = toolsets
+        .call_top_level_tool(
+            &subject,
+            "compose",
+            compose_args(&format!(
+                "const items = []; \
+                 for (let i = 0; i < 100; i++) {{ items.push({{ id: i, blob: '{}' }}); }} \
+                 return items;",
+                big
+            )),
+        )
+        .await
+        .expect("compose dispatch");
+
+    let env = extract_structured(&result);
+    let recovery_id = env
+        .get("result_invocation_id")
+        .and_then(|v| v.as_str())
+        .expect("large array result must persist");
+    let recovery_uuid: uuid::Uuid = recovery_id.parse().expect("uuid");
+
+    let persisted = invocations
+        .find_by_id(recovery_uuid.into())
+        .await
+        .expect("persisted compose row");
+    assert_eq!(
+        persisted.root_path, "$.items",
+        "compose top-level array results must persist with root_path '$.items', \
+         not the default '$' that build_walker_input's raw value would yield"
+    );
+}
+
+#[tokio::test]
+async fn compose_inner_array_root_is_unwrapped_for_js() {
+    let pool = pool().await;
+    let audit = Arc::new(Audit::new(&pool));
+    let invocations = Arc::new(ToolInvocations::new(&pool));
+    let toolsets = ToolSets::init(
+        ToolSetsConfig::default(),
+        Some(Arc::clone(&audit)),
+        None,
+        Some(Arc::clone(&invocations)),
+    )
+    .await
+    .expect("init toolsets");
+    toolsets.register_searchable(ArrayRootStub::new());
+
+    let user_id = insert_user(&pool).await;
+    let subject = AuthSubject::User(user_id);
+
+    let result = toolsets
+        .call_top_level_tool(
+            &subject,
+            "compose",
+            compose_args(
+                "const r = await tools.stub.list_things({});\
+                 return { isArr: Array.isArray(r), len: r.length, first_id: r[0].id };",
+            ),
+        )
+        .await
+        .expect("compose dispatch");
+
+    let env = extract_structured(&result);
+    assert_eq!(
+        env.get("result").and_then(|v| v.get("isArr")),
+        Some(&json!(true)),
+        "compose JS must see Array.isArray(r) === true (NOT the {{items,_shape}} envelope)",
+    );
+    assert_eq!(
+        env.get("result").and_then(|v| v.get("len")),
+        Some(&json!(3))
+    );
+    assert_eq!(
+        env.get("result").and_then(|v| v.get("first_id")),
+        Some(&json!(1))
+    );
+}
+
 #[tokio::test]
 async fn tool_output_fetch_inside_compose_engine() {
     let pool = pool().await;

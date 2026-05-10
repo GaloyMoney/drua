@@ -73,6 +73,9 @@ impl ResultClassifier for ConcourseBuildLogClassifier {
                 body,
             },
             canonical_text: stripped,
+            // Typed classifier produces a record-shaped `body` ({ logs: "..." }),
+            // so the transport-level wrapping is a no-op.
+            root_path: "$".to_string(),
         })
     }
 }
