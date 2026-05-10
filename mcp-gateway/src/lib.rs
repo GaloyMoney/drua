@@ -9,6 +9,8 @@
 
 use std::sync::Arc;
 
+use serde_json::{Map, Value};
+
 use rmcp::model::{
     CallToolRequestParams, CallToolResult, ErrorCode, ErrorData, ListToolsResult,
     PaginatedRequestParams, ServerCapabilities, ServerInfo, Tool,
@@ -74,14 +76,14 @@ impl McpGateway {
 /// Convert a registered top-level tool into the rmcp wire shape.
 fn to_mcp_tool(tool: &(dyn TopLevelTool + '_)) -> Tool {
     let input_schema = match tool.input_schema() {
-        serde_json::Value::Object(map) => map.clone(),
+        Value::Object(map) => sanitized_mcp_schema(map),
         // Defensive: TopLevelTool::input_schema is contractually an object;
         // fall back to an empty object rather than panic if a tool ever
         // returns something else.
-        _ => serde_json::Map::new(),
+        _ => Map::new(),
     };
     let output_schema = tool.output_schema().and_then(|v| match v {
-        serde_json::Value::Object(map) => Some(Arc::new(map.clone())),
+        Value::Object(map) => Some(Arc::new(sanitized_mcp_schema(map))),
         _ => None,
     });
     let mut t = Tool::default();
@@ -90,6 +92,49 @@ fn to_mcp_tool(tool: &(dyn TopLevelTool + '_)) -> Tool {
     t.input_schema = Arc::new(input_schema);
     t.output_schema = output_schema;
     t
+}
+
+fn sanitized_mcp_schema(schema: &Map<String, Value>) -> Map<String, Value> {
+    let mut value = Value::Object(schema.clone());
+    remove_nonstandard_unsigned_integer_formats(&mut value);
+    match value {
+        Value::Object(map) => map,
+        _ => Map::new(),
+    }
+}
+
+fn remove_nonstandard_unsigned_integer_formats(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            let is_unsigned_integer = map.get("type").and_then(Value::as_str) == Some("integer")
+                && map
+                    .get("format")
+                    .and_then(Value::as_str)
+                    .is_some_and(is_unsigned_integer_format);
+
+            if is_unsigned_integer {
+                map.remove("format");
+                map.entry("minimum".to_string()).or_insert(Value::from(0));
+            }
+
+            for child in map.values_mut() {
+                remove_nonstandard_unsigned_integer_formats(child);
+            }
+        }
+        Value::Array(items) => {
+            for child in items {
+                remove_nonstandard_unsigned_integer_formats(child);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_unsigned_integer_format(format: &str) -> bool {
+    matches!(
+        format,
+        "uint" | "uint8" | "uint16" | "uint32" | "uint64" | "usize"
+    )
 }
 
 impl ServerHandler for McpGateway {
@@ -140,5 +185,74 @@ impl ServerHandler for McpGateway {
                     None::<serde_json::Value>,
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitizes_unsigned_integer_formats_recursively() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "total": { "type": "integer", "format": "uint" },
+                "nested": {
+                    "type": "object",
+                    "properties": {
+                        "execution_time_ms": { "type": "integer", "format": "uint64" },
+                        "seq": { "type": "integer", "format": "uint32", "minimum": 1 }
+                    }
+                },
+                "items": {
+                    "type": "array",
+                    "items": { "type": "integer", "format": "uint16" }
+                }
+            }
+        });
+        let sanitized = sanitized_mcp_schema(schema.as_object().expect("object schema"));
+
+        assert_eq!(sanitized["properties"]["total"]["type"], "integer");
+        assert_eq!(sanitized["properties"]["total"]["minimum"], 0);
+        assert!(sanitized["properties"]["total"].get("format").is_none());
+
+        assert!(
+            sanitized["properties"]["nested"]["properties"]["execution_time_ms"]
+                .get("format")
+                .is_none()
+        );
+        assert_eq!(
+            sanitized["properties"]["nested"]["properties"]["execution_time_ms"]["minimum"],
+            0
+        );
+
+        assert!(sanitized["properties"]["nested"]["properties"]["seq"]
+            .get("format")
+            .is_none());
+        assert_eq!(
+            sanitized["properties"]["nested"]["properties"]["seq"]["minimum"],
+            1
+        );
+
+        assert!(sanitized["properties"]["items"]["items"]
+            .get("format")
+            .is_none());
+    }
+
+    #[test]
+    fn leaves_non_unsigned_formats_unchanged() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "created_at": { "type": "string", "format": "date-time" },
+                "signed": { "type": "integer", "format": "int64" }
+            }
+        });
+        let sanitized = sanitized_mcp_schema(schema.as_object().expect("object schema"));
+
+        assert_eq!(sanitized["properties"]["created_at"]["format"], "date-time");
+        assert_eq!(sanitized["properties"]["signed"]["format"], "int64");
+        assert!(sanitized["properties"]["signed"].get("minimum").is_none());
     }
 }
