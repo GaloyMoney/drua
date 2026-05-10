@@ -186,19 +186,21 @@ impl TopLevelTool for ToolOutputFetch {
 
         // Any `query` (text or json) overrides structured_content with the
         // slice. JSON modes carry a real Value override; text modes (tail/
-        // head/range/grep) become Value::String of the sliced text. This
-        // closes the compose-vs-direct gap: compose's `result_to_value`
-        // reads structured first, so without this generalization text-mode
-        // slices were invisible to JS.
+        // head/range/grep) become Value::String of the sliced text. The
+        // wrap step (`wrap_non_record`) lifts non-object slice results into
+        // the same `{value|items, _shape}` envelope reify uses on the input
+        // side, so the MCP transport's record-only `structuredContent`
+        // contract holds for every recovery template the gateway emits.
+        // Objects pass through unchanged.
         //
         // Without `query`, structured_content reflects the requested view
-        // (full original / typed summary).
+        // (full original / typed summary) — already a record post-reify.
         let final_structured = match &query_outcome {
-            Some(r) => Some(
+            Some(r) => Some(drua_tool_classifier::wrap_non_record(
                 r.structured
                     .clone()
                     .unwrap_or_else(|| serde_json::Value::String(r.content.clone())),
-            ),
+            )),
             None => view_structured,
         };
 
