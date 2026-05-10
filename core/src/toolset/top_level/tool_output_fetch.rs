@@ -184,12 +184,23 @@ impl TopLevelTool for ToolOutputFetch {
             }
         };
 
-        // JSON-mode queries override structured_content with the resolved slice
-        // so MCP-aware consumers see it without parsing the text channel.
-        let final_structured = query_outcome
-            .as_ref()
-            .and_then(|r| r.structured.clone())
-            .or(view_structured);
+        // Any `query` (text or json) overrides structured_content with the
+        // slice. JSON modes carry a real Value override; text modes (tail/
+        // head/range/grep) become Value::String of the sliced text. This
+        // closes the compose-vs-direct gap: compose's `result_to_value`
+        // reads structured first, so without this generalization text-mode
+        // slices were invisible to JS.
+        //
+        // Without `query`, structured_content reflects the requested view
+        // (full original / typed summary).
+        let final_structured = match &query_outcome {
+            Some(r) => Some(
+                r.structured
+                    .clone()
+                    .unwrap_or_else(|| serde_json::Value::String(r.content.clone())),
+            ),
+            None => view_structured,
+        };
 
         let mut ctr = CallToolResult::success(vec![Content::text(content_text)]);
         ctr.structured_content = final_structured;
