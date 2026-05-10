@@ -292,15 +292,17 @@ impl TopLevelTool for ComposeTool {
 
 /// Build the synthetic `CallToolResult` the classifier walks for compose's
 /// top-level return value. Mirrors what `ensure_structured_content` produces
-/// on the regular dispatch path: non-record values are wrapped into the
-/// transport envelope so the classifier's `root_path_of_wrapped` detection
-/// returns the correct path (`$.items` for arrays, `$.value` for strings /
-/// scalars / non-JSON text), not `$`.
+/// Synthetic `CallToolResult` the classifier walks for compose's top-level
+/// return value. The classifier's `canonicalize` helper reads
+/// `structured_content` first — only set when the JS return is a record so
+/// non-record returns flow through the text channel and the classifier
+/// derives root_path from the parsed shape directly.
 fn build_walker_input(value: &serde_json::Value) -> CallToolResult {
     let text = serde_json::to_string(value).unwrap_or_default();
-    let wrapped = drua_tool_classifier::wrap_non_record(value.clone());
     let mut ctr = CallToolResult::success(vec![Content::text(text)]);
-    ctr.structured_content = Some(wrapped);
+    if let serde_json::Value::Object(_) = value {
+        ctr.structured_content = Some(value.clone());
+    }
     ctr
 }
 
@@ -634,9 +636,9 @@ async fn run_searchable_call(
         .call(subject, tool_name, inner_args)
         .await
         .map_err(|e| e.to_string())?;
-    let root_path = super::super::classifier::ensure_structured_content(&mut result);
+    let _ = super::super::classifier::ensure_structured_content(&mut result);
 
-    let value = result_to_value(&result, root_path);
+    let value = result_to_value(&result);
     Ok((result, value))
 }
 
@@ -665,26 +667,22 @@ async fn run_top_level_call(
         .call(subject, inner_args)
         .await
         .map_err(|e| e.to_string())?;
-    let root_path = if bypass {
-        // top-level tools that opt out of the universal pipeline already
-        // emit a record-shaped `structured_content` (or none). Treat them
-        // as `$` from JS's perspective.
-        "$"
-    } else {
-        super::super::classifier::ensure_structured_content(&mut result)
-    };
+    if !bypass {
+        let _ = super::super::classifier::ensure_structured_content(&mut result);
+    }
 
-    let value = result_to_value(&result, root_path);
+    let value = result_to_value(&result);
     Ok((result, value))
 }
 
-/// JS-engine view of a sub-call's result. Always returns the upstream's
-/// **unwrapped** shape so compose scripts see the same value they would get
-/// by parsing the upstream's text directly — no `_shape` / `value` /
-/// `items` envelope leakage.
-fn result_to_value(result: &CallToolResult, root_path: &str) -> serde_json::Value {
+/// JS-engine view of a sub-call's result. Returns the upstream's actual
+/// shape: a record from `structured_content` when set, otherwise the
+/// upstream's text content parsed as JSON (or as a bare `Value::String` if
+/// the text isn't JSON). No `{value|items, _shape}` envelope ever leaks
+/// into JS.
+fn result_to_value(result: &CallToolResult) -> serde_json::Value {
     if let Some(structured) = &result.structured_content {
-        return drua_tool_classifier::unwrap_at(root_path, structured).clone();
+        return structured.clone();
     }
     let text = extract_text(result);
     match serde_json::from_str::<serde_json::Value>(&text) {

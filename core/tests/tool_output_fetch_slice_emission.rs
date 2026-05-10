@@ -1,10 +1,12 @@
 //! Integration tests for `tool_output_fetch` slice/json-mode emission.
 //!
-//! Locks in the contract that every `tool_output_fetch` query result lands in
-//! `structured_content` as a JSON object — never a raw string, array, number,
-//! bool, or null. Without this the MCP transport's record-only
-//! `structuredContent` validation rejects the response and the
-//! gateway-emitted `_recover` templates round-trip-fail.
+//! Locks in the contract that `tool_output_fetch` only sets
+//! `structured_content` when the result is a JSON **object** (record).
+//! Non-record results — text-mode slices, array slices, scalar `json_path`
+//! results, string roots — flow through the `content[].text` channel
+//! verbatim with `structured_content` left as `None`. The MCP transport
+//! accepts a missing `structured_content`, and the agent reads the
+//! upstream's actual shape rather than a `{value|items, _shape}` envelope.
 
 use std::sync::Arc;
 
@@ -50,9 +52,37 @@ async fn insert_user(pool: &sqlx::PgPool) -> UserId {
     id
 }
 
-/// Seed a string-root invocation (root_path `$.value`, `original_structured`
-/// holding a bare `Value::String`). Mirrors what reify produces when the
-/// upstream emits non-JSON text like a kubectl table.
+/// Seed a record-root invocation. `original_structured` holds the parsed
+/// `{items:[…], logs:"…"}` object; root_path is `$`.
+async fn seed_wide(invocations: &ToolInvocations, owner: InvocationOwner) -> ToolInvocationId {
+    let items: Vec<_> = (0..200).map(|i| json!({ "id": i, "tag": "x" })).collect();
+    let logs = (0..200)
+        .map(|i| format!("[line-{i:04}] kube-proxy event"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let payload = json!({ "items": items, "logs": logs });
+    let raw_text = serde_json::to_string(&payload).unwrap();
+    let raw_size_bytes = raw_text.len() as i64;
+    let new = NewToolInvocation {
+        owner,
+        tool_name: "stub_wide".to_string(),
+        args: json!({}),
+        args_hash: vec![1, 2, 3, 4],
+        classifier: "passthrough".to_string(),
+        summary: json!({"kind": "passthrough", "value": payload.clone()}),
+        raw_text,
+        raw_size_bytes,
+        original_structured: Some(payload),
+        exit_code: None,
+        duration_ms: 1,
+        started_at: chrono::Utc::now(),
+        root_path: "$".to_string(),
+    };
+    invocations.persist(new).await.expect("seed").id
+}
+
+/// Seed a string-root invocation: `original_structured` is `None`,
+/// `raw_text` holds the verbatim upstream text, root_path is `$.value`.
 async fn seed_string_root(
     invocations: &ToolInvocations,
     owner: InvocationOwner,
@@ -66,9 +96,9 @@ async fn seed_string_root(
         args_hash: vec![9, 9, 9, 9],
         classifier: "passthrough".to_string(),
         summary: json!({"kind":"passthrough","value":raw_text.clone()}),
-        raw_text: raw_text.clone(),
+        raw_text,
         raw_size_bytes,
-        original_structured: Some(json!(raw_text)),
+        original_structured: None,
         exit_code: None,
         duration_ms: 1,
         started_at: chrono::Utc::now(),
@@ -77,10 +107,8 @@ async fn seed_string_root(
     invocations.persist(new).await.expect("seed").id
 }
 
-/// Seed an array-root invocation (root_path `$.items`,
-/// `original_structured` holding a bare `Value::Array`). Mirrors what reify
-/// produces when the upstream emits a top-level JSON array (github
-/// list-style endpoints, lingo's listers).
+/// Seed an array-root invocation: `original_structured` holds the parsed
+/// `Value::Array`, raw_text is the JSON encoding, root_path is `$.items`.
 async fn seed_array_root(
     invocations: &ToolInvocations,
     owner: InvocationOwner,
@@ -106,39 +134,6 @@ async fn seed_array_root(
     invocations.persist(new).await.expect("seed").id
 }
 
-/// Seed an invocation directly via the persistence layer so the test focuses
-/// on `tool_output_fetch` emission, not on full upstream dispatch. Payload is
-/// `{items:[...], logs:"..."}` — wide enough to exercise array, object,
-/// string field, and raw-text grep paths.
-async fn seed_wide(invocations: &ToolInvocations, owner: InvocationOwner) -> ToolInvocationId {
-    let items: Vec<_> = (0..200).map(|i| json!({ "id": i, "tag": "x" })).collect();
-    let logs = (0..200)
-        .map(|i| format!("[line-{i:04}] kube-proxy event"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let payload = json!({ "items": items, "logs": logs });
-    let raw_text = serde_json::to_string(&payload).unwrap();
-    let raw_size_bytes = raw_text.len() as i64;
-
-    let new = NewToolInvocation {
-        owner,
-        tool_name: "stub_wide".to_string(),
-        args: json!({}),
-        args_hash: vec![1, 2, 3, 4],
-        classifier: "passthrough".to_string(),
-        summary: json!({"kind": "passthrough", "value": payload.clone()}),
-        raw_text,
-        raw_size_bytes,
-        original_structured: Some(payload),
-        exit_code: None,
-        duration_ms: 1,
-        started_at: chrono::Utc::now(),
-        root_path: "$".to_string(),
-    };
-    let persisted = invocations.persist(new).await.expect("seed persist");
-    persisted.id
-}
-
 fn fetch_args(invocation_id: ToolInvocationId, query: serde_json::Value) -> Option<JsonObject> {
     let mut args = JsonObject::new();
     args.insert(
@@ -149,15 +144,20 @@ fn fetch_args(invocation_id: ToolInvocationId, query: serde_json::Value) -> Opti
     Some(args)
 }
 
-fn structured(result: &CallToolResult) -> &serde_json::Value {
+fn text_content(result: &CallToolResult) -> String {
     result
-        .structured_content
-        .as_ref()
-        .expect("tool_output_fetch always emits structured_content")
+        .content
+        .iter()
+        .filter_map(|c| match &c.raw {
+            rmcp::model::RawContent::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[tokio::test]
-async fn json_array_slice_wraps_array_in_items_envelope() {
+async fn json_array_slice_returns_array_in_text_channel_no_envelope() {
     let pool = pool().await;
     let (toolsets, invocations) = build(&pool).await;
     let user_id = insert_user(&pool).await;
@@ -176,17 +176,17 @@ async fn json_array_slice_wraps_array_in_items_envelope() {
         .await
         .expect("dispatch");
 
-    let sc = structured(&result);
-    assert!(sc.is_object(), "json_array_slice must wrap into an object");
-    assert_eq!(sc.get("_shape"), Some(&json!("array")));
-    let items = sc.get("items").and_then(|v| v.as_array()).expect("items");
-    assert_eq!(items.len(), 2);
-    assert_eq!(items[0].get("id"), Some(&json!(1)));
-    assert_eq!(items[1].get("id"), Some(&json!(2)));
+    assert!(
+        result.structured_content.is_none(),
+        "array slice must NOT set structured_content (no envelope leaks to agent)",
+    );
+    let text = text_content(&result);
+    assert!(text.contains("\"id\": 1") || text.contains("\"id\":1"));
+    assert!(text.contains("\"id\": 2") || text.contains("\"id\":2"));
 }
 
 #[tokio::test]
-async fn json_path_to_array_wraps_in_items_envelope() {
+async fn json_path_to_array_returns_array_in_text_channel_no_envelope() {
     let pool = pool().await;
     let (toolsets, invocations) = build(&pool).await;
     let user_id = insert_user(&pool).await;
@@ -202,17 +202,13 @@ async fn json_path_to_array_wraps_in_items_envelope() {
         .await
         .expect("dispatch");
 
-    let sc = structured(&result);
-    assert!(sc.is_object(), "json_path → array must wrap into an object");
-    assert_eq!(sc.get("_shape"), Some(&json!("array")));
-    assert_eq!(
-        sc.get("items").and_then(|v| v.as_array()).map(Vec::len),
-        Some(200)
-    );
+    assert!(result.structured_content.is_none());
+    let text = text_content(&result);
+    assert!(text.contains("\"id\""));
 }
 
 #[tokio::test]
-async fn json_path_to_string_wraps_in_value_envelope() {
+async fn json_path_to_string_returns_string_in_text_channel_no_envelope() {
     let pool = pool().await;
     let (toolsets, invocations) = build(&pool).await;
     let user_id = insert_user(&pool).await;
@@ -228,17 +224,12 @@ async fn json_path_to_string_wraps_in_value_envelope() {
         .await
         .expect("dispatch");
 
-    let sc = structured(&result);
-    assert!(
-        sc.is_object(),
-        "json_path → string must wrap into an object"
-    );
-    assert_eq!(sc.get("_shape"), Some(&json!("string")));
-    assert_eq!(sc.get("value"), Some(&json!("x")));
+    assert!(result.structured_content.is_none());
+    assert!(text_content(&result).contains('x'));
 }
 
 #[tokio::test]
-async fn json_path_to_object_passes_through_unchanged() {
+async fn json_path_to_object_sets_structured_content() {
     let pool = pool().await;
     let (toolsets, invocations) = build(&pool).await;
     let user_id = insert_user(&pool).await;
@@ -254,18 +245,20 @@ async fn json_path_to_object_passes_through_unchanged() {
         .await
         .expect("dispatch");
 
-    let sc = structured(&result);
-    assert!(sc.is_object(), "json_path → object must remain an object");
+    let sc = result
+        .structured_content
+        .expect("object slice must set structured_content");
+    assert!(sc.is_object());
     assert_eq!(sc.get("id"), Some(&json!(0)));
     assert_eq!(sc.get("tag"), Some(&json!("x")));
     assert!(
         sc.get("_shape").is_none(),
-        "object passthrough must not be re-wrapped",
+        "no `_shape` envelope on records"
     );
 }
 
 #[tokio::test]
-async fn grep_text_slice_wraps_in_value_envelope() {
+async fn grep_text_slice_returns_lines_in_text_channel_no_envelope() {
     let pool = pool().await;
     let (toolsets, invocations) = build(&pool).await;
     let user_id = insert_user(&pool).await;
@@ -284,22 +277,36 @@ async fn grep_text_slice_wraps_in_value_envelope() {
         .await
         .expect("dispatch");
 
-    let sc = structured(&result);
-    assert!(sc.is_object(), "grep slice must wrap into an object");
-    assert_eq!(sc.get("_shape"), Some(&json!("string")));
-    let v = sc
-        .get("value")
-        .and_then(|v| v.as_str())
-        .expect("value is a string");
-    assert!(v.contains("line-0001"));
+    assert!(result.structured_content.is_none());
+    assert!(text_content(&result).contains("line-0001"));
 }
 
 #[tokio::test]
-async fn view_original_wraps_string_root_for_transport() {
-    // Persisted state: original_structured is a bare `Value::String`,
-    // root_path is `$.value`. The fetch's view:original must reapply the
-    // envelope so the response satisfies MCP's record-only structuredContent
-    // contract.
+async fn head_text_slice_returns_lines_in_text_channel_no_envelope() {
+    let pool = pool().await;
+    let (toolsets, invocations) = build(&pool).await;
+    let user_id = insert_user(&pool).await;
+    let subject = AuthSubject::User(user_id);
+    let id = seed_wide(&invocations, InvocationOwner::user(user_id)).await;
+
+    let result = toolsets
+        .call_top_level_tool(
+            &subject,
+            "tool_output_fetch",
+            fetch_args(id, json!({"mode":"head","lines":3,"path":"$.logs"})),
+        )
+        .await
+        .expect("dispatch");
+
+    assert!(result.structured_content.is_none());
+    assert!(text_content(&result).contains("line-0000"));
+}
+
+#[tokio::test]
+async fn view_original_on_string_root_returns_raw_text_no_envelope() {
+    // String-root persisted: original_structured is None, raw_text holds the
+    // verbatim upstream text. view:original returns the raw text in the
+    // content channel and leaves structured_content None.
     let pool = pool().await;
     let (toolsets, invocations) = build(&pool).await;
     let user_id = insert_user(&pool).await;
@@ -316,15 +323,14 @@ async fn view_original_wraps_string_root_for_transport() {
         .await
         .expect("dispatch");
 
-    let sc = structured(&result);
-    assert!(sc.is_object(), "view:original on string root must wrap");
-    assert_eq!(sc.get("_shape"), Some(&json!("string")));
-    let v = sc.get("value").and_then(|v| v.as_str()).expect("value");
-    assert!(v.contains("kube-system"));
+    assert!(result.structured_content.is_none());
+    let text = text_content(&result);
+    assert!(text.contains("kube-system"));
+    assert!(text.contains("calico"));
 }
 
 #[tokio::test]
-async fn view_original_wraps_array_root_for_transport() {
+async fn view_original_on_array_root_returns_array_text_no_envelope() {
     let pool = pool().await;
     let (toolsets, invocations) = build(&pool).await;
     let user_id = insert_user(&pool).await;
@@ -341,20 +347,45 @@ async fn view_original_wraps_array_root_for_transport() {
         .await
         .expect("dispatch");
 
-    let sc = structured(&result);
-    assert!(sc.is_object(), "view:original on array root must wrap");
-    assert_eq!(sc.get("_shape"), Some(&json!("array")));
-    assert_eq!(
-        sc.get("items").and_then(|v| v.as_array()).map(Vec::len),
-        Some(3)
-    );
+    assert!(result.structured_content.is_none());
+    let text = text_content(&result);
+    assert!(text.starts_with('['));
+    assert!(text.contains("\"id\""));
 }
 
 #[tokio::test]
-async fn json_path_dollar_on_array_root_returns_wrapped_array() {
+async fn view_original_on_record_root_sets_structured_content() {
+    let pool = pool().await;
+    let (toolsets, invocations) = build(&pool).await;
+    let user_id = insert_user(&pool).await;
+    let subject = AuthSubject::User(user_id);
+    // seed_wide creates a record-rooted invocation (root_path "$").
+    let id = seed_wide(&invocations, InvocationOwner::user(user_id)).await;
+
+    let mut args = JsonObject::new();
+    args.insert(
+        "invocation_id".to_string(),
+        json!(uuid::Uuid::from(id).to_string()),
+    );
+    args.insert("query".to_string(), json!({"mode":"json_path","path":"$"}));
+    let result = toolsets
+        .call_top_level_tool(&subject, "tool_output_fetch", Some(args))
+        .await
+        .expect("dispatch");
+
+    let sc = result
+        .structured_content
+        .expect("record root must set structured_content");
+    assert!(sc.get("items").is_some());
+    assert!(sc.get("logs").is_some());
+}
+
+#[tokio::test]
+async fn json_path_dollar_on_array_root_returns_text_no_envelope() {
     // `_recover` templates emitted by the walker for an array-root
-    // invocation use `path: "$"` (unwrapped space). The query must resolve
-    // against the unwrapped storage and reapply the envelope.
+    // invocation use `path: "$"` (unwrapped space). The query resolves
+    // against the unwrapped storage; the agent reads the array text
+    // without any `{items, _shape}` envelope wrapping.
     let pool = pool().await;
     let (toolsets, invocations) = build(&pool).await;
     let user_id = insert_user(&pool).await;
@@ -370,37 +401,7 @@ async fn json_path_dollar_on_array_root_returns_wrapped_array() {
         .await
         .expect("dispatch");
 
-    let sc = structured(&result);
-    assert_eq!(sc.get("_shape"), Some(&json!("array")));
-    assert_eq!(
-        sc.get("items").and_then(|v| v.as_array()).map(Vec::len),
-        Some(3)
-    );
-}
-
-#[tokio::test]
-async fn head_text_slice_wraps_in_value_envelope() {
-    let pool = pool().await;
-    let (toolsets, invocations) = build(&pool).await;
-    let user_id = insert_user(&pool).await;
-    let subject = AuthSubject::User(user_id);
-    let id = seed_wide(&invocations, InvocationOwner::user(user_id)).await;
-
-    let result = toolsets
-        .call_top_level_tool(
-            &subject,
-            "tool_output_fetch",
-            fetch_args(id, json!({"mode":"head","lines":3,"path":"$.logs"})),
-        )
-        .await
-        .expect("dispatch");
-
-    let sc = structured(&result);
-    assert!(sc.is_object(), "head slice must wrap into an object");
-    assert_eq!(sc.get("_shape"), Some(&json!("string")));
-    let v = sc
-        .get("value")
-        .and_then(|v| v.as_str())
-        .expect("value is a string");
-    assert!(v.contains("line-0000"));
+    assert!(result.structured_content.is_none());
+    let text = text_content(&result);
+    assert!(text.starts_with('['));
 }

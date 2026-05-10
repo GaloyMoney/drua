@@ -184,30 +184,30 @@ impl TopLevelTool for ToolOutputFetch {
             }
         };
 
-        // Any `query` (text or json) overrides structured_content with the
-        // slice. JSON modes carry a real Value override; text modes (tail/
-        // head/range/grep) become Value::String of the sliced text. The
-        // wrap step (`wrap_non_record`) lifts non-object slice results into
-        // the same `{value|items, _shape}` envelope reify uses on the input
-        // side, so the MCP transport's record-only `structuredContent`
-        // contract holds for every recovery template the gateway emits.
-        // Objects pass through unchanged.
+        // `structured_content` is set ONLY when the result is a JSON object
+        // (record). Non-record results — text-mode slices, array roots,
+        // string roots, scalars — flow through the text channel verbatim.
+        // The MCP transport accepts a missing `structured_content`, so the
+        // agent reads clean upstream-shaped text (kubectl tables stay tabular,
+        // markdown stays markdown, JSON arrays stay JSON arrays — no
+        // `{value|items, _shape}` envelope leaks into the response).
         //
         // Without `query`:
         // - `view: "summary"` returns the typed summary (always a record).
-        // - `view: "original"` returns the *unwrapped* upstream value as
-        //   stored. Reapply the transport envelope so the response shape
-        //   honours the wrapper contract — for record roots this is a no-op,
-        //   for array / string / scalar roots it produces `{items|value,
-        //   _shape}`.
+        // - `view: "original"` returns the persisted `original_structured`
+        //   only when it's a record; otherwise leaves it None and the agent
+        //   reads the raw text content.
         let final_structured = match (&query_outcome, input.view) {
-            (Some(r), _) => Some(drua_tool_classifier::wrap_non_record(
-                r.structured
-                    .clone()
-                    .unwrap_or_else(|| serde_json::Value::String(r.content.clone())),
-            )),
-            (None, FetchView::Original) => view_structured
-                .map(|v| drua_tool_cache::wrap_for_transport(v, &invocation.root_path)),
+            (Some(r), _) => match &r.structured {
+                Some(serde_json::Value::Object(map)) => {
+                    Some(serde_json::Value::Object(map.clone()))
+                }
+                _ => None,
+            },
+            (None, FetchView::Original) => match view_structured {
+                Some(serde_json::Value::Object(map)) => Some(serde_json::Value::Object(map)),
+                _ => None,
+            },
             (None, FetchView::Summary) => view_structured,
         };
 

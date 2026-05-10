@@ -1,108 +1,65 @@
-//! Always-populate `structured_content` at the classifier boundary.
-//!
-//! Every dispatch path (regular MCP, compose, catalog) calls this once before
-//! classification, so the universal pipeline always sees the same shape:
-//! `result.structured_content` is `Some(record)` on return, never `None` and
-//! never a raw string / array / scalar.
+//! Classify the upstream value at the dispatch boundary so storage,
+//! rendering, and recovery all key off the upstream's actual shape — without
+//! injecting a transport envelope into the response the agent reads.
 //!
 //! Resolution order:
-//! 1. If `structured_content` is already attached and is already a record →
-//!    leave it alone, root_path is `$`. If it's a non-record, idempotently
-//!    wrap it (so a buggy upstream that pre-populated with `Value::Array`
-//!    can't escape the transport contract).
-//! 2. Combine `content[].text` parts.
-//! 3. Try to parse the combined text as JSON.
-//!    - Object → attach as-is, root_path `$`.
-//!    - Array  → attach `{ "items": [...], "_shape": "array" }`, root_path `$.items`.
-//!    - String → attach `{ "value": "...", "_shape": "string" }`, root_path `$.value`.
-//!    - Number → attach `{ "value": N, "_shape": "number" }`, root_path `$.value`.
-//!    - Bool   → attach `{ "value": B, "_shape": "boolean" }`, root_path `$.value`.
-//!    - Null   → attach `{ "value": null, "_shape": "null" }`, root_path `$.value`.
-//! 4. Parse failure → attach `{ "value": <raw_text>, "_shape": "string" }`,
-//!    root_path `$.value`.
+//! 1. If `structured_content` is already attached and is a record → leave it,
+//!    root_path `$`. If it's a non-record, the upstream tool misused the
+//!    channel — clear it so the agent reads the text content instead. The
+//!    parsed shape still informs root_path metadata for storage.
+//! 2. Otherwise, parse the combined `content[].text` body as JSON:
+//!    - Object → attach as `structured_content`, root_path `$`.
+//!    - Array → leave `structured_content` as `None`, root_path `$.items`.
+//!    - String / Number / Bool / Null → leave `None`, root_path `$.value`.
+//!    - Parse failure / non-JSON text → leave `None`, root_path `$.value`.
 //!
-//! `root_path` rides alongside the wrapped value through the rest of the
-//! pipeline so consumers (walker, canonical-text rendering, `tool_output_fetch`,
-//! compose JS engine) can address the unwrapped upstream value directly. The
-//! envelope only exists to satisfy the MCP transport's record-only
-//! `structuredContent` validation.
+//! Non-record upstreams (kubectl tables, code-assistant markdown, top-level
+//! JSON arrays) flow to the agent through the text channel verbatim; no
+//! `{value|items, _shape}` envelope leaks into the response. `root_path` is
+//! recorded as invocation metadata so the persistence layer, walker, and
+//! `tool_output_fetch` can reconstruct the upstream's shape on demand.
 
 use rmcp::model::CallToolResult;
-use serde_json::{json, Value};
+use serde_json::Value;
 
-/// Mutates `result` so `structured_content` is `Some(record)` on return.
-/// Returns the root_path: where the *unwrapped* upstream value lives within
-/// the wrapped envelope (`$` for records, `$.items` for arrays, `$.value`
-/// for strings / scalars / non-JSON text).
+/// Inspect `result` and return the root_path of the upstream's value:
+/// `$` for records, `$.items` for arrays, `$.value` for strings / scalars
+/// / non-JSON text.
+///
+/// `structured_content` is *only* populated when the parse yields a JSON
+/// object. Non-record values stay in the text content channel — the MCP
+/// transport accepts a missing `structured_content`, and agents reading the
+/// response see the upstream's verbatim text rather than a record envelope.
+/// A pre-populated non-record `structured_content` is treated as upstream
+/// misuse and cleared.
 pub fn ensure_structured_content(result: &mut CallToolResult) -> &'static str {
     if let Some(existing) = result.structured_content.take() {
-        let path = root_path_of_unwrapped(&existing);
-        let wrapped = wrap_non_record(existing);
-        result.structured_content = Some(wrapped);
-        return path;
+        if matches!(existing, Value::Object(_)) {
+            result.structured_content = Some(existing);
+            return "$";
+        }
+        // Non-record pre-set: clear it. root_path reflects the underlying
+        // shape so storage / fetch can reconstruct.
+        return root_path_of_unwrapped(&existing);
     }
     let combined = combined_text(result);
-    let v = reify(combined);
-    let path = root_path_of_wrapped(&v);
-    result.structured_content = Some(v);
-    path
-}
-
-/// Wrap an arbitrary tool-output text into a record-shaped JSON value.
-///
-/// Pure function over a `String` so it can be unit-tested without an
-/// `rmcp::CallToolResult`.
-pub fn reify(text: String) -> Value {
-    if text.trim().is_empty() {
-        return wrap_string(text);
-    }
-    match serde_json::from_str::<Value>(text.trim()) {
-        Ok(v) => wrap_non_record(v),
-        Err(_) => wrap_string(text),
-    }
-}
-
-/// Wrap a `Value` so the result is always a JSON object.
-///
-/// Mirror of [`reify`] for the case where the caller already has a
-/// parsed `Value` (e.g. `tool_output_fetch` slice/json-mode outputs).
-/// Objects pass through unchanged so the function is idempotent.
-pub fn wrap_non_record(v: Value) -> Value {
-    match v {
-        Value::Object(_) => v,
-        Value::Array(items) => json!({ "items": items, "_shape": "array" }),
-        Value::String(s) => json!({ "value": s, "_shape": "string" }),
-        Value::Number(n) => json!({ "value": n, "_shape": "number" }),
-        Value::Bool(b) => json!({ "value": b, "_shape": "boolean" }),
-        Value::Null => json!({ "value": null, "_shape": "null" }),
-    }
-}
-
-fn wrap_string(s: String) -> Value {
-    json!({ "value": s, "_shape": "string" })
-}
-
-/// Where the unwrapped value lives within a wrapped envelope. Pure shape
-/// inspection — used at `ensure_structured_content` time to record the
-/// root_path metadata that the rest of the pipeline keys off.
-pub fn root_path_of_wrapped(v: &Value) -> &'static str {
-    if let Value::Object(map) = v {
-        if map.len() == 2 {
-            if let Some(Value::String(shape)) = map.get("_shape") {
-                match shape.as_str() {
-                    "array" if map.contains_key("items") => return "$.items",
-                    "string" | "number" | "boolean" | "null" if map.contains_key("value") => {
-                        return "$.value"
-                    }
-                    _ => {}
-                }
-            }
+    let parsed = if combined.trim().is_empty() {
+        None
+    } else {
+        serde_json::from_str::<Value>(combined.trim()).ok()
+    };
+    match parsed {
+        Some(Value::Object(map)) => {
+            result.structured_content = Some(Value::Object(map));
+            "$"
         }
+        Some(Value::Array(_)) => "$.items",
+        Some(_) => "$.value",
+        None => "$.value",
     }
-    "$"
 }
 
-/// Inverse of `root_path_of_wrapped`: where would we wrap an unwrapped value?
+/// Where would we record root_path for this *unwrapped* upstream value?
 pub fn root_path_of_unwrapped(v: &Value) -> &'static str {
     match v {
         Value::Object(_) => "$",
@@ -111,31 +68,20 @@ pub fn root_path_of_unwrapped(v: &Value) -> &'static str {
     }
 }
 
-/// Look through a wrapped envelope at `root_path` to the unwrapped upstream
-/// value. Returns the input unchanged for `$` (records).
-pub fn unwrap_at<'a>(root_path: &str, v: &'a Value) -> &'a Value {
-    match root_path {
-        "$" => v,
-        "$.items" => v.get("items").unwrap_or(v),
-        "$.value" => v.get("value").unwrap_or(v),
-        _ => v,
+/// Resolve the upstream value to store / classify, regardless of which
+/// channel the upstream used to deliver it. Returns `None` only when the
+/// upstream emitted no usable shape (empty content, non-JSON text). Used by
+/// the persistence layer to populate `original_structured` and by the
+/// classifier to decide what to walk.
+pub fn canonicalize(result: &CallToolResult) -> Option<Value> {
+    if let Some(sc) = result.structured_content.as_ref() {
+        return Some(sc.clone());
     }
-}
-
-/// Owning version of `unwrap_at`.
-pub fn unwrap_at_owned(root_path: &str, v: Value) -> Value {
-    match root_path {
-        "$" => v,
-        "$.items" => match v {
-            Value::Object(mut map) => map.remove("items").unwrap_or(Value::Object(map)),
-            other => other,
-        },
-        "$.value" => match v {
-            Value::Object(mut map) => map.remove("value").unwrap_or(Value::Object(map)),
-            other => other,
-        },
-        _ => v,
+    let combined = combined_text(result);
+    if combined.trim().is_empty() {
+        return None;
     }
+    serde_json::from_str::<Value>(combined.trim()).ok()
 }
 
 fn combined_text(result: &CallToolResult) -> String {
@@ -155,31 +101,74 @@ fn combined_text(result: &CallToolResult) -> String {
 mod tests {
     use super::*;
     use rmcp::model::Content;
+    use serde_json::json;
 
     #[test]
-    fn object_passes_through_unchanged() {
+    fn object_text_sets_structured_content() {
         let mut r = CallToolResult::success(vec![Content::text(
             r#"{"total":2,"items":[{"id":1},{"id":2}]}"#.to_string(),
         )]);
         let path = ensure_structured_content(&mut r);
         assert_eq!(path, "$");
-        let sc = r.structured_content.expect("structured_content set");
+        let sc = r.structured_content.expect("set for record upstream");
         assert_eq!(sc.get("total"), Some(&json!(2)));
         assert!(sc.get("items").unwrap().is_array());
-        assert!(sc.get("_shape").is_none(), "objects must not be re-wrapped");
     }
 
     #[test]
-    fn array_wraps_into_items_envelope() {
+    fn array_text_leaves_structured_content_none_with_items_root_path() {
         let mut r = CallToolResult::success(vec![Content::text(
             r#"[{"a":1},{"a":2},{"a":3}]"#.to_string(),
         )]);
         let path = ensure_structured_content(&mut r);
         assert_eq!(path, "$.items");
-        let sc = r.structured_content.expect("set");
-        assert!(sc.is_object(), "array must be wrapped as an object");
-        assert_eq!(sc.get("_shape"), Some(&json!("array")));
-        assert_eq!(sc.get("items").unwrap().as_array().unwrap().len(), 3);
+        assert!(
+            r.structured_content.is_none(),
+            "non-record upstreams must NOT set structured_content — agent reads content text",
+        );
+    }
+
+    #[test]
+    fn string_text_leaves_structured_content_none_with_value_root_path() {
+        let raw = "NAMESPACE  KIND  NAME\nkube-system  Pod  calico\n".to_string();
+        let mut r = CallToolResult::success(vec![Content::text(raw.clone())]);
+        let path = ensure_structured_content(&mut r);
+        assert_eq!(path, "$.value");
+        assert!(r.structured_content.is_none());
+        // Original text content is preserved.
+        assert_eq!(combined_text(&r), raw);
+    }
+
+    #[test]
+    fn json_scalar_text_leaves_none_with_value_root_path() {
+        for (text, expected_path) in [
+            ("42", "$.value"),
+            ("true", "$.value"),
+            ("null", "$.value"),
+            (r#""quoted""#, "$.value"),
+        ] {
+            let mut r = CallToolResult::success(vec![Content::text(text.to_string())]);
+            let path = ensure_structured_content(&mut r);
+            assert_eq!(path, expected_path, "scalar {text}");
+            assert!(r.structured_content.is_none(), "scalar {text}");
+        }
+    }
+
+    #[test]
+    fn invalid_json_leaves_none_with_value_root_path() {
+        let raw = r#"{"a": 1, "b":"#.to_string();
+        let mut r = CallToolResult::success(vec![Content::text(raw)]);
+        let path = ensure_structured_content(&mut r);
+        assert_eq!(path, "$.value");
+        assert!(r.structured_content.is_none());
+    }
+
+    #[test]
+    fn empty_content_yields_value_root_path_with_none_structured() {
+        let mut r = CallToolResult::success(vec![]);
+        let path = ensure_structured_content(&mut r);
+        assert_eq!(path, "$.value");
+        assert!(r.structured_content.is_none());
     }
 
     #[test]
@@ -192,219 +181,62 @@ mod tests {
     }
 
     #[test]
-    fn preset_array_idempotently_wraps() {
-        // Defends the transport contract against an upstream that bypasses
-        // text content and stuffs `Value::Array(_)` into `structured_content`
-        // directly.
-        let mut r = CallToolResult::success(vec![]);
+    fn preset_non_record_is_cleared() {
+        // Defends the transport contract: an upstream that misuses the
+        // channel by stuffing a `Value::Array` directly into
+        // `structured_content` would crash the wrapper validation. We clear
+        // it; root_path still reflects the original shape so storage knows
+        // the upstream was array-typed.
+        let mut r = CallToolResult::success(vec![Content::text("[1,2,3]".to_string())]);
         r.structured_content = Some(json!([1, 2, 3]));
         let path = ensure_structured_content(&mut r);
         assert_eq!(path, "$.items");
-        assert_eq!(
-            r.structured_content,
-            Some(json!({"items":[1,2,3],"_shape":"array"})),
-        );
-    }
+        assert!(r.structured_content.is_none());
 
-    #[test]
-    fn preset_string_idempotently_wraps() {
-        let mut r = CallToolResult::success(vec![]);
+        let mut r = CallToolResult::success(vec![Content::text("\"hi\"".to_string())]);
         r.structured_content = Some(json!("hi"));
         let path = ensure_structured_content(&mut r);
         assert_eq!(path, "$.value");
-        assert_eq!(
-            r.structured_content,
-            Some(json!({"value":"hi","_shape":"string"})),
-        );
+        assert!(r.structured_content.is_none());
     }
 
     #[test]
-    fn non_json_text_wraps_as_string_envelope() {
-        let raw = "NAME    READY   STATUS\nfoo     1/1     Running\n".to_string();
-        let mut r = CallToolResult::success(vec![Content::text(raw.clone())]);
-        let path = ensure_structured_content(&mut r);
-        assert_eq!(path, "$.value");
-        let sc = r.structured_content.expect("set");
-        assert_eq!(sc.get("_shape"), Some(&json!("string")));
-        assert_eq!(sc.get("value"), Some(&Value::String(raw)));
+    fn root_path_of_unwrapped_per_shape() {
+        assert_eq!(root_path_of_unwrapped(&json!({"k":1})), "$");
+        assert_eq!(root_path_of_unwrapped(&json!([1, 2])), "$.items");
+        assert_eq!(root_path_of_unwrapped(&json!("hi")), "$.value");
+        assert_eq!(root_path_of_unwrapped(&json!(42)), "$.value");
+        assert_eq!(root_path_of_unwrapped(&json!(true)), "$.value");
+        assert_eq!(root_path_of_unwrapped(&Value::Null), "$.value");
     }
 
     #[test]
-    fn json_string_scalar_wraps_unquoted() {
-        let mut r = CallToolResult::success(vec![Content::text(r#""just a string""#.to_string())]);
-        ensure_structured_content(&mut r);
-        let sc = r.structured_content.expect("set");
-        assert_eq!(sc.get("_shape"), Some(&json!("string")));
-        assert_eq!(sc.get("value"), Some(&json!("just a string")));
+    fn canonicalize_prefers_pre_set_structured_content() {
+        let mut r = CallToolResult::success(vec![Content::text("ignored".to_string())]);
+        r.structured_content = Some(json!({"k": 1}));
+        assert_eq!(canonicalize(&r), Some(json!({"k": 1})));
     }
 
     #[test]
-    fn json_number_wraps_as_number_envelope() {
-        let mut r = CallToolResult::success(vec![Content::text("42".to_string())]);
-        ensure_structured_content(&mut r);
-        let sc = r.structured_content.expect("set");
-        assert_eq!(sc.get("_shape"), Some(&json!("number")));
-        assert_eq!(sc.get("value"), Some(&json!(42)));
+    fn canonicalize_parses_text_when_no_structured_content() {
+        let r = CallToolResult::success(vec![Content::text(r#"[{"a":1},{"a":2}]"#.to_string())]);
+        assert_eq!(canonicalize(&r), Some(json!([{"a":1},{"a":2}])));
+
+        let r = CallToolResult::success(vec![Content::text("42".to_string())]);
+        assert_eq!(canonicalize(&r), Some(json!(42)));
     }
 
     #[test]
-    fn json_bool_wraps_as_boolean_envelope() {
-        let mut r = CallToolResult::success(vec![Content::text("true".to_string())]);
-        ensure_structured_content(&mut r);
-        let sc = r.structured_content.expect("set");
-        assert_eq!(sc.get("_shape"), Some(&json!("boolean")));
-        assert_eq!(sc.get("value"), Some(&json!(true)));
-    }
+    fn canonicalize_returns_none_for_non_json_or_empty() {
+        let r = CallToolResult::success(vec![Content::text(
+            "NAME    READY   STATUS\nfoo  1/1  Running\n".to_string(),
+        )]);
+        assert_eq!(canonicalize(&r), None);
 
-    #[test]
-    fn json_null_wraps_as_null_envelope() {
-        let mut r = CallToolResult::success(vec![Content::text("null".to_string())]);
-        ensure_structured_content(&mut r);
-        let sc = r.structured_content.expect("set");
-        assert_eq!(sc.get("_shape"), Some(&json!("null")));
-        assert_eq!(sc.get("value"), Some(&Value::Null));
-    }
+        let r = CallToolResult::success(vec![]);
+        assert_eq!(canonicalize(&r), None);
 
-    #[test]
-    fn truncated_or_invalid_json_falls_back_to_raw_string() {
-        let raw = r#"{"a": 1, "b":"#.to_string();
-        let mut r = CallToolResult::success(vec![Content::text(raw.clone())]);
-        ensure_structured_content(&mut r);
-        let sc = r.structured_content.expect("set");
-        assert_eq!(sc.get("_shape"), Some(&json!("string")));
-        assert_eq!(sc.get("value"), Some(&Value::String(raw)));
-    }
-
-    #[test]
-    fn parses_with_leading_whitespace() {
-        let mut r = CallToolResult::success(vec![Content::text("  \n\t  [1,2,3]\n".to_string())]);
-        ensure_structured_content(&mut r);
-        let sc = r.structured_content.expect("set");
-        assert_eq!(sc.get("_shape"), Some(&json!("array")));
-        assert_eq!(sc.get("items").unwrap().as_array().unwrap().len(), 3);
-    }
-
-    #[test]
-    fn empty_content_wraps_empty_string() {
-        let mut r = CallToolResult::success(vec![]);
-        ensure_structured_content(&mut r);
-        let sc = r.structured_content.expect("set");
-        assert_eq!(sc.get("_shape"), Some(&json!("string")));
-        assert_eq!(sc.get("value"), Some(&json!("")));
-    }
-
-    #[test]
-    fn wrap_non_record_object_passes_through() {
-        let v = json!({"k": 1});
-        assert_eq!(wrap_non_record(v.clone()), v);
-    }
-
-    #[test]
-    fn wrap_non_record_array_string_number_bool_null() {
-        assert_eq!(
-            wrap_non_record(json!([1, 2, 3])),
-            json!({"items":[1,2,3],"_shape":"array"})
-        );
-        assert_eq!(
-            wrap_non_record(json!("hello")),
-            json!({"value":"hello","_shape":"string"})
-        );
-        assert_eq!(
-            wrap_non_record(json!(7)),
-            json!({"value":7,"_shape":"number"})
-        );
-        assert_eq!(
-            wrap_non_record(json!(false)),
-            json!({"value":false,"_shape":"boolean"})
-        );
-        assert_eq!(
-            wrap_non_record(json!(null)),
-            json!({"value":null,"_shape":"null"})
-        );
-    }
-
-    #[test]
-    fn wrap_non_record_is_idempotent_on_envelopes() {
-        let env = json!({"value":"x","_shape":"string"});
-        assert_eq!(wrap_non_record(env.clone()), env);
-        let arr_env = json!({"items":[1,2],"_shape":"array"});
-        assert_eq!(wrap_non_record(arr_env.clone()), arr_env);
-    }
-
-    #[test]
-    fn root_path_of_wrapped_recognises_each_envelope() {
-        assert_eq!(root_path_of_wrapped(&json!({"a":1})), "$");
-        assert_eq!(
-            root_path_of_wrapped(&json!({"items":[1],"_shape":"array"})),
-            "$.items"
-        );
-        assert_eq!(
-            root_path_of_wrapped(&json!({"value":"x","_shape":"string"})),
-            "$.value"
-        );
-        assert_eq!(
-            root_path_of_wrapped(&json!({"value":7,"_shape":"number"})),
-            "$.value"
-        );
-        // Object that happens to have keys named like the envelope but a
-        // different `_shape` value should NOT be recognised.
-        assert_eq!(
-            root_path_of_wrapped(&json!({"value":"x","_shape":"custom"})),
-            "$"
-        );
-        // Three keys ≠ envelope.
-        assert_eq!(
-            root_path_of_wrapped(&json!({"value":"x","_shape":"string","extra":1})),
-            "$"
-        );
-    }
-
-    #[test]
-    fn unwrap_at_returns_inner_for_each_root_path() {
-        let env = json!({"items":[1,2,3],"_shape":"array"});
-        assert_eq!(unwrap_at("$.items", &env), &json!([1, 2, 3]));
-        let env = json!({"value":"x","_shape":"string"});
-        assert_eq!(unwrap_at("$.value", &env), &json!("x"));
-        let plain = json!({"k":1});
-        assert_eq!(unwrap_at("$", &plain), &plain);
-    }
-
-    #[test]
-    fn unwrap_at_owned_consumes() {
-        let env = json!({"items":[1,2,3],"_shape":"array"});
-        assert_eq!(unwrap_at_owned("$.items", env), json!([1, 2, 3]));
-        let env = json!({"value":"x","_shape":"string"});
-        assert_eq!(unwrap_at_owned("$.value", env), json!("x"));
-        let plain = json!({"k":1});
-        assert_eq!(unwrap_at_owned("$", plain.clone()), plain);
-    }
-
-    #[test]
-    fn reify_helper_directly_records() {
-        assert_eq!(reify(r#"{"k":1}"#.to_string()), json!({"k":1}));
-        assert_eq!(
-            reify("[1,2]".to_string()),
-            json!({"items":[1,2],"_shape":"array"})
-        );
-        assert_eq!(
-            reify("42".to_string()),
-            json!({"value":42,"_shape":"number"})
-        );
-        assert_eq!(
-            reify("true".to_string()),
-            json!({"value":true,"_shape":"boolean"})
-        );
-        assert_eq!(
-            reify("null".to_string()),
-            json!({"value":null,"_shape":"null"})
-        );
-        assert_eq!(
-            reify(r#""hi""#.to_string()),
-            json!({"value":"hi","_shape":"string"}),
-        );
-        assert_eq!(
-            reify("kubectl table".to_string()),
-            json!({"value":"kubectl table","_shape":"string"}),
-        );
+        let r = CallToolResult::success(vec![Content::text("   \n\t  ".to_string())]);
+        assert_eq!(canonicalize(&r), None);
     }
 }
