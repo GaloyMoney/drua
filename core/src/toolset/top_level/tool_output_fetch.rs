@@ -206,9 +206,8 @@ impl TopLevelTool for ToolOutputFetch {
                     .clone()
                     .unwrap_or_else(|| serde_json::Value::String(r.content.clone())),
             )),
-            (None, FetchView::Original) => {
-                view_structured.map(drua_tool_classifier::wrap_non_record)
-            }
+            (None, FetchView::Original) => view_structured
+                .map(|v| drua_tool_cache::wrap_for_transport(v, &invocation.root_path)),
             (None, FetchView::Summary) => view_structured,
         };
 

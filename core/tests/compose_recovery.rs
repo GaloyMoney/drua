@@ -349,6 +349,55 @@ impl SearchableToolSet for ArrayRootStub {
 }
 
 #[tokio::test]
+async fn compose_top_level_array_persists_with_items_root_path() {
+    // Regression pin for the Bugbot finding: when the JS script returns a
+    // top-level array, the compose top-level classifier used to record
+    // `root_path: "$"` because `build_walker_input` put the raw array
+    // straight into `structured_content`. The fix wraps the value first so
+    // `root_path_of_wrapped` detects the shape correctly. This guarantees
+    // any future consumer of `invocation.root_path` for compose results
+    // sees the upstream's actual shape.
+    let pool = pool().await;
+    let (toolsets, invocations) =
+        build_toolsets_with_invocations(&pool, StubSet::new("stub", "noop", 0)).await;
+
+    let user_id = insert_user(&pool).await;
+    let subject = AuthSubject::User(user_id);
+
+    let big = "x".repeat(200);
+    let result = toolsets
+        .call_top_level_tool(
+            &subject,
+            "compose",
+            compose_args(&format!(
+                "const items = []; \
+                 for (let i = 0; i < 100; i++) {{ items.push({{ id: i, blob: '{}' }}); }} \
+                 return items;",
+                big
+            )),
+        )
+        .await
+        .expect("compose dispatch");
+
+    let env = extract_structured(&result);
+    let recovery_id = env
+        .get("result_invocation_id")
+        .and_then(|v| v.as_str())
+        .expect("large array result must persist");
+    let recovery_uuid: uuid::Uuid = recovery_id.parse().expect("uuid");
+
+    let persisted = invocations
+        .find_by_id(recovery_uuid.into())
+        .await
+        .expect("persisted compose row");
+    assert_eq!(
+        persisted.root_path, "$.items",
+        "compose top-level array results must persist with root_path '$.items', \
+         not the default '$' that build_walker_input's raw value would yield"
+    );
+}
+
+#[tokio::test]
 async fn compose_inner_array_root_is_unwrapped_for_js() {
     let pool = pool().await;
     let audit = Arc::new(Audit::new(&pool));

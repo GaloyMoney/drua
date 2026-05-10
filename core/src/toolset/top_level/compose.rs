@@ -290,10 +290,17 @@ impl TopLevelTool for ComposeTool {
     }
 }
 
+/// Build the synthetic `CallToolResult` the classifier walks for compose's
+/// top-level return value. Mirrors what `ensure_structured_content` produces
+/// on the regular dispatch path: non-record values are wrapped into the
+/// transport envelope so the classifier's `root_path_of_wrapped` detection
+/// returns the correct path (`$.items` for arrays, `$.value` for strings /
+/// scalars / non-JSON text), not `$`.
 fn build_walker_input(value: &serde_json::Value) -> CallToolResult {
     let text = serde_json::to_string(value).unwrap_or_default();
+    let wrapped = drua_tool_classifier::wrap_non_record(value.clone());
     let mut ctr = CallToolResult::success(vec![Content::text(text)]);
-    ctr.structured_content = Some(value.clone());
+    ctr.structured_content = Some(wrapped);
     ctr
 }
 
