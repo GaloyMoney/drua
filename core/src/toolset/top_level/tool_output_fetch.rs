@@ -54,18 +54,19 @@ const DESCRIPTION: &str = "Fetch a previously-persisted tool result. Same respon
      Call shape: `{invocation_id, view?, query?}`. \
      `view: 'original'` (default) returns the upstream tool's \
      structured_content; `view: 'summary'` returns the typed \
-     classifier summary instead. \
-     `query` is optional — when present, content[].text carries a \
-     slice. Modes: `tail`/`head` (lines), `range` (offset+len bytes), \
-     `grep` (pattern + rg-style flags), `json_path` (resolve a path \
-     in structured_content), `json_array_slice` (resolve a path to \
-     an array, return [offset..offset+len]). Per-mode args: \
-     `tail`/`head` take `lines`; `range` takes `offset` + `len`; \
+     classifier summary instead — always succeeds with no `query` \
+     (summary is bounded). \
+     `query` is optional. Text-body modes \
+     (`tail`/`head`/`range`/`grep`) put the slice in `content[].text`. \
+     Structured modes (`json_path`/`json_array_slice`) replace \
+     `structured_content` with the slice so MCP-aware consumers see \
+     it directly (text mirrors the same JSON). \
+     Per-mode args: `tail`/`head` take `lines`; `range` takes `offset` + `len`; \
      `grep` takes `pattern` plus `-i`/`-A`/`-B`/`-C`/`-n`/`invert_match`/`head_limit`; \
      `json_path` takes `path` (e.g. `$.data.rows`); `json_array_slice` \
      takes `path` + `offset` + `len`. The `_recover` template inside \
-     elided array sentinels gives you ready-made `json_array_slice` \
-     args.";
+     elided sentinels (or in `elided_paths[]._recover`) gives you \
+     ready-made args.";
 
 #[async_trait::async_trait]
 impl TopLevelTool for ToolOutputFetch {
@@ -126,7 +127,7 @@ impl TopLevelTool for ToolOutputFetch {
         }
 
         let invocation_id_str = uuid::Uuid::from(invocation.id).to_string();
-        let structured = match input.view {
+        let view_structured = match input.view {
             FetchView::Original => invocation.original_structured.clone(),
             FetchView::Summary => {
                 let mut s = invocation.summary.clone();
@@ -138,14 +139,14 @@ impl TopLevelTool for ToolOutputFetch {
             }
         };
 
-        let content_text = match input.query {
+        let query_outcome = match input.query.as_ref() {
             Some(q) => {
                 match crate::toolset::tool_invocations::apply_fetch_query(
                     &invocation.raw_text,
                     invocation.original_structured.as_ref(),
-                    &q,
+                    q,
                 ) {
-                    Ok(r) => r.content,
+                    Ok(r) => Some(r),
                     Err(e) => {
                         return Ok(CallToolResult::error(vec![Content::text(format!(
                             "tool_output_fetch failed: {e}"
@@ -153,24 +154,41 @@ impl TopLevelTool for ToolOutputFetch {
                     }
                 }
             }
-            None => {
+            None => None,
+        };
+
+        let content_text = match (&query_outcome, input.view) {
+            (Some(r), _) => r.content.clone(),
+            (None, FetchView::Summary) => view_structured
+                .as_ref()
+                .map(|s| serde_json::to_string_pretty(s).unwrap_or_default())
+                .unwrap_or_default(),
+            (None, FetchView::Original) => {
                 let total = invocation.raw_text.len();
                 if total > FETCH_MAX_UNQUERIED_BYTES {
                     return Ok(CallToolResult::error(vec![Content::text(format!(
                         "tool_output_fetch refused: invocation has {total} bytes \
-                         (no-query limit {FETCH_MAX_UNQUERIED_BYTES}). \
-                         Re-call with `query`: \
-                         `tail`/`head` (lines), `range` (offset+len), \
-                         or `grep` (pattern). \
-                         Use `view: \"summary\"` for the classifier summary."
+                         (no-query limit {FETCH_MAX_UNQUERIED_BYTES}). Either: \
+                         (a) call with `view: \"summary\"` for the typed classifier \
+                         summary (always succeeds, bounded size); \
+                         (b) call with `query`: \
+                         `tail`/`head`/`range`/`grep` for text slices, or \
+                         `json_path`/`json_array_slice` for structured slices."
                     ))]));
                 }
                 invocation.raw_text.clone()
             }
         };
 
+        // JSON-mode queries override structured_content with the resolved slice
+        // so MCP-aware consumers see it without parsing the text channel.
+        let final_structured = query_outcome
+            .as_ref()
+            .and_then(|r| r.structured.clone())
+            .or(view_structured);
+
         let mut ctr = CallToolResult::success(vec![Content::text(content_text)]);
-        ctr.structured_content = structured;
+        ctr.structured_content = final_structured;
         Ok(ctr)
     }
 }

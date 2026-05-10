@@ -78,6 +78,11 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct FetchResult {
     pub content: String,
+    /// JSON-mode queries (`json_path`, `json_array_slice`) populate this so
+    /// callers can place the slice into `structured_content` instead of leaving
+    /// MCP-aware consumers to dig through the text channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured: Option<serde_json::Value>,
     pub total_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elision: Option<FetchElision>,
@@ -298,7 +303,7 @@ pub fn apply_fetch_query(
 ) -> Result<FetchResult, ToolInvocationError> {
     let total_bytes = raw.len() as u64;
 
-    let content = match query {
+    let structured_override: Option<serde_json::Value> = match query {
         FetchQuery::JsonPath { path } => {
             let root = structured.ok_or_else(|| {
                 ToolInvocationError::InvalidPattern(
@@ -310,7 +315,7 @@ pub fn apply_fetch_query(
                     "json_path {path:?} did not resolve in structured_content"
                 ))
             })?;
-            serde_json::to_string_pretty(value).unwrap_or_default()
+            Some(value.clone())
         }
         FetchQuery::JsonArraySlice { path, offset, len } => {
             let root = structured.ok_or_else(|| {
@@ -333,8 +338,16 @@ pub fn apply_fetch_query(
             let total = array.len();
             let start = (*offset as usize).min(total);
             let end = (start + *len as usize).min(total);
-            let slice: Vec<&serde_json::Value> = array[start..end].iter().collect();
-            serde_json::to_string_pretty(&slice).unwrap_or_default()
+            let slice: Vec<serde_json::Value> = array[start..end].iter().cloned().collect();
+            Some(serde_json::Value::Array(slice))
+        }
+        _ => None,
+    };
+
+    let content = match query {
+        FetchQuery::JsonPath { .. } | FetchQuery::JsonArraySlice { .. } => {
+            serde_json::to_string_pretty(structured_override.as_ref().expect("set above"))
+                .unwrap_or_default()
         }
         FetchQuery::Tail { lines } => {
             let n = *lines as usize;
@@ -431,6 +444,7 @@ pub fn apply_fetch_query(
 
     Ok(FetchResult {
         content,
+        structured: structured_override,
         total_bytes,
         elision,
     })
@@ -832,6 +846,57 @@ mod tests {
         .unwrap_err();
         let s = err.to_string().to_lowercase();
         assert!(s.contains("structured_content"));
+    }
+
+    #[test]
+    fn json_path_query_populates_structured_override() {
+        let structured = serde_json::json!({"user": {"name": "alice", "id": 42}});
+        let r = apply_fetch_query(
+            "irrelevant raw",
+            Some(&structured),
+            &FetchQuery::JsonPath {
+                path: "$.user".into(),
+            },
+        )
+        .unwrap();
+        let s = r.structured.expect("json_path sets structured override");
+        assert_eq!(s.get("name"), Some(&serde_json::json!("alice")));
+        assert_eq!(s.get("id"), Some(&serde_json::json!(42)));
+    }
+
+    #[test]
+    fn json_array_slice_query_populates_structured_override() {
+        let structured = serde_json::json!({
+            "hits": [{"id": 0}, {"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}]
+        });
+        let r = apply_fetch_query(
+            "irrelevant raw",
+            Some(&structured),
+            &FetchQuery::JsonArraySlice {
+                path: "$.hits".into(),
+                offset: 1,
+                len: 2,
+            },
+        )
+        .unwrap();
+        let s = r
+            .structured
+            .expect("json_array_slice sets structured override");
+        let arr = s.as_array().expect("override is an array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0].get("id"), Some(&serde_json::json!(1)));
+        assert_eq!(arr[1].get("id"), Some(&serde_json::json!(2)));
+    }
+
+    #[test]
+    fn text_modes_do_not_set_structured_override() {
+        let r = apply_fetch_query(sample(), None, &FetchQuery::Tail { lines: 1 }).unwrap();
+        assert!(r.structured.is_none());
+        let r = apply_fetch_query(sample(), None, &grep_pattern("error")).unwrap();
+        assert!(r.structured.is_none());
+        let r =
+            apply_fetch_query(sample(), None, &FetchQuery::Range { offset: 0, len: 5 }).unwrap();
+        assert!(r.structured.is_none());
     }
 
     #[test]
