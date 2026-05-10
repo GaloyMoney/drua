@@ -21,31 +21,40 @@ use repo::ToolInvocationRepo;
 #[derive(Debug, Clone, Deserialize, Serialize, schemars::JsonSchema)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum FetchQuery {
+    /// Last `lines` lines of the text body. Defaults to whole `raw_text`;
+    /// pass `path` to address a string within `structured_content`.
     Tail {
         lines: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
     },
+    /// First `lines` lines of the text body.
     Head {
         lines: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
     },
+    /// Byte slice `[offset..offset+len]` of the text body.
     Range {
         offset: u64,
         len: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
     },
     /// JSON-path lookup against the persisted `original_structured`.
     /// `path` like `$.foo.bar[3]`; returns the value at that path.
-    JsonPath {
-        path: String,
-    },
+    JsonPath { path: String },
     /// JSON-path lookup that resolves to an array, then slices it.
     /// `path` like `$.hits`; returns `array[offset..offset+len]`.
-    JsonArraySlice {
-        path: String,
-        offset: u32,
-        len: u32,
-    },
+    JsonArraySlice { path: String, offset: u32, len: u32 },
     /// Line-grep with rg-style flags; cross-line patterns not supported.
+    /// `path` addresses a string within `structured_content`; line numbers
+    /// (`-n`) are relative to the resolved body, not raw_text.
     Grep {
         pattern: String,
+
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        path: Option<String>,
 
         #[serde(rename = "-i", default)]
         case_insensitive: bool,
@@ -78,6 +87,11 @@ fn default_true() -> bool {
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct FetchResult {
     pub content: String,
+    /// JSON-mode queries (`json_path`, `json_array_slice`) populate this so
+    /// callers can place the slice into `structured_content` instead of leaving
+    /// MCP-aware consumers to dig through the text channel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured: Option<serde_json::Value>,
     pub total_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elision: Option<FetchElision>,
@@ -272,19 +286,34 @@ fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId, raw_size_byt
     summary.render_envelope_text(&uuid::Uuid::from(id).to_string(), raw_size_bytes)
 }
 
+/// Substitutes `RECOVERY_INVOCATION_PLACEHOLDER` with the actual invocation
+/// UUID inside `_recover` templates. Recovery info lives exclusively in
+/// `elided_paths[]._recover`; this only touches that location, never user data
+/// inside `kept`.
 pub fn substitute_recovery_placeholder(value: &mut serde_json::Value, invocation_id: &str) {
+    let Some(paths) = value.get_mut("elided_paths").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    for entry in paths {
+        if let Some(recover) = entry.get_mut("_recover") {
+            substitute_in_value(recover, invocation_id);
+        }
+    }
+}
+
+fn substitute_in_value(value: &mut serde_json::Value, invocation_id: &str) {
     match value {
         serde_json::Value::String(s) if s == RECOVERY_INVOCATION_PLACEHOLDER => {
             *s = invocation_id.to_string();
         }
         serde_json::Value::Array(items) => {
             for item in items {
-                substitute_recovery_placeholder(item, invocation_id);
+                substitute_in_value(item, invocation_id);
             }
         }
         serde_json::Value::Object(map) => {
             for v in map.values_mut() {
-                substitute_recovery_placeholder(v, invocation_id);
+                substitute_in_value(v, invocation_id);
             }
         }
         _ => {}
@@ -298,7 +327,7 @@ pub fn apply_fetch_query(
 ) -> Result<FetchResult, ToolInvocationError> {
     let total_bytes = raw.len() as u64;
 
-    let content = match query {
+    let structured_override: Option<serde_json::Value> = match query {
         FetchQuery::JsonPath { path } => {
             let root = structured.ok_or_else(|| {
                 ToolInvocationError::InvalidPattern(
@@ -310,7 +339,7 @@ pub fn apply_fetch_query(
                     "json_path {path:?} did not resolve in structured_content"
                 ))
             })?;
-            serde_json::to_string_pretty(value).unwrap_or_default()
+            Some(value.clone())
         }
         FetchQuery::JsonArraySlice { path, offset, len } => {
             let root = structured.ok_or_else(|| {
@@ -333,32 +362,43 @@ pub fn apply_fetch_query(
             let total = array.len();
             let start = (*offset as usize).min(total);
             let end = (start + *len as usize).min(total);
-            let slice: Vec<&serde_json::Value> = array[start..end].iter().collect();
-            serde_json::to_string_pretty(&slice).unwrap_or_default()
+            Some(serde_json::Value::Array(array[start..end].to_vec()))
         }
-        FetchQuery::Tail { lines } => {
+        _ => None,
+    };
+
+    let content = match query {
+        FetchQuery::JsonPath { .. } | FetchQuery::JsonArraySlice { .. } => {
+            serde_json::to_string_pretty(structured_override.as_ref().expect("set above"))
+                .unwrap_or_default()
+        }
+        FetchQuery::Tail { lines, path } => {
+            let body = resolve_text_body(raw, structured, path.as_deref(), "tail")?;
             let n = *lines as usize;
-            let collected: Vec<&str> = raw.lines().collect();
+            let collected: Vec<&str> = body.lines().collect();
             let start = collected.len().saturating_sub(n);
             collected[start..].join("\n")
         }
-        FetchQuery::Head { lines } => {
+        FetchQuery::Head { lines, path } => {
+            let body = resolve_text_body(raw, structured, path.as_deref(), "head")?;
             let n = *lines as usize;
-            raw.lines().take(n).collect::<Vec<&str>>().join("\n")
+            body.lines().take(n).collect::<Vec<&str>>().join("\n")
         }
-        FetchQuery::Range { offset, len } => {
+        FetchQuery::Range { offset, len, path } => {
+            let body = resolve_text_body(raw, structured, path.as_deref(), "range")?;
             let start = *offset as usize;
-            if start >= raw.len() {
+            if start >= body.len() {
                 String::new()
             } else {
-                let end = (start + *len as usize).min(raw.len());
-                let end = floor_char_boundary(raw, end);
-                let start = floor_char_boundary(raw, start);
-                raw[start..end].to_string()
+                let end = (start + *len as usize).min(body.len());
+                let end = floor_char_boundary(&body, end);
+                let start = floor_char_boundary(&body, start);
+                body[start..end].to_string()
             }
         }
         FetchQuery::Grep {
             pattern,
+            path,
             case_insensitive,
             after_context,
             before_context,
@@ -367,6 +407,7 @@ pub fn apply_fetch_query(
             invert_match,
             head_limit,
         } => {
+            let body = resolve_text_body(raw, structured, path.as_deref(), "grep")?;
             if pattern.len() > MAX_GREP_PATTERN_LENGTH {
                 return Err(ToolInvocationError::InvalidPattern(format!(
                     "grep pattern too long ({} chars, max {MAX_GREP_PATTERN_LENGTH})",
@@ -377,7 +418,7 @@ pub fn apply_fetch_query(
                 .case_insensitive(*case_insensitive)
                 .build()
                 .map_err(|e| ToolInvocationError::InvalidPattern(format!("invalid regex: {e}")))?;
-            let lines: Vec<&str> = raw.lines().collect();
+            let lines: Vec<&str> = body.lines().collect();
 
             let (before, after) = match (before_context, after_context) {
                 (None, None) => {
@@ -431,6 +472,7 @@ pub fn apply_fetch_query(
 
     Ok(FetchResult {
         content,
+        structured: structured_override,
         total_bytes,
         elision,
     })
@@ -438,10 +480,10 @@ pub fn apply_fetch_query(
 
 fn refine_hint(query: &FetchQuery) -> String {
     match query {
-        FetchQuery::Tail { lines } => format!(
+        FetchQuery::Tail { lines, .. } => format!(
             "lower `lines` (currently {lines}); or switch to `range` for a known byte window"
         ),
-        FetchQuery::Head { lines } => format!(
+        FetchQuery::Head { lines, .. } => format!(
             "lower `lines` (currently {lines}); or switch to `range` for a known byte window"
         ),
         FetchQuery::Range { len, .. } => format!(
@@ -478,6 +520,40 @@ fn refine_hint(query: &FetchQuery) -> String {
         FetchQuery::JsonArraySlice { path, len, .. } => format!(
             "lower `len` (currently {len}) at `path` {path:?}; or step the slice with `offset`"
         ),
+    }
+}
+
+/// Resolves the text body that text-mode queries (`tail`/`head`/`range`/`grep`)
+/// operate on. With `path = None` (or `"$"`), the body is the persisted
+/// `raw_text`. With `path = Some("$.foo.bar")`, the body is the resolved
+/// string value at that path in `structured_content`.
+fn resolve_text_body<'a>(
+    raw: &'a str,
+    structured: Option<&'a serde_json::Value>,
+    path: Option<&str>,
+    mode: &str,
+) -> Result<std::borrow::Cow<'a, str>, ToolInvocationError> {
+    let path = match path {
+        None => return Ok(std::borrow::Cow::Borrowed(raw)),
+        Some(p) if p == "$" || p.is_empty() => return Ok(std::borrow::Cow::Borrowed(raw)),
+        Some(p) => p,
+    };
+    let root = structured.ok_or_else(|| {
+        ToolInvocationError::InvalidPattern(format!(
+            "{mode} with `path` requested but invocation has no structured_content"
+        ))
+    })?;
+    let value = resolve_json_path(root, path).ok_or_else(|| {
+        ToolInvocationError::InvalidPattern(format!(
+            "{mode} `path` {path:?} did not resolve in structured_content"
+        ))
+    })?;
+    match value {
+        serde_json::Value::String(s) => Ok(std::borrow::Cow::Borrowed(s.as_str())),
+        other => Err(ToolInvocationError::InvalidPattern(format!(
+            "{mode} `path` {path:?} resolved to {} (need string)",
+            json_kind_name(other)
+        ))),
     }
 }
 
@@ -566,7 +642,15 @@ mod tests {
 
     #[test]
     fn tail_returns_last_n_lines() {
-        let r = apply_fetch_query(sample(), None, &FetchQuery::Tail { lines: 2 }).unwrap();
+        let r = apply_fetch_query(
+            sample(),
+            None,
+            &FetchQuery::Tail {
+                lines: 2,
+                path: None,
+            },
+        )
+        .unwrap();
         assert_eq!(r.content, "echo\nfoxtrot");
         assert!(r.elision.is_none());
         assert_eq!(r.total_bytes, sample().len() as u64);
@@ -574,20 +658,37 @@ mod tests {
 
     #[test]
     fn head_returns_first_n_lines() {
-        let r = apply_fetch_query(sample(), None, &FetchQuery::Head { lines: 1 }).unwrap();
+        let r = apply_fetch_query(
+            sample(),
+            None,
+            &FetchQuery::Head {
+                lines: 1,
+                path: None,
+            },
+        )
+        .unwrap();
         assert_eq!(r.content, "alpha");
     }
 
     #[test]
     fn range_slices_bytes() {
-        let r =
-            apply_fetch_query(sample(), None, &FetchQuery::Range { offset: 0, len: 5 }).unwrap();
+        let r = apply_fetch_query(
+            sample(),
+            None,
+            &FetchQuery::Range {
+                offset: 0,
+                len: 5,
+                path: None,
+            },
+        )
+        .unwrap();
         assert_eq!(r.content, "alpha");
     }
 
     fn grep_pattern(pattern: &str) -> FetchQuery {
         FetchQuery::Grep {
             pattern: pattern.to_string(),
+            path: None,
             case_insensitive: false,
             after_context: None,
             before_context: None,
@@ -682,6 +783,7 @@ mod tests {
             &FetchQuery::Range {
                 offset: 0,
                 len: u32::MAX,
+                path: None,
             },
         )
         .unwrap();
@@ -698,6 +800,7 @@ mod tests {
     fn refine_hint_grep_unset_head_limit_suggests_setting_one() {
         let q = FetchQuery::Grep {
             pattern: "err".into(),
+            path: None,
             case_insensitive: false,
             after_context: None,
             before_context: None,
@@ -715,6 +818,7 @@ mod tests {
     fn refine_hint_grep_with_context_suggests_reducing() {
         let q = FetchQuery::Grep {
             pattern: "err".into(),
+            path: None,
             case_insensitive: false,
             after_context: Some(3),
             before_context: Some(2),
@@ -832,6 +936,231 @@ mod tests {
         .unwrap_err();
         let s = err.to_string().to_lowercase();
         assert!(s.contains("structured_content"));
+    }
+
+    #[test]
+    fn json_path_query_populates_structured_override() {
+        let structured = serde_json::json!({"user": {"name": "alice", "id": 42}});
+        let r = apply_fetch_query(
+            "irrelevant raw",
+            Some(&structured),
+            &FetchQuery::JsonPath {
+                path: "$.user".into(),
+            },
+        )
+        .unwrap();
+        let s = r.structured.expect("json_path sets structured override");
+        assert_eq!(s.get("name"), Some(&serde_json::json!("alice")));
+        assert_eq!(s.get("id"), Some(&serde_json::json!(42)));
+    }
+
+    #[test]
+    fn json_array_slice_query_populates_structured_override() {
+        let structured = serde_json::json!({
+            "hits": [{"id": 0}, {"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}]
+        });
+        let r = apply_fetch_query(
+            "irrelevant raw",
+            Some(&structured),
+            &FetchQuery::JsonArraySlice {
+                path: "$.hits".into(),
+                offset: 1,
+                len: 2,
+            },
+        )
+        .unwrap();
+        let s = r
+            .structured
+            .expect("json_array_slice sets structured override");
+        let arr = s.as_array().expect("override is an array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0].get("id"), Some(&serde_json::json!(1)));
+        assert_eq!(arr[1].get("id"), Some(&serde_json::json!(2)));
+    }
+
+    #[test]
+    fn text_modes_do_not_set_structured_override() {
+        let r = apply_fetch_query(
+            sample(),
+            None,
+            &FetchQuery::Tail {
+                lines: 1,
+                path: None,
+            },
+        )
+        .unwrap();
+        assert!(r.structured.is_none());
+        let r = apply_fetch_query(sample(), None, &grep_pattern("error")).unwrap();
+        assert!(r.structured.is_none());
+        let r = apply_fetch_query(
+            sample(),
+            None,
+            &FetchQuery::Range {
+                offset: 0,
+                len: 5,
+                path: None,
+            },
+        )
+        .unwrap();
+        assert!(r.structured.is_none());
+    }
+
+    #[test]
+    fn tail_with_path_resolves_nested_string() {
+        let structured = serde_json::json!({"logs": "line1\nline2\nline3\nline4\nline5"});
+        let r = apply_fetch_query(
+            "irrelevant raw",
+            Some(&structured),
+            &FetchQuery::Tail {
+                lines: 2,
+                path: Some("$.logs".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(r.content, "line4\nline5");
+    }
+
+    #[test]
+    fn head_with_path_resolves_nested_string() {
+        let structured = serde_json::json!({"data": {"text": "a\nb\nc\nd\ne"}});
+        let r = apply_fetch_query(
+            "irrelevant raw",
+            Some(&structured),
+            &FetchQuery::Head {
+                lines: 2,
+                path: Some("$.data.text".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(r.content, "a\nb");
+    }
+
+    #[test]
+    fn range_with_path_slices_nested_string() {
+        let structured = serde_json::json!({"body": "0123456789ABCDEF"});
+        let r = apply_fetch_query(
+            "irrelevant raw",
+            Some(&structured),
+            &FetchQuery::Range {
+                offset: 4,
+                len: 4,
+                path: Some("$.body".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(r.content, "4567");
+    }
+
+    #[test]
+    fn grep_with_path_resolves_nested_string_and_relative_line_numbers() {
+        let structured = serde_json::json!({
+            "logs": "line1\nERROR: bad\nline3\nERROR: worse\nline5"
+        });
+        let r = apply_fetch_query(
+            "irrelevant raw",
+            Some(&structured),
+            &FetchQuery::Grep {
+                pattern: "ERROR".into(),
+                path: Some("$.logs".into()),
+                case_insensitive: false,
+                after_context: None,
+                before_context: None,
+                context: None,
+                line_numbers: true,
+                invert_match: false,
+                head_limit: None,
+            },
+        )
+        .unwrap();
+        // Line numbers are relative to the resolved string body, not raw_text.
+        assert_eq!(r.content, "2:ERROR: bad\n4:ERROR: worse");
+    }
+
+    #[test]
+    fn path_set_but_no_structured_content_errors_helpfully() {
+        let err = apply_fetch_query(
+            "raw text",
+            None,
+            &FetchQuery::Tail {
+                lines: 1,
+                path: Some("$.logs".into()),
+            },
+        )
+        .unwrap_err();
+        let s = err.to_string().to_lowercase();
+        assert!(s.contains("structured_content"));
+    }
+
+    #[test]
+    fn path_resolves_to_non_string_errors_helpfully() {
+        let structured = serde_json::json!({"items": [1, 2, 3]});
+        let err = apply_fetch_query(
+            "raw text",
+            Some(&structured),
+            &FetchQuery::Tail {
+                lines: 1,
+                path: Some("$.items".into()),
+            },
+        )
+        .unwrap_err();
+        let s = err.to_string().to_lowercase();
+        assert!(s.contains("array") && s.contains("string"));
+    }
+
+    #[test]
+    fn path_dollar_or_empty_treated_as_raw_text() {
+        let structured = serde_json::json!({"logs": "ignored"});
+        let r = apply_fetch_query(
+            "alpha\nbravo\ncharlie",
+            Some(&structured),
+            &FetchQuery::Tail {
+                lines: 2,
+                path: Some("$".into()),
+            },
+        )
+        .unwrap();
+        assert_eq!(r.content, "bravo\ncharlie");
+    }
+
+    #[test]
+    fn substitute_only_visits_elided_paths_recover() {
+        let mut summary = serde_json::json!({
+            "kind": "structured_elision",
+            "kept": {
+                // User data string that *coincidentally* matches the placeholder.
+                // Must not be substituted.
+                "user_field": "<this-invocation>"
+            },
+            "elided_paths": [{
+                "path": "$.foo",
+                "kind": "string",
+                "bytes": 100,
+                "_recover": {
+                    "args_template": {
+                        "invocation_id": "<this-invocation>",
+                        "view": "original"
+                    }
+                }
+            }]
+        });
+        substitute_recovery_placeholder(&mut summary, "actual-uuid");
+        // The recover template's invocation_id was substituted.
+        assert_eq!(
+            summary["elided_paths"][0]["_recover"]["args_template"]["invocation_id"],
+            serde_json::json!("actual-uuid")
+        );
+        // The user data string was NOT touched.
+        assert_eq!(
+            summary["kept"]["user_field"],
+            serde_json::json!("<this-invocation>")
+        );
+    }
+
+    #[test]
+    fn substitute_handles_envelope_without_elided_paths() {
+        let mut v = serde_json::json!({"kind": "passthrough", "value": 42});
+        substitute_recovery_placeholder(&mut v, "actual-uuid");
+        assert_eq!(v, serde_json::json!({"kind": "passthrough", "value": 42}));
     }
 
     #[test]

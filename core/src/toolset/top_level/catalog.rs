@@ -384,18 +384,7 @@ impl CallCatalogTool {
         prefixed_name: &str,
     ) -> Option<(Arc<dyn SearchableToolSet>, String)> {
         let sets = self.sets.read().expect("toolset lock poisoned");
-        for set in sets.iter() {
-            if !set.is_visible(subject) {
-                continue;
-            }
-            let prefix = format!("{}_", set.prefix());
-            if let Some(tool_name) = prefixed_name.strip_prefix(&prefix) {
-                if set.tools().iter().any(|t| t.name == tool_name) {
-                    return Some((Arc::clone(set), tool_name.to_string()));
-                }
-            }
-        }
-        None
+        super::super::dispatch::find_searchable(sets.iter(), subject, prefixed_name)
     }
 }
 
@@ -460,6 +449,19 @@ impl TopLevelTool for CallCatalogTool {
             .find_set(subject, &tool_name)
             .ok_or_else(|| ToolSetsError::ToolNotFound(tool_name.clone()))?;
 
+        // Auto-parse inner_args against the upstream tool's input schema —
+        // the outer call_tool envelope only declares `arguments: object`, so
+        // stringified JSON inside individual upstream-arg fields wouldn't
+        // otherwise be parsed.
+        let inner_args = inner_args.map(|mut a| {
+            if let Some(entry) = set.tools().iter().find(|t| t.name == name) {
+                let schema =
+                    serde_json::Value::Object(entry.description.input_schema.as_ref().clone());
+                super::super::auto_parse_args::auto_parse_stringified_json_args(&mut a, &schema);
+            }
+            a
+        });
+
         Audit::record_action(format!("catalog: {}", tool_name));
 
         let started_at = chrono::Utc::now();
@@ -467,7 +469,8 @@ impl TopLevelTool for CallCatalogTool {
         let result = set.call(subject, &name, inner_args.clone()).await;
         let duration_ms = start.elapsed().as_millis() as u64;
 
-        let result = annotate_envelope_mistake(result, &tool_name, &extra_keys)?;
+        let mut result = annotate_envelope_mistake(result, &tool_name, &extra_keys)?;
+        super::super::classifier::ensure_structured_content(&mut result);
 
         let recorded_args = inner_args
             .map(serde_json::Value::Object)

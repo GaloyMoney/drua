@@ -366,6 +366,7 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
 
                 let result = match dispatch_result {
                     Ok((raw, value)) => {
+                        Audit::record_tokens(super::super::estimate_tokens(&raw));
                         dispatcher
                             .maybe_persist_sub_invocation(
                                 &name_owned,
@@ -403,18 +404,8 @@ impl CatalogDispatcher {
         prefixed_name: &str,
     ) -> Result<(Arc<dyn SearchableToolSet>, String), ToolSetsError> {
         let sets = self.sets.read().expect("toolset lock poisoned");
-        for set in sets.iter() {
-            if !set.is_visible(&self.subject) {
-                continue;
-            }
-            let prefix = format!("{}_", set.prefix());
-            if let Some(tool_name) = prefixed_name.strip_prefix(&prefix) {
-                if set.tools().iter().any(|t| t.name == tool_name) {
-                    return Ok((Arc::clone(set), tool_name.to_string()));
-                }
-            }
-        }
-        Err(ToolSetsError::ToolNotFound(prefixed_name.to_string()))
+        super::super::dispatch::find_searchable(sets.iter(), &self.subject, prefixed_name)
+            .ok_or_else(|| ToolSetsError::ToolNotFound(prefixed_name.to_string()))
     }
 
     async fn call_top_level(
@@ -457,6 +448,7 @@ impl CatalogDispatcher {
 
             let result = match dispatch_result {
                 Ok((raw, value)) => {
+                    Audit::record_tokens(super::super::estimate_tokens(&raw));
                     if !bypass {
                         dispatcher
                             .maybe_persist_sub_invocation(
@@ -515,25 +507,36 @@ impl CatalogDispatcherShared {
         duration_ms: u64,
         started_at: chrono::DateTime<chrono::Utc>,
     ) {
-        let Some(invocations) = self.tool_invocations.as_ref() else {
-            return;
-        };
+        // Even when there's nothing to persist, classify and emit pipeline
+        // metrics so dashboards see compose sub-calls — parity with the
+        // regular path which always records.
         let classification = self.classifiers.classify(&ClassifierContext {
             tool_name,
             args,
             raw,
             exit_code: None,
         });
+        let raw_bytes = classification.canonical_text.len() as u64;
+        let classifier_kind = classification.summary.kind().to_string();
+        let kept_bytes = classification.summary.kept_bytes(raw_bytes);
+
         if classification.summary.is_passthrough() {
+            super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, false);
             return;
         }
+
         let summary_value_size = serde_json::to_string(
             &serde_json::to_value(&classification.summary).unwrap_or_default(),
         )
         .map(|s| s.len() as u64)
         .unwrap_or(0);
 
+        let Some(invocations) = self.tool_invocations.as_ref() else {
+            super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, false);
+            return;
+        };
         let Some(owner) = super::super::invocation_owner(&self.subject) else {
+            super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, false);
             return;
         };
         let Some(persisted): Option<PersistedClassification> = invocations
@@ -548,8 +551,12 @@ impl CatalogDispatcherShared {
             )
             .await
         else {
+            super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, false);
             return;
         };
+
+        super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, true);
+        Audit::record_tool_invocation_id(persisted.invocation_id);
 
         let seq = self.seq_counter.fetch_add(1, Ordering::Relaxed);
         let entry = SubInvocation {
@@ -602,10 +609,21 @@ async fn run_searchable_call(
         _ => return Err(format!("Expected object arguments, got: {args}")),
     };
 
-    let result = set
+    // Defense-in-depth: JS values are usually well-typed, but if a script
+    // passes stringified JSON we parse the same way the regular path does.
+    let inner_args = inner_args.map(|mut a| {
+        if let Some(entry) = set.tools().iter().find(|t| t.name == tool_name) {
+            let schema = serde_json::Value::Object(entry.description.input_schema.as_ref().clone());
+            super::super::auto_parse_args::auto_parse_stringified_json_args(&mut a, &schema);
+        }
+        a
+    });
+
+    let mut result = set
         .call(subject, tool_name, inner_args)
         .await
         .map_err(|e| e.to_string())?;
+    super::super::classifier::ensure_structured_content(&mut result);
 
     let value = result_to_value(&result);
     Ok((result, value))
@@ -622,10 +640,23 @@ async fn run_top_level_call(
         _ => return Err(format!("Expected object arguments, got: {args}")),
     };
 
-    let result = tool
+    // Same defense-in-depth as searchable runner.
+    let inner_args = inner_args.map(|mut a| {
+        super::super::auto_parse_args::auto_parse_stringified_json_args(
+            &mut a,
+            tool.input_schema(),
+        );
+        a
+    });
+
+    let bypass = tool.bypass_universal_pipeline();
+    let mut result = tool
         .call(subject, inner_args)
         .await
         .map_err(|e| e.to_string())?;
+    if !bypass {
+        super::super::classifier::ensure_structured_content(&mut result);
+    }
 
     let value = result_to_value(&result);
     Ok((result, value))
