@@ -245,13 +245,20 @@ impl ToolInvocations {
         duration_ms: u64,
         started_at: chrono::DateTime<chrono::Utc>,
     ) -> Option<(CallToolResult, ToolInvocationId)> {
+        // Storage holds the upstream's canonical value, regardless of which
+        // channel the upstream used. `raw.structured_content` is `None` for
+        // non-record upstreams (the response keeps the text channel clean
+        // for the agent), but we still want `original_structured` populated
+        // for arrays / scalars so json_path / json_array_slice `_recover`
+        // templates the walker emits for those shapes round-trip cleanly.
+        let original_structured = drua_tool_classifier::canonicalize(raw);
         let persisted = self
             .persist_classification(
                 owner,
                 tool_name,
                 args,
                 classification,
-                raw.structured_content.clone(),
+                original_structured,
                 duration_ms,
                 started_at,
             )

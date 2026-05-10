@@ -552,13 +552,18 @@ impl CatalogDispatcherShared {
             super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, false);
             return;
         };
+        // Same canonicalize step `persist_and_envelope` uses on the regular
+        // dispatch path: pull the upstream value from whichever channel was
+        // used so json_path / json_array_slice `_recover` templates round-trip
+        // for non-record sub-tools.
+        let original_structured = drua_tool_classifier::canonicalize(raw);
         let Some(persisted): Option<PersistedClassification> = invocations
             .persist_classification(
                 owner,
                 tool_name,
                 args,
                 classification,
-                raw.structured_content.clone(),
+                original_structured,
                 duration_ms,
                 started_at,
             )
