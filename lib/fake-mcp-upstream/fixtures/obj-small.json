@@ -1,0 +1,12 @@
+{
+  "name": "obj-small",
+  "description": "small JSON object",
+  "as_used_by": ["pg_execute_sql", "concourse_list_pipelines"],
+  "upstream": {
+    "is_error": false,
+    "content": [
+      {"type": "text", "text": "{\"ok\":true,\"count\":3}"}
+    ],
+    "structured_content": null
+  }
+}

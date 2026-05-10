@@ -1,0 +1,12 @@
+{
+  "name": "invalid-json",
+  "description": "truncated / malformed JSON text",
+  "as_used_by": ["broken upstream responses"],
+  "upstream": {
+    "is_error": false,
+    "content": [
+      {"type": "text", "text": "{\"a\":1,\"b\":"}
+    ],
+    "structured_content": null
+  }
+}

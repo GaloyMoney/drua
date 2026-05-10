@@ -1,0 +1,18 @@
+{
+  "name": "nix-copy-output",
+  "description": "nix-style build output: preparing/building/25 copy lines/error",
+  "as_used_by": [
+    "bash invoking nix-build",
+    "nix classifier targets"
+  ],
+  "upstream": {
+    "is_error": false,
+    "content": [
+      {
+        "type": "text",
+        "text": "preparing to build\nbuilding '/nix/store/aaa-foo.drv'\ncopying path '/nix/store/bbb00-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb01-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb02-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb03-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb04-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb05-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb06-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb07-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb08-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb09-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb10-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb11-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb12-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb13-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb14-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb15-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb16-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb17-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb18-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb19-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb20-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb21-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb22-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb23-bar' from 'https://cache.nixos.org/'\ncopying path '/nix/store/bbb24-bar' from 'https://cache.nixos.org/'\nerror: builder for '/nix/store/aaa-foo.drv' failed with exit code 1\n"
+      }
+    ],
+    "structured_content": null
+  }
+}

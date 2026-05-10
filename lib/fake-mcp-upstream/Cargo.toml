@@ -1,0 +1,21 @@
+[package]
+name = "fake-mcp-upstream"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+
+[[bin]]
+name = "fake-mcp-upstream"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+clap = { workspace = true }
+rmcp = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

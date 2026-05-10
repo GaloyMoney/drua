@@ -18,6 +18,7 @@ members = [
   "lib/js-engine",
   "lib/json-schema-ts",
   "lib/github-app",
+  "lib/fake-mcp-upstream",
   "code-assistant/crates/core",
   "code-assistant/crates/cli",
   "images/sandbox/server",
@@ -61,6 +62,7 @@ llm = { path = "lib/llm" }
 anthropic-client = { path = "lib/anthropic-client" }
 openai-client = { path = "lib/openai-client" }
 github-app = { path = "lib/github-app" }
+fake-mcp-upstream = { path = "lib/fake-mcp-upstream" }
 
 # MCP
 rmcp = { version = "1.2", features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "macros"] }

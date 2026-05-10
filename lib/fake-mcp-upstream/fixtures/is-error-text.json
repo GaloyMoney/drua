@@ -1,0 +1,12 @@
+{
+  "name": "is-error-text",
+  "description": "tool error result with text body",
+  "as_used_by": ["k8s_get_pod_logs against missing pod", "any failing tool"],
+  "upstream": {
+    "is_error": true,
+    "content": [
+      {"type": "text", "text": "pods 'foo' not found"}
+    ],
+    "structured_content": null
+  }
+}

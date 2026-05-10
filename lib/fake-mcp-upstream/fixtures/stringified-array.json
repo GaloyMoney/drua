@@ -1,0 +1,12 @@
+{
+  "name": "stringified-array",
+  "description": "JSON string whose value is itself JSON-encoded array (double-encoded)",
+  "as_used_by": ["upstreams that JSON-stringify their payload twice"],
+  "upstream": {
+    "is_error": false,
+    "content": [
+      {"type": "text", "text": "\"[1,2,3]\""}
+    ],
+    "structured_content": null
+  }
+}

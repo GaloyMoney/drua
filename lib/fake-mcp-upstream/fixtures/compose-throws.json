@@ -1,0 +1,9 @@
+{
+  "name": "compose-throws",
+  "description": "script throws an Error",
+  "as_used_by": ["compose error path"],
+  "compose": {
+    "script": "throw new Error(\"boom\");",
+    "inner_stub_upstream": null
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "arr-small",
+  "description": "small JSON array",
+  "as_used_by": ["pg_execute_sql", "github_list_pull_requests"],
+  "upstream": {
+    "is_error": false,
+    "content": [
+      {"type": "text", "text": "[{\"id\":1},{\"id\":2}]"}
+    ],
+    "structured_content": null
+  }
+}
