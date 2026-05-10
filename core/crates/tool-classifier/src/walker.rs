@@ -7,7 +7,6 @@ use super::{ElidedPath, ElisionKind};
 
 const STRING_ELIDE_HEAD_CHARS: usize = 256;
 const STRING_ELIDE_TAIL_CHARS: usize = 256;
-const STRING_ELIDE_MARKER: &str = "…";
 
 const ARRAY_SENTINEL_HEAD: usize = 3;
 const ARRAY_SENTINEL_TAIL: usize = 3;
@@ -70,21 +69,32 @@ fn walk(
 ) -> Value {
     match value {
         Value::String(s) => {
+            let original_bytes = json_size(value);
             if let Some(c) = chain {
                 let mut ctx = SegmentedText::from_initial(s);
                 let modified = c.run(&mut ctx);
                 let current = ctx.into_log();
-                if modified {
-                    *typed_replacements += 1;
-                    return Value::String(current);
-                }
-                if current != *s {
+                if modified || current != *s {
+                    if modified {
+                        *typed_replacements += 1;
+                    }
+                    // Chain modified the text (typed pass like rsync, or the
+                    // generic BulkElide). Record an ElidedPath with a
+                    // `_recover` handle pointing at the original; agent can
+                    // navigate via tail/head/range/grep with `path` as needed.
+                    paths.push(ElidedPath {
+                        path: path.to_string(),
+                        kind: ElisionKind::String,
+                        bytes: original_bytes as u64,
+                        length: None,
+                        preview: None,
+                        recover: Some(make_string_recover_full(&path)),
+                    });
                     return Value::String(current);
                 }
             }
-            let bytes = json_size(value);
-            if bytes >= threshold {
-                byte_elide_string(s, &path, paths, bytes)
+            if original_bytes >= threshold {
+                byte_elide_string(s, &path, paths, original_bytes)
             } else {
                 value.clone()
             }
@@ -135,10 +145,18 @@ fn byte_elide_string(
     if head_end >= tail_start {
         return Value::String(s.to_string());
     }
+    let missing_len = tail_start - head_end;
+    let tail_bytes = s.len() - tail_start;
+    // Same `<head>...<bulk-elided>...<tail>` shape `BulkElide` produces, so
+    // every elided string — line-aware or char-aware — has a uniform marker
+    // structure for the agent to pattern-match on.
     let elided = format!(
-        "{}{}{}",
+        "<head bytes=\"{head_end}\">\n{}\n</head>\n\
+         <bulk-elided original-bytes=\"{missing_len}\">\n\
+         {missing_len} bytes elided\n\
+         </bulk-elided>\n\
+         <tail bytes=\"{tail_bytes}\">\n{}\n</tail>",
         &s[..head_end],
-        STRING_ELIDE_MARKER,
         &s[tail_start..]
     );
     paths.push(ElidedPath {
@@ -147,8 +165,78 @@ fn byte_elide_string(
         bytes: original_bytes as u64,
         length: None,
         preview: None,
+        recover: Some(make_string_recover_range(path, head_end, missing_len)),
     });
     Value::String(elided)
+}
+
+fn make_string_recover_range(path: &str, offset: usize, len: usize) -> Value {
+    let mut query = serde_json::json!({
+        "mode": "range",
+        "offset": offset,
+        "len": len,
+    });
+    if path != "$" {
+        query["path"] = Value::String(path.to_string());
+    }
+    serde_json::json!({
+        "tool": "tool_output_fetch",
+        "args_template": {
+            "invocation_id": RECOVERY_INVOCATION_PLACEHOLDER,
+            "view": "original",
+            "query": query,
+        }
+    })
+}
+
+/// For chain-modified strings (typed passes, BulkElide). Boundaries aren't
+/// directly extractable from the chain output, so the recover template just
+/// hands the agent the invocation_id + path; they pick `tail`/`head`/`grep`/
+/// `range` themselves.
+fn make_string_recover_full(path: &str) -> Value {
+    let query = if path == "$" {
+        serde_json::json!({"mode": "json_path", "path": "$"})
+    } else {
+        serde_json::json!({"mode": "json_path", "path": path})
+    };
+    serde_json::json!({
+        "tool": "tool_output_fetch",
+        "args_template": {
+            "invocation_id": RECOVERY_INVOCATION_PLACEHOLDER,
+            "view": "original",
+            "query": query,
+        }
+    })
+}
+
+fn make_array_recover(path: &str, head_count: usize, missing_len: usize) -> Value {
+    serde_json::json!({
+        "tool": "tool_output_fetch",
+        "args_template": {
+            "invocation_id": RECOVERY_INVOCATION_PLACEHOLDER,
+            "view": "original",
+            "query": {
+                "mode": "json_array_slice",
+                "path": path,
+                "offset": head_count,
+                "len": missing_len,
+            },
+        }
+    })
+}
+
+fn make_object_recover(path: &str) -> Value {
+    serde_json::json!({
+        "tool": "tool_output_fetch",
+        "args_template": {
+            "invocation_id": RECOVERY_INVOCATION_PLACEHOLDER,
+            "view": "original",
+            "query": {
+                "mode": "json_path",
+                "path": path,
+            },
+        }
+    })
 }
 
 fn walk_array(
@@ -222,12 +310,14 @@ fn sentinel_array(
             path,
         );
     }
+    let missing_len = original_length.saturating_sub(head_count + tail_count);
     paths.push(ElidedPath {
         path: path.to_string(),
         kind: ElisionKind::Array,
         bytes: original_bytes as u64,
         length: Some(original_length),
         preview: None,
+        recover: Some(make_array_recover(path, head_count, missing_len)),
     });
     sentinel
 }
@@ -248,29 +338,14 @@ fn make_array_sentinel(
         .rev()
         .cloned()
         .collect();
-    let missing_offset = head_count;
-    let missing_len = length.saturating_sub(head_count + tail_count);
-    let recover = serde_json::json!({
-        "tool": "tool_output_fetch",
-        "args_template": {
-            "invocation_id": RECOVERY_INVOCATION_PLACEHOLDER,
-            "view": "original",
-            "query": {
-                "mode": "json_array_slice",
-                "path": path,
-                "offset": missing_offset,
-                "len": missing_len,
-            },
-        },
-    });
     serde_json::json!({
         "_elided": true,
         "kind": "array",
+        "path": path,
         "length": length,
         "bytes": bytes,
         "head": head,
         "tail": tail,
-        "_recover": recover,
     })
 }
 
@@ -353,15 +428,26 @@ fn peel_object_keys(
             }
         };
         let original_size = original_sizes.get(&key).copied().unwrap_or(post_walk_size);
+        let elided_path = format!("{path}.{key}");
         per_key_paths.retain(|(k, _)| k != &key);
+        let recover = match kind {
+            ElisionKind::String => Some(make_string_recover_full(&elided_path)),
+            // Array peeling at the object-key level: use json_path (returns
+            // the whole field). Array path emitted by `sentinel_array` is the
+            // precise json_array_slice; this branch is only hit when the
+            // walker peels a fully-untouched array as a sentinel.
+            ElisionKind::Array => Some(make_object_recover(&elided_path)),
+            ElisionKind::Object => Some(make_object_recover(&elided_path)),
+        };
         paths.push(ElidedPath {
-            path: format!("{path}.{key}"),
+            path: elided_path.clone(),
             kind,
             bytes: original_size as u64,
             length,
             preview: None,
+            recover,
         });
-        let sentinel = sentinel_for(kind, original_size, length);
+        let sentinel = sentinel_for(kind, original_size, length, &elided_path);
         let sentinel_size = json_size(&sentinel);
         walked.insert(key, sentinel);
         current_size = current_size
@@ -374,7 +460,7 @@ fn peel_object_keys(
     Value::Object(walked)
 }
 
-fn sentinel_for(kind: ElisionKind, bytes: usize, length: Option<usize>) -> Value {
+fn sentinel_for(kind: ElisionKind, bytes: usize, length: Option<usize>, path: &str) -> Value {
     let kind_str = match kind {
         ElisionKind::String => "string",
         ElisionKind::Array => "array",
@@ -383,6 +469,7 @@ fn sentinel_for(kind: ElisionKind, bytes: usize, length: Option<usize>) -> Value
     let mut obj = serde_json::Map::new();
     obj.insert("_elided".to_string(), Value::Bool(true));
     obj.insert("kind".to_string(), Value::String(kind_str.to_string()));
+    obj.insert("path".to_string(), Value::String(path.to_string()));
     obj.insert("bytes".to_string(), Value::from(bytes));
     if let Some(n) = length {
         obj.insert("length".to_string(), Value::from(n));
@@ -475,7 +562,9 @@ mod tests {
         assert!(output.is_string());
         let s = output.as_str().unwrap();
         assert!(s.len() < 10_000);
-        assert!(s.contains(STRING_ELIDE_MARKER));
+        assert!(s.contains("<head"));
+        assert!(s.contains("<bulk-elided"));
+        assert!(s.contains("<tail"));
     }
 
     #[test]
@@ -506,18 +595,34 @@ mod tests {
     }
 
     #[test]
-    fn array_sentinel_carries_recover_template_with_placeholder() {
+    fn array_elided_path_carries_json_array_slice_recover() {
         let items: Vec<Value> = (0..50)
             .map(|i| serde_json::json!({"id": i, "blob": "z".repeat(200)}))
             .collect();
         let v = serde_json::json!({"hits": items});
         let outcome = classify_value(&v, 4096, None);
-        let WalkOutcome::Elided { kept, .. } = outcome else {
+        let WalkOutcome::Elided {
+            kept, elided_paths, ..
+        } = outcome
+        else {
             panic!("expected Elided");
         };
+        // Inline sentinel is lean: kind, path, length, bytes, head, tail —
+        // no `_recover` field.
         let hits = kept.get("hits").expect("hits key present");
         assert_eq!(hits.get("_elided"), Some(&Value::Bool(true)));
-        let recover = hits.get("_recover").expect("_recover present");
+        assert!(
+            hits.get("_recover").is_none(),
+            "inline _recover must move to elided_paths metadata"
+        );
+        assert_eq!(hits.get("path"), Some(&Value::String("$.hits".to_string())));
+
+        // Metadata side carries the verbatim recovery template.
+        let entry = elided_paths
+            .iter()
+            .find(|p| p.path == "$.hits")
+            .expect("$.hits in elided_paths");
+        let recover = entry.recover.as_ref().expect("_recover in metadata");
         assert_eq!(
             recover.get("tool"),
             Some(&Value::String("tool_output_fetch".to_string()))
@@ -527,10 +632,6 @@ mod tests {
             args.get("invocation_id"),
             Some(&Value::String(RECOVERY_INVOCATION_PLACEHOLDER.to_string()))
         );
-        assert_eq!(
-            args.get("view"),
-            Some(&Value::String("original".to_string()))
-        );
         let q = args.get("query").expect("query");
         assert_eq!(
             q.get("mode"),
@@ -539,6 +640,48 @@ mod tests {
         assert_eq!(q.get("path"), Some(&Value::String("$.hits".to_string())));
         assert!(q.get("offset").and_then(|v| v.as_u64()).is_some());
         assert!(q.get("len").and_then(|v| v.as_u64()).is_some());
+    }
+
+    #[test]
+    fn root_string_recover_uses_range_without_path() {
+        let big = "x".repeat(20_000);
+        let v = Value::String(big);
+        let outcome = classify_value(&v, 4096, None);
+        let WalkOutcome::Elided { elided_paths, .. } = outcome else {
+            panic!("expected Elided");
+        };
+        let entry = elided_paths.first().expect("one elided path at root");
+        assert_eq!(entry.path, "$");
+        let recover = entry.recover.as_ref().expect("_recover");
+        let q = recover
+            .get("args_template")
+            .and_then(|a| a.get("query"))
+            .expect("query");
+        assert_eq!(q.get("mode"), Some(&Value::String("range".to_string())));
+        assert!(q.get("offset").is_some());
+        assert!(q.get("len").is_some());
+        // Root path: no `path` field on the query.
+        assert!(q.get("path").is_none());
+    }
+
+    #[test]
+    fn nested_string_recover_is_path_aware_with_range() {
+        let v = serde_json::json!({"data": "x".repeat(20_000)});
+        let outcome = classify_value(&v, 4096, None);
+        let WalkOutcome::Elided { elided_paths, .. } = outcome else {
+            panic!("expected Elided");
+        };
+        let entry = elided_paths
+            .iter()
+            .find(|p| p.path == "$.data")
+            .expect("$.data in elided_paths");
+        let recover = entry.recover.as_ref().expect("_recover");
+        let q = recover
+            .get("args_template")
+            .and_then(|a| a.get("query"))
+            .expect("query");
+        assert_eq!(q.get("mode"), Some(&Value::String("range".to_string())));
+        assert_eq!(q.get("path"), Some(&Value::String("$.data".to_string())));
     }
 
     #[test]

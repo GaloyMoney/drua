@@ -104,7 +104,13 @@ async fn persist_round_trip_and_fetch_modes() {
     assert_eq!(persisted.raw_text, raw);
 
     let tail = invocations
-        .fetch(persisted.id, FetchQuery::Tail { lines: 3 })
+        .fetch(
+            persisted.id,
+            FetchQuery::Tail {
+                lines: 3,
+                path: None,
+            },
+        )
         .await
         .expect("tail fetch");
     assert_eq!(tail.content, "line-0197\nline-0198\nline-0199");
@@ -112,13 +118,26 @@ async fn persist_round_trip_and_fetch_modes() {
     assert_eq!(tail.total_bytes, raw.len() as u64);
 
     let head = invocations
-        .fetch(persisted.id, FetchQuery::Head { lines: 2 })
+        .fetch(
+            persisted.id,
+            FetchQuery::Head {
+                lines: 2,
+                path: None,
+            },
+        )
         .await
         .expect("head fetch");
     assert_eq!(head.content, "line-0000\nline-0001");
 
     let range = invocations
-        .fetch(persisted.id, FetchQuery::Range { offset: 0, len: 9 })
+        .fetch(
+            persisted.id,
+            FetchQuery::Range {
+                offset: 0,
+                len: 9,
+                path: None,
+            },
+        )
         .await
         .expect("range fetch");
     assert_eq!(range.content, "line-0000");
@@ -128,6 +147,7 @@ async fn persist_round_trip_and_fetch_modes() {
             persisted.id,
             FetchQuery::Grep {
                 pattern: "^error".to_string(),
+                path: None,
                 case_insensitive: false,
                 after_context: None,
                 before_context: None,

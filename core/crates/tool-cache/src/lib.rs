@@ -286,19 +286,34 @@ fn envelope_text(summary: &ToolResultSummary, id: ToolInvocationId, raw_size_byt
     summary.render_envelope_text(&uuid::Uuid::from(id).to_string(), raw_size_bytes)
 }
 
+/// Substitutes `RECOVERY_INVOCATION_PLACEHOLDER` with the actual invocation
+/// UUID inside `_recover` templates. Recovery info lives exclusively in
+/// `elided_paths[]._recover`; this only touches that location, never user data
+/// inside `kept`.
 pub fn substitute_recovery_placeholder(value: &mut serde_json::Value, invocation_id: &str) {
+    let Some(paths) = value.get_mut("elided_paths").and_then(|v| v.as_array_mut()) else {
+        return;
+    };
+    for entry in paths {
+        if let Some(recover) = entry.get_mut("_recover") {
+            substitute_in_value(recover, invocation_id);
+        }
+    }
+}
+
+fn substitute_in_value(value: &mut serde_json::Value, invocation_id: &str) {
     match value {
         serde_json::Value::String(s) if s == RECOVERY_INVOCATION_PLACEHOLDER => {
             *s = invocation_id.to_string();
         }
         serde_json::Value::Array(items) => {
             for item in items {
-                substitute_recovery_placeholder(item, invocation_id);
+                substitute_in_value(item, invocation_id);
             }
         }
         serde_json::Value::Object(map) => {
             for v in map.values_mut() {
-                substitute_recovery_placeholder(v, invocation_id);
+                substitute_in_value(v, invocation_id);
             }
         }
         _ => {}
@@ -1106,6 +1121,47 @@ mod tests {
         )
         .unwrap();
         assert_eq!(r.content, "bravo\ncharlie");
+    }
+
+    #[test]
+    fn substitute_only_visits_elided_paths_recover() {
+        let mut summary = serde_json::json!({
+            "kind": "structured_elision",
+            "kept": {
+                // User data string that *coincidentally* matches the placeholder.
+                // Must not be substituted.
+                "user_field": "<this-invocation>"
+            },
+            "elided_paths": [{
+                "path": "$.foo",
+                "kind": "string",
+                "bytes": 100,
+                "_recover": {
+                    "args_template": {
+                        "invocation_id": "<this-invocation>",
+                        "view": "original"
+                    }
+                }
+            }]
+        });
+        substitute_recovery_placeholder(&mut summary, "actual-uuid");
+        // The recover template's invocation_id was substituted.
+        assert_eq!(
+            summary["elided_paths"][0]["_recover"]["args_template"]["invocation_id"],
+            serde_json::json!("actual-uuid")
+        );
+        // The user data string was NOT touched.
+        assert_eq!(
+            summary["kept"]["user_field"],
+            serde_json::json!("<this-invocation>")
+        );
+    }
+
+    #[test]
+    fn substitute_handles_envelope_without_elided_paths() {
+        let mut v = serde_json::json!({"kind": "passthrough", "value": 42});
+        substitute_recovery_placeholder(&mut v, "actual-uuid");
+        assert_eq!(v, serde_json::json!({"kind": "passthrough", "value": 42}));
     }
 
     #[test]

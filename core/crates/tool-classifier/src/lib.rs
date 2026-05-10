@@ -157,6 +157,12 @@ pub struct ElidedPath {
     pub length: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
+    /// `tool_output_fetch` template the agent can copy verbatim to recover the
+    /// elided content. Lives in metadata (not inline) so a string elision's
+    /// kept value can stay a `Value::String` and array/object inline sentinels
+    /// stay lean — single source of truth across all kinds.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "_recover")]
+    pub recover: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -405,11 +411,19 @@ mod tests {
             } => {
                 assert!((kept_bytes as u64) < total_bytes);
                 let kept_str = kept.as_str().expect("string-typed kept");
-                assert!(kept_str.starts_with("line-0000"));
-                assert!(kept_str.ends_with("line-0999"));
+                // Marker-laced output: <head> covers the start, <tail> covers
+                // the end, with a <bulk-elided> stretch in between.
+                assert!(kept_str.contains("<head"));
+                assert!(kept_str.contains("</head>"));
+                assert!(kept_str.contains("<bulk-elided"));
+                assert!(kept_str.contains("</bulk-elided>"));
+                assert!(kept_str.contains("<tail"));
+                assert!(kept_str.contains("line-0000"));
+                assert!(kept_str.contains("line-0999"));
                 assert_eq!(elided_paths.len(), 1);
                 assert_eq!(elided_paths[0].path, "$");
                 assert!(matches!(elided_paths[0].kind, ElisionKind::String));
+                assert!(elided_paths[0].recover.is_some());
             }
             other => panic!("expected StructuredElision, got {other:?}"),
         }
