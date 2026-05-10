@@ -6,6 +6,7 @@ pub mod searchable;
 pub use drua_tool_cache as tool_invocations;
 mod cache_owner;
 pub use cache_owner::invocation_owner;
+mod auto_parse_args;
 mod reify;
 pub mod top_level;
 mod traits;
@@ -518,6 +519,15 @@ impl ToolSets {
             Audit::record_subject(subject);
             Audit::record_entrypoint(format!("mcp: {}", name));
             Audit::record_interaction_type(crate::audit::primitives::InteractionType::McpCall);
+
+            // Some MCP clients JSON-encode complex nested args as strings.
+            // Auto-parse them in place against the tool's input schema before
+            // dispatch, so per-tool deserialization sees the intended shape.
+            let arguments = arguments.map(|mut args| {
+                auto_parse_args::auto_parse_stringified_json_args(&mut args, tool.input_schema());
+                args
+            });
+
             let args_value = arguments
                 .as_ref()
                 .map(|a| serde_json::Value::Object(a.clone()));
