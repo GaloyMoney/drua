@@ -602,10 +602,11 @@ async fn run_searchable_call(
         _ => return Err(format!("Expected object arguments, got: {args}")),
     };
 
-    let result = set
+    let mut result = set
         .call(subject, tool_name, inner_args)
         .await
         .map_err(|e| e.to_string())?;
+    super::super::reify::reify_json_structured_content(&mut result);
 
     let value = result_to_value(&result);
     Ok((result, value))
@@ -622,10 +623,14 @@ async fn run_top_level_call(
         _ => return Err(format!("Expected object arguments, got: {args}")),
     };
 
-    let result = tool
+    let bypass = tool.bypass_universal_pipeline();
+    let mut result = tool
         .call(subject, inner_args)
         .await
         .map_err(|e| e.to_string())?;
+    if !bypass {
+        super::super::reify::reify_json_structured_content(&mut result);
+    }
 
     let value = result_to_value(&result);
     Ok((result, value))

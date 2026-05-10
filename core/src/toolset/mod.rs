@@ -6,6 +6,7 @@ pub mod searchable;
 pub use drua_tool_cache as tool_invocations;
 mod cache_owner;
 pub use cache_owner::invocation_owner;
+mod reify;
 pub mod top_level;
 mod traits;
 
@@ -528,7 +529,12 @@ impl ToolSets {
             let bypass_pipeline =
                 tool.bypass_universal_pipeline() || invocation_owner(subject).is_none();
             let start = std::time::Instant::now();
-            let raw_result = tool.call(subject, arguments).await;
+            let raw_result = tool.call(subject, arguments).await.map(|mut raw| {
+                if !bypass_pipeline {
+                    reify::reify_json_structured_content(&mut raw);
+                }
+                raw
+            });
             let duration_ms = start.elapsed().as_millis() as u64;
             Audit::record_duration(start);
 
