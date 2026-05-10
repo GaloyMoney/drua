@@ -290,13 +290,11 @@ impl TopLevelTool for ComposeTool {
     }
 }
 
-/// Build the synthetic `CallToolResult` the classifier walks for compose's
-/// top-level return value. Mirrors what `ensure_structured_content` produces
 /// Synthetic `CallToolResult` the classifier walks for compose's top-level
-/// return value. The classifier's `canonicalize` helper reads
-/// `structured_content` first — only set when the JS return is a record so
-/// non-record returns flow through the text channel and the classifier
-/// derives root_path from the parsed shape directly.
+/// return value. Only sets `structured_content` when the JS return is a
+/// record; non-record returns flow through the text channel so the
+/// classifier's `canonicalize` helper derives root_path from the parsed
+/// shape directly (matches the regular dispatch path's behaviour).
 fn build_walker_input(value: &serde_json::Value) -> CallToolResult {
     let text = serde_json::to_string(value).unwrap_or_default();
     let mut ctr = CallToolResult::success(vec![Content::text(text)]);
