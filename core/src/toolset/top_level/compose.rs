@@ -602,6 +602,16 @@ async fn run_searchable_call(
         _ => return Err(format!("Expected object arguments, got: {args}")),
     };
 
+    // Defense-in-depth: JS values are usually well-typed, but if a script
+    // passes stringified JSON we parse the same way the regular path does.
+    let inner_args = inner_args.map(|mut a| {
+        if let Some(entry) = set.tools().iter().find(|t| t.name == tool_name) {
+            let schema = serde_json::Value::Object(entry.description.input_schema.as_ref().clone());
+            super::super::auto_parse_args::auto_parse_stringified_json_args(&mut a, &schema);
+        }
+        a
+    });
+
     let mut result = set
         .call(subject, tool_name, inner_args)
         .await
@@ -622,6 +632,15 @@ async fn run_top_level_call(
         serde_json::Value::Null => None,
         _ => return Err(format!("Expected object arguments, got: {args}")),
     };
+
+    // Same defense-in-depth as searchable runner.
+    let inner_args = inner_args.map(|mut a| {
+        super::super::auto_parse_args::auto_parse_stringified_json_args(
+            &mut a,
+            tool.input_schema(),
+        );
+        a
+    });
 
     let bypass = tool.bypass_universal_pipeline();
     let mut result = tool

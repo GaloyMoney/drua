@@ -460,6 +460,19 @@ impl TopLevelTool for CallCatalogTool {
             .find_set(subject, &tool_name)
             .ok_or_else(|| ToolSetsError::ToolNotFound(tool_name.clone()))?;
 
+        // Auto-parse inner_args against the upstream tool's input schema —
+        // the outer call_tool envelope only declares `arguments: object`, so
+        // stringified JSON inside individual upstream-arg fields wouldn't
+        // otherwise be parsed.
+        let inner_args = inner_args.map(|mut a| {
+            if let Some(entry) = set.tools().iter().find(|t| t.name == name) {
+                let schema =
+                    serde_json::Value::Object(entry.description.input_schema.as_ref().clone());
+                super::super::auto_parse_args::auto_parse_stringified_json_args(&mut a, &schema);
+            }
+            a
+        });
+
         Audit::record_action(format!("catalog: {}", tool_name));
 
         let started_at = chrono::Utc::now();
