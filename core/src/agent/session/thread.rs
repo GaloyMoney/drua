@@ -359,6 +359,31 @@ impl NewSessionThread {
         }
     }
 
+    pub fn model_changed(
+        id: SessionThreadId,
+        session_id: AgentSessionId,
+        model_defaults: ModelDefaults,
+        system_view: SystemView,
+        tool_definitions_view: ToolDefinitionsView,
+        messages: Vec<MessageView>,
+        follows_from: SessionThreadId,
+    ) -> Self {
+        Self {
+            id,
+            session_id,
+            start_reason: ThreadStartReason::ModelChanged {
+                from_thread: follows_from,
+            },
+            model_defaults,
+            system_view,
+            tool_definitions_view,
+            init: ThreadInitData::Refreshed {
+                messages,
+                follows_from,
+            },
+        }
+    }
+
     /// Fresh thread from an orphan action; no conversation history.
     pub fn orphaned(
         id: SessionThreadId,

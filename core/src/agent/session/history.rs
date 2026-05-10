@@ -281,7 +281,9 @@ pub(super) fn build_thread_infos<'a>(
                     ThreadStartReason::ToolDefsUpdated { .. } => {
                         ThreadStartReasonKind::ToolDefsUpdated
                     }
-                    ThreadStartReason::ContextRefreshed { .. } => {
+                    // Both inherit messages verbatim; same UX kind.
+                    ThreadStartReason::ContextRefreshed { .. }
+                    | ThreadStartReason::ModelChanged { .. } => {
                         ThreadStartReasonKind::ContextRefreshed
                     }
                     ThreadStartReason::Compaction { .. } => ThreadStartReasonKind::Compaction,

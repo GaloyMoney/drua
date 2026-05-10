@@ -1299,6 +1299,18 @@ impl Agents {
         // into the session at create and is immutable for the run.
         let runtime_chain_override = self.resolve_runtime_chain(&agent).await;
 
+        if let Some(c) = &runtime_chain_override {
+            if let Some(defaults) = self.config.models.get(&c.primary.name) {
+                let session_defaults = ModelDefaults {
+                    model: c.primary.name.clone(),
+                    ..defaults.clone()
+                };
+                self.sessions
+                    .apply_model_change(id, session_defaults)
+                    .await?;
+            }
+        }
+
         let mut prompt_state = self
             .sessions
             .next_prompt(id, session::TargetThread::Main)

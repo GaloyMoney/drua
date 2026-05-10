@@ -86,6 +86,21 @@ impl Sessions {
         Ok(response)
     }
 
+    #[instrument(name = "domain.agent_session.apply_model_change", skip(self))]
+    pub async fn apply_model_change(
+        &self,
+        agent_id: AgentId,
+        new_defaults: ModelDefaults,
+    ) -> Result<(), AgentSessionError> {
+        let mut op = self.repo.begin_op().await?;
+        let mut session = self.repo.find_by_agent_id_in_op(&mut op, agent_id).await?;
+        if session.apply_model_change(new_defaults)?.did_execute() {
+            self.repo.update_in_op(&mut op, &mut session).await?;
+            op.commit().await?;
+        }
+        Ok(())
+    }
+
     #[instrument(name = "domain.agent_session.next_prompt", skip(self))]
     pub async fn next_prompt(
         &self,

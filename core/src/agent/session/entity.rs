@@ -29,6 +29,9 @@ pub enum ThreadStartReason {
     Orphan {
         from_thread: SessionThreadId,
     },
+    ModelChanged {
+        from_thread: SessionThreadId,
+    },
 }
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
@@ -50,6 +53,10 @@ pub enum AgentSessionEvent {
     /// and bumps `latest_idx_by_kind`.
     SystemBlockUpdated {
         block: SystemBlock,
+    },
+    /// Always paired with a sibling `ThreadStarted { ModelChanged }` event.
+    ModelDefaultsUpdated {
+        defaults: ModelDefaults,
     },
     UserInputAdded {
         target: TargetThread,
@@ -517,6 +524,52 @@ impl AgentSession {
         (new_thread_id, new_pd)
     }
 
+    /// to ensure compaction + prompt-building read fresh values on the next turn.
+    pub(super) fn apply_model_change(
+        &mut self,
+        new_defaults: ModelDefaults,
+    ) -> Result<Idempotent<()>, AgentSessionError> {
+        if self.model_defaults.model == new_defaults.model {
+            return Ok(Idempotent::AlreadyApplied);
+        }
+        let from_thread = self
+            .current_main_thread
+            .ok_or(AgentSessionError::ThreadNotFound)?;
+
+        let from = self
+            .threads
+            .get_persisted(&from_thread)
+            .ok_or(AgentSessionError::ThreadNotFound)?
+            .prompt_definition();
+        let system_view = from.system_view().clone();
+        let tool_view = from.tool_definitions_view().clone();
+        let messages = from.messages.clone();
+
+        self.model_defaults = new_defaults.clone();
+        self.events.push(AgentSessionEvent::ModelDefaultsUpdated {
+            defaults: new_defaults.clone(),
+        });
+
+        let new_thread_id = SessionThreadId::new();
+        let new_thread = NewSessionThread::model_changed(
+            new_thread_id,
+            self.id,
+            new_defaults,
+            system_view,
+            tool_view,
+            messages,
+            from_thread,
+        );
+        self.threads.add_new(new_thread);
+        self.events.push(AgentSessionEvent::ThreadStarted {
+            thread_id: new_thread_id,
+            start_reason: ThreadStartReason::ModelChanged { from_thread },
+        });
+        self.current_main_thread = Some(new_thread_id);
+
+        Ok(Idempotent::Executed(()))
+    }
+
     pub fn add_tool_results(
         &mut self,
         thread_id: SessionThreadId,
@@ -864,6 +917,9 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                 }
                 AgentSessionEvent::ThreadStarted { thread_id, .. } => {
                     builder = builder.current_main_thread(Some(*thread_id));
+                }
+                AgentSessionEvent::ModelDefaultsUpdated { defaults } => {
+                    builder = builder.model_defaults(defaults.clone());
                 }
                 AgentSessionEvent::UserInputAdded { .. } => {}
                 AgentSessionEvent::SandboxNotificationAdded { .. } => {}
@@ -2239,5 +2295,54 @@ mod tests {
             )
             .expect("assistant response on refreshed thread must succeed");
         assert!(matches!(response, AgentSessionResponse::Done));
+    }
+
+    fn defaults_for(model: &str) -> ModelDefaults {
+        ModelDefaults {
+            model: model.into(),
+            max_tokens_per_response: 1024,
+            context_window_tokens: 200_000,
+        }
+    }
+
+    #[test]
+    fn apply_model_change_refreshes_and_spawns_thread_when_different() {
+        let mut session = new_session();
+        seed_initial_thread(&mut session, vec![role("R")]);
+        let thread_before = session.current_main_thread.unwrap();
+
+        let result = session
+            .apply_model_change(defaults_for("new-model"))
+            .expect("apply_model_change");
+        assert!(matches!(result, Idempotent::Executed(())));
+
+        assert_eq!(session.model_defaults.model, "new-model");
+        let new_thread_id = session.current_main_thread.unwrap();
+        assert_ne!(new_thread_id, thread_before);
+
+        let mut saw_update = false;
+        let mut saw_started = false;
+        for event in session.events.iter_all() {
+            match event {
+                AgentSessionEvent::ModelDefaultsUpdated { defaults } => {
+                    assert_eq!(defaults.model, "new-model");
+                    saw_update = true;
+                }
+                AgentSessionEvent::ThreadStarted {
+                    thread_id,
+                    start_reason: ThreadStartReason::ModelChanged { from_thread },
+                } => {
+                    assert_eq!(*thread_id, new_thread_id);
+                    assert_eq!(*from_thread, thread_before);
+                    saw_started = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_update, "ModelDefaultsUpdated event should be emitted");
+        assert!(
+            saw_started,
+            "ThreadStarted with ModelChanged reason should be emitted"
+        );
     }
 }
