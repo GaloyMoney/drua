@@ -197,6 +197,17 @@ spec:
             fieldRef:
               apiVersion: v1
               fieldPath: spec.nodeName
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: status.podIP
+        - name: DRUA_TUNNEL_INTERNAL_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: {{ template "galoyAgents.fullname" . }}
+              key: "tunnel-internal-secret"
+              optional: true
         {{- if .Values.galoyAgents.codeAssistant.indexHash }}
         - name: FASTEMBED_CACHE_DIR
           value: /data/code-assistant/.fastembed_cache

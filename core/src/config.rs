@@ -31,6 +31,8 @@ pub struct AppConfig {
     /// the server to apply edits (no live reload — memo `019dfebc` §7.2).
     #[serde(default)]
     pub git_proxy: GitProxyAppConfig,
+    #[serde(default)]
+    pub tunnel_runtime: TunnelRuntimeConfig,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -50,6 +52,52 @@ pub struct GitProxyAppConfig {
 
 fn default_mirror_ttl_seconds() -> u64 {
     300
+}
+
+/// Runtime knobs for the HA tunnel registry. Mirrors the relevant
+/// subset of `server::config::TunnelConfig` — split out because `core`
+/// shouldn't depend on `server`. Populated by the server on `App::init`.
+#[derive(Clone, Debug, Deserialize)]
+pub struct TunnelRuntimeConfig {
+    /// `<POD_IP>:<server.port>` — empty in single-replica/local-dev
+    /// mode, in which case the listener treats every row as
+    /// owned-elsewhere (cheap no-op since the WS handler is
+    /// authoritative locally anyway).
+    #[serde(default)]
+    pub self_pod_addr: Option<String>,
+    #[serde(default = "default_tunnel_heartbeat_secs")]
+    pub heartbeat_secs: u64,
+    #[serde(default = "default_tunnel_expires_after_secs")]
+    pub expires_after_secs: u64,
+    #[serde(default = "default_tunnel_reaper_interval_secs")]
+    pub reaper_interval_secs: u64,
+    /// Token-file path for SA-token auth on the internal proxy hop, or
+    /// a shared secret if neither is available the proxy disables
+    /// (single-replica deployments don't need it).
+    #[serde(default)]
+    pub internal_secret: Option<String>,
+}
+
+impl Default for TunnelRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            self_pod_addr: None,
+            heartbeat_secs: default_tunnel_heartbeat_secs(),
+            expires_after_secs: default_tunnel_expires_after_secs(),
+            reaper_interval_secs: default_tunnel_reaper_interval_secs(),
+            internal_secret: None,
+        }
+    }
+}
+
+fn default_tunnel_heartbeat_secs() -> u64 {
+    30
+}
+fn default_tunnel_expires_after_secs() -> u64 {
+    90
+}
+fn default_tunnel_reaper_interval_secs() -> u64 {
+    60
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]

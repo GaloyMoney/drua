@@ -26,7 +26,25 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 use crate::auth::AuthSubject;
-use crate::toolset::{SearchableToolSet, ToolSetEntry, ToolSetScope, ToolSetsError};
+use crate::toolset::{SearchableToolSet, ToolSetEntry, ToolSetScope, ToolSetsError, TunnelKind};
+
+mod listener;
+mod proxy;
+mod registrations;
+
+pub use listener::{
+    reconcile_all as reconcile_all_deployments, reconcile_one as reconcile_one_deployment,
+    spawn_tunnel_registry_listener,
+};
+pub use proxy::{InternalAuth, InternalCallReq, ProxyTunnelToolSet};
+pub use registrations::{TunnelRegistrationRow, TunnelRegistrations};
+
+/// Re-exports for crates (`server`) that don't take rmcp as a direct
+/// dependency but need to type-annotate the JSON wire shapes for
+/// `/internal/tunnel/...`.
+pub mod wire {
+    pub use rmcp::model::{CallToolResult, JsonObject};
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -158,10 +176,14 @@ impl TunnelHandle {
 }
 
 /// `close_tx` evicts old WS loop on takeover; `session_id` prevents an
-/// evicted loop from removing the new entry during cleanup.
+/// evicted loop from removing the new entry during cleanup; `handle`
+/// is exposed so the internal proxy route on this pod can dispatch
+/// peer-pod calls through the in-process WS without re-discovering
+/// the toolset.
 struct RegisteredTunnel {
     session_id: uuid::Uuid,
     close_tx: mpsc::Sender<()>,
+    handle: TunnelHandle,
 }
 
 /// At most one entry per `deployment_id`; a new Register evicts the
@@ -185,6 +207,7 @@ impl TunnelRegistry {
         deployment_id: &str,
         session_id: uuid::Uuid,
         close_tx: mpsc::Sender<()>,
+        handle: TunnelHandle,
     ) -> bool {
         let evicted = {
             let mut map = self.inner.lock().expect("tunnel registry lock poisoned");
@@ -193,6 +216,7 @@ impl TunnelRegistry {
                 RegisteredTunnel {
                     session_id,
                     close_tx,
+                    handle,
                 },
             )
         };
@@ -202,6 +226,48 @@ impl TunnelRegistry {
             true
         } else {
             false
+        }
+    }
+
+    /// Return the in-process `TunnelHandle` for `deployment_id`, if this
+    /// pod owns the WebSocket. Used by `/internal/tunnel/:id/call` so a
+    /// peer pod's proxy POST can dispatch through the live channel.
+    pub fn handle_for(&self, deployment_id: &str) -> Option<TunnelHandle> {
+        let map = self.inner.lock().expect("tunnel registry lock poisoned");
+        map.get(deployment_id).map(|t| t.handle.clone())
+    }
+
+    /// Return `(session_id, handle)` for `deployment_id`, if this pod
+    /// owns the WebSocket. Used by the internal proxy route to fence
+    /// stale callers: a proxy that was built against a now-displaced
+    /// session_id is rejected before its call dispatches through the
+    /// (still in-process) handle of the old session.
+    pub fn local_session(&self, deployment_id: &str) -> Option<(uuid::Uuid, TunnelHandle)> {
+        let map = self.inner.lock().expect("tunnel registry lock poisoned");
+        map.get(deployment_id)
+            .map(|t| (t.session_id, t.handle.clone()))
+    }
+
+    /// If a local session for `deployment_id` exists with a session_id
+    /// that does not match `current`, signal it to close. Used by the
+    /// listener when the DB row's owner has moved to a peer pod —
+    /// without this, the old owner keeps serving stale tool calls
+    /// until its next heartbeat tick (up to `heartbeat_secs`).
+    /// Returns `true` if an eviction signal was sent.
+    pub async fn evict_if_session_differs(&self, deployment_id: &str, current: uuid::Uuid) -> bool {
+        let close_tx = {
+            let map = self.inner.lock().expect("tunnel registry lock poisoned");
+            match map.get(deployment_id) {
+                Some(t) if t.session_id != current => Some(t.close_tx.clone()),
+                _ => None,
+            }
+        };
+        match close_tx {
+            Some(tx) => {
+                let _ = tx.send(()).await;
+                true
+            }
+            None => false,
         }
     }
 
@@ -234,7 +300,7 @@ impl Default for TunnelRegistry {
     }
 }
 
-pub struct TunnelToolSet {
+pub struct LocalTunnelToolSet {
     name: String,
     prefix: String,
     category: String,
@@ -247,7 +313,7 @@ pub struct TunnelToolSet {
     scope: ToolSetScope,
 }
 
-impl TunnelToolSet {
+impl LocalTunnelToolSet {
     /// Name/prefix are scoped to `deployment_id` to avoid catalog collisions.
     pub fn new(
         deployment_id: &str,
@@ -281,13 +347,14 @@ impl TunnelToolSet {
             scope: ToolSetScope::Tunnel {
                 deployment_id: deployment_id.to_string(),
                 session_id,
+                kind: TunnelKind::Local,
             },
         })
     }
 }
 
 #[async_trait::async_trait]
-impl SearchableToolSet for TunnelToolSet {
+impl SearchableToolSet for LocalTunnelToolSet {
     fn name(&self) -> &str {
         &self.name
     }
@@ -334,12 +401,17 @@ mod tests {
         assert!(registry.is_empty());
     }
 
+    fn dummy_handle() -> TunnelHandle {
+        let (tx, _rx) = mpsc::channel::<String>(1);
+        TunnelHandle::new(tx)
+    }
+
     #[tokio::test]
     async fn claim_first_does_not_evict() {
         let registry = TunnelRegistry::new();
         let (tx, _rx) = mpsc::channel::<()>(1);
         let evicted = registry
-            .claim("galoy-staging", uuid::Uuid::new_v4(), tx)
+            .claim("galoy-staging", uuid::Uuid::new_v4(), tx, dummy_handle())
             .await;
         assert!(!evicted);
         assert_eq!(registry.len(), 1);
@@ -351,12 +423,12 @@ mod tests {
 
         let (tx_a, mut rx_a) = mpsc::channel::<()>(1);
         registry
-            .claim("galoy-staging", uuid::Uuid::new_v4(), tx_a)
+            .claim("galoy-staging", uuid::Uuid::new_v4(), tx_a, dummy_handle())
             .await;
 
         let (tx_b, _rx_b) = mpsc::channel::<()>(1);
         let evicted = registry
-            .claim("galoy-staging", uuid::Uuid::new_v4(), tx_b)
+            .claim("galoy-staging", uuid::Uuid::new_v4(), tx_b, dummy_handle())
             .await;
 
         assert!(evicted);
@@ -372,12 +444,17 @@ mod tests {
 
         assert!(
             !registry
-                .claim("galoy-staging", uuid::Uuid::new_v4(), tx_a)
+                .claim("galoy-staging", uuid::Uuid::new_v4(), tx_a, dummy_handle())
                 .await
         );
         assert!(
             !registry
-                .claim("galoy-production", uuid::Uuid::new_v4(), tx_b)
+                .claim(
+                    "galoy-production",
+                    uuid::Uuid::new_v4(),
+                    tx_b,
+                    dummy_handle()
+                )
                 .await
         );
         assert_eq!(registry.len(), 2);
@@ -388,7 +465,9 @@ mod tests {
         let registry = TunnelRegistry::new();
         let session = uuid::Uuid::new_v4();
         let (tx, _rx) = mpsc::channel::<()>(1);
-        registry.claim("galoy-staging", session, tx).await;
+        registry
+            .claim("galoy-staging", session, tx, dummy_handle())
+            .await;
 
         registry.release("galoy-staging", session);
         assert!(registry.is_empty());
@@ -401,17 +480,86 @@ mod tests {
 
         let stale_session = uuid::Uuid::new_v4();
         let (tx_a, _rx_a) = mpsc::channel::<()>(1);
-        registry.claim("galoy-staging", stale_session, tx_a).await;
+        registry
+            .claim("galoy-staging", stale_session, tx_a, dummy_handle())
+            .await;
 
         let fresh_session = uuid::Uuid::new_v4();
         let (tx_b, _rx_b) = mpsc::channel::<()>(1);
-        registry.claim("galoy-staging", fresh_session, tx_b).await;
+        registry
+            .claim("galoy-staging", fresh_session, tx_b, dummy_handle())
+            .await;
 
         registry.release("galoy-staging", stale_session);
         assert_eq!(registry.len(), 1);
 
         registry.release("galoy-staging", fresh_session);
         assert!(registry.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_for_returns_live_handle() {
+        let registry = TunnelRegistry::new();
+        assert!(registry.handle_for("galoy-staging").is_none());
+
+        let session = uuid::Uuid::new_v4();
+        let (tx, _rx) = mpsc::channel::<()>(1);
+        registry
+            .claim("galoy-staging", session, tx, dummy_handle())
+            .await;
+        assert!(registry.handle_for("galoy-staging").is_some());
+
+        registry.release("galoy-staging", session);
+        assert!(registry.handle_for("galoy-staging").is_none());
+    }
+
+    #[tokio::test]
+    async fn local_session_returns_session_and_handle() {
+        let registry = TunnelRegistry::new();
+        assert!(registry.local_session("galoy-staging").is_none());
+
+        let session = uuid::Uuid::new_v4();
+        let (tx, _rx) = mpsc::channel::<()>(1);
+        registry
+            .claim("galoy-staging", session, tx, dummy_handle())
+            .await;
+
+        let (sid, _h) = registry.local_session("galoy-staging").expect("present");
+        assert_eq!(sid, session);
+    }
+
+    #[tokio::test]
+    async fn evict_if_session_differs_signals_close_when_mismatched() {
+        let registry = TunnelRegistry::new();
+        let local_session = uuid::Uuid::new_v4();
+        let (tx, mut rx) = mpsc::channel::<()>(1);
+        registry
+            .claim("galoy-staging", local_session, tx, dummy_handle())
+            .await;
+
+        // Same session: no-op.
+        let evicted = registry
+            .evict_if_session_differs("galoy-staging", local_session)
+            .await;
+        assert!(!evicted);
+        assert!(rx.try_recv().is_err());
+
+        // Different session: close_tx fires.
+        let other_session = uuid::Uuid::new_v4();
+        let evicted = registry
+            .evict_if_session_differs("galoy-staging", other_session)
+            .await;
+        assert!(evicted);
+        assert!(rx.try_recv().is_ok());
+    }
+
+    #[tokio::test]
+    async fn evict_if_session_differs_no_op_when_absent() {
+        let registry = TunnelRegistry::new();
+        let evicted = registry
+            .evict_if_session_differs("nope", uuid::Uuid::new_v4())
+            .await;
+        assert!(!evicted);
     }
 
     // Each scenario below proves `pending` doesn't leak under abnormal exit.

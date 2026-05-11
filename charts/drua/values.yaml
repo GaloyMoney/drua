@@ -248,6 +248,7 @@ galoyAgents:
     zendutyApiToken: ""
     anthropicApiKey: ""
     openaiApiKey: ""
+    tunnelInternalSecret: ""
     annotations:
   codeAssistant:
     indexHash: "63f26586413c03d57ccf29f1eb17e234c163e09e24a9c99030b3c0bf9fbaf172"

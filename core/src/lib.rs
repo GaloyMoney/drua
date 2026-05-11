@@ -69,6 +69,17 @@ pub struct App {
     /// Keyed by `deployment_id`; `/tunnel/ws` evicts a previous tunnel when
     /// a new connector registers the same `deployment_id`.
     tunnels: Arc<tunnel::TunnelRegistry>,
+    /// DB-backed source of truth for tunnel ownership across replicas.
+    /// Drives the proxy listener + heartbeat / reaper.
+    tunnel_registrations: Arc<tunnel::TunnelRegistrations>,
+    /// Loaded once from `AppConfig`; shapes heartbeat / reaper intervals
+    /// and feeds `self_pod_addr` into the WS handler's UPSERT.
+    tunnel_runtime: TunnelRuntimeConfig,
+    /// Held alongside the listener so the WS handler's cleanup tail
+    /// can call `tunnel_reconcile` to install a Proxy after a takeover
+    /// without re-deriving these from config.
+    tunnel_http: Arc<reqwest::Client>,
+    tunnel_auth: Arc<tunnel::InternalAuth>,
     library: drua_library::Library,
     spaces: Arc<AuthedSpaces>,
     search: Arc<AuthedSearch>,
@@ -381,6 +392,65 @@ impl App {
             .map_err(|e| AppError::Job(e.to_string()))?;
         let jobs = Arc::new(jobs);
 
+        let tunnel_registrations = Arc::new(tunnel::TunnelRegistrations::new(pool.clone()));
+        let tunnel_runtime = config.tunnel_runtime.clone();
+        validate_tunnel_runtime(&tunnel_runtime)?;
+
+        // Reaper: idempotent across replicas; raw spawn keeps it out
+        // of the job framework (the only thing it does is one DELETE
+        // every minute, no resumption semantics needed).
+        spawn_tunnel_reaper(
+            Arc::clone(&tunnel_registrations),
+            std::time::Duration::from_secs(tunnel_runtime.reaper_interval_secs.max(1)),
+        );
+
+        // Listener: mirrors `tunnel_registrations` into per-pod
+        // ProxyTunnelToolSet entries. The proxy hop fails closed when
+        // auth is `Disabled` — but in HA mode we refuse to even start
+        // in that state so peer pods can never silently advertise
+        // tunnels they can't actually reach.
+        let http = Arc::new(
+            reqwest::Client::builder()
+                .build()
+                .map_err(|e| AppError::PromptExecutor(e.to_string()))?,
+        );
+        let auth = Arc::new(internal_auth_from_runtime(&tunnel_runtime));
+        // HA is opt-in on (POD_IP × internal_secret). Either missing
+        // → run as single-replica: no DB upserts, no listener-driven
+        // proxies, peer pods don't see this pod's tunnels. The chart
+        // ships `POD_IP` unconditionally so existing replicas=1
+        // deploys without `tunnel-internal-secret` keep booting; one
+        // warning so operators notice if they wanted HA.
+        let mut tunnel_runtime = tunnel_runtime;
+        if tunnel_runtime.self_pod_addr.is_some() && matches!(*auth, tunnel::InternalAuth::Disabled)
+        {
+            tracing::warn!(
+                "POD_IP is set but no tunnel internal_secret configured — \
+                 falling back to single-replica tunnel mode. Set \
+                 DRUA_TUNNEL_INTERNAL_SECRET (Helm secrets.tunnelInternalSecret) \
+                 to enable cross-pod tunnel HA."
+            );
+            tunnel_runtime.self_pod_addr = None;
+        }
+        let tunnel_http = Arc::clone(&http);
+        let tunnel_auth = Arc::clone(&auth);
+        let tunnels = Arc::new(tunnel::TunnelRegistry::new());
+        // Only run the listener when HA is actually active. Otherwise
+        // a stale DB row from a previous HA deploy (or from another
+        // pod sharing this DB in dev) could either falsely evict our
+        // local session or install Proxy entries that 503 because
+        // `auth` is `Disabled`.
+        if tunnel_runtime.self_pod_addr.is_some() {
+            tunnel::spawn_tunnel_registry_listener(
+                pool.clone(),
+                tunnel_runtime.self_pod_addr.clone(),
+                Arc::clone(&toolsets),
+                Arc::clone(&tunnels),
+                Arc::clone(&http),
+                Arc::clone(&auth),
+            );
+        }
+
         Ok(Self {
             users,
             mcp_creds: Arc::new(mcp_creds),
@@ -395,7 +465,11 @@ impl App {
             workflows,
             github_app,
             git_proxies,
-            tunnels: Arc::new(tunnel::TunnelRegistry::new()),
+            tunnels,
+            tunnel_registrations,
+            tunnel_runtime,
+            tunnel_http,
+            tunnel_auth,
             library,
             spaces,
             search,
@@ -461,6 +535,30 @@ impl App {
         &self.tunnels
     }
 
+    pub fn tunnel_registrations(&self) -> &tunnel::TunnelRegistrations {
+        &self.tunnel_registrations
+    }
+
+    pub fn tunnel_runtime(&self) -> &TunnelRuntimeConfig {
+        &self.tunnel_runtime
+    }
+
+    /// Reconcile this pod's view of one deployment against the DB row.
+    /// Used by the WS-handler cleanup tail after a takeover so the
+    /// Proxy entry installs without waiting for an unrelated `pg_notify`.
+    pub async fn tunnel_reconcile(&self, deployment_id: &str) -> Result<(), sqlx::Error> {
+        tunnel::reconcile_one_deployment(
+            &self.tunnel_registrations,
+            self.tunnel_runtime.self_pod_addr.as_deref(),
+            &self.toolsets,
+            &self.tunnels,
+            &self.tunnel_http,
+            &self.tunnel_auth,
+            deployment_id,
+        )
+        .await
+    }
+
     pub fn library(&self) -> &drua_library::Library {
         &self.library
     }
@@ -479,9 +577,160 @@ impl App {
 
     /// Gracefully shut down background jobs. Call on SIGTERM / ctrl-c.
     pub async fn shutdown(&self) {
+        // Hand off tunnel ownership before draining jobs — peer pods
+        // pick up the freed deployments via pg_notify within ms.
+        if let Some(addr) = self.tunnel_runtime.self_pod_addr.as_deref() {
+            match self.tunnel_registrations.delete_all_owned_by(addr).await {
+                Ok(n) if n > 0 => {
+                    tracing::info!(count = n, owner = %addr, "tunnel rows handed off");
+                }
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error = %e, "tunnel shutdown cleanup failed"),
+            }
+        }
         if let Err(e) = self.jobs.shutdown().await {
             tracing::error!(error = %e, "job shutdown failed");
         }
+    }
+}
+
+/// Idempotent across replicas. Runs forever — aborted only when the
+/// process exits. The DELETE matches `expires_at < now()` so it's
+/// safe to fire concurrently from every pod's reaper.
+fn spawn_tunnel_reaper(regs: Arc<tunnel::TunnelRegistrations>, interval: std::time::Duration) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(interval);
+        // First tick fires immediately; skip it so the reaper doesn't
+        // race the very first heartbeat-extend on a fresh row.
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            match regs.reap_expired().await {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(count = n, "tunnel reaper deleted expired rows"),
+                Err(e) => tracing::warn!(error = %e, "tunnel reaper failed"),
+            }
+        }
+    });
+}
+
+/// Reject configs that would either panic in `tokio::time::interval`
+/// (heartbeat = 0) or flap rows under low TTL. The 2× lower bound on
+/// `expires_after_secs` lets one transient heartbeat error survive
+/// without losing the row.
+fn validate_tunnel_runtime(runtime: &TunnelRuntimeConfig) -> Result<(), AppError> {
+    if runtime.heartbeat_secs == 0 {
+        return Err(AppError::TunnelConfig(
+            "tunnel_runtime.heartbeat_secs must be > 0".into(),
+        ));
+    }
+    if runtime.expires_after_secs < runtime.heartbeat_secs * 2 {
+        return Err(AppError::TunnelConfig(format!(
+            "tunnel_runtime.expires_after_secs ({}) must be >= 2x heartbeat_secs ({})",
+            runtime.expires_after_secs, runtime.heartbeat_secs
+        )));
+    }
+    if runtime.reaper_interval_secs == 0 {
+        return Err(AppError::TunnelConfig(
+            "tunnel_runtime.reaper_interval_secs must be > 0".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn internal_auth_from_runtime(runtime: &TunnelRuntimeConfig) -> tunnel::InternalAuth {
+    // V1: shared secret only. SA-token end-to-end (with `drua-internal`
+    // audience + projected volume + a second `SaTokenValidator`) is a
+    // follow-up — the `InternalAuth::SaToken` variant exists but isn't
+    // populated from runtime yet.
+    match runtime.internal_secret.as_deref() {
+        Some(s) if !s.is_empty() => tunnel::InternalAuth::SharedSecret {
+            secret: s.to_string(),
+        },
+        _ => tunnel::InternalAuth::Disabled,
+    }
+}
+
+#[cfg(test)]
+mod ha_validation_tests {
+    use super::*;
+
+    #[test]
+    fn validate_rejects_zero_heartbeat() {
+        let runtime = TunnelRuntimeConfig {
+            heartbeat_secs: 0,
+            ..Default::default()
+        };
+        assert!(matches!(
+            validate_tunnel_runtime(&runtime),
+            Err(AppError::TunnelConfig(_))
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_ttl_below_2x_heartbeat() {
+        let runtime = TunnelRuntimeConfig {
+            heartbeat_secs: 30,
+            expires_after_secs: 45, // < 60
+            ..Default::default()
+        };
+        assert!(matches!(
+            validate_tunnel_runtime(&runtime),
+            Err(AppError::TunnelConfig(_))
+        ));
+    }
+
+    #[test]
+    fn validate_accepts_default() {
+        validate_tunnel_runtime(&TunnelRuntimeConfig::default()).unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_zero_reaper_interval() {
+        let runtime = TunnelRuntimeConfig {
+            reaper_interval_secs: 0,
+            ..Default::default()
+        };
+        assert!(matches!(
+            validate_tunnel_runtime(&runtime),
+            Err(AppError::TunnelConfig(_))
+        ));
+    }
+
+    #[test]
+    fn auth_disabled_when_no_secret() {
+        let runtime = TunnelRuntimeConfig {
+            internal_secret: None,
+            ..Default::default()
+        };
+        assert!(matches!(
+            internal_auth_from_runtime(&runtime),
+            tunnel::InternalAuth::Disabled
+        ));
+    }
+
+    #[test]
+    fn auth_disabled_on_empty_secret() {
+        let runtime = TunnelRuntimeConfig {
+            internal_secret: Some(String::new()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            internal_auth_from_runtime(&runtime),
+            tunnel::InternalAuth::Disabled
+        ));
+    }
+
+    #[test]
+    fn auth_shared_secret_when_set() {
+        let runtime = TunnelRuntimeConfig {
+            internal_secret: Some("hunter2".to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            internal_auth_from_runtime(&runtime),
+            tunnel::InternalAuth::SharedSecret { .. }
+        ));
     }
 }
 
@@ -540,4 +789,6 @@ pub enum AppError {
     Library(String),
     #[error("AppError - GitProxy: {0}")]
     GitProxy(String),
+    #[error("AppError - TunnelConfig: {0}")]
+    TunnelConfig(String),
 }
