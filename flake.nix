@@ -103,6 +103,13 @@
           cargoExtraArgs = "-p drua-server --bin write_sdl";
         });
 
+        fake-mcp-upstream = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+          pname = "fake-mcp-upstream";
+          cargoExtraArgs = "-p fake-mcp-upstream";
+          doCheck = false;
+        });
+
         pythonEnv = pkgs.python3.withPackages (ps:
           with ps; [
             torch
@@ -192,6 +199,7 @@
           export TERM="''${TERM:-dumb}"
           export REPO_ROOT="$(pwd)"
           export DRUA_BIN="${drua}/bin/drua"
+          export FAKE_UPSTREAM_BIN="${fake-mcp-upstream}/bin/fake-mcp-upstream"
           export ORT_DYLIB_PATH="${pkgs.onnxruntime}/lib/libonnxruntime${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}"
           # Point bats/sandbox-helpers.bash at the nix-built binary so
           # setup_file doesn't fall back to `cargo run` (which fetches
