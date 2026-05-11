@@ -1,0 +1,15 @@
+{
+  "name": "compose-inner-tool-array-return",
+  "description": "compose calls inner tool that returns small JSON array",
+  "as_used_by": ["compose scripts using list-style tools"],
+  "compose": {
+    "script": "const r = await tools.stub.list_engines({}); return { count: r.length };",
+    "inner_stub_upstream": {
+      "is_error": false,
+      "content": [
+        {"type": "text", "text": "[{\"id\":\"eng_1\"},{\"id\":\"eng_2\"}]"}
+      ],
+      "structured_content": null
+    }
+  }
+}

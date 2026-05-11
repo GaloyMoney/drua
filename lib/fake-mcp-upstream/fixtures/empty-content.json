@@ -1,0 +1,10 @@
+{
+  "name": "empty-content",
+  "description": "successful response with zero content parts",
+  "as_used_by": ["void / no-op tools"],
+  "upstream": {
+    "is_error": false,
+    "content": [],
+    "structured_content": null
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "whitespace-only",
+  "description": "text part containing only whitespace",
+  "as_used_by": ["bash with whitespace-only stdout"],
+  "upstream": {
+    "is_error": false,
+    "content": [
+      {"type": "text", "text": "   \n\t  "}
+    ],
+    "structured_content": null
+  }
+}

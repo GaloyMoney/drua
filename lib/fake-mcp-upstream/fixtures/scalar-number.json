@@ -1,0 +1,12 @@
+{
+  "name": "scalar-number",
+  "description": "JSON scalar number",
+  "as_used_by": ["pg_execute_sql count() queries"],
+  "upstream": {
+    "is_error": false,
+    "content": [
+      {"type": "text", "text": "42"}
+    ],
+    "structured_content": null
+  }
+}

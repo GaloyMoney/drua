@@ -1,0 +1,14 @@
+{
+  "name": "mixed-content-parts",
+  "description": "three content parts: text, image PNG, text",
+  "as_used_by": ["tools returning mixed text+image responses"],
+  "upstream": {
+    "is_error": false,
+    "content": [
+      {"type": "text", "text": "part1"},
+      {"type": "image", "mimeType": "image/png", "data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="},
+      {"type": "text", "text": "part2"}
+    ],
+    "structured_content": null
+  }
+}

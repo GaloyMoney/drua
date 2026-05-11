@@ -1,0 +1,9 @@
+{
+  "name": "compose-returns-object-shaped-like-envelope",
+  "description": "script returns an object that resembles a typed-summary envelope",
+  "as_used_by": ["compose scripts producing classifier-like shapes"],
+  "compose": {
+    "script": "return { _shape: \"string\", value: \"x\" };",
+    "inner_stub_upstream": null
+  }
+}

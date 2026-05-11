@@ -1,0 +1,12 @@
+{
+  "name": "arr-empty",
+  "description": "empty JSON array",
+  "as_used_by": ["pg_execute_sql with no rows", "list-style tools with no results"],
+  "upstream": {
+    "is_error": false,
+    "content": [
+      {"type": "text", "text": "[]"}
+    ],
+    "structured_content": null
+  }
+}

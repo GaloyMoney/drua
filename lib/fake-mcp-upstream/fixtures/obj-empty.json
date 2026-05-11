@@ -1,0 +1,12 @@
+{
+  "name": "obj-empty",
+  "description": "empty JSON object",
+  "as_used_by": ["pg_execute_sql with no rows returned as object"],
+  "upstream": {
+    "is_error": false,
+    "content": [
+      {"type": "text", "text": "{}"}
+    ],
+    "structured_content": null
+  }
+}

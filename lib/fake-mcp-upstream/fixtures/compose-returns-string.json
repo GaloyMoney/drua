@@ -1,0 +1,9 @@
+{
+  "name": "compose-returns-string",
+  "description": "script returns a long string directly",
+  "as_used_by": ["compose scripts that build text reports"],
+  "compose": {
+    "script": "return \"x\".repeat(20000);",
+    "inner_stub_upstream": null
+  }
+}
