@@ -361,21 +361,11 @@ impl TopLevelTool for DescribeCatalogTool {
 
 pub struct CallCatalogTool {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
-    tool_invocations: Option<Arc<super::super::tool_invocations::ToolInvocations>>,
-    classifiers: Arc<super::super::classifier::ClassifierRegistry>,
 }
 
 impl CallCatalogTool {
-    pub fn new(
-        sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
-        tool_invocations: Option<Arc<super::super::tool_invocations::ToolInvocations>>,
-        classifiers: Arc<super::super::classifier::ClassifierRegistry>,
-    ) -> Self {
-        Self {
-            sets,
-            tool_invocations,
-            classifiers,
-        }
+    pub fn new(sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>) -> Self {
+        Self { sets }
     }
 
     fn find_set(
@@ -464,62 +454,14 @@ impl TopLevelTool for CallCatalogTool {
 
         Audit::record_action(format!("catalog: {}", tool_name));
 
-        let started_at = chrono::Utc::now();
-        let start = std::time::Instant::now();
-        let result = set.call(subject, &name, inner_args.clone()).await;
-        let duration_ms = start.elapsed().as_millis() as u64;
+        let result = set.call(subject, &name, inner_args).await;
+        let result = annotate_envelope_mistake(result, &tool_name, &extra_keys)?;
 
-        let mut result = annotate_envelope_mistake(result, &tool_name, &extra_keys)?;
-        super::super::classifier::ensure_structured_content(&mut result);
-
-        let recorded_args = inner_args
-            .map(serde_json::Value::Object)
-            .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
-
-        let Some(invocations) = self.tool_invocations.as_ref() else {
-            let raw_bytes = super::super::estimate_text_bytes(&result);
-            super::super::record_pipeline_metrics(raw_bytes, raw_bytes, "bypass", false);
-            return Ok(result);
-        };
-        let classification =
-            self.classifiers
-                .classify(&super::super::classifier::ClassifierContext {
-                    tool_name: &tool_name,
-                    args: &recorded_args,
-                    raw: &result,
-                    exit_code: None,
-                });
-        let raw_bytes = classification.canonical_text.len() as u64;
-        let classifier_kind = classification.summary.kind().to_string();
-        let kept_bytes = classification.summary.kept_bytes(raw_bytes);
-        if classification.summary.is_passthrough() {
-            super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, false);
-            return Ok(result);
-        }
-        let Some(owner) = super::super::invocation_owner(subject) else {
-            super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, false);
-            return Ok(result);
-        };
-        let outcome = invocations
-            .persist_and_envelope(
-                owner,
-                &tool_name,
-                &recorded_args,
-                classification,
-                &result,
-                duration_ms,
-                started_at,
-            )
-            .await;
-        let persisted = outcome.is_some();
-        super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, persisted);
-        match outcome {
-            Some((wrapped, invocation_id)) => {
-                crate::audit::Audit::record_tool_invocation_id(invocation_id);
-                Ok(wrapped)
-            }
-            None => Ok(result),
-        }
+        // Tool-output caching is disconnected — classifier + envelope wrapping
+        // intentionally skipped. Return the upstream result verbatim.
+        let raw_bytes = super::super::estimate_text_bytes(&result);
+        super::super::record_pipeline_metrics(raw_bytes, raw_bytes, "bypass", false);
+        Ok(result)
     }
 }
 

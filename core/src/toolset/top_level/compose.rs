@@ -11,18 +11,11 @@ use serde::Deserialize;
 use crate::audit::{Audit, InteractionType};
 use crate::auth::AuthSubject;
 
-use super::super::classifier::{
-    Classification, ClassifierContext, ClassifierRegistry, GenericFallback, ResultClassifier,
-    ToolResultSummary,
-};
 use super::super::config::ComposeConfig;
 use super::super::error::ToolSetsError;
-use super::super::tool_invocations::{PersistedClassification, ToolInvocations};
 use super::super::traits::{SearchableToolSet, TopLevelTool};
 use super::liberal;
 use super::{parse_params, schema_for};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::Mutex as StdMutex;
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct ComposeParams {
@@ -36,8 +29,6 @@ pub struct ComposeTool {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
     top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
     audit: Option<Arc<Audit>>,
-    tool_invocations: Option<Arc<ToolInvocations>>,
-    classifiers: Arc<ClassifierRegistry>,
     config: ComposeConfig,
 }
 
@@ -46,16 +37,12 @@ impl ComposeTool {
         sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
         top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
         audit: Option<Arc<Audit>>,
-        tool_invocations: Option<Arc<ToolInvocations>>,
-        classifiers: Arc<ClassifierRegistry>,
         config: ComposeConfig,
     ) -> Self {
         Self {
             sets,
             top_level,
             audit,
-            tool_invocations,
-            classifiers,
             config,
         }
     }
@@ -152,17 +139,11 @@ impl TopLevelTool for ComposeTool {
             format!("/*\n{dts}*/\n{}", params.script)
         };
 
-        let sub_invocations = Arc::new(StdMutex::new(Vec::<SubInvocation>::new()));
-        let seq_counter = Arc::new(AtomicU32::new(0));
         let dispatcher = Arc::new(CatalogDispatcher {
             sets: Arc::clone(&self.sets),
             top_level: Arc::clone(&self.top_level),
             subject: subject.clone(),
             audit: self.audit.clone(),
-            tool_invocations: self.tool_invocations.clone(),
-            classifiers: Arc::clone(&self.classifiers),
-            sub_invocations: Arc::clone(&sub_invocations),
-            seq_counter: Arc::clone(&seq_counter),
         });
 
         let engine = js_engine::JsEngine::new()
@@ -172,73 +153,19 @@ impl TopLevelTool for ComposeTool {
             .with_max_console_bytes(self.config.max_console_bytes)
             .with_memory_limit(self.config.memory_limit_bytes)
             .with_stack_limit(self.config.stack_limit_bytes);
-        let started_at = chrono::Utc::now();
         let result = engine
             .execute(&script, dispatcher, timeout)
             .await
             .map_err(|e| ToolSetsError::Compose(e.to_string()))?;
 
-        let walker_classifier = GenericFallback::default();
-        let walker_input = build_walker_input(&result.value);
-        let classification = walker_classifier
-            .classify(&ClassifierContext {
-                tool_name: "compose",
-                args: &recorded_args,
-                raw: &walker_input,
-                exit_code: None,
-            })
-            .unwrap_or_else(|_| Classification {
-                summary: ToolResultSummary::Passthrough {
-                    value: result.value.clone(),
-                },
-                canonical_text: serde_json::to_string(&result.value).unwrap_or_default(),
-                root_path: super::super::classifier::root_path_of_unwrapped(&result.value)
-                    .to_string(),
-            });
-
-        let (curated_result, result_invocation_id) =
-            match (classification.summary, self.tool_invocations.as_ref()) {
-                (ToolResultSummary::Passthrough { value }, _) => (value, None),
-                (summary, Some(invocations)) => {
-                    let canonical_text = classification.canonical_text;
-                    let root_path = classification.root_path;
-                    let curated = render_curated_result(&summary);
-                    let original_structured = Some(result.value.clone());
-                    let persisted = match super::super::invocation_owner(subject) {
-                        Some(owner) => {
-                            invocations
-                                .persist_classification(
-                                    owner,
-                                    "compose",
-                                    &recorded_args,
-                                    Classification {
-                                        summary,
-                                        canonical_text,
-                                        root_path,
-                                    },
-                                    original_structured,
-                                    result.execution_time.as_millis() as u64,
-                                    started_at,
-                                )
-                                .await
-                        }
-                        None => None,
-                    };
-                    let invocation_id = persisted.map(|p| uuid::Uuid::from(p.invocation_id));
-                    (curated, invocation_id)
-                }
-                (summary, None) => (render_curated_result(&summary), None),
-            };
-
-        let sub_invocations = sub_invocations
-            .lock()
-            .map(|g| g.clone())
-            .unwrap_or_default();
-
+        // Tool-output caching is disconnected — classifier + persistence
+        // intentionally skipped. The script's return value flows through
+        // verbatim.
+        let _ = &recorded_args;
         let out = ComposeOutput {
-            result: curated_result,
-            result_invocation_id,
-            sub_invocations,
+            result: result.value.clone(),
+            result_invocation_id: None,
+            sub_invocations: Vec::new(),
             fetch_hint: COMPOSE_FETCH_HINT.to_string(),
             console: result.console_output.clone(),
             tool_calls: result.tool_calls_made,
@@ -290,28 +217,6 @@ impl TopLevelTool for ComposeTool {
     }
 }
 
-/// Synthetic `CallToolResult` the classifier walks for compose's top-level
-/// return value. Only sets `structured_content` when the JS return is a
-/// record; non-record returns flow through the text channel so the
-/// classifier's `canonicalize` helper derives root_path from the parsed
-/// shape directly (matches the regular dispatch path's behaviour).
-fn build_walker_input(value: &serde_json::Value) -> CallToolResult {
-    let text = serde_json::to_string(value).unwrap_or_default();
-    let mut ctr = CallToolResult::success(vec![Content::text(text)]);
-    if let serde_json::Value::Object(_) = value {
-        ctr.structured_content = Some(value.clone());
-    }
-    ctr
-}
-
-fn render_curated_result(summary: &ToolResultSummary) -> serde_json::Value {
-    match summary {
-        ToolResultSummary::Passthrough { value } => value.clone(),
-        ToolResultSummary::StructuredElision { kept, .. } => kept.clone(),
-        ToolResultSummary::Typed { body, .. } => body.clone(),
-    }
-}
-
 const COMPOSE_FETCH_HINT: &str = "invocation_id is either `result_invocation_id` (full JS return) \
      or any `sub_invocations[].invocation_id` (specific sub-call's \
      persisted output) — see `tool_output_fetch` for the full call shape.";
@@ -337,10 +242,6 @@ struct CatalogDispatcher {
     top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
     subject: AuthSubject,
     audit: Option<Arc<Audit>>,
-    tool_invocations: Option<Arc<ToolInvocations>>,
-    classifiers: Arc<ClassifierRegistry>,
-    sub_invocations: Arc<StdMutex<Vec<SubInvocation>>>,
-    seq_counter: Arc<AtomicU32>,
 }
 
 #[async_trait::async_trait]
@@ -490,127 +391,28 @@ impl CatalogDispatcher {
     }
 
     fn clone_for_persistence(&self) -> CatalogDispatcherShared {
-        CatalogDispatcherShared {
-            subject: self.subject.clone(),
-            tool_invocations: self.tool_invocations.clone(),
-            classifiers: Arc::clone(&self.classifiers),
-            sub_invocations: Arc::clone(&self.sub_invocations),
-            seq_counter: Arc::clone(&self.seq_counter),
-        }
+        CatalogDispatcherShared {}
     }
 }
 
 #[derive(Clone)]
-struct CatalogDispatcherShared {
-    subject: AuthSubject,
-    tool_invocations: Option<Arc<ToolInvocations>>,
-    classifiers: Arc<ClassifierRegistry>,
-    sub_invocations: Arc<StdMutex<Vec<SubInvocation>>>,
-    seq_counter: Arc<AtomicU32>,
-}
+struct CatalogDispatcherShared {}
 
 impl CatalogDispatcherShared {
     async fn maybe_persist_sub_invocation(
         &self,
-        tool_name: &str,
-        args: &serde_json::Value,
+        _tool_name: &str,
+        _args: &serde_json::Value,
         raw: &CallToolResult,
-        duration_ms: u64,
-        started_at: chrono::DateTime<chrono::Utc>,
+        _duration_ms: u64,
+        _started_at: chrono::DateTime<chrono::Utc>,
     ) {
-        // Even when there's nothing to persist, classify and emit pipeline
-        // metrics so dashboards see compose sub-calls — parity with the
-        // regular path which always records.
-        let classification = self.classifiers.classify(&ClassifierContext {
-            tool_name,
-            args,
-            raw,
-            exit_code: None,
-        });
-        let raw_bytes = classification.canonical_text.len() as u64;
-        let classifier_kind = classification.summary.kind().to_string();
-        let kept_bytes = classification.summary.kept_bytes(raw_bytes);
-
-        if classification.summary.is_passthrough() {
-            super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, false);
-            return;
-        }
-
-        let summary_value_size = serde_json::to_string(
-            &serde_json::to_value(&classification.summary).unwrap_or_default(),
-        )
-        .map(|s| s.len() as u64)
-        .unwrap_or(0);
-
-        let Some(invocations) = self.tool_invocations.as_ref() else {
-            super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, false);
-            return;
-        };
-        let Some(owner) = super::super::invocation_owner(&self.subject) else {
-            super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, false);
-            return;
-        };
-        // Same canonicalize step `persist_and_envelope` uses on the regular
-        // dispatch path: pull the upstream value from whichever channel was
-        // used so json_path / json_array_slice `_recover` templates round-trip
-        // for non-record sub-tools.
-        let original_structured = drua_tool_classifier::canonicalize(raw);
-        let Some(persisted): Option<PersistedClassification> = invocations
-            .persist_classification(
-                owner,
-                tool_name,
-                args,
-                classification,
-                original_structured,
-                duration_ms,
-                started_at,
-            )
-            .await
-        else {
-            super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, false);
-            return;
-        };
-
-        super::super::record_pipeline_metrics(raw_bytes, kept_bytes, &classifier_kind, true);
-        Audit::record_tool_invocation_id(persisted.invocation_id);
-
-        let seq = self.seq_counter.fetch_add(1, Ordering::Relaxed);
-        let entry = SubInvocation {
-            seq,
-            tool_name: tool_name.to_string(),
-            args_digest: args_digest(tool_name, args),
-            invocation_id: persisted.invocation_id.into(),
-            kind: persisted.summary.kind().to_string(),
-            raw_size_bytes: persisted.raw_size_bytes,
-            summary_size_bytes: summary_value_size,
-        };
-        if let Ok(mut guard) = self.sub_invocations.lock() {
-            guard.push(entry);
-        }
+        // Tool-output caching is disconnected — sub-tool classification +
+        // persistence intentionally skipped. Only the bypass metric is
+        // recorded for dashboard parity.
+        let raw_bytes = super::super::estimate_text_bytes(raw);
+        super::super::record_pipeline_metrics(raw_bytes, raw_bytes, "bypass", false);
     }
-}
-
-fn args_digest(tool_name: &str, args: &serde_json::Value) -> String {
-    let mut out = String::from(tool_name);
-    out.push('(');
-    if let serde_json::Value::Object(obj) = args {
-        let mut first = true;
-        for (k, v) in obj.iter().take(4) {
-            if !first {
-                out.push_str(", ");
-            }
-            first = false;
-            let v_str: String = match v {
-                serde_json::Value::String(s) => s.chars().take(20).collect(),
-                other => other.to_string().chars().take(20).collect(),
-            };
-            out.push_str(k);
-            out.push('=');
-            out.push_str(&v_str);
-        }
-    }
-    out.push(')');
-    out.chars().take(80).collect()
 }
 
 async fn run_searchable_call(
@@ -635,11 +437,10 @@ async fn run_searchable_call(
         a
     });
 
-    let mut result = set
+    let result = set
         .call(subject, tool_name, inner_args)
         .await
         .map_err(|e| e.to_string())?;
-    let _ = super::super::classifier::ensure_structured_content(&mut result);
 
     let value = result_to_value(&result);
     Ok((result, value))
@@ -665,14 +466,10 @@ async fn run_top_level_call(
         a
     });
 
-    let bypass = tool.bypass_universal_pipeline();
-    let mut result = tool
+    let result = tool
         .call(subject, inner_args)
         .await
         .map_err(|e| e.to_string())?;
-    if !bypass {
-        let _ = super::super::classifier::ensure_structured_content(&mut result);
-    }
 
     let value = result_to_value(&result);
     Ok((result, value))
