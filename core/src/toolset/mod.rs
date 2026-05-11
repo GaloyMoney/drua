@@ -1,36 +1,19 @@
-pub use drua_tool_classifier as classifier;
+mod auto_parse_args;
 mod config;
+mod dispatch;
 mod error;
 mod inspect;
 pub mod searchable;
-pub use drua_tool_cache as tool_invocations;
-mod cache_owner;
-pub use cache_owner::invocation_owner;
-mod auto_parse_args;
-mod dispatch;
 pub mod top_level;
 mod traits;
 
-pub use classifier::{
-    default_summarizer_chain, BashClassifier, BulkElide, CargoCheckRun, CargoCompileRun,
-    CargoDownloadRun, Classification, ClassifierContext, ClassifierError, ClassifierRegistry,
-    ConcourseBuildLogClassifier, ConcourseBuildLogPreprocessor, ElidedPath, ElisionKind,
-    GenericFallback, GitCloneProgress, NixBuildingRun, NixCacheActivity, NixCopyRun, NixDrvList,
-    NixFetchList, ResultClassifier, SegmentedText, StringSummarizer, StringSummarizerChain,
-    ToolResultSummary,
-};
 pub use config::*;
 pub use error::*;
 pub use searchable::*;
-pub use tool_invocations::{
-    substitute_recovery_placeholder, FetchQuery, FetchResult, InvocationOwner, NewToolInvocation,
-    ToolInvocation, ToolInvocationError, ToolInvocationId, ToolInvocationOwnerId, ToolInvocations,
-};
 pub use top_level::{
     Bash, CallCatalogTool, ComposeTool, ComposeTypes, Delete, DescribeCatalogTool, GlobTool, Grep,
     Ls, MoveFile, NotesTool, ProjectAgent, ProjectLog, ProjectSandbox, Read, SearchCatalog,
-    SkillTool, SpacesTool, SubmitOutputTool, TextEditor, ToolOutputFetch, UseSkillTool, WhoAmI,
-    WorkflowTool,
+    SkillTool, SpacesTool, SubmitOutputTool, TextEditor, UseSkillTool, WhoAmI, WorkflowTool,
 };
 pub use traits::*;
 
@@ -141,15 +124,11 @@ fn normalize_for_strict_in_place(value: &mut serde_json::Value) {
     obj.insert("additionalProperties".to_string(), serde_json::json!(false));
 }
 
-const PERSIST_MIN_SAVINGS_BYTES: u64 = 100;
-
 pub struct ToolSets {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
     top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
     /// `None` only in tests without a DB pool.
     audit: Option<Arc<Audit>>,
-    tool_invocations: Option<Arc<ToolInvocations>>,
-    classifiers: Arc<ClassifierRegistry>,
     init_errors: Vec<(String, String)>,
 }
 
@@ -158,7 +137,8 @@ impl ToolSets {
         config: ToolSetsConfig,
         audit: Option<Arc<Audit>>,
         github_app: Option<Arc<github_app::GitHubAppTokenProvider>>,
-        tool_invocations: Option<Arc<ToolInvocations>>,
+        // Reserved for re-enabling the tool-output cache; ignored today.
+        _tool_invocations: Option<()>,
     ) -> Result<Self, ToolSetsError> {
         let mut sets: Vec<Arc<dyn SearchableToolSet>> = Vec::new();
         let mut init_errors: Vec<(String, String)> = Vec::new();
@@ -215,18 +195,11 @@ impl ToolSets {
 
         let search = Arc::new(SearchCatalog::new(Arc::clone(&sets)));
         let describe = Arc::new(DescribeCatalogTool::new(Arc::clone(&sets)));
-        let classifiers = Arc::new(ClassifierRegistry::with_default());
-        let call = Arc::new(CallCatalogTool::new(
-            Arc::clone(&sets),
-            tool_invocations.clone(),
-            Arc::clone(&classifiers),
-        ));
+        let call = Arc::new(CallCatalogTool::new(Arc::clone(&sets)));
         let compose = Arc::new(ComposeTool::new(
             Arc::clone(&sets),
             Arc::clone(&top_level),
             audit.clone(),
-            tool_invocations.clone(),
-            Arc::clone(&classifiers),
             config.compose.clone(),
         ));
         let compose_types = Arc::new(ComposeTypes::new(Arc::clone(&sets), Arc::clone(&top_level)));
@@ -246,18 +219,12 @@ impl ToolSets {
                 compose_types as Arc<dyn TopLevelTool>,
             );
             map.insert(whoami.name().to_string(), whoami as Arc<dyn TopLevelTool>);
-            if let Some(ti) = tool_invocations.as_ref() {
-                let fetch = Arc::new(ToolOutputFetch::new(Arc::clone(ti)));
-                map.insert(fetch.name().to_string(), fetch as Arc<dyn TopLevelTool>);
-            }
         }
 
         Ok(Self {
             sets,
             top_level,
             audit,
-            tool_invocations,
-            classifiers,
             init_errors,
         })
     }
@@ -511,9 +478,10 @@ impl ToolSets {
         };
 
         let audit = self.audit.clone();
-        let tool_invocations = self.tool_invocations.clone();
-        let classifiers = Arc::clone(&self.classifiers);
-        let started_at = chrono::Utc::now();
+        // Tool-output caching is disconnected — the persistence + classifier
+        // pipeline in core/crates/tool-{cache,classifier} stays compiled but
+        // is intentionally not invoked here; every result is returned
+        // verbatim.
 
         async move {
             Audit::record_subject(subject);
@@ -536,20 +504,12 @@ impl ToolSets {
                 "arguments": args_value,
             }));
 
-            let bypass_pipeline =
-                tool.bypass_universal_pipeline() || invocation_owner(subject).is_none();
             let start = std::time::Instant::now();
-            let raw_result = tool.call(subject, arguments).await.map(|mut raw| {
-                if !bypass_pipeline {
-                    classifier::ensure_structured_content(&mut raw);
-                }
-                raw
-            });
-            let duration_ms = start.elapsed().as_millis() as u64;
+            let raw_result = tool.call(subject, arguments).await;
             Audit::record_duration(start);
 
             let final_result = match raw_result {
-                Ok(raw) if bypass_pipeline => {
+                Ok(raw) => {
                     if !tool.records_own_pipeline_metrics() {
                         let raw_bytes = estimate_text_bytes(&raw);
                         record_pipeline_metrics(raw_bytes, raw_bytes, "bypass", false);
@@ -557,61 +517,6 @@ impl ToolSets {
                     Audit::record_tokens(estimate_tokens(&raw));
                     Audit::record_success();
                     Ok(raw)
-                }
-                Ok(raw) => {
-                    let args_for_classify = args_value
-                        .clone()
-                        .unwrap_or_else(|| serde_json::Value::Object(serde_json::Map::new()));
-                    let classification = classifiers.classify(&ClassifierContext {
-                        tool_name: name,
-                        args: &args_for_classify,
-                        raw: &raw,
-                        exit_code: None,
-                    });
-
-                    let raw_bytes = classification.canonical_text.len() as u64;
-                    let classifier_kind = classification.summary.kind().to_string();
-                    let kept_bytes = classification.summary.kept_bytes(raw_bytes);
-                    let saved_bytes = raw_bytes.saturating_sub(kept_bytes);
-                    let summary_is_passthrough = classification.summary.is_passthrough()
-                        || saved_bytes < PERSIST_MIN_SAVINGS_BYTES;
-
-                    let owner = invocation_owner(subject);
-                    let (wrapped, persisted) =
-                        match (summary_is_passthrough, owner, tool_invocations.as_ref()) {
-                            (false, Some(owner), Some(invocations)) => {
-                                match invocations
-                                    .persist_and_envelope(
-                                        owner,
-                                        name,
-                                        &args_for_classify,
-                                        classification,
-                                        &raw,
-                                        duration_ms,
-                                        started_at,
-                                    )
-                                    .await
-                                {
-                                    Some((wrapped, invocation_id)) => {
-                                        Audit::record_tool_invocation_id(invocation_id);
-                                        (wrapped, true)
-                                    }
-                                    None => (raw, false),
-                                }
-                            }
-                            _ => (raw, false),
-                        };
-
-                    let effective_kept_bytes = if persisted { kept_bytes } else { raw_bytes };
-                    record_pipeline_metrics(
-                        raw_bytes,
-                        effective_kept_bytes,
-                        &classifier_kind,
-                        persisted,
-                    );
-                    Audit::record_tokens(estimate_tokens(&wrapped));
-                    Audit::record_success();
-                    Ok(wrapped)
                 }
                 Err(e) => {
                     Audit::record_error(e.to_string());
@@ -684,8 +589,6 @@ impl ToolSets {
             sets: Arc::new(RwLock::new(Vec::new())),
             top_level: Arc::new(RwLock::new(HashMap::new())),
             audit: None,
-            tool_invocations: None,
-            classifiers: Arc::new(ClassifierRegistry::with_default()),
             init_errors: Vec::new(),
         }
     }
