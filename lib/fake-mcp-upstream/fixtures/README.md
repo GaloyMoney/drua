@@ -95,11 +95,19 @@ Every fixture is a JSON file using one of two shapes.
 ## Real vs synthesised
 
 REAL captured upstream data is reused in:
-- 16 (`str-large-table`)
+- 16 (`str-large-table`) — sanitized
 - 22 (`arr-large-fat-items`)
 - 23 (`obj-with-large-nested-array`)
-- 24 (`concourse-build-log`)
-- 25 (`concourse-shaped-but-wrong-tool`) — same payload as 24
+- 24 (`concourse-build-log`) — sanitized
+- 25 (`concourse-shaped-but-wrong-tool`) — sanitized; same payload as 24
+
+Sanitization for entries 16, 24, 25 (per PR #324 review): project IDs,
+service-account / IAM-role names, employee emails, internal pod IPs,
+and GKE node-hash suffixes have been substituted with non-identifying
+placeholders (`example-project`, `alice@example.com`, `bob@example.com`,
+`10.99.0.x`, etc.). The terraform / kubectl line-shape, byte profile,
+ANSI escapes, and `structured_content` schema are preserved so the
+classifier-targeted tests stay meaningful.
 
 All other fixtures are synthesised inline. Note: 21 (`arr-large-passthrough-items`)
 was previously REAL but mislabeled (the captured payload was an object root with
