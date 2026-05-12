@@ -1,4 +1,4 @@
--- Persistence layer for tool-output caching. Each row holds
+-- Persistence layer for the tool-output universal pipeline. Each row holds
 -- the raw output of a single tool call that the dispatcher's
 -- `ResultClassifier` deemed worth persisting (i.e. anything but
 -- `Passthrough`).
