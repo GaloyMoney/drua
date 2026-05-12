@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use es_entity::EntityEvents;
 
-use crate::agent::config::ModelDefaults;
+use crate::agent::config::ModelChain;
 
 use super::entity::{AgentSessionEvent, ThreadStartReason};
 use super::message::{CompactionMetadata, SandboxOperation, TargetThread};
@@ -42,7 +42,8 @@ pub(super) fn event_belongs_to_thread(
         | AgentSessionEvent::SystemBlockUpdated { .. }
         | AgentSessionEvent::ThreadStarted { .. }
         | AgentSessionEvent::ToolResultsMasked { .. }
-        | AgentSessionEvent::OutputSubmitted { .. } => false,
+        | AgentSessionEvent::OutputSubmitted { .. }
+        | AgentSessionEvent::ModelChainUpdated { .. } => false,
     }
 }
 
@@ -58,7 +59,7 @@ pub(super) struct CompactionResult {
 pub(super) fn maybe_prune(
     events: &EntityEvents<AgentSessionEvent>,
     config: &CompactionConfig,
-    model_defaults: &ModelDefaults,
+    model_chain: &ModelChain,
     session_id: super::AgentSessionId,
     current_thread_id: SessionThreadId,
     is_main_thread: bool,
@@ -76,7 +77,7 @@ pub(super) fn maybe_prune(
 
     let action = config.determine_action(
         estimated_tokens,
-        model_defaults.context_window_tokens,
+        model_chain.primary.context_window_tokens,
         time_since_last_turn,
     );
 
@@ -88,7 +89,7 @@ pub(super) fn maybe_prune(
                 session_id,
                 current_thread_id,
                 is_main_thread,
-                model_defaults,
+                model_chain,
                 current_prompt_definition,
             );
         }
@@ -139,8 +140,7 @@ pub(super) fn maybe_prune(
     let tool_definitions_view = current_prompt_definition.tool_definitions_view().clone();
 
     let prompt_definition = PromptDefinition {
-        model: model_defaults.model.clone(),
-        max_tokens_per_response: model_defaults.max_tokens_per_response,
+        chain: model_chain.clone(),
         system_view: system_view.clone(),
         tool_definitions_view: tool_definitions_view.clone(),
         messages: transformed_messages.clone(),
@@ -150,7 +150,7 @@ pub(super) fn maybe_prune(
     let new_thread = NewSessionThread::compacted(
         new_thread_id,
         session_id,
-        model_defaults.clone(),
+        model_chain.clone(),
         system_view,
         tool_definitions_view,
         transformed_messages,
@@ -231,7 +231,7 @@ fn build_orphan_result<'a>(
     session_id: super::AgentSessionId,
     current_thread_id: SessionThreadId,
     is_main_thread: bool,
-    model_defaults: &ModelDefaults,
+    model_chain: &ModelChain,
     current_prompt_definition: &PromptDefinition,
 ) -> Option<CompactionResult> {
     let new_thread_id = SessionThreadId::new();
@@ -253,8 +253,7 @@ fn build_orphan_result<'a>(
     };
 
     let prompt_definition = PromptDefinition {
-        model: model_defaults.model.clone(),
-        max_tokens_per_response: model_defaults.max_tokens_per_response,
+        chain: model_chain.clone(),
         system_view: system_view.clone(),
         tool_definitions_view: tool_definitions_view.clone(),
         messages: vec![MessageView::User(user_messages.clone())],
@@ -274,7 +273,7 @@ fn build_orphan_result<'a>(
             new_thread_id,
             session_id,
             current_thread_id,
-            model_defaults.clone(),
+            model_chain.clone(),
             system_view,
             tool_definitions_view,
             user_messages,

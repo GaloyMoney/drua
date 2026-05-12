@@ -20,4 +20,6 @@ pub enum AgentSessionError {
     NotAssistantTurn,
     #[error("AgentSessionError - received tool results but no tool use is pending")]
     NotToolUseTurn,
+    #[error("AgentSessionError - proposed model chain is invalid: {0}")]
+    ModelChainInvalid(String),
 }

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::agent::config::ModelChain;
+
 use super::thread::SessionThreadId;
 
 /// Name of the runtime-provided `submit_output` tool. Used by:
@@ -31,8 +33,7 @@ pub struct CompactionMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Prompt {
     pub target_thread: TargetThread,
-    pub model: String,
-    pub max_tokens_per_response: u32,
+    pub chain: ModelChain,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_key: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -189,9 +190,14 @@ pub enum StopReason {
 
 impl From<Prompt> for llm::Prompt {
     fn from(p: Prompt) -> Self {
+        let max_tokens = Some(p.chain.primary.max_tokens_per_response);
+        let mut chain = llm::ModelChain::new(p.chain.primary.model);
+        for fallback in p.chain.fallbacks {
+            chain = chain.with_fallback(fallback.model);
+        }
         llm::Prompt {
-            chain: llm::ModelChain::new(p.model),
-            max_tokens: Some(p.max_tokens_per_response),
+            chain,
+            max_tokens,
             cache_key: p.cache_key,
             system: p
                 .system

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use es_entity::*;
 
-use crate::agent::config::ModelDefaults;
+use crate::agent::config::ModelChain;
 
 use super::entity::ThreadStartReason;
 use super::view::*;
@@ -27,7 +27,7 @@ pub enum SessionThreadEvent {
         id: SessionThreadId,
         session_id: AgentSessionId,
         start_reason: ThreadStartReason,
-        model_defaults: ModelDefaults,
+        chain: ModelChain,
         system_view: SystemView,
         tool_definitions_view: ToolDefinitionsView,
         initial_user_messages: UserMessagesView,
@@ -35,7 +35,7 @@ pub enum SessionThreadEvent {
     InitializedFromCompaction {
         id: SessionThreadId,
         session_id: AgentSessionId,
-        model_defaults: ModelDefaults,
+        chain: ModelChain,
         system_view: SystemView,
         tool_definitions_view: ToolDefinitionsView,
         messages: Vec<MessageView>,
@@ -45,7 +45,7 @@ pub enum SessionThreadEvent {
     InitializedFromRefresh {
         id: SessionThreadId,
         session_id: AgentSessionId,
-        model_defaults: ModelDefaults,
+        chain: ModelChain,
         system_view: SystemView,
         tool_definitions_view: ToolDefinitionsView,
         messages: Vec<MessageView>,
@@ -116,8 +116,7 @@ impl SessionThread {
     }
 
     pub fn prompt_definition(&self) -> PromptDefinition {
-        let mut model = String::new();
-        let mut max_tokens_per_response = 0;
+        let mut chain = ModelChain::default();
         let mut system_view = SystemView { indexes: vec![] };
         let mut tool_definitions_view = ToolDefinitionsView { indexes: vec![] };
         let mut messages = Vec::new();
@@ -125,34 +124,32 @@ impl SessionThread {
         for event in self.events.iter_all() {
             match event {
                 SessionThreadEvent::Initialized {
-                    model_defaults,
+                    chain: c,
                     system_view: sv,
                     tool_definitions_view: tdv,
                     initial_user_messages,
                     ..
                 } => {
-                    model = model_defaults.model.clone();
-                    max_tokens_per_response = model_defaults.max_tokens_per_response;
+                    chain = c.clone();
                     system_view = sv.clone();
                     tool_definitions_view = tdv.clone();
                     messages.push(MessageView::User(initial_user_messages.clone()));
                 }
                 SessionThreadEvent::InitializedFromCompaction {
-                    model_defaults,
+                    chain: c,
                     system_view: sv,
                     tool_definitions_view: tdv,
                     messages: init_messages,
                     ..
                 }
                 | SessionThreadEvent::InitializedFromRefresh {
-                    model_defaults,
+                    chain: c,
                     system_view: sv,
                     tool_definitions_view: tdv,
                     messages: init_messages,
                     ..
                 } => {
-                    model = model_defaults.model.clone();
-                    max_tokens_per_response = model_defaults.max_tokens_per_response;
+                    chain = c.clone();
                     system_view = sv.clone();
                     tool_definitions_view = tdv.clone();
                     messages.extend(init_messages.iter().cloned());
@@ -181,8 +178,7 @@ impl SessionThread {
         }
 
         PromptDefinition {
-            model,
-            max_tokens_per_response,
+            chain,
             system_view,
             tool_definitions_view,
             messages,
@@ -274,7 +270,7 @@ pub struct NewSessionThread {
     pub(super) id: SessionThreadId,
     pub(super) session_id: AgentSessionId,
     pub(super) start_reason: ThreadStartReason,
-    pub(super) model_defaults: ModelDefaults,
+    pub(super) chain: ModelChain,
     pub(super) system_view: SystemView,
     pub(super) tool_definitions_view: ToolDefinitionsView,
     init: ThreadInitData,
@@ -301,7 +297,7 @@ impl NewSessionThread {
             id: SessionThreadId::new(),
             session_id: None,
             start_reason: None,
-            model_defaults: None,
+            chain: None,
             system_view: None,
             tool_definitions_view: None,
             initial_user_messages: None,
@@ -311,7 +307,7 @@ impl NewSessionThread {
     pub fn compacted(
         id: SessionThreadId,
         session_id: AgentSessionId,
-        model_defaults: ModelDefaults,
+        chain: ModelChain,
         system_view: SystemView,
         tool_definitions_view: ToolDefinitionsView,
         messages: Vec<MessageView>,
@@ -323,7 +319,7 @@ impl NewSessionThread {
             start_reason: ThreadStartReason::Compaction {
                 from_thread: follows_from,
             },
-            model_defaults,
+            chain,
             system_view,
             tool_definitions_view,
             init: ThreadInitData::Compacted {
@@ -337,7 +333,7 @@ impl NewSessionThread {
     pub fn refreshed(
         id: SessionThreadId,
         session_id: AgentSessionId,
-        model_defaults: ModelDefaults,
+        chain: ModelChain,
         system_view: SystemView,
         tool_definitions_view: ToolDefinitionsView,
         messages: Vec<MessageView>,
@@ -349,7 +345,7 @@ impl NewSessionThread {
             start_reason: ThreadStartReason::ContextRefreshed {
                 from_thread: follows_from,
             },
-            model_defaults,
+            chain,
             system_view,
             tool_definitions_view,
             init: ThreadInitData::Refreshed {
@@ -364,7 +360,7 @@ impl NewSessionThread {
         id: SessionThreadId,
         session_id: AgentSessionId,
         from_thread: SessionThreadId,
-        model_defaults: ModelDefaults,
+        chain: ModelChain,
         system_view: super::view::SystemView,
         tool_definitions_view: super::view::ToolDefinitionsView,
         pending_user_messages: super::view::UserMessagesView,
@@ -373,7 +369,7 @@ impl NewSessionThread {
             id,
             session_id,
             start_reason: ThreadStartReason::Orphan { from_thread },
-            model_defaults,
+            chain,
             system_view,
             tool_definitions_view,
             init: ThreadInitData::Initial {
@@ -387,7 +383,7 @@ pub struct NewSessionThreadBuilder {
     id: SessionThreadId,
     session_id: Option<AgentSessionId>,
     start_reason: Option<ThreadStartReason>,
-    model_defaults: Option<ModelDefaults>,
+    chain: Option<ModelChain>,
     system_view: Option<SystemView>,
     tool_definitions_view: Option<ToolDefinitionsView>,
     initial_user_messages: Option<UserMessagesView>,
@@ -409,8 +405,8 @@ impl NewSessionThreadBuilder {
         self
     }
 
-    pub fn model_defaults(mut self, model_defaults: ModelDefaults) -> Self {
-        self.model_defaults = Some(model_defaults);
+    pub fn chain(mut self, chain: ModelChain) -> Self {
+        self.chain = Some(chain);
         self
     }
 
@@ -438,8 +434,8 @@ impl NewSessionThreadBuilder {
             start_reason: self.start_reason.ok_or(EntityHydrationError::from(
                 derive_builder::UninitializedFieldError::from("start_reason"),
             ))?,
-            model_defaults: self.model_defaults.ok_or(EntityHydrationError::from(
-                derive_builder::UninitializedFieldError::from("model_defaults"),
+            chain: self.chain.ok_or(EntityHydrationError::from(
+                derive_builder::UninitializedFieldError::from("chain"),
             ))?,
             system_view: self.system_view.ok_or(EntityHydrationError::from(
                 derive_builder::UninitializedFieldError::from("system_view"),
@@ -469,7 +465,7 @@ impl IntoEvents<SessionThreadEvent> for NewSessionThread {
                 id: self.id,
                 session_id: self.session_id,
                 start_reason: self.start_reason,
-                model_defaults: self.model_defaults,
+                chain: self.chain,
                 system_view: self.system_view,
                 tool_definitions_view: self.tool_definitions_view,
                 initial_user_messages,
@@ -480,7 +476,7 @@ impl IntoEvents<SessionThreadEvent> for NewSessionThread {
             } => SessionThreadEvent::InitializedFromCompaction {
                 id: self.id,
                 session_id: self.session_id,
-                model_defaults: self.model_defaults,
+                chain: self.chain,
                 system_view: self.system_view,
                 tool_definitions_view: self.tool_definitions_view,
                 messages,
@@ -492,7 +488,7 @@ impl IntoEvents<SessionThreadEvent> for NewSessionThread {
             } => SessionThreadEvent::InitializedFromRefresh {
                 id: self.id,
                 session_id: self.session_id,
-                model_defaults: self.model_defaults,
+                chain: self.chain,
                 system_view: self.system_view,
                 tool_definitions_view: self.tool_definitions_view,
                 messages,

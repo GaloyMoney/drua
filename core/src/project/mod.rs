@@ -251,26 +251,6 @@ impl Projects {
         Ok(project)
     }
 
-    #[instrument(name = "domain.project.update_model_chain", skip(self, sub))]
-    pub async fn update_model_chain(
-        &self,
-        sub: &AuthSubject,
-        id: impl Into<ProjectId> + std::fmt::Debug,
-        chain: Option<llm::ModelChain>,
-    ) -> Result<Project, ProjectError> {
-        let id = id.into();
-        sub.can(AuthVerb::Update, AuthResource::Project(Some(id)))?;
-        Audit::record_action_if_unset("project.update_model_chain");
-        Audit::record_project_id(id);
-        let mut op = self.repo.begin_op().await?;
-        let mut project = self.repo.find_by_id_in_op(&mut op, id).await?;
-        if project.update_model_chain(chain).did_execute() {
-            self.repo.update_in_op(&mut op, &mut project).await?;
-        }
-        op.commit().await?;
-        Ok(project)
-    }
-
     #[instrument(name = "domain.project.delete", skip(self, sub))]
     pub async fn delete(
         &self,

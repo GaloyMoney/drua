@@ -91,19 +91,6 @@ impl Mutation {
         })
     }
 
-    async fn project_update_model_chain(
-        &self,
-        ctx: &Context<'_>,
-        input: ProjectUpdateModelChainInput,
-    ) -> async_graphql::Result<ProjectUpdateModelChainPayload> {
-        let (app, sub) = app_and_sub_from_ctx!(ctx);
-        let project = app
-            .projects()
-            .update_model_chain(sub, input.id, input.chain.map(Into::into))
-            .await?;
-        Ok(ProjectUpdateModelChainPayload::from(Project::from(project)))
-    }
-
     async fn agent_create(
         &self,
         ctx: &Context<'_>,
@@ -127,17 +114,19 @@ impl Mutation {
         Ok(AgentCreatePayload::from(Agent::from(agent)))
     }
 
-    async fn agent_update_model_chain(
+    async fn agent_update_session_chain(
         &self,
         ctx: &Context<'_>,
-        input: AgentUpdateModelChainInput,
-    ) -> async_graphql::Result<AgentUpdateModelChainPayload> {
+        input: AgentUpdateSessionChainInput,
+    ) -> async_graphql::Result<AgentUpdateSessionChainPayload> {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
-        let agent = app
+        let session = app
             .agents()
-            .update_model_chain(sub, input.agent_id, input.chain.map(Into::into))
+            .update_session_chain(sub, input.agent_id, input.chain.map(Into::into))
             .await?;
-        Ok(AgentUpdateModelChainPayload::from(Agent::from(agent)))
+        Ok(AgentUpdateSessionChainPayload::from(
+            super::session::AgentSession::from(session),
+        ))
     }
 
     async fn agent_attach_sandbox(

@@ -193,9 +193,15 @@ pub struct AgentSession {
 
 #[Object]
 impl AgentSession {
-    /// Model used by the LLM for this session's prompts.
+    /// Primary model name — what the chat header shows.
     async fn model(&self) -> &str {
         self.entity.model()
+    }
+
+    /// Full chain (primary + fallbacks) currently persisted on the session.
+    /// Read-shape mirror of `AgentUpdateSessionChainInput.chain`.
+    async fn chain(&self) -> super::agent::ModelChain {
+        self.entity.chain().clone().into()
     }
 
     /// Flat chat history: recent user messages and assistant responses.

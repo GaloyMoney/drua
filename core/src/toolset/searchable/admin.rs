@@ -231,10 +231,6 @@ enum ProjectCommand {
     /// Create a new project (also seeds a ProjectLead agent named 'lead').
     Create,
     List,
-    /// Set / replace / clear the project-level chain.
-    /// `clear_model_chain: true` clears; otherwise `model_chain` sets.
-    /// Inherited by every non-workflow agent in the project.
-    UpdateModelChain,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -242,13 +238,6 @@ struct ProjectParams {
     command: ProjectCommand,
     name: Option<String>,
     description: Option<String>,
-    /// Project ID (required for `update_model_chain`).
-    #[schemars(with = "Option<uuid::Uuid>")]
-    project_id: Option<ProjectId>,
-    #[serde(default)]
-    model_chain: Option<llm::ModelChain>,
-    #[serde(default)]
-    clear_model_chain: bool,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -685,10 +674,7 @@ static TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "project",
         description: "Manage projects. Commands: `create` (requires `name`, optional \
-                       `description`; also seeds a ProjectLead agent), `list`, \
-                       `update_model_chain` (requires `project_id`; set `model_chain` \
-                       to pin a chain inherited by every non-workflow agent in the \
-                       project, or `clear_model_chain: true` to clear).",
+                       `description`; also seeds a ProjectLead agent), `list`.",
         schema: &PROJECT_SCHEMA,
     },
     ToolDef {
@@ -976,19 +962,24 @@ impl AdminToolSet {
                 })?;
                 let chain =
                     resolve_model_chain_update(params.model_chain, params.clear_model_chain)?;
-                let agent = self
-                    .agents
-                    .update_model_chain(subject, agent_id, chain)
+                self.agents
+                    .update_session_chain(subject, agent_id, chain)
                     .await
                     .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
+                let session = self
+                    .agents
+                    .find_session(subject, agent_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
+                let chain_str = session
+                    .chain()
+                    .iter()
+                    .map(|m| m.model.clone())
+                    .collect::<Vec<_>>()
+                    .join(" -> ");
                 Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Agent {} model_chain_override = {}",
-                    agent.id,
-                    agent
-                        .model_chain_override
-                        .as_ref()
-                        .map(|c| serde_yaml::to_string(c).unwrap_or_default())
-                        .unwrap_or_else(|| "<none>".to_string())
+                    "Agent {} session chain = {}",
+                    agent_id, chain_str
                 ))]))
             }
         }
@@ -1115,29 +1106,6 @@ impl AdminToolSet {
                 Ok(CallToolResult::success(vec![Content::text(
                     format_projects(&all),
                 )]))
-            }
-
-            ProjectCommand::UpdateModelChain => {
-                let project_id = params.project_id.ok_or_else(|| {
-                    ToolSetsError::MissingArgument(
-                        "project_id is required for update_model_chain".to_string(),
-                    )
-                })?;
-                let chain =
-                    resolve_model_chain_update(params.model_chain, params.clear_model_chain)?;
-                let project = self
-                    .projects
-                    .update_model_chain(subject, project_id, chain)
-                    .await?;
-                Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Project {} model_chain_override = {}",
-                    project.id,
-                    project
-                        .model_chain_override
-                        .as_ref()
-                        .map(|c| serde_yaml::to_string(c).unwrap_or_default())
-                        .unwrap_or_else(|| "<none>".to_string())
-                ))]))
             }
         }
     }
