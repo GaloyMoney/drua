@@ -142,19 +142,21 @@ async fn resolve_auth_context(
         }
 
         // SA tokens from sandbox pods (projected ServiceAccount tokens).
+        // A valid audience-scoped JWT is sufficient — the git-proxy's
+        // global allow-list is the policy gate, no per-pod identity
+        // lookup. Synthesise the same nil-uuid `AuthSubject::Agent`
+        // shape that the `dev-agent` literal uses; downstream
+        // `is_agent()` returns true and audit rows carry nil
+        // project_id / agent_id (consistent with the design pivot in
+        // PR #290 where the allow-list became global).
         if sa_token::looks_like_jwt(&raw_token) {
             if let Some(ref validator) = state.sa_token_validator {
-                if let Ok(id_str) = validator.validate(&raw_token).await {
-                    let agent_id = domain::primitives::AgentId::from(
-                        id_str.parse::<uuid::Uuid>().expect("validated as UUID"),
+                if validator.validate(&raw_token).await.is_ok() {
+                    return AuthSubject::Agent(
+                        domain::primitives::ProjectId::from(uuid::Uuid::nil()),
+                        domain::primitives::AgentId::from(uuid::Uuid::nil()),
+                        Vec::new(),
                     );
-                    // System-level User subject bypasses authz; runs during token
-                    // resolution, before the per-request AuthSubject is known.
-                    let system_sub =
-                        AuthSubject::User(domain::primitives::UserId::from(uuid::Uuid::nil()));
-                    if let Ok(agent) = state.app.agents().find_by_id(&system_sub, agent_id).await {
-                        return agent.auth_subject();
-                    }
                 }
             }
         }
