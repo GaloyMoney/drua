@@ -85,6 +85,43 @@ impl Sandboxes {
         })
     }
 
+    /// One-line description of the git-proxy push policy for this
+    /// sandbox, surfaced in the attach notification so the agent picks
+    /// an accepted branch name on its first push instead of hitting a
+    /// `push_ref_denied` after the fact. `None` for scratch sandboxes
+    /// or repos absent from the allow-list (the latter is unreachable
+    /// from a successful create — `validate_repo_mode` rejects those —
+    /// but stay defensive in case the YAML is reloaded with the repo
+    /// removed before an old sandbox re-attaches).
+    pub fn push_policy_text(&self, mode: &SandboxMode) -> Option<String> {
+        let SandboxMode::Repo { repo_url, .. } = mode else {
+            return None;
+        };
+        let coord = drua_git_proxy::RepoCoord::from_github_url(repo_url)?;
+        let entry = self.allowlist.lookup(&coord.owner, &coord.repo)?;
+        if !entry.modes.contains(&drua_git_proxy::GitProxyMode::Push) {
+            return Some(
+                "Push policy: this repo is read-only via the git-proxy — pushes are not accepted."
+                    .to_string(),
+            );
+        }
+        let patterns = entry.push_refs.raw();
+        if patterns.is_empty() {
+            return Some(
+                "Push policy: no ref patterns are allowed for push (repo is effectively read-only)."
+                    .to_string(),
+            );
+        }
+        let list = patterns
+            .iter()
+            .map(|p| format!("`{p}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!(
+            "Push policy: only these refs are accepted on push: {list}. Other branches will be rejected with `push_ref_denied`."
+        ))
+    }
+
     /// Pre-validate `mode: repo` against the global git-proxy allow-list
     /// before persisting the sandbox row. Reject early with a clear
     /// error rather than letting `/initialize` fail mid-clone and

@@ -363,6 +363,14 @@ pub enum SandboxOperation {
         cwd: String,
         #[serde(default)]
         scope: Option<String>,
+        /// One-line git-proxy push-policy description (e.g.
+        /// `Push policy: only these refs are accepted on push: …`).
+        /// Sourced from the allow-list at attach time so the agent
+        /// knows which branch names will be accepted before its first
+        /// push. `None` for scratch sandboxes or repos absent from the
+        /// allow-list. Old events default to `None`.
+        #[serde(default)]
+        push_policy: Option<String>,
     },
     Detach,
 }
@@ -375,6 +383,7 @@ pub fn sandbox_notification_text(sandbox_name: &str, op: &SandboxOperation) -> S
             kind,
             cwd,
             scope,
+            push_policy,
         } => {
             let header = match scope {
                 Some(label) => {
@@ -382,7 +391,7 @@ pub fn sandbox_notification_text(sandbox_name: &str, op: &SandboxOperation) -> S
                 }
                 None => format!("Attached sandbox \"{sandbox_name}\" in {agent_mode} mode."),
             };
-            let body = match kind.as_str() {
+            let mut body = match kind.as_str() {
                 "repo" => format!(
                     "Working directory: {cwd}\n\
                      The repository is checked out here at the requested branch. Stay inside \
@@ -394,6 +403,10 @@ pub fn sandbox_notification_text(sandbox_name: &str, op: &SandboxOperation) -> S
                      tools reject paths outside it."
                 ),
             };
+            if let Some(policy) = push_policy {
+                body.push('\n');
+                body.push_str(policy);
+            }
             format!("<sandbox>\n{header}\n{body}\n</sandbox>")
         }
         SandboxOperation::Detach => {

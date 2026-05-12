@@ -543,6 +543,7 @@ impl Agents {
                 .await?;
 
             let (kind, scope) = sandbox.kind_and_scope();
+            let push_policy = self.sandboxes.push_policy_text(&sandbox.mode);
             self.sessions
                 .sandbox_notification_in_op(
                     op,
@@ -553,6 +554,7 @@ impl Agents {
                         kind: kind.to_string(),
                         cwd: sandbox.cwd,
                         scope,
+                        push_policy,
                     },
                 )
                 .await?;
@@ -835,6 +837,7 @@ impl Agents {
             .await?;
 
         let (kind, scope) = sandbox.kind_and_scope();
+        let push_policy = self.sandboxes.push_policy_text(&sandbox.mode);
         self.sessions
             .sandbox_notification_in_op(
                 &mut op,
@@ -845,6 +848,7 @@ impl Agents {
                     kind: kind.to_string(),
                     cwd: sandbox.cwd,
                     scope,
+                    push_policy,
                 },
             )
             .await?;
