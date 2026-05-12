@@ -22,7 +22,7 @@ pub enum JsEngineError {
          script's sub-tool calls already produced what you need, look \
          up sub_invocations[].invocation_id from a prior successful \
          compose run and call tool_output_fetch(invocation_id, \
-         query={{mode:'grep'|'tail'|'head'|'range', ...}}) instead of \
+         path, query={{mode:'range'|'lines'|'json_array_slice', offset, len}}) instead of \
          re-running the whole compose script."
     )]
     ReturnTooLarge { size: usize, max: usize },
