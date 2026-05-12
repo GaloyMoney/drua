@@ -629,7 +629,6 @@ impl Default for StringSummarizerChain {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
