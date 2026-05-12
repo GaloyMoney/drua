@@ -299,11 +299,15 @@
               # handlers — bats/sandbox.bats spawns sandbox-tool-server
               # via this PATH so `rg` has to be present here too (the
               # production sandbox image bakes it in separately).
+              # `diffutils` provides `diff`, used by
+              # bats/fake_mcp_upstream.bats to compare snapshot fixtures
+              # under bats/summarized-tool-responses/.
               export PATH="${pkgs.lib.makeBinPath [
                 bats-runner
                 drua
                 podmanPkgs.podman-compose-runner
                 pkgs.bats
+                pkgs.diffutils
                 pkgs.jq
                 pkgs.curl
                 pkgs.coreutils
