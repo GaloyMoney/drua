@@ -8,10 +8,10 @@ mod concourse;
 /// Run any registered preprocessor whose tool-name set matches.
 /// Falls through to the input unchanged when nothing matches.
 pub(crate) fn run(tool_name: &str, raw: &str) -> String {
-    if bash::TOOL_NAMES.iter().any(|n| *n == tool_name) {
+    if bash::TOOL_NAMES.contains(&tool_name) {
         return bash::run(raw);
     }
-    if concourse::TOOL_NAMES.iter().any(|n| *n == tool_name) {
+    if concourse::TOOL_NAMES.contains(&tool_name) {
         return concourse::run(raw);
     }
     // Some upstream-prefixed names look like `<server>_concourse_get_build_logs`;

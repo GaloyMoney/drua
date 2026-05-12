@@ -629,70 +629,6 @@ impl Default for StringSummarizerChain {
     }
 }
 
-/// Terminal fallback when structured passes leave the log over `max_total_bytes`.
-pub struct BulkElide {
-    pub max_total_bytes: usize,
-    pub head_lines: u32,
-    pub tail_lines: u32,
-}
-
-impl Default for BulkElide {
-    fn default() -> Self {
-        Self {
-            max_total_bytes: 16 * 1024,
-            head_lines: 30,
-            tail_lines: 100,
-        }
-    }
-}
-
-impl BulkElide {
-    pub fn with_max_bytes(mut self, n: usize) -> Self {
-        self.max_total_bytes = n;
-        self
-    }
-
-    pub fn with_head_lines(mut self, n: u32) -> Self {
-        self.head_lines = n;
-        self
-    }
-
-    pub fn with_tail_lines(mut self, n: u32) -> Self {
-        self.tail_lines = n;
-        self
-    }
-}
-
-impl StringSummarizer for BulkElide {
-    fn name(&self) -> &'static str {
-        "bulk-elide"
-    }
-
-    fn can_summarize(&self, ctx: &SegmentedText) -> bool {
-        ctx.log().len() > self.max_total_bytes
-    }
-
-    fn apply(&self, ctx: &mut SegmentedText) -> bool {
-        let total = ctx.current_lines();
-        if total <= self.head_lines + self.tail_lines {
-            return false;
-        }
-        let pre_bytes = ctx.log().len();
-        let did_elide = ctx.elide_middle_keep_head_and_tail(self.head_lines, self.tail_lines);
-        if did_elide {
-            tracing::warn!(
-                pass = "bulk-elide",
-                pre_bytes,
-                post_bytes = ctx.log().len(),
-                head_lines = self.head_lines,
-                tail_lines = self.tail_lines,
-                max_total_bytes = self.max_total_bytes,
-                "drua_tool_classifier.bulk_elide.fallback_fired",
-            );
-        }
-        did_elide
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -883,55 +819,6 @@ mod tests {
         let ctx = SegmentedText::from_initial(raw);
         assert_eq!(ctx.byte_len_of_lines(0..3), 15);
         assert_eq!(ctx.byte_len_of_lines(1..2), 5);
-    }
-
-    #[test]
-    fn bulk_elide_keeps_head_and_tail_with_wrappers() {
-        let mut raw = String::new();
-        for i in 0..1000 {
-            raw.push_str(&format!("line {i:04} of unstructured chatter\n"));
-        }
-        let mut ctx = SegmentedText::from_initial(&raw);
-        BulkElide {
-            max_total_bytes: 2_048,
-            head_lines: 5,
-            tail_lines: 20,
-        }
-        .apply(&mut ctx);
-        let log = ctx.log();
-        assert!(log.starts_with("<head>\n"), "log starts: {log:.120}");
-        assert!(log.contains("</head>\n"));
-        assert!(log.contains("line 0000 of unstructured chatter"));
-        assert!(log.contains("line 0004 of unstructured chatter"));
-        assert!(log.contains("<bulk-elided"));
-        assert!(log.contains("</bulk-elided>"));
-        assert!(log.contains("975 lines"));
-        assert!(log.contains("<tail>\n"));
-        assert!(log.contains("</tail>\n"));
-        assert!(log.contains("line 0980 of unstructured chatter"));
-        assert!(log.contains("line 0999 of unstructured chatter"));
-        assert!(!log.contains("line 0500 of unstructured chatter"));
-    }
-
-    #[test]
-    fn bulk_elide_skips_when_total_under_head_plus_tail() {
-        let mut ctx = SegmentedText::from_initial("a\nb\nc\nd\ne\n");
-        let pass = BulkElide {
-            max_total_bytes: 4,
-            head_lines: 30,
-            tail_lines: 100,
-        };
-        assert!(pass.can_summarize(&ctx));
-        assert!(!pass.apply(&mut ctx));
-        assert_eq!(ctx.log(), "a\nb\nc\nd\ne\n");
-    }
-
-    #[test]
-    fn bulk_elide_skips_when_under_byte_budget() {
-        let mut ctx = SegmentedText::from_initial("a\nb\nc\n");
-        let pass = BulkElide::default();
-        assert!(!pass.can_summarize(&ctx));
-        assert!(!pass.apply(&mut ctx));
     }
 
     #[test]

@@ -273,8 +273,8 @@ impl Walker {
         let mut tail_count = n - head_count;
         if tail_count > 0 {
             tail_count -= 1;
-        } else if head_count > 0 {
-            head_count -= 1;
+        } else {
+            head_count = head_count.saturating_sub(1);
         }
         let mut sentinel = make_array_sentinel(
             walked,
@@ -374,8 +374,8 @@ fn line_elide_string(s: &str, budget: usize) -> Option<LineElide> {
     let mut tail = n - head;
     if tail > 0 {
         tail -= 1;
-    } else if head > 0 {
-        head -= 1;
+    } else {
+        head = head.saturating_sub(1);
     }
     let mut elide = make_line_elide(&lines, head, tail);
     while elide.text.len() > budget && (head > 0 || tail > 0) {
