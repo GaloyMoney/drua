@@ -119,9 +119,7 @@ impl ToolCallSummary {
                 let mut obj = serde_json::Map::new();
                 obj.insert("result".to_string(), self.summary);
                 if !self.elided_paths.is_empty() {
-                    let inv = invocation_id
-                        .map(|id| id.to_string())
-                        .unwrap_or_default();
+                    let inv = invocation_id.map(|id| id.to_string()).unwrap_or_default();
                     obj.insert(
                         "_elided".to_string(),
                         serde_json::json!({

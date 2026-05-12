@@ -428,7 +428,11 @@ impl CatalogDispatcher {
                     // `DruaToolResult<T>` for the ones that opt in, so
                     // bypass tools (bash, read, etc.) keep their native
                     // shape in JS.
-                    let value = if bypass { value } else { wrap_compose_value(value) };
+                    let value = if bypass {
+                        value
+                    } else {
+                        wrap_compose_value(value)
+                    };
                     Ok(value)
                 }
                 Err(msg) => {
