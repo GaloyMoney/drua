@@ -206,7 +206,7 @@ impl Walker {
         // and line indices stay accurate across passes.
         let mut ctx = SegmentedText::from_initial(&preprocessed);
         let _ = self.chain.run(&mut ctx);
-        let prepared = ctx.into_log();
+        let prepared = ctx.log().to_string();
         let modified = prepared != *s;
         // If the chain didn't change anything and we're already under
         // budget, passthrough verbatim.
@@ -227,7 +227,7 @@ impl Walker {
             return Value::String(prepared);
         }
         // Try line-mode first if the string has enough lines to split.
-        if let Some(elide) = line_elide_string(&prepared, budget) {
+        if let Some(elide) = line_elide_string(&prepared, budget, &ctx) {
             elided_paths.push(ElidedPath {
                 path: path.to_string(),
                 bytes: s.len() as u64,
@@ -236,13 +236,27 @@ impl Walker {
                 recover: make_lines_recover(
                     invocation_id,
                     path,
-                    elide.head_lines as usize,
-                    elide.missing_lines as usize,
+                    elide.raw_offset as usize,
+                    elide.raw_missing as usize,
                 ),
             });
             return Value::String(elide.text);
         }
         // Fall back to byte-mode for single-line / few-line strings.
+        // When preprocess / chain modified the string, the recovery
+        // template can't carry byte offsets (they wouldn't map back to
+        // the persisted raw bytes), so emit a full-value recover and
+        // let the fetch cap gate response size.
+        if modified {
+            elided_paths.push(ElidedPath {
+                path: path.to_string(),
+                bytes: s.len() as u64,
+                lines: None,
+                length: None,
+                recover: make_full_recover(invocation_id, path),
+            });
+            return Value::String(prepared);
+        }
         if let Some(elide) = byte_elide_string(&prepared, budget) {
             elided_paths.push(ElidedPath {
                 path: path.to_string(),
@@ -355,21 +369,23 @@ fn line_count(s: &str) -> u32 {
 
 // ── String elision: line-mode (preferred for line-oriented content) ──
 
+/// `raw_offset` / `raw_missing` are line indices into the *persisted*
+/// raw text (what `tool_output_fetch` slices). They're translated from
+/// the post-chain "current" line indices via `SegmentedText`, so chain
+/// passes that compact `nix-copy`/`cargo`/`git-clone` runs into XML
+/// markers don't desync the recovery template from the on-disk bytes.
 struct LineElide {
     text: String,
-    head_lines: u32,
-    missing_lines: u32,
+    raw_offset: u32,
+    raw_missing: u32,
 }
 
-fn line_elide_string(s: &str, budget: usize) -> Option<LineElide> {
+fn line_elide_string(s: &str, budget: usize, ctx: &SegmentedText) -> Option<LineElide> {
     let lines: Vec<&str> = s.lines().collect();
     let n = lines.len();
     if n < 3 {
-        // Need head + tail + missing >= 3 lines to even attempt.
         return None;
     }
-    // Start as wide as possible (symmetric, at least one missing line),
-    // shrink alternately from the bigger side until rendered text fits.
     let mut head = n / 2;
     let mut tail = n - head;
     if tail > 0 {
@@ -377,14 +393,14 @@ fn line_elide_string(s: &str, budget: usize) -> Option<LineElide> {
     } else {
         head = head.saturating_sub(1);
     }
-    let mut elide = make_line_elide(&lines, head, tail);
+    let mut elide = make_line_elide(&lines, head, tail, ctx);
     while elide.text.len() > budget && (head > 0 || tail > 0) {
         if tail > head {
             tail -= 1;
         } else {
             head -= 1;
         }
-        elide = make_line_elide(&lines, head, tail);
+        elide = make_line_elide(&lines, head, tail, ctx);
     }
     if head == 0 && tail == 0 {
         return None;
@@ -392,17 +408,20 @@ fn line_elide_string(s: &str, budget: usize) -> Option<LineElide> {
     Some(elide)
 }
 
-fn make_line_elide(lines: &[&str], head: usize, tail: usize) -> LineElide {
+fn make_line_elide(lines: &[&str], head: usize, tail: usize, ctx: &SegmentedText) -> LineElide {
     let n = lines.len();
-    let missing = n - head - tail;
+    let missing_compacted = n - head - tail;
+    let raw_offset = ctx.current_to_original_line(head as u32);
+    let raw_after = ctx.current_to_original_line((head + missing_compacted) as u32);
+    let raw_missing = raw_after.saturating_sub(raw_offset);
     let mut text = String::new();
     if head > 0 {
         let head_text = lines[..head].join("\n");
         text.push_str(&format!("<head lines=\"{head}\">\n{head_text}\n</head>\n"));
     }
     text.push_str(&format!(
-        "<bulk-elided original-lines=\"{missing}\">\n\
-         {missing} lines elided\n\
+        "<bulk-elided original-lines=\"{raw_missing}\">\n\
+         {raw_missing} lines elided\n\
          </bulk-elided>\n"
     ));
     if tail > 0 {
@@ -413,8 +432,8 @@ fn make_line_elide(lines: &[&str], head: usize, tail: usize) -> LineElide {
     }
     LineElide {
         text,
-        head_lines: head as u32,
-        missing_lines: missing as u32,
+        raw_offset,
+        raw_missing,
     }
 }
 
