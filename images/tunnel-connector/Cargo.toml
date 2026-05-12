@@ -7,6 +7,10 @@ edition.workspace = true
 name = "tunnel-connector"
 path = "src/main.rs"
 
+[[bin]]
+name = "tunnel-fixture"
+path = "src/bin/tunnel-fixture.rs"
+
 [dependencies]
 anyhow = { workspace = true }
 base64 = { workspace = true }
