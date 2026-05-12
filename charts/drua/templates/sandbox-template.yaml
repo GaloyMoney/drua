@@ -57,10 +57,10 @@ spec:
         - name: MCP_GATEWAY_URL
           value: {{ .Values.sandbox.mcpGatewayUrl | quote }}
         {{- end }}
-        {{- if .Values.sandbox.gitProxyUrl }}
         - name: DRUA_GIT_PROXY_URL
-          value: {{ .Values.sandbox.gitProxyUrl | quote }}
-        {{- end }}
+          # Override via `sandbox.gitProxyUrl`. Defaults to the
+          # in-cluster service URL — see `galoyAgents.gitProxyUrl`.
+          value: {{ .Values.sandbox.gitProxyUrl | default (include "galoyAgents.gitProxyUrl" .) | quote }}
         {{- if or .Values.sandbox.nixSubstituters .Values.sandbox.nixNetrc.enabled }}
         - name: NIX_CONFIG
           value: |-

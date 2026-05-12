@@ -17,6 +17,16 @@ If release name contain chart name it will be used as a full name.
 {{- end }}
 
 {{/*
+In-cluster URL for the git-proxy served by this drua-server release.
+Used as the default for `sandbox.gitProxyUrl` so ops don't have to
+hand-write the DNS name + port. Shape mirrors
+`galoyAgents.postgresMcp` URL construction.
+*/}}
+{{- define "galoyAgents.gitProxyUrl" -}}
+http://{{ template "galoyAgents.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.galoyAgents.server.service.port }}/git
+{{- end -}}
+
+{{/*
 Postgres MCP fullname: <release>-postgres-mcp
 */}}
 {{- define "galoyAgents.postgresMcp.fullname" -}}

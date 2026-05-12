@@ -111,6 +111,38 @@ galoyAgents:
       enabled: false
       url: ""
       team: ""
+    ## Smart-HTTP git proxy. Sandbox `git clone` / `git push` traffic is
+    ## rewritten to flow through `drua-internal/git/...`; the proxy
+    ## validates against the global allow-list and forwards upstream
+    ## using a fresh GitHub App installation token. See memo 019dfebc.
+    ##
+    ## `allowedPushRefs` is push-only — pull / clone / fetch is
+    ## unrestricted modulo the `modes` list. Lookup on (owner, repo)
+    ## is case-insensitive. Empty entries list = no repos allowed.
+    gitProxy:
+      ## On-disk root for per-repo bare mirrors. Must match the mount
+      ## path on the PVC below when `mirrorPersistence.enabled = true`.
+      mirrorRoot: "/data/git-proxy-mirrors"
+      ## Pulls within this window reuse the existing mirror without
+      ## re-fetching upstream. github → mirror sync lag is at most
+      ## this many seconds. Pushes from the sandbox don't need
+      ## upstream fetches (objects are written locally then pushed
+      ## out by the proxy itself).
+      mirrorTtlSeconds: 300
+      ## PVC for mirrors — without persistence, every pod restart
+      ## re-clones every repo on first access. With persistence,
+      ## restarts just revalidate (TTL).
+      mirrorPersistence:
+        enabled: true
+        size: 20Gi
+        storageClassName: standard-rwo
+      allowlist:
+        entries: []
+        ## - owner: GaloyMoney
+        ##   repo: drua
+        ##   modes: [pull, push]
+        ##   allowedPushRefs:
+        ##     - refs/heads/bot/*
     zenduty:
       enabled: false
       url: ""
