@@ -378,7 +378,7 @@ impl ConcourseToolSet {
             ),
             tool_entry(
                 "get_build_logs",
-                "Get build output/logs for a Concourse build by its numeric build ID. Returns log output as plain text. For in-flight builds, returns partial output — use get_build_status first to check if the build has finished. Oversize logs are summarised by the universal pipeline and the full bytes are persisted; recover specific slices via tool_output_fetch(invocation_id, path, query={mode:'range'|'lines'|'json_array_slice', offset, len}).",
+                "Get build output/logs for a Concourse build by its numeric build ID. Returns log output as plain text. For in-flight builds, returns partial output — use get_build_status first to check if the build has finished. Oversize logs are summarised on the way back and the full bytes are persisted; recover specific slices via tool_output_fetch(invocation_id, path, query={mode:'range'|'lines'|'json_array_slice', offset, len}).",
                 (*BUILD_ID_SCHEMA).clone(),
                 (*OUT_BUILD_LOGS).clone(),
             ),

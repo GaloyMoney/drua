@@ -1,4 +1,4 @@
-//! Recovery handle for the universal-pipeline envelope. Given an
+//! Recovery handle for the tool-caching envelope. Given an
 //! `invocation_id` (advertised verbatim in `<recovery>`), navigate a
 //! JSON-path on the persisted upstream payload and optionally slice
 //! the resolved value.

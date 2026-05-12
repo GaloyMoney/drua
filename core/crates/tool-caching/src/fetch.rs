@@ -1,5 +1,5 @@
-//! Recovery side of the universal pipeline: given a stored invocation,
-//! navigate a json-path and optionally slice the resolved value.
+//! Recovery side of tool-caching: given a stored invocation, navigate
+//! a json-path and optionally slice the resolved value.
 
 use rmcp::model::{CallToolResult, Content};
 use serde::{Deserialize, Serialize};
