@@ -228,6 +228,23 @@ mcp_call_no_auth() {
     -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"$method\",\"params\":$params}"
 }
 
+# Poll `audit_entries` until a row matching the given WHERE clause appears.
+# Echoes the final count on stdout. Audit persistence is fire-and-forget
+# (`tokio::spawn`) so the row may arrive a few ms after the HTTP response —
+# wait up to ~3s to absorb CI scheduler jitter.
+wait_for_audit_count() {
+  local where="$1"
+  local count=0
+  for _i in $(seq 1 30); do
+    count="$(psql "$PG_CON" -tAc "SELECT count(*) FROM audit_entries WHERE $where")"
+    if [ "$count" -ge 1 ]; then
+      break
+    fi
+    sleep 0.1
+  done
+  echo "$count"
+}
+
 graphql_query() {
   local query="$1"
   local token="${2:-}"
