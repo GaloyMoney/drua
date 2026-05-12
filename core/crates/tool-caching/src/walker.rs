@@ -453,11 +453,8 @@ fn make_line_elide(
     let n = lines.len();
     let missing_compacted = n - head - tail;
     let raw_offset = compacted_to_raw_line(head as u32, ctx, preprocessed_to_raw);
-    let raw_after = compacted_to_raw_line(
-        (head + missing_compacted) as u32,
-        ctx,
-        preprocessed_to_raw,
-    );
+    let raw_after =
+        compacted_to_raw_line((head + missing_compacted) as u32, ctx, preprocessed_to_raw);
     // If the elided middle falls entirely inside a single raw line
     // (e.g. inner `\r`-progress segments of a packed line), return that
     // raw line as the recovery so the agent gets at least the
