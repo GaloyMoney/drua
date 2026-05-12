@@ -390,7 +390,8 @@ assert_compose_snapshot() {
         if has("execution_time_ms") then .execution_time_ms = "<ms>" else . end
       else . end
     )' | sed -E \
-      -e 's/invocation_id="[0-9a-f-]{36}"/invocation_id="<uuid>"/g')"
+      -e 's/invocation_id="[0-9a-f-]{36}"/invocation_id="<uuid>"/g' \
+      -e 's/invocation_id=\\"[0-9a-f-]{36}\\"/invocation_id=\\"<uuid>\\"/g')"
   if [ "${UPDATE_FIXTURES:-}" = "1" ]; then
     mkdir -p "$(dirname "$snapshot")"
     printf '%s\n' "$normalized" > "$snapshot"
