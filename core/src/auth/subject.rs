@@ -194,6 +194,22 @@ impl AuthSubject {
     }
 }
 
+/// Attribution for `ToolCaching` persistence. `None` for
+/// `WorkflowExecutor` and `Anonymous`. Agent-first on
+/// `AgentOnBehalfOfUser`: the active agent owns the invocation so
+/// recovery requires the same agent session.
+impl From<&AuthSubject> for Option<drua_tool_caching::ToolCallOwnerId> {
+    fn from(subject: &AuthSubject) -> Self {
+        match subject {
+            AuthSubject::User(user_id) => Some((*user_id).into()),
+            AuthSubject::ExportedAgent(user_id, _, _) => Some((*user_id).into()),
+            AuthSubject::AgentOnBehalfOfUser(_, _, agent_id, _) => Some((*agent_id).into()),
+            AuthSubject::Agent(_, agent_id, _) => Some((*agent_id).into()),
+            AuthSubject::WorkflowExecutor(_, _, _, _) | AuthSubject::Anonymous => None,
+        }
+    }
+}
+
 impl AuthSubject {
     /// Mints a `WorkflowExecutor` subject scoped to `project_id` with
     /// implicit `ProjectAdmin(project_id)` scope. The workflow tier

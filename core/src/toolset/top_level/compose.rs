@@ -1,9 +1,10 @@
 //! Execute JavaScript that chains multiple MCP tool calls in a single round trip.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, LazyLock, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Duration;
 
+use drua_tool_caching::ToolCaching;
 use es_entity::context::{EventContext, WithEventContext};
 use rmcp::model::{CallToolResult, Content, JsonObject};
 use serde::Deserialize;
@@ -29,6 +30,7 @@ pub struct ComposeTool {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
     top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
     audit: Option<Arc<Audit>>,
+    tool_caching: Option<Arc<ToolCaching>>,
     config: ComposeConfig,
 }
 
@@ -37,12 +39,14 @@ impl ComposeTool {
         sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
         top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
         audit: Option<Arc<Audit>>,
+        tool_caching: Option<Arc<ToolCaching>>,
         config: ComposeConfig,
     ) -> Self {
         Self {
             sets,
             top_level,
             audit,
+            tool_caching,
             config,
         }
     }
@@ -101,8 +105,8 @@ impl TopLevelTool for ComposeTool {
         false
     }
 
-    fn bypass_universal_pipeline(&self) -> bool {
-        true
+    fn default_tool_caching(&self) -> bool {
+        false
     }
 
     #[tracing::instrument(name = "toolset.compose.call", skip_all)]
@@ -139,11 +143,14 @@ impl TopLevelTool for ComposeTool {
             format!("/*\n{dts}*/\n{}", params.script)
         };
 
+        let sub_invocations: Arc<Mutex<Vec<SubInvocation>>> = Arc::new(Mutex::new(Vec::new()));
         let dispatcher = Arc::new(CatalogDispatcher {
             sets: Arc::clone(&self.sets),
             top_level: Arc::clone(&self.top_level),
             subject: subject.clone(),
             audit: self.audit.clone(),
+            tool_caching: self.tool_caching.clone(),
+            sub_invocations: Arc::clone(&sub_invocations),
         });
 
         let engine = js_engine::JsEngine::new()
@@ -158,14 +165,37 @@ impl TopLevelTool for ComposeTool {
             .await
             .map_err(|e| ToolSetsError::Compose(e.to_string()))?;
 
-        // Tool-output caching is disconnected — classifier + persistence
-        // intentionally skipped. The script's return value flows through
-        // verbatim.
-        let _ = &recorded_args;
+        let collected_sub_invocations = sub_invocations
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+
+        // Cache the JS return value itself — if it's oversized the agent
+        // gets a `result_invocation_id` to recover the full value via
+        // `tool_output_fetch`. Builds a fake `CallToolResult` carrying
+        // the value as JSON text so the existing pipeline can summarise it.
+        let (curated_result, result_invocation_id) = match self.tool_caching.as_ref() {
+            Some(tc) => {
+                let pretty = serde_json::to_string_pretty(&result.value).unwrap_or_default();
+                let mut ctr = CallToolResult::success(vec![Content::text(pretty)]);
+                ctr.structured_content = Some(result.value.clone());
+                let resp = tc
+                    .maybe_summarize_and_cache(subject, "compose:result", &recorded_args, ctr)
+                    .await?;
+                let id = resp.invocation_id.map(uuid::Uuid::from);
+                let curated = match id {
+                    Some(_) => serde_json::Value::String(extract_text(&resp.result)),
+                    None => result.value.clone(),
+                };
+                (curated, id)
+            }
+            None => (result.value.clone(), None),
+        };
+
         let out = ComposeOutput {
-            result: result.value.clone(),
-            result_invocation_id: None,
-            sub_invocations: Vec::new(),
+            result: curated_result,
+            result_invocation_id,
+            sub_invocations: collected_sub_invocations,
             fetch_hint: COMPOSE_FETCH_HINT.to_string(),
             console: result.console_output.clone(),
             tool_calls: result.tool_calls_made,
@@ -213,6 +243,15 @@ impl TopLevelTool for ComposeTool {
         let structured = serde_json::to_value(&out).expect("ComposeOutput serialization");
         let mut ctr = CallToolResult::success(vec![Content::text(text)]);
         ctr.structured_content = Some(structured);
+
+        let ctr = match self.tool_caching.as_ref() {
+            Some(tc) => {
+                tc.maybe_summarize_and_cache(subject, "compose", &recorded_args, ctr)
+                    .await?
+                    .result
+            }
+            None => ctr,
+        };
         Ok(ctr)
     }
 }
@@ -242,6 +281,8 @@ struct CatalogDispatcher {
     top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
     subject: AuthSubject,
     audit: Option<Arc<Audit>>,
+    tool_caching: Option<Arc<ToolCaching>>,
+    sub_invocations: Arc<Mutex<Vec<SubInvocation>>>,
 }
 
 #[async_trait::async_trait]
@@ -341,7 +382,7 @@ impl CatalogDispatcher {
         let parent_seed = EventContext::current().data();
         let started_at = chrono::Utc::now();
         let dispatcher = self.clone_for_persistence();
-        let bypass = tool.bypass_universal_pipeline();
+        let bypass = !tool.default_tool_caching();
 
         async move {
             Audit::record_action(action);
@@ -391,27 +432,97 @@ impl CatalogDispatcher {
     }
 
     fn clone_for_persistence(&self) -> CatalogDispatcherShared {
-        CatalogDispatcherShared {}
+        CatalogDispatcherShared {
+            tool_caching: self.tool_caching.clone(),
+            subject: self.subject.clone(),
+            sub_invocations: Arc::clone(&self.sub_invocations),
+        }
     }
 }
 
 #[derive(Clone)]
-struct CatalogDispatcherShared {}
+struct CatalogDispatcherShared {
+    tool_caching: Option<Arc<ToolCaching>>,
+    subject: AuthSubject,
+    sub_invocations: Arc<Mutex<Vec<SubInvocation>>>,
+}
 
 impl CatalogDispatcherShared {
     async fn maybe_persist_sub_invocation(
         &self,
-        _tool_name: &str,
-        _args: &serde_json::Value,
+        tool_name: &str,
+        args: &serde_json::Value,
         raw: &CallToolResult,
         _duration_ms: u64,
         _started_at: chrono::DateTime<chrono::Utc>,
     ) {
-        // Tool-output caching is disconnected — sub-tool classification +
-        // persistence intentionally skipped. Only the bypass metric is
-        // recorded for dashboard parity.
-        let raw_bytes = super::super::estimate_text_bytes(raw);
-        super::super::record_pipeline_metrics(raw_bytes, raw_bytes, "bypass", false);
+        let Some(tc) = self.tool_caching.as_ref() else {
+            return;
+        };
+        let raw_size = extract_text(raw).len() as u64;
+        let Ok(resp) = tc
+            .maybe_summarize_and_cache(&self.subject, tool_name, args, raw.clone())
+            .await
+        else {
+            return;
+        };
+        // Only emit a SubInvocation entry when persistence actually
+        // happened — passthrough results have no recoverable id and
+        // showing them would just clutter the metadata block.
+        let Some(invocation_id) = resp.invocation_id else {
+            return;
+        };
+        let summary_size = extract_text(&resp.result).len() as u64;
+        let kind = sub_invocation_kind(&resp.elided_paths);
+        let seq = self
+            .sub_invocations
+            .lock()
+            .map(|guard| guard.len() as u32)
+            .unwrap_or(0);
+        if let Ok(mut guard) = self.sub_invocations.lock() {
+            guard.push(SubInvocation {
+                seq,
+                tool_name: tool_name.to_string(),
+                args_digest: format_args_digest(tool_name, args),
+                invocation_id: uuid::Uuid::from(invocation_id),
+                kind,
+                raw_size_bytes: raw_size,
+                summary_size_bytes: summary_size,
+            });
+        }
+    }
+}
+
+/// Pick a discriminator from the elided_paths' recover modes. Used in
+/// the agent-facing metadata to hint at what kind of summarisation
+/// happened.
+fn sub_invocation_kind(elided_paths: &[drua_tool_caching::ElidedPath]) -> String {
+    let mut modes: Vec<&str> = elided_paths
+        .iter()
+        .filter_map(|p| {
+            p.recover
+                .get("args_template")
+                .and_then(|a| a.get("query"))
+                .and_then(|q| q.get("mode"))
+                .and_then(|m| m.as_str())
+        })
+        .collect();
+    modes.sort_unstable();
+    modes.dedup();
+    if modes.is_empty() {
+        "summarized".to_string()
+    } else {
+        modes.join("+")
+    }
+}
+
+fn format_args_digest(tool_name: &str, args: &serde_json::Value) -> String {
+    let pretty = serde_json::to_string(args).unwrap_or_default();
+    let summary = format!("{tool_name}({pretty})");
+    if summary.len() <= 80 {
+        summary
+    } else {
+        format!("{}…", &summary[..79])
     }
 }
 

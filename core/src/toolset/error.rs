@@ -42,6 +42,8 @@ pub enum ToolSetsError {
     Skill(String),
     #[error("ToolSetsError - Library: {0}")]
     Library(#[from] crate::library::LibraryError),
+    #[error("ToolSetsError - ToolCaching: {0}")]
+    ToolCaching(#[from] drua_tool_caching::ToolCachingError),
     #[error("ToolSetsError - Compose: {0}")]
     Compose(String),
     #[error("ToolSetsError - Workflow: {0}")]

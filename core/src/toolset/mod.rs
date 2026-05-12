@@ -13,13 +13,15 @@ pub use searchable::*;
 pub use top_level::{
     Bash, CallCatalogTool, ComposeTool, ComposeTypes, Delete, DescribeCatalogTool, GlobTool, Grep,
     Ls, MoveFile, NotesTool, ProjectAgent, ProjectLog, ProjectSandbox, Read, SearchCatalog,
-    SkillTool, SpacesTool, SubmitOutputTool, TextEditor, UseSkillTool, WhoAmI, WorkflowTool,
+    SkillTool, SpacesTool, SubmitOutputTool, TextEditor, ToolOutputFetch, UseSkillTool, WhoAmI,
+    WorkflowTool,
 };
 pub use traits::*;
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
+use drua_tool_caching::ToolCaching;
 use rmcp::model::{CallToolResult, JsonObject};
 
 use crate::audit::Audit;
@@ -129,6 +131,8 @@ pub struct ToolSets {
     top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
     /// `None` only in tests without a DB pool.
     audit: Option<Arc<Audit>>,
+    /// `None` only in tests without a DB pool.
+    tool_caching: Option<Arc<ToolCaching>>,
     init_errors: Vec<(String, String)>,
 }
 
@@ -137,8 +141,7 @@ impl ToolSets {
         config: ToolSetsConfig,
         audit: Option<Arc<Audit>>,
         github_app: Option<Arc<github_app::GitHubAppTokenProvider>>,
-        // Reserved for re-enabling the tool-output cache; ignored today.
-        _tool_invocations: Option<()>,
+        tool_caching: Option<Arc<ToolCaching>>,
     ) -> Result<Self, ToolSetsError> {
         let mut sets: Vec<Arc<dyn SearchableToolSet>> = Vec::new();
         let mut init_errors: Vec<(String, String)> = Vec::new();
@@ -195,11 +198,15 @@ impl ToolSets {
 
         let search = Arc::new(SearchCatalog::new(Arc::clone(&sets)));
         let describe = Arc::new(DescribeCatalogTool::new(Arc::clone(&sets)));
-        let call = Arc::new(CallCatalogTool::new(Arc::clone(&sets)));
+        let call = Arc::new(CallCatalogTool::new(
+            Arc::clone(&sets),
+            tool_caching.clone(),
+        ));
         let compose = Arc::new(ComposeTool::new(
             Arc::clone(&sets),
             Arc::clone(&top_level),
             audit.clone(),
+            tool_caching.clone(),
             config.compose.clone(),
         ));
         let compose_types = Arc::new(ComposeTypes::new(Arc::clone(&sets), Arc::clone(&top_level)));
@@ -219,12 +226,17 @@ impl ToolSets {
                 compose_types as Arc<dyn TopLevelTool>,
             );
             map.insert(whoami.name().to_string(), whoami as Arc<dyn TopLevelTool>);
+            if let Some(ref tc) = tool_caching {
+                let fetch = Arc::new(ToolOutputFetch::new(Arc::clone(tc)));
+                map.insert(fetch.name().to_string(), fetch as Arc<dyn TopLevelTool>);
+            }
         }
 
         Ok(Self {
             sets,
             top_level,
             audit,
+            tool_caching,
             init_errors,
         })
     }
@@ -478,10 +490,7 @@ impl ToolSets {
         };
 
         let audit = self.audit.clone();
-        // Tool-output caching is disconnected — the persistence + classifier
-        // pipeline in core/crates/tool-{cache,classifier} stays compiled but
-        // is intentionally not invoked here; every result is returned
-        // verbatim.
+        let tool_caching = self.tool_caching.clone();
 
         async move {
             Audit::record_subject(subject);
@@ -504,19 +513,27 @@ impl ToolSets {
                 "arguments": args_value,
             }));
 
+            let default_cache = tool.default_tool_caching();
             let start = std::time::Instant::now();
             let raw_result = tool.call(subject, arguments).await;
             Audit::record_duration(start);
 
             let final_result = match raw_result {
                 Ok(raw) => {
-                    if !tool.records_own_pipeline_metrics() {
-                        let raw_bytes = estimate_text_bytes(&raw);
-                        record_pipeline_metrics(raw_bytes, raw_bytes, "bypass", false);
-                    }
-                    Audit::record_tokens(estimate_tokens(&raw));
+                    let cached = match (default_cache, tool_caching.as_ref()) {
+                        (true, Some(tc)) => {
+                            let args_for_cache = args_value
+                                .clone()
+                                .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+                            tc.maybe_summarize_and_cache(subject, name, &args_for_cache, raw)
+                                .await?
+                                .result
+                        }
+                        _ => raw,
+                    };
+                    Audit::record_tokens(estimate_tokens(&cached));
                     Audit::record_success();
-                    Ok(raw)
+                    Ok(cached)
                 }
                 Err(e) => {
                     Audit::record_error(e.to_string());
@@ -548,40 +565,6 @@ pub fn estimate_tokens(result: &CallToolResult) -> u64 {
     (total_chars / 4).max(1) as u64
 }
 
-pub(crate) fn estimate_text_bytes(result: &CallToolResult) -> u64 {
-    result
-        .content
-        .iter()
-        .map(|c| match &c.raw {
-            rmcp::model::RawContent::Text(t) => t.text.len() as u64,
-            _ => 0,
-        })
-        .sum()
-}
-
-pub(crate) fn record_pipeline_metrics(
-    raw_bytes: u64,
-    kept_bytes: u64,
-    classifier: &str,
-    persisted: bool,
-) {
-    let compression_ratio = if kept_bytes == 0 {
-        1.0
-    } else {
-        raw_bytes as f64 / kept_bytes as f64
-    };
-    Audit::augment_metadata(
-        "pipeline",
-        serde_json::json!({
-            "raw_bytes": raw_bytes,
-            "kept_bytes": kept_bytes,
-            "classifier": classifier,
-            "persisted": persisted,
-            "compression_ratio": compression_ratio,
-        }),
-    );
-}
-
 #[cfg(test)]
 impl ToolSets {
     pub fn empty_for_test() -> Self {
@@ -589,6 +572,7 @@ impl ToolSets {
             sets: Arc::new(RwLock::new(Vec::new())),
             top_level: Arc::new(RwLock::new(HashMap::new())),
             audit: None,
+            tool_caching: None,
             init_errors: Vec::new(),
         }
     }

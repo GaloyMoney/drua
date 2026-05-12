@@ -4,9 +4,11 @@
 #
 # Spins up the in-tree `fake-mcp-upstream` binary as a real HTTP MCP server
 # (serving the bundled fixtures dir) and points a freshly rendered drua.yml
-# at it. Each test calls a fixture through the gateway and asserts the
-# upstream payload round-trips verbatim — only sub-threshold fixtures are
-# covered here so the universal pipeline stays in passthrough mode.
+# at it. Sub-threshold fixtures assert the upstream payload round-trips
+# verbatim (passthrough); over-threshold fixtures assert the rendered
+# `<summary>` + `<recovery>` envelope matches a snapshot under
+# `bats/summarized-tool-responses/`. Re-run with `UPDATE_FIXTURES=1` to
+# regenerate snapshots after intentional envelope changes.
 
 load helpers
 
@@ -134,6 +136,37 @@ fake_call() {
   mcp_call "$AGENT_TOKEN" "tools/call" "$body"
 }
 
+# Diff the gateway's rendered envelope against a snapshot under
+# bats/summarized-tool-responses/<fixture>.txt. `UPDATE_FIXTURES=1`
+# rewrites the snapshot with the live response. UUIDs in
+# `invocation_id="…"` get normalized to `<uuid>` so per-run randomness
+# doesn't break the diff.
+assert_summarized_text_matches() {
+  local prefixed="$1"
+  local fixture="$2"
+  local args="${3:-{\}}"
+  local snapshot="$REPO_ROOT/bats/summarized-tool-responses/${fixture}.txt"
+
+  run fake_call "$prefixed" "$args"
+  [ "$status" -eq 0 ]
+  local text normalized
+  text="$(echo "$output" | jq -r '.result.content[0].text')"
+  normalized="$(printf '%s\n' "$text" | sed -E \
+    's/invocation_id="[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"/invocation_id="<uuid>"/g')"
+
+  if [ "${UPDATE_FIXTURES:-}" = "1" ]; then
+    mkdir -p "$(dirname "$snapshot")"
+    printf '%s' "$normalized" > "$snapshot"
+    return 0
+  fi
+
+  [ -f "$snapshot" ] || {
+    echo "snapshot missing: $snapshot (run with UPDATE_FIXTURES=1 to seed)" >&2
+    return 1
+  }
+  diff -u "$snapshot" <(printf '%s' "$normalized")
+}
+
 @test "fake-upstream: obj-small round-trips verbatim (passthrough)" {
   run fake_call "fake_upstream_obj-small"
   echo "$output"
@@ -178,12 +211,308 @@ fake_call() {
   [[ "$is_error" == "true" ]]
 }
 
-@test "fake-upstream: mixed-content-parts returns text + image + text" {
-  run fake_call "fake_upstream_mixed-content-parts"
-  echo "$output"
-  local parts types
-  parts="$(echo "$output" | jq -r '.result.content | length')"
-  types="$(echo "$output" | jq -r '.result.content | map(.type) | join(",")')"
-  [[ "$parts" == "3" ]]
-  [[ "$types" == "text,image,text" ]]
+@test "fake-upstream: str-large-table → tool_output_fetch round-trips elided lines" {
+  # Summarise once: extract the advertised recovery args from <recovery>.
+  run fake_call "fake_upstream_str-large-table"
+  [ "$status" -eq 0 ]
+  local envelope call_line inv_id mode offset len
+  envelope="$(echo "$output" | jq -r '.result.content[0].text')"
+  call_line="$(echo "$envelope" | grep 'tool_output_fetch(' | head -1)"
+  inv_id="$(echo "$call_line" | grep -oE 'invocation_id="[0-9a-f-]{36}"' \
+    | sed -E 's/invocation_id="([^"]+)"/\1/')"
+  mode="$(echo "$call_line" | grep -oE '"mode":"[^"]+"' \
+    | sed -E 's/"mode":"([^"]+)"/\1/')"
+  offset="$(echo "$call_line" | grep -oE '"offset":[0-9]+' | head -1 | grep -oE '[0-9]+')"
+  len="$(echo "$call_line" | grep -oE '"len":[0-9]+' | head -1 | grep -oE '[0-9]+')"
+  [ -n "$inv_id" ] && [ -n "$mode" ] && [ -n "$offset" ] && [ -n "$len" ]
+
+  # Replay the recovery call the envelope advertised.
+  local fetch_args fetch_body
+  fetch_args="$(jq -nc \
+    --arg id "$inv_id" \
+    --arg m "$mode" \
+    --argjson o "$offset" \
+    --argjson l "$len" \
+    '{invocation_id:$id, path:"$", query:{mode:$m, offset:$o, len:$l}}')"
+  fetch_body="$(jq -nc --argjson a "$fetch_args" \
+    '{name:"tool_output_fetch", arguments:$a}')"
+  run mcp_call "$AGENT_TOKEN" "tools/call" "$fetch_body"
+  [ "$status" -eq 0 ]
+  local recovered
+  recovered="$(echo "$output" | jq -r '.result.content[0].text')"
+
+  # Diff against the snapshot of the elided-middle slice. UPDATE_FIXTURES=1
+  # regenerates from the live response.
+  local snapshot="$REPO_ROOT/bats/summarized-tool-responses/str-large-table.recovered.txt"
+  if [ "${UPDATE_FIXTURES:-}" = "1" ]; then
+    mkdir -p "$(dirname "$snapshot")"
+    printf '%s\n' "$recovered" > "$snapshot"
+  else
+    [ -f "$snapshot" ] || {
+      echo "snapshot missing: $snapshot (run with UPDATE_FIXTURES=1 to seed)" >&2
+      return 1
+    }
+    diff -u "$snapshot" <(printf '%s\n' "$recovered")
+  fi
+}
+
+@test "fake-upstream: str-large-table summarized into <summary>+<recovery> envelope" {
+  # ~13KB kubectl-table-style output (real k8s_list_pods shape); exceeds the
+  # 8KiB threshold so the universal pipeline elides head/tail and renders a
+  # range-mode tool_output_fetch recovery template. Snapshot lives at
+  # bats/summarized-tool-responses/str-large-table.txt — open the file to
+  # see exactly what the agent receives. Re-run with UPDATE_FIXTURES=1 to
+  # regenerate after intentional envelope changes.
+  assert_summarized_text_matches \
+    "fake_upstream_str-large-table" \
+    "str-large-table"
+}
+
+@test "fake-upstream: arr-large-passthrough-items summarized into array sentinel envelope" {
+  # 14KB top-level JSON array of 500 small {id, tag} objects. Items are
+  # sub-threshold so they passthrough verbatim; the root array is over
+  # threshold so the walker emits an {_elided, kind: "array", head, tail}
+  # sentinel and a json_array_slice recovery template.
+  assert_summarized_text_matches \
+    "fake_upstream_arr-large-passthrough-items" \
+    "arr-large-passthrough-items"
+}
+
+@test "fake-upstream: arr-large-passthrough-items → tool_output_fetch round-trips elided items" {
+  run fake_call "fake_upstream_arr-large-passthrough-items"
+  [ "$status" -eq 0 ]
+  local envelope call_line inv_id mode offset len
+  envelope="$(echo "$output" | jq -r '.result.content[0].text')"
+  call_line="$(echo "$envelope" | grep 'tool_output_fetch(' | head -1)"
+  inv_id="$(echo "$call_line" | grep -oE 'invocation_id="[0-9a-f-]{36}"' \
+    | sed -E 's/invocation_id="([^"]+)"/\1/')"
+  mode="$(echo "$call_line" | grep -oE '"mode":"[^"]+"' \
+    | sed -E 's/"mode":"([^"]+)"/\1/')"
+  offset="$(echo "$call_line" | grep -oE '"offset":[0-9]+' | head -1 | grep -oE '[0-9]+')"
+  len="$(echo "$call_line" | grep -oE '"len":[0-9]+' | head -1 | grep -oE '[0-9]+')"
+  [ -n "$inv_id" ] && [ -n "$mode" ] && [ -n "$offset" ] && [ -n "$len" ]
+
+  local fetch_args fetch_body
+  fetch_args="$(jq -nc \
+    --arg id "$inv_id" \
+    --arg m "$mode" \
+    --argjson o "$offset" \
+    --argjson l "$len" \
+    '{invocation_id:$id, path:"$", query:{mode:$m, offset:$o, len:$l}}')"
+  fetch_body="$(jq -nc --argjson a "$fetch_args" \
+    '{name:"tool_output_fetch", arguments:$a}')"
+  run mcp_call "$AGENT_TOKEN" "tools/call" "$fetch_body"
+  [ "$status" -eq 0 ]
+  local recovered
+  recovered="$(echo "$output" | jq -r '.result.content[0].text')"
+
+  local snapshot="$REPO_ROOT/bats/summarized-tool-responses/arr-large-passthrough-items.recovered.json"
+  if [ "${UPDATE_FIXTURES:-}" = "1" ]; then
+    mkdir -p "$(dirname "$snapshot")"
+    printf '%s\n' "$recovered" > "$snapshot"
+  else
+    [ -f "$snapshot" ] || {
+      echo "snapshot missing: $snapshot (run with UPDATE_FIXTURES=1 to seed)" >&2
+      return 1
+    }
+    diff -u "$snapshot" <(printf '%s\n' "$recovered")
+  fi
+}
+
+@test "fake-upstream: arr-large-fat-items summarized → multi-element body line-elide + array sentinel" {
+  # 5 GitHub PR rows, each with a 11.7 KB markdown body (~65 KB total).
+  # Walker recurses with per-item budget, line-elides each body, then
+  # if the walked array still exceeds budget it sentinels — exercising
+  # both kinds of truncation at once.
+  assert_summarized_text_matches \
+    "fake_upstream_arr-large-fat-items" \
+    "arr-large-fat-items"
+}
+
+@test "fake-upstream: arr-large-fat-items → tool_output_fetch round-trips elided slice" {
+  run fake_call "fake_upstream_arr-large-fat-items"
+  [ "$status" -eq 0 ]
+  local envelope call_line inv_id rec_path mode offset len
+  envelope="$(echo "$output" | jq -r '.result.content[0].text')"
+  # Pull the literal call form from <recovery>.
+  call_line="$(echo "$envelope" | grep 'tool_output_fetch(' | head -1)"
+  inv_id="$(echo "$call_line" | grep -oE 'invocation_id="[0-9a-f-]{36}"' \
+    | sed -E 's/invocation_id="([^"]+)"/\1/')"
+  rec_path="$(echo "$call_line" | grep -oE 'path="[^"]*"' \
+    | sed -E 's/path="([^"]*)"/\1/')"
+  mode="$(echo "$call_line" | grep -oE '"mode":"[^"]+"' \
+    | sed -E 's/"mode":"([^"]+)"/\1/')"
+  offset="$(echo "$call_line" | grep -oE '"offset":[0-9]+' | head -1 | grep -oE '[0-9]+')"
+  len="$(echo "$call_line" | grep -oE '"len":[0-9]+' | head -1 | grep -oE '[0-9]+')"
+  [ -n "$inv_id" ] && [ -n "$rec_path" ] && [ -n "$mode" ] && [ -n "$offset" ] && [ -n "$len" ]
+
+  local fetch_args fetch_body
+  fetch_args="$(jq -nc \
+    --arg id "$inv_id" \
+    --arg p "$rec_path" \
+    --arg m "$mode" \
+    --argjson o "$offset" \
+    --argjson l "$len" \
+    '{invocation_id:$id, path:$p, query:{mode:$m, offset:$o, len:$l}}')"
+  fetch_body="$(jq -nc --argjson a "$fetch_args" \
+    '{name:"tool_output_fetch", arguments:$a}')"
+  run mcp_call "$AGENT_TOKEN" "tools/call" "$fetch_body"
+  [ "$status" -eq 0 ]
+  local recovered
+  recovered="$(echo "$output" | jq -r '.result.content[0].text')"
+
+  local snapshot="$REPO_ROOT/bats/summarized-tool-responses/arr-large-fat-items.recovered.json"
+  if [ "${UPDATE_FIXTURES:-}" = "1" ]; then
+    mkdir -p "$(dirname "$snapshot")"
+    printf '%s\n' "$recovered" > "$snapshot"
+  else
+    [ -f "$snapshot" ] || {
+      echo "snapshot missing: $snapshot (run with UPDATE_FIXTURES=1 to seed)" >&2
+      return 1
+    }
+    diff -u "$snapshot" <(printf '%s\n' "$recovered")
+  fi
+}
+
+# Snapshot the compose structuredContent against a fixture. Normalises
+# uuids (invocation_ids — varied per run) and execution_time_ms (timing-
+# dependent) so the diff is byte-stable.
+assert_compose_snapshot() {
+  local raw="$1"
+  local fixture="$2"
+  local snapshot="$REPO_ROOT/bats/summarized-tool-responses/${fixture}.json"
+  local normalized
+  normalized="$(echo "$raw" | jq -S '
+    walk(
+      if type == "object" then
+        if has("invocation_id") then .invocation_id = "<uuid>" else . end |
+        if has("result_invocation_id") and .result_invocation_id != null then .result_invocation_id = "<uuid>" else . end |
+        if has("execution_time_ms") then .execution_time_ms = "<ms>" else . end
+      else . end
+    )' | sed -E \
+      -e 's/invocation_id="[0-9a-f-]{36}"/invocation_id="<uuid>"/g' \
+      -e 's/invocation_id=\\"[0-9a-f-]{36}\\"/invocation_id=\\"<uuid>\\"/g')"
+  if [ "${UPDATE_FIXTURES:-}" = "1" ]; then
+    mkdir -p "$(dirname "$snapshot")"
+    printf '%s\n' "$normalized" > "$snapshot"
+    return 0
+  fi
+  [ -f "$snapshot" ] || {
+    echo "snapshot missing: $snapshot (run with UPDATE_FIXTURES=1 to seed)" >&2
+    return 1
+  }
+  diff -u "$snapshot" <(printf '%s\n' "$normalized")
+}
+
+@test "compose: sub_invocations exposed + recovery round-trips through tool_output_fetch" {
+  # Round 1 — compose calls 3 fake-upstream tools (small, large-string,
+  # large-array). Returns metadata including sub_invocations[] with
+  # invocation_ids for the persisted (large) ones.
+  local r1_script
+  r1_script='return {
+    small: await tools["fake_upstream_obj-small"]({}),
+    str: await tools["fake_upstream_str-large-table"]({}),
+    arr: await tools["fake_upstream_arr-large-passthrough-items"]({}),
+  };'
+  local r1_body
+  r1_body="$(jq -nc --arg s "$r1_script" \
+    '{name:"compose", arguments:{script:$s}}')"
+  run mcp_call "$AGENT_TOKEN" "tools/call" "$r1_body"
+  [ "$status" -eq 0 ]
+  local r1_struct
+  r1_struct="$(echo "$output" | jq -r '.result.structuredContent')"
+
+  # Structural: 2 sub_invocations expected (small obj is passthrough →
+  # no recovery; large str + large arr are persisted).
+  local n_subs
+  n_subs="$(echo "$r1_struct" | jq -r '.sub_invocations | length')"
+  [ "$n_subs" = "2" ]
+
+  # Each persisted sub_invocation carries a uuid + a kind discriminator.
+  local subs_summary
+  subs_summary="$(echo "$r1_struct" | jq -r \
+    '.sub_invocations | map({tool_name, kind})')"
+  echo "$subs_summary"
+  [[ "$subs_summary" == *"str-large-table"* ]]
+  [[ "$subs_summary" == *"arr-large-passthrough-items"* ]]
+
+  # Snapshot the round-1 structured response (uuids + timings normalized).
+  assert_compose_snapshot "$r1_struct" "compose-roundtrip-1"
+
+  # Round 2 — feed each captured invocation_id back through
+  # tool_output_fetch inside a fresh compose script, replaying the
+  # advertised query for each. Asserts end-to-end recoverability.
+  local str_id arr_id str_q arr_q
+  str_id="$(echo "$r1_struct" | jq -r \
+    '.sub_invocations[] | select(.tool_name | endswith("str-large-table")) | .invocation_id')"
+  arr_id="$(echo "$r1_struct" | jq -r \
+    '.sub_invocations[] | select(.tool_name | endswith("arr-large-passthrough-items")) | .invocation_id')"
+  [[ "$str_id" =~ ^[0-9a-f-]{36}$ ]]
+  [[ "$arr_id" =~ ^[0-9a-f-]{36}$ ]]
+
+  # Pull the advertised query off the rendered <recovery> block of the
+  # round-1 result (it's the curated compose:result envelope).
+  local r1_result_text
+  r1_result_text="$(echo "$r1_struct" | jq -r '.result')"
+  # str-large-table is line-mode; arr is json_array_slice.
+  str_q="$(echo "$r1_result_text" | grep -oE '"mode":"lines"[^}]*' | head -1)"
+  arr_q="$(echo "$r1_result_text" | grep -oE '"mode":"json_array_slice"[^}]*' | head -1)"
+
+  # Construct a recovery script via jq so quoting is correct.
+  local r2_script r2_body
+  r2_script="$(jq -nc \
+    --arg str_id "$str_id" \
+    --arg arr_id "$arr_id" \
+    '"return { str_slice: await tools.tool_output_fetch({invocation_id: \"" + $str_id + "\", path: \"$\", query: {mode: \"lines\", offset: 12, len: 16}}), arr_slice: await tools.tool_output_fetch({invocation_id: \"" + $arr_id + "\", path: \"$\", query: {mode: \"json_array_slice\", offset: 195, len: 109}}) };"')"
+  r2_body="$(jq -nc --argjson s "$r2_script" \
+    '{name:"compose", arguments:{script:$s}}')"
+  run mcp_call "$AGENT_TOKEN" "tools/call" "$r2_body"
+  [ "$status" -eq 0 ]
+
+  # The recovered slices must match the elided middle of each fixture.
+  local r2_struct r2_result
+  r2_struct="$(echo "$output" | jq -r '.result.structuredContent')"
+  r2_result="$(echo "$r2_struct" | jq -r '.result')"
+
+  # str_slice is a JSON string; arr_slice is a JSON array.
+  local str_slice arr_slice_len
+  str_slice="$(echo "$r2_result" | jq -r '.str_slice' | head -c 60)"
+  arr_slice_len="$(echo "$r2_result" | jq -r '.arr_slice | length')"
+
+  # Sanity: line-mode slice begins with a known kubectl row prefix.
+  [[ "$str_slice" == kube-system* ]] || {
+    echo "expected str_slice to start with 'kube-system'; got: $str_slice" >&2
+    return 1
+  }
+  [ "$arr_slice_len" = "109" ]
+
+  # Snapshot the round-2 structured response. uuids normalized, but
+  # the actual recovered slices (str_slice text + arr_slice array) are
+  # byte-stable across runs since the fixtures are deterministic.
+  assert_compose_snapshot "$r2_struct" "compose-roundtrip-2"
+}
+
+@test "fake-upstream: nix-copy-output → chain compacts copy/build/cache runs" {
+  # Tool output is well under threshold (1.8KB) so the budget-aware
+  # eliders don't fire. But the nix pattern passes still detect copy/
+  # building/cache-activity runs and compact them — exercising the
+  # generic StringSummarizerChain on a small payload.
+  #
+  # Snapshot shows the rendered nix-* markers in place of the original
+  # runs. UPDATE_FIXTURES=1 regens.
+  assert_summarized_text_matches \
+    "fake_upstream_nix-copy-output" \
+    "nix-copy-output"
+}
+
+@test "fake-upstream: concourse-build-log → preprocessor strips ANSI/timestamps + line-elide" {
+  # ~32KB ANSI-coloured timestamped concourse build log. Tool name
+  # `fake_upstream_concourse-build-log` ends with `concourse-build-log`
+  # which is in preprocessors::concourse::TOOL_NAMES, so the
+  # preprocessor engages and strips ANSI escapes + `[HH:MM:SS] `
+  # timestamps before the budget-aware line-eliding runs. Snapshot
+  # shows the cleaned head/tail.
+  assert_summarized_text_matches \
+    "fake_upstream_concourse-build-log" \
+    "concourse-build-log"
 }

@@ -38,16 +38,12 @@ pub trait TopLevelTool: Send + Sync {
         true
     }
 
-    /// Skip the universal classify+persist+envelope stage; raw result is returned unchanged.
-    fn bypass_universal_pipeline(&self) -> bool {
-        false
-    }
-
-    // cursor bugbot #3210558743: when true, dispatcher's bypass branch skips
-    // its default `record_pipeline_metrics(raw, raw, "bypass", false)` so an
-    // internally-compressing tool doesn't record a misleading 1.0 ratio.
-    fn records_own_pipeline_metrics(&self) -> bool {
-        false
+    /// True (default): the top-level dispatcher runs `ToolCaching` on the
+    /// result. False: the tool calls `ToolCaching` itself (e.g. because it
+    /// wants to attribute under a different `tool_name` or run it on
+    /// sub-results internally).
+    fn default_tool_caching(&self) -> bool {
+        true
     }
 
     async fn call(

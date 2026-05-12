@@ -133,14 +133,15 @@ impl App {
         };
 
         let audit = Arc::new(Audit::new(pool));
-        // Tool-output caching is currently disabled; the persistence layer
-        // and classifier-driven envelope wrapping in core/crates/tool-{cache,
-        // classifier} remain compiled but are intentionally not wired up.
+        let tool_caching = Arc::new(drua_tool_caching::ToolCaching::new(
+            pool,
+            drua_tool_caching::ToolCachingConfig::default(),
+        ));
         let toolsets = ToolSets::init(
             config.toolsets,
             Some(Arc::clone(&audit)),
             github_app.clone(),
-            None,
+            Some(Arc::clone(&tool_caching)),
         )
         .await?;
         toolsets.log_init_summary();
