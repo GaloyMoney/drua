@@ -9,6 +9,11 @@ use crate::sandbox::SandboxConfig;
 use crate::toolset::ToolSetsConfig;
 use drua_git_proxy::AllowlistConfig;
 
+pub use drua_tunnel::{
+    default_tunnel_expires_after_secs, default_tunnel_heartbeat_secs,
+    default_tunnel_reaper_interval_secs, TunnelRuntimeConfig,
+};
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -53,43 +58,6 @@ pub struct GitProxyAppConfig {
 fn default_mirror_ttl_seconds() -> u64 {
     300
 }
-
-#[derive(Clone, Debug, Deserialize)]
-pub struct TunnelRuntimeConfig {
-    #[serde(default)]
-    pub self_pod_addr: Option<String>,
-    #[serde(default = "default_tunnel_heartbeat_secs")]
-    pub heartbeat_secs: u64,
-    #[serde(default = "default_tunnel_expires_after_secs")]
-    pub expires_after_secs: u64,
-    #[serde(default = "default_tunnel_reaper_interval_secs")]
-    pub reaper_interval_secs: u64,
-    #[serde(default)]
-    pub internal_secret: Option<String>,
-}
-
-impl Default for TunnelRuntimeConfig {
-    fn default() -> Self {
-        Self {
-            self_pod_addr: None,
-            heartbeat_secs: default_tunnel_heartbeat_secs(),
-            expires_after_secs: default_tunnel_expires_after_secs(),
-            reaper_interval_secs: default_tunnel_reaper_interval_secs(),
-            internal_secret: None,
-        }
-    }
-}
-
-pub fn default_tunnel_heartbeat_secs() -> u64 {
-    30
-}
-pub fn default_tunnel_expires_after_secs() -> u64 {
-    90
-}
-pub fn default_tunnel_reaper_interval_secs() -> u64 {
-    60
-}
-
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct EncryptionConfig {
     /// Hex-encoded 32-byte encryption key for project secrets.

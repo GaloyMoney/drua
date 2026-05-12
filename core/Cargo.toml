@@ -14,6 +14,7 @@ anthropic-client = { workspace = true }
 code-assistant-core = { workspace = true }
 drua-library = { path = "crates/library" }
 drua-tool-caching = { path = "crates/tool-caching" }
+drua-tunnel = { workspace = true }
 github-app = { workspace = true }
 openai-client = { workspace = true }
 anyhow = { workspace = true }

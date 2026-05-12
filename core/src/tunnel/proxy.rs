@@ -1,37 +1,11 @@
 use std::sync::Arc;
 
 use rmcp::model::{CallToolResult, JsonObject, Tool};
-use serde::{Deserialize, Serialize};
 
 use crate::auth::AuthSubject;
-use crate::toolset::{SearchableToolSet, ToolSetEntry, ToolSetScope, ToolSetsError, TunnelKind};
+use crate::toolset::{SearchableToolSet, ToolSetEntry, ToolSetScope, ToolSetsError, TunnelRoute};
 
-use super::RegisteredToolSet;
-
-#[derive(Clone)]
-pub enum InternalAuth {
-    SharedSecret { secret: String },
-    Disabled,
-}
-
-impl InternalAuth {
-    pub fn header_value(&self) -> Result<String, ToolSetsError> {
-        match self {
-            InternalAuth::SharedSecret { secret } => Ok(format!("Bearer {secret}")),
-            InternalAuth::Disabled => Err(ToolSetsError::Tunnel(
-                "internal auth disabled — cross-pod tunnel calls unavailable".to_string(),
-            )),
-        }
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct InternalCallReq<'a> {
-    pub upstream: &'a str,
-    pub tool_name: &'a str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub arguments: Option<JsonObject>,
-}
+use super::{InternalAuth, InternalCallReq, RegisteredToolSet};
 
 pub struct ProxyTunnelToolSet {
     name: String,
@@ -90,7 +64,7 @@ impl ProxyTunnelToolSet {
                     scope: ToolSetScope::Tunnel {
                         deployment_id: deployment_id.to_string(),
                         session_id,
-                        kind: TunnelKind::Proxy,
+                        route: TunnelRoute::Proxy,
                     },
                 }
             })
@@ -134,7 +108,10 @@ impl SearchableToolSet for ProxyTunnelToolSet {
             tool_name,
             arguments,
         };
-        let auth_header = self.auth.header_value()?;
+        let auth_header = self
+            .auth
+            .header_value()
+            .map_err(|e| ToolSetsError::Tunnel(e.to_string()))?;
 
         let resp = self
             .http
@@ -187,7 +164,7 @@ mod tests {
     #[test]
     fn header_value_disabled_errors() {
         let auth = InternalAuth::Disabled;
-        assert!(matches!(auth.header_value(), Err(ToolSetsError::Tunnel(_))));
+        assert!(auth.header_value().is_err());
     }
 
     fn try_test_client() -> Option<reqwest::Client> {
@@ -224,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn build_one_proxy_per_registration_matching_local_naming() {
+    fn build_one_proxy_per_registration_matching_owned_naming() {
         let Some(http) = try_test_client() else {
             return;
         };
@@ -247,7 +224,7 @@ mod tests {
         assert!(matches!(
             proxies[0].scope(),
             Some(ToolSetScope::Tunnel {
-                kind: TunnelKind::Proxy,
+                route: TunnelRoute::Proxy,
                 ..
             })
         ));

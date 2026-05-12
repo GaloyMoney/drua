@@ -2,26 +2,11 @@ use rmcp::model::{CallToolResult, JsonObject, Tool};
 
 use crate::auth::AuthSubject;
 
-use super::ToolSetsError;
+use super::{ToolSetScope, ToolSetsError};
 
 pub struct ToolSetEntry {
     pub name: String,
     pub description: Tool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ToolSetScope {
-    Tunnel {
-        deployment_id: String,
-        session_id: uuid::Uuid,
-        kind: TunnelKind,
-    },
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TunnelKind {
-    Local,
-    Proxy,
 }
 
 #[async_trait::async_trait]

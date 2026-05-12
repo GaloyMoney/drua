@@ -171,8 +171,8 @@ fn try_test_client() -> Option<reqwest::Client> {
 #[tokio::test]
 async fn reconcile_one_installs_drops_and_defers_local_takeover() {
     use drua_core::tunnel::{
-        reconcile_all_deployments, reconcile_one_deployment, InternalAuth, ReconcileCtx,
-        TunnelRegistry,
+        reconcile_all_deployments, reconcile_one_deployment, CoreReconcileTarget, InternalAuth,
+        ReconcileCtx, TunnelRegistry,
     };
 
     let pool = pool().await;
@@ -189,15 +189,18 @@ async fn reconcile_one_installs_drops_and_defers_local_takeover() {
     let auth = std::sync::Arc::new(InternalAuth::SharedSecret {
         secret: "x".to_string(),
     });
+    let peer_target = CoreReconcileTarget::new(
+        std::sync::Arc::clone(&toolsets),
+        std::sync::Arc::clone(&tunnels),
+        std::sync::Arc::clone(&http),
+        std::sync::Arc::clone(&auth),
+    );
     let owner = unique_owner("reconcile-owner");
     let peer = unique_owner("reconcile-peer");
     let peer_ctx = ReconcileCtx {
         regs: &regs,
         self_pod_addr: Some(&peer),
-        toolsets: &toolsets,
-        tunnels: &tunnels,
-        http: &http,
-        auth: &auth,
+        target: &peer_target,
     };
 
     reconcile_one_deployment(&peer_ctx, &deployment_id)
@@ -229,13 +232,16 @@ async fn reconcile_one_installs_drops_and_defers_local_takeover() {
 
     let toolsets_a = std::sync::Arc::new(drua_core::toolset::ToolSets::empty_for_test());
     let tunnels_a = std::sync::Arc::new(TunnelRegistry::new());
+    let owner_target = CoreReconcileTarget::new(
+        std::sync::Arc::clone(&toolsets_a),
+        std::sync::Arc::clone(&tunnels_a),
+        std::sync::Arc::clone(&http),
+        std::sync::Arc::clone(&auth),
+    );
     let owner_ctx = ReconcileCtx {
         regs: &regs,
         self_pod_addr: Some(&owner),
-        toolsets: &toolsets_a,
-        tunnels: &tunnels_a,
-        http: &http,
-        auth: &auth,
+        target: &owner_target,
     };
     reconcile_one_deployment(&owner_ctx, &deployment_id)
         .await
@@ -261,10 +267,7 @@ async fn reconcile_one_installs_drops_and_defers_local_takeover() {
     let ctx = ReconcileCtx {
         regs: &regs,
         self_pod_addr: Some(&owner),
-        toolsets: &toolsets,
-        tunnels: &tunnels,
-        http: &http,
-        auth: &auth,
+        target: &peer_target,
     };
 
     let peer_session = uuid::Uuid::new_v4();
@@ -324,7 +327,7 @@ async fn reconcile_one_installs_drops_and_defers_local_takeover() {
     reconcile_all_deployments(&ctx).await.unwrap();
     assert!(
         close_rx.try_recv().is_ok(),
-        "displaced Local must be signaled to close from the full-sweep path"
+        "displaced owned tunnel must be signaled to close from the full-sweep path"
     );
 
     regs.delete_if_owner(&deployment_id, peer_session)

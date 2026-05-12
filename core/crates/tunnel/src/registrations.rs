@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Transaction};
 
-use super::RegisteredToolSet;
+use crate::protocol::RegisteredToolSet;
 
 const NOTIFY_CHANNEL: &str = "tunnel_registry_changed";
 
@@ -234,4 +234,4 @@ impl TunnelRegistrations {
     }
 }
 
-pub(crate) const TUNNEL_NOTIFY_CHANNEL: &str = NOTIFY_CHANNEL;
+pub const TUNNEL_NOTIFY_CHANNEL: &str = NOTIFY_CHANNEL;
