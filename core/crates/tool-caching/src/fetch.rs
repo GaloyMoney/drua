@@ -248,10 +248,7 @@ mod tests {
     fn wrap_at_path_mixed_keys_and_indices() {
         let wrapped =
             StoredInvocation::wrap_at_path("$.items[1].name", Value::String("hi".into())).unwrap();
-        assert_eq!(
-            wrapped,
-            serde_json::json!({"items": [{"name": "hi"}]}),
-        );
+        assert_eq!(wrapped, serde_json::json!({"items": [{"name": "hi"}]}),);
     }
 
     #[test]
