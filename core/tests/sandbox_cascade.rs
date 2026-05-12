@@ -32,9 +32,13 @@ fn specs() -> SandboxSpecs {
 
 async fn build_sandboxes(pool: &sqlx::PgPool) -> Arc<Sandboxes> {
     Arc::new(
-        Sandboxes::init(pool, SandboxConfig::default(), None)
-            .await
-            .expect("init sandboxes"),
+        Sandboxes::init(
+            pool,
+            SandboxConfig::default(),
+            std::sync::Arc::new(drua_git_proxy::Allowlist::default()),
+        )
+        .await
+        .expect("init sandboxes"),
     )
 }
 

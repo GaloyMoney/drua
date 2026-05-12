@@ -13,9 +13,13 @@ async fn pool() -> sqlx::PgPool {
 
 async fn build_skills(pool: &sqlx::PgPool) -> Skills {
     let sandboxes = Arc::new(
-        Sandboxes::init(pool, SandboxConfig::default(), None)
-            .await
-            .expect("init sandboxes"),
+        Sandboxes::init(
+            pool,
+            SandboxConfig::default(),
+            std::sync::Arc::new(drua_git_proxy::Allowlist::default()),
+        )
+        .await
+        .expect("init sandboxes"),
     );
     Skills::new_without_library(pool, sandboxes)
 }

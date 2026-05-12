@@ -111,6 +111,38 @@ galoyAgents:
       enabled: false
       url: ""
       team: ""
+    ## Smart-HTTP git proxy. Sandbox `git clone` / `git push` traffic is
+    ## rewritten to flow through `drua-internal/git/...`; the proxy
+    ## validates against the global allow-list and forwards upstream
+    ## using a fresh GitHub App installation token. See memo 019dfebc.
+    ##
+    ## `allowedPushRefs` is push-only — pull / clone / fetch is
+    ## unrestricted modulo the `modes` list. Lookup on (owner, repo)
+    ## is case-insensitive. Empty entries list = no repos allowed.
+    gitProxy:
+      ## On-disk root for per-repo bare mirrors. Must match the mount
+      ## path on the PVC below when `mirrorPersistence.enabled = true`.
+      mirrorRoot: "/data/git-proxy-mirrors"
+      ## Pulls within this window reuse the existing mirror without
+      ## re-fetching upstream. github → mirror sync lag is at most
+      ## this many seconds. Pushes from the sandbox don't need
+      ## upstream fetches (objects are written locally then pushed
+      ## out by the proxy itself).
+      mirrorTtlSeconds: 300
+      ## PVC for mirrors — without persistence, every pod restart
+      ## re-clones every repo on first access. With persistence,
+      ## restarts just revalidate (TTL).
+      mirrorPersistence:
+        enabled: true
+        size: 20Gi
+        storageClassName: standard-rwo
+      allowlist:
+        entries: []
+        ## - owner: GaloyMoney
+        ##   repo: drua
+        ##   modes: [pull, push]
+        ##   allowedPushRefs:
+        ##     - refs/heads/bot/*
     zenduty:
       enabled: false
       url: ""
@@ -314,8 +346,19 @@ sandbox:
   networkPolicyManagement: Managed
   ## MCP gateway URL for sandbox pods (e.g. "http://drua.drua.svc.cluster.local:5254/mcp")
   mcpGatewayUrl: ""
-  ## Audience claim for the projected SA token (must match gateway validation)
-  saTokenAudience: "galoy-agents-mcp"
+  ## drua git-proxy URL for sandbox pods. When set, the sandbox image's
+  ## entrypoint adds an `[url …] insteadOf = https://github.com/`
+  ## rewrite + a `drua-sa` credential helper so all `git clone` /
+  ## `git push` traffic flows through drua, not directly to github.com.
+  ## Pair with `sandbox.saTokenAudience = "galoy-agents-git"` (default).
+  ## Required for M5 — without this, the kill-switch NetworkPolicy
+  ## leaves the sandbox unable to reach github.com.
+  gitProxyUrl: ""
+  ## Audience claim for the projected SA token (must match drua's
+  ## SaTokenValidator audience). Repurposed from the prior
+  ## `galoy-agents-mcp` audience per memo `019dfebc` §3.2 — one token
+  ## covers MCP + git-proxy + future SA-authed paths.
+  saTokenAudience: "galoy-agents-git"
   image:
     repository: us.gcr.io/galoyorg/sandbox
     digest: ""

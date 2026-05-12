@@ -63,6 +63,50 @@ galoyAgents:
       enabled: true
       clientId: "Iv23liCAm3yHFqmGmayW"
       installationId: "123146136"
+    ## Smart-HTTP git proxy — sandbox `git clone` / `git push` traffic
+    ## flows through drua via the projected SA token; the App-
+    ## installation token never crosses the trust boundary. Per memo
+    ## 019dfebc. `allowedPushRefs: [refs/heads/bot/*]` keeps agents
+    ## off `main` / release branches — agents PR, humans / CI merge.
+    gitProxy:
+      mirrorRoot: "/data/git-proxy-mirrors"
+      mirrorTtlSeconds: 300
+      mirrorPersistence:
+        enabled: true
+        size: 50Gi
+        storageClassName: standard-rwo
+      allowlist:
+        entries:
+          - owner: GaloyMoney
+            repo: drua
+            modes: [pull, push]
+            allowedPushRefs:
+              - refs/heads/bot/*
+          - owner: GaloyMoney
+            repo: lana-bank
+            modes: [pull, push]
+            allowedPushRefs:
+              - refs/heads/bot/*
+          - owner: GaloyMoney
+            repo: es-entity
+            modes: [pull, push]
+            allowedPushRefs:
+              - refs/heads/bot/*
+          - owner: GaloyMoney
+            repo: cala
+            modes: [pull, push]
+            allowedPushRefs:
+              - refs/heads/bot/*
+          - owner: GaloyMoney
+            repo: obix
+            modes: [pull, push]
+            allowedPushRefs:
+              - refs/heads/bot/*
+          - owner: GaloyMoney
+            repo: job
+            modes: [pull, push]
+            allowedPushRefs:
+              - refs/heads/bot/*
     mcpUpstreams:
       - name: honeycomb
         url: https://mcp.honeycomb.io/mcp

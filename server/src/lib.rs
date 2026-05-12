@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod config;
+pub mod git_proxy;
 pub mod graphql;
 mod routes;
 pub mod server;
@@ -40,6 +41,7 @@ pub struct AppState {
     pub session_store: PgSessionStore,
     pub tunnel_public_keys: TunnelPublicKeys,
     pub library_repo_url: Option<String>,
+    pub dev_mode_agent_tokens: bool,
 }
 
 impl AppState {
@@ -67,6 +69,7 @@ impl AppState {
             session_store: PgSessionStore::new(pool),
             tunnel_public_keys,
             library_repo_url: None,
+            dev_mode_agent_tokens: false,
         }
     }
 
@@ -82,6 +85,7 @@ pub fn router() -> Router<AppState> {
         .merge(routes::api_router())
         .merge(graphql::router())
         .merge(webhook::router())
+        .merge(git_proxy::router())
 }
 
 pub struct RunServerArgs {
@@ -156,6 +160,7 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
         sandbox: config.sandbox.clone(),
         github_app: github_app_config,
         library: config.library.clone(),
+        git_proxy: config.git_proxy.clone(),
     };
 
     let app = domain::App::init(&pool, app_config).await?;
@@ -191,9 +196,21 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
         std::sync::Arc::new(tunnel_public_keys),
     );
     app_state.library_repo_url = config.library.repo_url.clone();
+    app_state.dev_mode_agent_tokens = auth_config.dev_mode_agent_tokens;
+    if app_state.dev_mode_agent_tokens {
+        tracing::warn!(
+            "dev_mode_agent_tokens enabled — accepting `dev-agent:<uuid>` bearer tokens. \
+             NEVER enable in production."
+        );
+    }
 
-    if let Some(validator) = auth::sa_token::SaTokenValidator::try_from_env("drua-mcp").await {
-        tracing::info!("SA token validator initialized (in-cluster)");
+    // Audience must match `sandbox.saTokenAudience` in values.yaml; if
+    // they diverge, every TokenReview call fails. Configurable via env
+    // for ops cutovers (renaming the audience without a code change).
+    let sa_audience =
+        std::env::var("DRUA_SA_TOKEN_AUDIENCE").unwrap_or_else(|_| "galoy-agents-git".to_string());
+    if let Some(validator) = auth::sa_token::SaTokenValidator::try_from_env(&sa_audience).await {
+        tracing::info!(audience = %sa_audience, "SA token validator initialized (in-cluster)");
         app_state = app_state.with_sa_token_validator(validator);
     }
 

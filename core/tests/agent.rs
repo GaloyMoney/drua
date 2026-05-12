@@ -82,9 +82,13 @@ async fn build_agents(pool: &sqlx::PgPool) -> (Agents, Arc<Sandboxes>) {
             .expect("init toolsets"),
     );
     let sandboxes = Arc::new(
-        Sandboxes::init(pool, SandboxConfig::default(), None)
-            .await
-            .expect("init sandboxes"),
+        Sandboxes::init(
+            pool,
+            SandboxConfig::default(),
+            std::sync::Arc::new(drua_git_proxy::Allowlist::default()),
+        )
+        .await
+        .expect("init sandboxes"),
     );
     let skills = Arc::new(drua_core::skill::Skills::new_without_library(
         pool,
@@ -141,9 +145,13 @@ async fn send_message_round_trip_via_prompt_channel() {
     );
 
     let sandboxes = Arc::new(
-        Sandboxes::init(&pool, SandboxConfig::default(), None)
-            .await
-            .expect("init sandboxes"),
+        Sandboxes::init(
+            &pool,
+            SandboxConfig::default(),
+            std::sync::Arc::new(drua_git_proxy::Allowlist::default()),
+        )
+        .await
+        .expect("init sandboxes"),
     );
     let skills = Arc::new(drua_core::skill::Skills::new_without_library(
         &pool,
@@ -301,9 +309,13 @@ async fn send_message_dispatches_registered_tool_call() {
     let toolsets = Arc::new(toolsets);
 
     let sandboxes = Arc::new(
-        Sandboxes::init(&pool, SandboxConfig::default(), None)
-            .await
-            .expect("init sandboxes"),
+        Sandboxes::init(
+            &pool,
+            SandboxConfig::default(),
+            std::sync::Arc::new(drua_git_proxy::Allowlist::default()),
+        )
+        .await
+        .expect("init sandboxes"),
     );
     let skills = Arc::new(drua_core::skill::Skills::new_without_library(
         &pool,

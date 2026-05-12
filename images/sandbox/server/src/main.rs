@@ -39,21 +39,13 @@ struct InitializeRequest {
     repo_url: Option<String>,
     #[serde(default)]
     branch: Option<String>,
-    #[serde(default)]
-    github_token: Option<String>,
 }
 
+/// Empty per memo `019dfebc` M4 — no credentials cross the trust
+/// boundary. Git auth flows through the drua git-proxy via the
+/// projected SA token, not via files written into the workspace.
 #[derive(Deserialize, Default)]
-struct AttachRequest {
-    /// Fresh GitHub App installation token. When present, written to
-    /// `/run/secrets/github-token` and `/workspace/.git-credentials`
-    /// (and `/workspace/.gh-token`) before the smoke test runs —
-    /// installation tokens expire after 1h and persistent sandboxes
-    /// outlive that, so the orchestrator passes a fresh token on
-    /// every workflow-run attach.
-    #[serde(default)]
-    github_token: Option<String>,
-}
+struct AttachRequest {}
 
 #[derive(Debug, Serialize)]
 struct ResetRepoResponse {
@@ -573,14 +565,9 @@ async fn execute_glob(session: &SharedSession, input: serde_json::Value) -> Resu
 }
 
 const DEFAULT_WORKSPACE_ROOT: &str = "/workspace";
-const DEFAULT_GITHUB_TOKEN_PATH: &str = "/run/secrets/github-token";
 
 fn workspace_root() -> String {
     std::env::var("WORKSPACE_ROOT").unwrap_or_else(|_| DEFAULT_WORKSPACE_ROOT.to_string())
-}
-
-fn github_token_path() -> String {
-    std::env::var("GITHUB_TOKEN_PATH").unwrap_or_else(|_| DEFAULT_GITHUB_TOKEN_PATH.to_string())
 }
 
 #[instrument(name = "sandbox.server.initialize", skip_all, fields(mode = %req.mode))]
@@ -588,17 +575,6 @@ async fn initialize(
     State(session): State<SharedSession>,
     Json(req): Json<InitializeRequest>,
 ) -> Json<InitializeResponse> {
-    if let Some(token) = req.github_token.as_deref().filter(|t| !t.is_empty()) {
-        if let Err(e) = write_github_token(&github_token_path(), token).await {
-            return Json(InitializeResponse {
-                cwd: workspace_root(),
-                exported_system_prompt: None,
-                exported_skills: Vec::new(),
-                error: Some(e),
-            });
-        }
-    }
-
     let resp = initialize_inner(
         &workspace_root(),
         &req.mode,
@@ -626,23 +602,13 @@ async fn initialize(
 /// instead of letting the agent flail through dozens of `Exit code
 /// 1` results.
 ///
-/// When `req.github_token` is set, refreshes
-/// `/run/secrets/github-token` and `/workspace/.git-credentials` (and
-/// `/workspace/.gh-token`) before the smoke test. GitHub App installation
-/// tokens expire after 1h and persistent sandboxes outlive that, so the
-/// orchestrator passes a fresh token on every workflow-run attach.
+/// Empty body per memo `019dfebc` M4 — no credentials are written;
+/// git auth flows through the drua git-proxy via the projected SA token.
 #[instrument(name = "sandbox.server.attach", skip_all)]
 async fn attach(
     State(session): State<SharedSession>,
-    body: Option<Json<AttachRequest>>,
+    _body: Option<Json<AttachRequest>>,
 ) -> Result<&'static str, (StatusCode, String)> {
-    let req = body.map(|Json(b)| b).unwrap_or_default();
-    if let Some(token) = req.github_token.as_deref().filter(|t| !t.is_empty()) {
-        if let Err(e) = write_github_token(&github_token_path(), token).await {
-            return Err((StatusCode::INTERNAL_SERVER_ERROR, e));
-        }
-    }
-
     let cwd = session.current_cwd().await;
     session.set_cwd(cwd).await;
 
@@ -738,50 +704,6 @@ async fn initialize_inner(
             error: Some(msg),
         }),
     }
-}
-
-/// Write the GitHub token to `path` with mode 0600 and chowned to the
-/// agent UID (1000:1000). Creates parent dirs as needed.
-///
-/// Ownership matters: the credential helper baked into the sandbox
-/// image (`git-credential-github-token`) `cat`s this file, and runs
-/// as the calling git's UID. For agent git ops the helper runs as
-/// UID 1000, so the file must be readable by 1000. The original
-/// implementation chmod'd 0600 root:root which broke the agent path
-/// (root could read it, agent couldn't, the helper returned an empty
-/// password, and git rejected it as "Invalid username or token").
-/// Root still reads it after chown via DAC bypass.
-async fn write_github_token(path: &str, token: &str) -> Result<(), String> {
-    let path_buf = PathBuf::from(path);
-    if let Some(parent) = path_buf.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|e| format!("Failed to create token directory {parent:?}: {e}"))?;
-    }
-    tokio::fs::write(&path_buf, token)
-        .await
-        .map_err(|e| format!("Failed to write github token: {e}"))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        tokio::fs::set_permissions(&path_buf, std::fs::Permissions::from_mode(0o600))
-            .await
-            .map_err(|e| format!("Failed to chmod github token: {e}"))?;
-
-        // chown to agent:agent (1000:1000) so the UID-dropped credential
-        // helper can read it. Best-effort: a chown failure leaves the
-        // token root-only, which keeps prior (root-only) behaviour and
-        // surfaces in the agent's first git op as "Permission denied".
-        let output = std::process::Command::new("chown")
-            .args(["1000:1000", path])
-            .output();
-        if let Err(e) = output {
-            tracing::warn!("Failed to chown github token (non-fatal): {e}");
-        }
-    }
-
-    Ok(())
 }
 
 async fn initialize_scratch(workspace: &str) -> Result<InitializeResponse, String> {
@@ -1768,37 +1690,6 @@ mod tests {
         assert_eq!(body, "Body.");
     }
 
-    // ── write_github_token ─────────────────────────────────────────
-
-    #[tokio::test]
-    async fn write_github_token_creates_file_and_parent_dir() {
-        init_test_workspace();
-        let base = std::env::temp_dir().join("sandbox-test-token");
-        let _ = tokio::fs::remove_dir_all(&base).await;
-        let path = base.join("nested").join("github-token");
-
-        write_github_token(path.to_str().unwrap(), "ghp_secret")
-            .await
-            .unwrap();
-
-        let written = tokio::fs::read_to_string(&path).await.unwrap();
-        assert_eq!(written, "ghp_secret");
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = tokio::fs::metadata(&path)
-                .await
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777;
-            assert_eq!(mode, 0o600);
-        }
-
-        let _ = tokio::fs::remove_dir_all(&base).await;
-    }
-
     // ── initialize_scratch ─────────────────────────────────────────
 
     #[tokio::test]
@@ -2248,56 +2139,14 @@ mod tests {
         dir.to_str().unwrap().to_string()
     }
 
-    #[tokio::test]
-    async fn write_github_token_writes_token_bytes() {
-        let dir = fresh_test_dir("sandbox-token-write");
-        let token_path = format!("{dir}/github-token");
-        write_github_token(&token_path, "ghs_test_token_42")
-            .await
-            .expect("write should succeed");
-
-        let written = std::fs::read_to_string(&token_path).unwrap();
-        assert_eq!(written, "ghs_test_token_42");
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn write_github_token_sets_0600_perms() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = fresh_test_dir("sandbox-token-perms");
-        let token_path = format!("{dir}/github-token");
-        write_github_token(&token_path, "ghs_perms_check")
-            .await
-            .expect("write should succeed");
-
-        let perms = std::fs::metadata(&token_path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(perms, 0o600, "github-token must be 0600");
-    }
-
-    /// Wire-shape smoke test: confirms the wire types deserialize and
-    /// the `Option<Json<AttachRequest>>` extractor accepts a missing
-    /// body without changing the cwd-pinned-shell behaviour.
+    /// Wire-shape smoke test: the empty `AttachRequest` deserialises
+    /// from `{}` and is the only shape the orchestrator sends post-M4
+    /// (no GitHub token field — the proxy handles git auth).
     #[test]
-    fn attach_request_default_has_no_token() {
-        let req = AttachRequest::default();
-        assert!(req.github_token.is_none());
-    }
-
-    /// Wire-shape smoke test: a JSON body with `github_token: null`
-    /// deserializes to `None`, and a present token deserializes to
-    /// `Some`.
-    #[test]
-    fn attach_request_deserializes_optional_token() {
-        let none_form: AttachRequest = serde_json::from_str(r#"{"github_token": null}"#).unwrap();
-        assert!(none_form.github_token.is_none());
-
-        let some_form: AttachRequest =
-            serde_json::from_str(r#"{"github_token": "ghs_x"}"#).unwrap();
-        assert_eq!(some_form.github_token.as_deref(), Some("ghs_x"));
-
-        let empty_form: AttachRequest = serde_json::from_str(r#"{}"#).unwrap();
-        assert!(empty_form.github_token.is_none());
+    fn attach_request_default_is_empty() {
+        let _req = AttachRequest::default();
+        let parsed: AttachRequest = serde_json::from_str(r#"{}"#).unwrap();
+        let _ = parsed;
     }
 
     #[tokio::test]

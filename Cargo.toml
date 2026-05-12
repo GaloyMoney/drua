@@ -19,6 +19,7 @@ members = [
   "lib/json-schema-ts",
   "lib/github-app",
   "lib/fake-mcp-upstream",
+  "lib/git-proxy",
   "code-assistant/crates/core",
   "code-assistant/crates/cli",
   "images/sandbox/server",
@@ -63,6 +64,7 @@ anthropic-client = { path = "lib/anthropic-client" }
 openai-client = { path = "lib/openai-client" }
 github-app = { path = "lib/github-app" }
 fake-mcp-upstream = { path = "lib/fake-mcp-upstream" }
+drua-git-proxy = { path = "lib/git-proxy" }
 
 # MCP
 rmcp = { version = "1.2", features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "macros"] }
@@ -140,6 +142,9 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-r
 # Errors
 anyhow = "1"
 thiserror = "2"
+
+# Glob matching (git-proxy ref-pattern policy)
+globset = "0.4"
 
 # CLI
 clap = { version = "4", features = ["derive", "env"] }

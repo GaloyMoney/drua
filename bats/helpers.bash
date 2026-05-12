@@ -86,6 +86,126 @@ SQL
   export AGENT_TOKEN="$raw_token"
 }
 
+# Renders an isolated bare upstream repo at $BATS_FILE_TMPDIR/<owner>-<repo>.git
+# with one commit on `main`. Returns its `file://` URL via stdout so
+# the caller can plug it into write_git_proxy_config's upstream override.
+mk_upstream_repo() {
+  local owner="$1" repo="$2"
+  local work="$BATS_FILE_TMPDIR/upstream/${owner}-${repo}"
+  local bare="$BATS_FILE_TMPDIR/upstream/${owner}-${repo}.git"
+  rm -rf "$work" "$bare"
+  mkdir -p "$work"
+  git -C "$work" init -q -b main
+  git -C "$work" config user.email "bats@example.com"
+  git -C "$work" config user.name "bats"
+  echo "# fixture" > "$work/README.md"
+  git -C "$work" add README.md
+  git -C "$work" commit -q -m "fixture initial"
+  git clone -q --bare "$work" "$bare" 2>/dev/null
+  # Pre-receive hook bare repos default to denyCurrentBranch=refuse
+  # which breaks pushes to the checked-out branch on the upstream.
+  # Bare clones don't have a checked-out branch so this is a no-op,
+  # but set it explicitly for clarity.
+  git -C "$bare" config receive.denyCurrentBranch ignore
+  echo "file://$bare"
+}
+
+# Renders an isolated drua.yml with:
+#   * dev login + dev_mode_agent_tokens enabled (accepts the literal
+#     `dev-agent` Bearer token; no agent row needs to exist in PG)
+#   * one git_proxy.allowlist entry per arg in the form
+#     "<owner>/<repo>:<modes>:<patterns>[:<upstream_url>]"
+#     — modes csv (pull,push), patterns csv. e.g.
+#       "GaloyMoney/drua:pull,push:refs/heads/bot/*,refs/heads/main"
+write_git_proxy_config() {
+  local out="$BATS_FILE_TMPDIR/drua.yml"
+
+  cat > "$out" <<EOF
+server:
+  port: 4200
+  host: "0.0.0.0"
+  secure_cookies: false
+  mcp_endpoint: "http://localhost:4200/mcp"
+oauth:
+  login: dev
+  dev_mode_agent_tokens: true
+  github_redirect_uri: "http://localhost:4200/auth/github/callback"
+  github_client_id: "bats"
+  github_allowed_teams: []
+agents:
+  models:
+    bats-test-model:
+      model: bats-test-model
+      max_tokens_per_response: 1024
+      context_window_tokens: 4096
+  default_chain:
+    primary: { name: "bats-test-model", max_tokens: 1024 }
+  builtin_roles:
+    project_lead:
+      compaction:
+        prune_after_seconds: 600
+    agent:
+      compaction:
+        prune_after_seconds: 600
+    workflow_step_agent:
+      compaction:
+        prune_after_seconds: 600
+sandbox:
+  backend:
+    provider: local
+    sandbox_spawn_cmd: "true"
+    local_repo_root: "."
+library:
+  repo_url: "https://github.com/galoymoney/drua-test-library"
+  skill_sync_interval_secs: 3600
+git_proxy:
+  mirror_root: "${BATS_FILE_TMPDIR}/git-proxy-mirrors"
+  allowlist:
+EOF
+
+  if [ "$#" -gt 0 ]; then
+    echo "    entries:" >> "$out"
+    for spec in "$@"; do
+      # spec format: <owner>/<repo>:<modes>:<patterns>[:<upstream_url>]
+      # split on : but keep only the first 3 splits — the 4th may itself contain ':' (file://).
+      local owner_repo modes patterns upstream_url remainder
+      owner_repo="${spec%%:*}"
+      remainder="${spec#*:}"
+      modes="${remainder%%:*}"
+      remainder="${remainder#*:}"
+      # `patterns` is everything until next `:` OR end if no upstream_url
+      if [[ "$remainder" == *":"* ]]; then
+        patterns="${remainder%%:*}"
+        upstream_url="${remainder#*:}"
+      else
+        patterns="$remainder"
+        upstream_url=""
+      fi
+      local owner="${owner_repo%%/*}"
+      local repo_name="${owner_repo#*/}"
+      echo "      - owner: $owner" >> "$out"
+      echo "        repo: $repo_name" >> "$out"
+      if [ -n "$upstream_url" ]; then
+        echo "        upstream_url: \"$upstream_url\"" >> "$out"
+      fi
+      echo "        modes:" >> "$out"
+      IFS=',' read -ra _modes <<< "$modes"
+      for m in "${_modes[@]}"; do
+        echo "          - $m" >> "$out"
+      done
+      echo "        allowed_push_refs:" >> "$out"
+      IFS=',' read -ra _pats <<< "$patterns"
+      for p in "${_pats[@]}"; do
+        echo "          - \"$p\"" >> "$out"
+      done
+    done
+  else
+    echo "    entries: []" >> "$out"
+  fi
+
+  export DRUA_CONFIG="$out"
+}
+
 mcp_call() {
   local token="$1"
   local method="$2"

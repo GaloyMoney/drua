@@ -264,6 +264,31 @@ data:
       client_id: {{ .Values.galoyAgents.config.githubApp.clientId | quote }}
       installation_id: {{ .Values.galoyAgents.config.githubApp.installationId | quote }}
     {{- end }}
+    {{- with .Values.galoyAgents.config.gitProxy }}
+    git_proxy:
+      {{- with .mirrorRoot }}
+      mirror_root: {{ . | quote }}
+      {{- end }}
+      {{- with .mirrorTtlSeconds }}
+      mirror_ttl_seconds: {{ . }}
+      {{- end }}
+      allowlist:
+        entries:
+        {{- range .allowlist.entries }}
+          - owner: {{ .owner | quote }}
+            repo: {{ .repo | quote }}
+            modes: {{ .modes | toJson }}
+            {{- with .allowedPushRefs }}
+            allowed_push_refs:
+            {{- range . }}
+              - {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- with .upstreamUrl }}
+            upstream_url: {{ . | quote }}
+            {{- end }}
+        {{- end }}
+    {{- end }}
     {{- if .Values.sandbox.namespace }}
     # Sandbox provisioning. Without this section the binary defaults to
     # SandboxBackendConfig::Local which tries to `cargo run` the

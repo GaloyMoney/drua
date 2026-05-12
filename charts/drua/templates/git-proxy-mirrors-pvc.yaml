@@ -1,0 +1,24 @@
+{{- with .Values.galoyAgents.config.gitProxy }}
+{{- if .mirrorPersistence.enabled }}
+# Bare-repo mirrors served by the smart-HTTP git-proxy. Persisting
+# them across pod restarts means the first clone after a restart
+# reuses local objects instead of re-fetching from upstream — a
+# 5-min mirror_ttl_seconds re-validates them in place.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ template "galoyAgents.fullname" $ }}-git-proxy-mirrors
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app: {{ template "galoyAgents.fullname" $ }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: {{ .mirrorPersistence.size | quote }}
+  {{- with .mirrorPersistence.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}
+{{- end }}

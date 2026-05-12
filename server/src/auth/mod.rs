@@ -126,6 +126,21 @@ async fn resolve_auth_context(
             }
         }
 
+        // Local-dev shortcut: a literal `dev-agent` Bearer token
+        // synthesises an `AuthSubject::Agent` with nil project_id +
+        // agent_id, granting access to anything the global git-proxy
+        // allow-list permits. No DB lookup. Audit rows for dev-mode
+        // requests carry `acting_agent_id = 00000000-…` so they're
+        // grep-able after the fact. Off in prod (config flag default
+        // false). Emits a `tracing::warn!` at server boot when enabled.
+        if state.dev_mode_agent_tokens && raw_token == "dev-agent" {
+            return AuthSubject::Agent(
+                domain::primitives::ProjectId::from(uuid::Uuid::nil()),
+                domain::primitives::AgentId::from(uuid::Uuid::nil()),
+                Vec::new(),
+            );
+        }
+
         // SA tokens from sandbox pods (projected ServiceAccount tokens).
         if sa_token::looks_like_jwt(&raw_token) {
             if let Some(ref validator) = state.sa_token_validator {

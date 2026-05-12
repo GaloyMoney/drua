@@ -16,7 +16,6 @@ use sandbox::instance_client::{
 pub use sandbox::{SandboxMode, SandboxSpecs};
 
 use crate::audit::Audit;
-use crate::github_app::GitHubAppTokenProvider;
 
 const PROVISION_TIMEOUT: Duration = Duration::from_secs(120);
 
@@ -33,14 +32,18 @@ use crate::auth::AuthSubject;
 pub struct Sandboxes {
     repo: SandboxRepo,
     admin: Arc<dyn AdminClient>,
-    github_app: Option<Arc<GitHubAppTokenProvider>>,
+    /// Same global allow-list the git-proxy uses for runtime decisions.
+    /// Sandbox-create pre-validates `mode: repo` against it so we don't
+    /// leak an `Errored` sandbox + a half-baked workspace when the
+    /// /initialize-time clone would fail.
+    allowlist: Arc<drua_git_proxy::Allowlist>,
 }
 
 impl Sandboxes {
     pub async fn init(
         pool: &sqlx::PgPool,
         config: SandboxConfig,
-        github_app: Option<Arc<GitHubAppTokenProvider>>,
+        allowlist: Arc<drua_git_proxy::Allowlist>,
     ) -> Result<Self, SandboxError> {
         let admin: Arc<dyn AdminClient> = match config.backend {
             SandboxBackendConfig::Local {
@@ -78,8 +81,39 @@ impl Sandboxes {
         Ok(Self {
             repo: SandboxRepo::new(pool),
             admin,
-            github_app,
+            allowlist,
         })
+    }
+
+    /// Pre-validate `mode: repo` against the global git-proxy allow-list
+    /// before persisting the sandbox row. Reject early with a clear
+    /// error rather than letting `/initialize` fail mid-clone and
+    /// leaving the sandbox in `Errored` (memo `019dfebc` §7.2).
+    /// Scratch-mode sandboxes are unaffected.
+    fn validate_repo_mode(&self, mode: &SandboxMode) -> Result<(), SandboxError> {
+        let SandboxMode::Repo { repo_url, .. } = mode else {
+            return Ok(());
+        };
+        let coord = drua_git_proxy::RepoCoord::from_github_url(repo_url).ok_or_else(|| {
+            SandboxError::InvalidRepoUrl {
+                url: repo_url.clone(),
+            }
+        })?;
+        // Pull is the floor — the sandbox tool-server runs `git clone`
+        // at `/initialize`. Push happens later from the agent and is
+        // checked at request time by the proxy.
+        self.allowlist
+            .check_authorization(
+                &coord.owner,
+                &coord.repo,
+                drua_git_proxy::GitProxyMode::Pull,
+                &[],
+            )
+            .map_err(|e| SandboxError::RepoNotAllowed {
+                url: repo_url.clone(),
+                reason: e.reject_code().to_string(),
+            })?;
+        Ok(())
     }
 
     #[instrument(name = "domain.sandbox.create", skip(self, sub))]
@@ -118,6 +152,7 @@ impl Sandboxes {
         specs: SandboxSpecs,
         mode: SandboxMode,
     ) -> Result<Sandbox, SandboxError> {
+        self.validate_repo_mode(&mode)?;
         let id = SandboxId::new();
         let mount_path = self.admin.mount_path(&format!("sb-{id}"));
         let new_sandbox = NewSandbox::builder()
@@ -213,19 +248,11 @@ impl Sandboxes {
             return;
         };
         let instance = InstanceClient::new(base_url);
-        // Without the token, `/initialize` can't clone private repos.
-        let github_token = match self.github_app.as_ref() {
-            Some(provider) => match provider.generate_token().await {
-                Ok(t) => Some(t.token),
-                Err(e) => {
-                    self.record_error(id, &name, "github_app_token", e.to_string())
-                        .await;
-                    return;
-                }
-            },
-            None => None,
-        };
-        let init_req = InitializeRequest::from_mode(&sandbox.mode, github_token);
+        // No GitHub token is sent to the sandbox: clones go through the
+        // drua git-proxy, authenticated by the sandbox's projected SA
+        // token. Memo `019dfebc` M4 — the sandbox no longer holds any
+        // GitHub credential.
+        let init_req = InitializeRequest::from_mode(&sandbox.mode);
         let response = match instance.initialize(&init_req).await {
             Ok(r) => r,
             Err(e) => {
@@ -459,6 +486,7 @@ impl Sandboxes {
         specs: SandboxSpecs,
         mode: SandboxMode,
     ) -> Result<Sandbox, SandboxError> {
+        self.validate_repo_mode(&mode)?;
         let storage_name = Self::workflow_sandbox_storage_name(workflow_id, &name.into());
         let id = SandboxId::new();
         let mount_path = self.admin.mount_path(&format!("sb-{id}"));
@@ -717,31 +745,16 @@ impl Sandboxes {
     }
 
     /// POST `/attach` to the sandbox-server. Resolves `base_url` via
-    /// the admin client (k8s pod IP / local port). Carries a fresh
-    /// GitHub App installation token in the attach body so a long-lived
-    /// sandbox doesn't run the smoke test with a stale (>1h) token —
-    /// installation tokens expire after 1h and `git push` / `gh` would
-    /// otherwise fail with `Authentication failed`.
+    /// the admin client (k8s pod IP / local port). The sandbox no
+    /// longer holds a GitHub credential (memo `019dfebc` M4 — git
+    /// auth flows through the drua git-proxy via the projected SA
+    /// token), so the attach body is empty.
     async fn notify_sandbox_attach(&self, sandbox: &Sandbox) -> Result<(), SandboxError> {
         let view = self.admin.get_sandbox(&sandbox.resource_name()).await?;
         let Some(client) = InstanceClient::from_sandbox(&view) else {
             return Ok(());
         };
-        let github_token = match self.github_app.as_ref() {
-            Some(provider) => match provider.generate_token().await {
-                Ok(t) => Some(t.token),
-                Err(e) => {
-                    tracing::warn!(
-                        sandbox_id = %sandbox.id,
-                        error = %e,
-                        "github_app.generate_token failed; attach proceeds with stale token"
-                    );
-                    None
-                }
-            },
-            None => None,
-        };
-        client.attach(&AttachRequest { github_token }).await?;
+        client.attach(&AttachRequest::default()).await?;
         Ok(())
     }
 

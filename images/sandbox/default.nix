@@ -147,24 +147,20 @@ let
     nixGvisorPtyPipePatch
   ];
 
-  # Git credential helper: reads token from /run/secrets/github-token.
-  # Used by the root server process as a fallback; the agent user uses
-  # the workspace-level .git-credentials file written during /initialize.
-  gitCredentialHelper = pkgs.writeShellScriptBin "git-credential-github-token" ''
+  # Credential helper: reads the projected K8s ServiceAccount token at
+  # invocation time and hands it back to git as an HTTP basic-auth
+  # password. Token rotates on disk; helper re-reads each call.
+  # Used for traffic to the drua git-proxy (`drua-internal:.../git/...`),
+  # which then validates the SA token via TokenReview and mints a fresh
+  # GitHub App installation token upstream — the sandbox never sees a
+  # GitHub credential.
+  gitCredentialHelper = pkgs.writeShellScriptBin "git-credential-drua-sa" ''
     case "$1" in
       get)
-        github=""
-        while IFS= read -r line; do
-          case "$line" in
-            host=github.com) github=1 ;;
-            "") break ;;
-          esac
-        done
-        if [ "$github" = "1" ] && [ -f /run/secrets/github-token ]; then
-          echo "protocol=https"
-          echo "host=github.com"
+        token_path="''${DRUA_SA_TOKEN_PATH:-/var/run/secrets/galoy-agents-git/token}"
+        if [ -f "$token_path" ]; then
           echo "username=x-access-token"
-          echo "password=$(cat /run/secrets/github-token)"
+          echo "password=$(cat "$token_path")"
           echo ""
         fi
         ;;
@@ -172,20 +168,41 @@ let
     esac
   '';
 
-  gitconfig = pkgs.writeTextDir "home/agent/.gitconfig" ''
-    [credential "https://github.com"]
-      helper = ${gitCredentialHelper}/bin/git-credential-github-token
+  # The static gitconfig — `insteadOf` rewriting is appended at runtime
+  # by the entrypoint based on `$DRUA_GIT_PROXY_URL`, since gitconfig
+  # files don't expand env vars.
+  gitconfig = pkgs.writeTextDir "home/agent/.gitconfig.base" ''
     [user]
       name = drua[bot]
       email = drua[bot]@users.noreply.github.com
   '';
 
-  # Entrypoint: starts nix-daemon, waits for socket, then execs tool server.
+  # Entrypoint: starts nix-daemon, waits for socket, materialises the
+  # dynamic gitconfig (rewriting github.com → DRUA_GIT_PROXY_URL when
+  # set), then execs the tool server.
   entrypoint = pkgs.writeShellScriptBin "sandbox-entrypoint" ''
     set -euo pipefail
 
     mkdir -p /workspace/tmp /nix/var/nix/daemon-socket /var/empty
     chown 1000:1000 /workspace /workspace/tmp 2>/dev/null || true
+
+    # Compose the agent's gitconfig: static base + dynamic insteadOf
+    # block that points GitHub URLs at the drua git-proxy when
+    # DRUA_GIT_PROXY_URL is set. Helper-name must match the wrapper
+    # written into the image (no path — git resolves via PATH).
+    cp /home/agent/.gitconfig.base /home/agent/.gitconfig
+    chown 1000:1000 /home/agent/.gitconfig 2>/dev/null || true
+    if [ -n "''${DRUA_GIT_PROXY_URL:-}" ]; then
+      cat >> /home/agent/.gitconfig <<EOF
+[url "''${DRUA_GIT_PROXY_URL%/}/"]
+    insteadOf = https://github.com/
+    insteadOf = git@github.com:
+[credential]
+    helper = drua-sa
+[http]
+    extraHeader = X-Drua-Sandbox: 1
+EOF
+    fi
 
     # Clients use NIX_REMOTE=daemon, but the daemon itself must open the local
     # store or it recursively connects back to its own socket.

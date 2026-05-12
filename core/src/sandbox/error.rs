@@ -38,4 +38,16 @@ pub enum SandboxError {
     NameNotFound { project_id: ProjectId, name: String },
     #[error("SandboxError - Authorization: {0}")]
     Authorization(#[from] AuthorizationError),
+    /// Repo URL didn't parse as a recognised github clone URL. Surfaces
+    /// as a 400-equivalent at every API surface so the agent gets a
+    /// clear message instead of a stuck-Errored sandbox.
+    #[error("SandboxError - InvalidRepoUrl: '{url}' is not a recognised github clone URL")]
+    InvalidRepoUrl { url: String },
+    /// Repo URL parsed but isn't in the global git-proxy allow-list
+    /// (or is configured pull-disabled). The sandbox would have failed
+    /// to clone the moment its tool-server reached the proxy; pre-
+    /// validating at create time keeps `Errored` rows + leaked
+    /// tool-server children out of the picture entirely.
+    #[error("SandboxError - RepoNotAllowed: {url} is not permitted by the git-proxy allow-list ({reason})")]
+    RepoNotAllowed { url: String, reason: String },
 }

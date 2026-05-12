@@ -4,6 +4,7 @@ server:
   secure_cookies: false
   mcp_endpoint: "http://localhost:4200/mcp"
 oauth:
+  dev_mode_agent_tokens: true
   login: github
   github_client_id: "Ov23li9ZTNnKjiTRwDcb"
   github_redirect_uri: "http://localhost:4200/auth/github/callback"
@@ -58,6 +59,22 @@ agents:
 library:
   repo_url: "https://github.com/galoymoney/drua-test-library"
   skill_sync_interval_secs: 5
+git_proxy:
+  # Repos sandboxes are allowed to clone / push through the drua proxy.
+  # `owner` / `repo` lookup is case-insensitive — `galoymoney` and
+  # `GaloyMoney` match the same entry. `allowed_push_refs` gates push
+  # only (pull / clone / fetch are unrestricted modulo the modes
+  # list); patterns are globs against the full ref name. Empty list
+  # ⇒ no pushes accepted. Restart drua to apply edits.
+  allowlist:
+    entries:
+      - owner: GaloyMoney
+        repo: drua
+        modes: [pull, push]
+        allowed_push_refs:
+          # Bot branches only — agents never push directly to main.
+          # Open a PR and let humans / CI do the merge.
+          - "refs/heads/bot/*"
 sandbox:
   # Local mode spawns the sandbox tool server as a child process per sandbox.
   # Each sandbox lives in <local_repo_root>/.sandboxes/<name>/.

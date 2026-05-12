@@ -26,6 +26,7 @@ chrono = { version = "0.4", features = ["clock", "serde"], default-features = fa
 chrono-tz = "0.10"
 cron = "0.15"
 derive_builder = "0.20"
+drua-git-proxy = { workspace = true }
 es-entity = "0.10"
 job = { workspace = true }
 obix = { workspace = true }

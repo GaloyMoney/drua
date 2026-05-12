@@ -68,12 +68,13 @@ spec:
         matchLabels:
           kubernetes.io/metadata.name: {{ .Values.sandbox.otelCollectorNamespace }}
   {{- end }}
-  # 4. Internet — all non-RFC1918 destinations (via NAT gateway)
-  - to:
-    - ipBlock:
-        cidr: 0.0.0.0/0
-        except:
-        - 10.0.0.0/8
-        - 172.16.0.0/12
-        - 192.168.0.0/16
+  # No general non-RFC1918 egress. Memo `019dfebc` M5 kill-switch:
+  # all GitHub traffic flows through `drua-internal/git/...` (covered
+  # by rule 2 above). Anything outside the allow-listed paths
+  # (kube-dns, drua-server, OTel) is denied.
+  #
+  # Workflows that still need external HTTP for non-git tasks (test
+  # fixtures hitting third-party APIs, npm install) require a
+  # per-domain proxy in the drua namespace. Audit run logs from M3/M4
+  # before flipping the upgrade for a project.
 {{- end }}

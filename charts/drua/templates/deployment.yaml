@@ -127,9 +127,17 @@ spec:
           mountPath: /secrets/github-app
           readOnly: true
         {{- end }}
+        {{- with .Values.galoyAgents.config.gitProxy }}
+        {{- if .mirrorPersistence.enabled }}
+        - name: git-proxy-mirrors
+          mountPath: {{ .mirrorRoot | quote }}
+        {{- end }}
+        {{- end }}
         env:
         - name: DRUA_CONFIG
           value: "/config/drua.yml"
+        - name: DRUA_SA_TOKEN_AUDIENCE
+          value: {{ .Values.sandbox.saTokenAudience | default "galoy-agents-git" | quote }}
         - name: OTEL_EXPORTER_OTLP_ENDPOINT
           value: {{ .Values.galoyAgents.tracing.otelExporterOtlpEndpoint | quote }}
         - name: OTEL_SERVICE_NAME
@@ -218,4 +226,11 @@ spec:
           items:
             - key: "github-app-private-key"
               path: "private-key.pem"
+      {{- end }}
+      {{- with .Values.galoyAgents.config.gitProxy }}
+      {{- if .mirrorPersistence.enabled }}
+      - name: git-proxy-mirrors
+        persistentVolumeClaim:
+          claimName: {{ template "galoyAgents.fullname" $ }}-git-proxy-mirrors
+      {{- end }}
       {{- end }}

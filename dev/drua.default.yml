@@ -10,6 +10,7 @@ oauth:
   github_redirect_uri: ''
   github_client_id: ''
   github_allowed_teams: []
+  dev_mode_agent_tokens: false
 db: {}
 providers: []
 agents:
@@ -46,4 +47,9 @@ library:
   data_dir: null
   repo_url: null
   skill_sync_interval_secs: 20
+git_proxy:
+  allowlist:
+    entries: []
+  mirror_root: null
+  mirror_ttl_seconds: 0
 

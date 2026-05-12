@@ -82,12 +82,57 @@ impl LocalAdminClient {
 
         let sandbox_dir = self.sandboxes_root.join(name);
         let workspace = sandbox_dir.join("workspace");
-        let secrets_dir = sandbox_dir.join("secrets");
-        let github_token_path = secrets_dir.join("github-token");
-        let _ = sandbox_dir;
 
         create_dir_all(&workspace).await?;
-        create_dir_all(&secrets_dir).await?;
+
+        // Mirror the K8s image entrypoint locally: when DRUA_GIT_PROXY_URL
+        // is in the parent (drua-server) env, write a per-sandbox
+        // gitconfig that rewrites github.com → proxy and inject an
+        // Authorization header from DRUA_DEV_AGENT_TOKEN (matching the
+        // dev-mode auth path the proxy accepts when
+        // `oauth.dev_mode_agent_tokens=true`). Surfaces as
+        // `<sandbox_dir>/gitconfig` so an operator can `cat` it to
+        // verify the wiring before driving traffic.
+        let proxy_url = std::env::var("DRUA_GIT_PROXY_URL")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let dev_agent_token = std::env::var("DRUA_DEV_AGENT_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty());
+        let gitconfig_path = if let Some(proxy_url) = proxy_url.as_deref() {
+            let proxy_url = proxy_url.trim_end_matches('/');
+            let path = sandbox_dir.join("gitconfig");
+            let mut body = format!(
+                "[user]\n\
+                     name = drua[bot]\n\
+                     email = drua[bot]@users.noreply.github.com\n\
+                 [url \"{proxy_url}/\"]\n\
+                     insteadOf = https://github.com/\n\
+                     insteadOf = git@github.com:\n"
+            );
+            if let Some(token) = dev_agent_token.as_deref() {
+                body.push_str(&format!(
+                    "[http \"{proxy_url}/\"]\n\
+                         extraHeader = Authorization: Bearer {token}\n"
+                ));
+            }
+            tokio::fs::write(&path, body)
+                .await
+                .map_err(|e| AdminError::Io {
+                    path: path.display().to_string(),
+                    source: e,
+                })?;
+            tracing::info!(
+                sandbox = %name,
+                gitconfig = %path.display(),
+                proxy_url = %proxy_url,
+                token_set = dev_agent_token.is_some(),
+                "wrote per-sandbox gitconfig"
+            );
+            Some(path)
+        } else {
+            None
+        };
 
         let port = allocate_port()?;
         let base_url = format!("http://127.0.0.1:{port}");
@@ -101,8 +146,10 @@ impl LocalAdminClient {
             .stdin(std::process::Stdio::null())
             .env("PORT", port.to_string())
             .env("WORKSPACE_ROOT", &workspace)
-            .env("GITHUB_TOKEN_PATH", &github_token_path)
             .kill_on_drop(true);
+        if let Some(path) = gitconfig_path.as_deref() {
+            cmd.env("GIT_CONFIG_GLOBAL", path);
+        }
 
         let child = cmd.spawn().map_err(AdminError::Spawn)?;
 
@@ -291,7 +338,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_sandbox_creates_workspace_and_secrets_dirs() {
+    async fn create_sandbox_creates_workspace_dir() {
         let tmp = std::env::temp_dir().join("sandbox-test-dirs");
         let _ = tokio::fs::remove_dir_all(&tmp).await;
         let client = LocalAdminClient::new(
@@ -309,11 +356,10 @@ mod tests {
             .expect_err("should time out — `true` never binds a port");
         assert!(matches!(err, AdminError::Timeout(_)));
 
-        // The dirs should still have been created before the spawn attempt.
+        // workspace should have been created before the spawn attempt;
+        // the prior `secrets/` dir is gone post-M4 (memo `019dfebc`).
         let workspace = tmp.join(".sandboxes/alpha/workspace");
-        let secrets = tmp.join(".sandboxes/alpha/secrets");
         assert!(workspace.is_dir(), "workspace dir not created");
-        assert!(secrets.is_dir(), "secrets dir not created");
 
         let _ = tokio::fs::remove_dir_all(&tmp).await;
     }

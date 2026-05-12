@@ -6,6 +6,7 @@ pub mod auth;
 pub mod code_assistant;
 mod config;
 pub mod encryption;
+pub mod git_proxy;
 pub mod github_app;
 pub mod library;
 pub mod mcp_creds;
@@ -31,6 +32,7 @@ use std::sync::Arc;
 use agent::Agents;
 use audit::Audit;
 use code_assistant::CodeAssistant;
+use git_proxy::GitProxies;
 use github_app::GitHubAppTokenProvider;
 use library::{AuthedSearch, AuthedSpaces};
 use mcp_creds::McpCredentials;
@@ -63,6 +65,7 @@ pub struct App {
     sandboxes: Arc<Sandboxes>,
     workflows: Arc<Workflows>,
     github_app: Option<Arc<GitHubAppTokenProvider>>,
+    git_proxies: Arc<GitProxies>,
     /// Keyed by `deployment_id`; `/tunnel/ws` evicts a previous tunnel when
     /// a new connector registers the same `deployment_id`.
     tunnels: Arc<tunnel::TunnelRegistry>,
@@ -108,10 +111,10 @@ impl App {
             None
         };
 
-        // Built before Sandboxes::init so the provider can mint a fresh
-        // installation token for `/initialize` to clone private repos.
-        // Verify by generating a token at startup — crash on failure rather
-        // than silently skip.
+        // GitHub App credentials live behind the git-proxy now —
+        // sandboxes never see a token. Provider stays for the proxy's
+        // upstream-fetch path. Verify by generating a token at startup
+        // so a misconfigured PEM crashes boot, not first push.
         let github_app = match config.github_app {
             Some(ref gh_config) => {
                 let provider = GitHubAppTokenProvider::new(gh_config)
@@ -184,7 +187,34 @@ impl App {
         let context_generation = ContextGeneration::new();
         spawn_context_generation_listener(pool.clone(), context_generation.clone());
 
-        let sandboxes = Arc::new(Sandboxes::init(pool, config.sandbox, github_app.clone()).await?);
+        // Bad ref-pattern in YAML must crash boot, not silently fail every push.
+        // Built before `Sandboxes::init` because both services share it —
+        // `Sandboxes` pre-validates `mode: repo` against the allow-list at
+        // create time so failed clones don't leak `Errored` rows + child
+        // tool-server processes (PR review feedback).
+        let allowlist = Arc::new(
+            drua_git_proxy::Allowlist::from_config(&config.git_proxy.allowlist)
+                .map_err(|e| AppError::GitProxy(format!("invalid allowlist config: {e}")))?,
+        );
+        tracing::info!(
+            entries = allowlist.entries().len(),
+            "git-proxy allow-list loaded"
+        );
+
+        let sandboxes = Arc::new(Sandboxes::init(pool, config.sandbox, allowlist.clone()).await?);
+
+        let mirror_root = config
+            .git_proxy
+            .mirror_root
+            .clone()
+            .unwrap_or_else(|| "./.git-proxy-mirrors".to_string());
+        let mirror_cfg = drua_git_proxy::MirrorConfig {
+            root: std::path::PathBuf::from(&mirror_root),
+            fetch_ttl: std::time::Duration::from_secs(config.git_proxy.mirror_ttl_seconds),
+        };
+        let mirror = drua_git_proxy::MirrorManager::new(mirror_cfg);
+        let git_proxies =
+            Arc::new(GitProxies::new(allowlist).with_mirror(mirror, github_app.clone()));
 
         // Read facade for the project↔space mount relationship. Built
         // before `Skills` so Skills can resolve mounted-space skills
@@ -363,6 +393,7 @@ impl App {
             sandboxes,
             workflows,
             github_app,
+            git_proxies,
             tunnels: Arc::new(tunnel::TunnelRegistry::new()),
             library,
             spaces,
@@ -419,6 +450,10 @@ impl App {
 
     pub fn github_app(&self) -> Option<&GitHubAppTokenProvider> {
         self.github_app.as_deref()
+    }
+
+    pub fn git_proxies(&self) -> &GitProxies {
+        &self.git_proxies
     }
 
     pub fn tunnels(&self) -> &tunnel::TunnelRegistry {
@@ -502,4 +537,6 @@ pub enum AppError {
     Job(String),
     #[error("AppError - Library: {0}")]
     Library(String),
+    #[error("AppError - GitProxy: {0}")]
+    GitProxy(String),
 }
