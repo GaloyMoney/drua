@@ -59,6 +59,25 @@ impl From<ModelChain> for DomainModelChain {
     }
 }
 
+impl From<drua_core::agent::ModelChain> for ModelChain {
+    fn from(c: drua_core::agent::ModelChain) -> Self {
+        Self {
+            primary: ModelSpec {
+                name: c.primary.model,
+                max_tokens: None,
+            },
+            fallbacks: c
+                .fallbacks
+                .into_iter()
+                .map(|m| ModelSpec {
+                    name: m.model,
+                    max_tokens: None,
+                })
+                .collect(),
+        }
+    }
+}
+
 #[derive(SimpleObject, Clone)]
 #[graphql(complex)]
 pub struct Agent {
@@ -73,12 +92,6 @@ pub struct Agent {
 
 #[ComplexObject]
 impl Agent {
-    /// `None` ⇒ use the project / role / config-default chain.
-    /// Always `None` for workflow-spawned agents.
-    async fn model_chain_override(&self) -> Option<ModelChain> {
-        self.entity.model_chain_override.clone().map(Into::into)
-    }
-
     async fn attached_sandbox(
         &self,
         ctx: &Context<'_>,
@@ -180,14 +193,14 @@ pub struct AgentCreateInput {
 mutation_payload! { AgentCreatePayload, agent: Agent }
 
 #[derive(InputObject)]
-pub struct AgentUpdateModelChainInput {
+pub struct AgentUpdateSessionChainInput {
     pub agent_id: AgentId,
-    /// `None` clears the override (revert to project / role / default).
+    /// `None` reverts the session chain to the role / `agents.default_chain`.
     /// Rejects workflow-spawned agents.
     pub chain: Option<ModelChain>,
 }
 
-mutation_payload! { AgentUpdateModelChainPayload, agent: Agent }
+mutation_payload! { AgentUpdateSessionChainPayload, session: super::session::AgentSession }
 
 #[derive(InputObject)]
 pub struct AgentAttachSandboxInput {

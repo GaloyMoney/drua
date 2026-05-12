@@ -150,8 +150,6 @@ pub struct ProjectView {
     pub name: String,
     pub description: String,
     pub created_at: String,
-    /// `None` when no project-level override is set.
-    pub model_chain_override_yaml: Option<String>,
 }
 
 #[derive(Template, WebTemplate)]
@@ -424,8 +422,6 @@ pub struct AgentDetailView {
     pub is_lead: bool,
     pub is_workflow_agent: bool,
     pub attached_sandbox: Option<AttachedSandboxView>,
-    /// Single-line YAML/JSON of the override; `None` when unset.
-    pub model_chain_override_yaml: Option<String>,
 }
 
 #[derive(Template, WebTemplate)]

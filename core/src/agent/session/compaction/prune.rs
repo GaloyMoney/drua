@@ -367,8 +367,7 @@ mod tests {
             })]
         };
         PromptDefinition {
-            model: String::new(),
-            max_tokens_per_response: 0,
+            chain: crate::agent::config::ModelChain::default(),
             system_view: SystemView { indexes: vec![] },
             tool_definitions_view: ToolDefinitionsView { indexes: vec![] },
             messages,

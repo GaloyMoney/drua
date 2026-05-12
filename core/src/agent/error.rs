@@ -44,6 +44,4 @@ pub enum AgentError {
     LeadCannotAttachSandbox,
     #[error("AgentError - no lead agent found in project {0}")]
     NoLeadAgent(ProjectId),
-    #[error("AgentError - workflow agents inherit their chain from the workflow definition")]
-    WorkflowAgentChainImmutable,
 }

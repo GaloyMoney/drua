@@ -141,20 +141,11 @@
 <p><small>Workflow-spawned agents inherit their chain from the workflow definition / step.</small></p>
 {% else %}
 <p><small>
-  Override this agent's chain for every prompt it sends. Empty primary ⇒
-  inherit from the project / role / config default. Fallbacks are
+  Set this agent's session chain. Empty primary ⇒ revert to the
+  role's chain / <code>agents.default_chain</code>. Fallbacks are
   comma-separated model ids tried in order on transient errors.
 </small></p>
-{% match agent.model_chain_override_yaml %}
-  {% when Some(y) %}
-<details>
-  <summary><small>Current override (YAML)</small></summary>
-  <pre style="font-size: 0.8rem; padding: 0.5rem;">{{ y }}</pre>
-</details>
-  {% when None %}
-<p><small><em>No override set — inheriting upstream.</em></small></p>
-{% endmatch %}
-<form data-gql-mutation="mutation($input: AgentUpdateModelChainInput!) { agentUpdateModelChain(input: $input) { agent { id } } }"
+<form data-gql-mutation="mutation($input: AgentUpdateSessionChainInput!) { agentUpdateSessionChain(input: $input) { session { chain { primary { name } fallbacks { name } } } } }"
       data-gql-build="buildAgentChain"
       data-gql-reload="true">
   <label>
@@ -167,7 +158,7 @@
   </label>
   <div style="display: flex; gap: 0.5rem;">
     <button type="submit">Save chain</button>
-    <button type="button" id="agent-chain-clear" class="secondary outline">Clear override</button>
+    <button type="button" id="agent-chain-clear" class="secondary outline">Reset to default</button>
   </div>
 </form>
 <script>
@@ -184,9 +175,9 @@
     };
   }
   document.getElementById('agent-chain-clear')?.addEventListener('click', async () => {
-    if (!confirm('Clear the agent-level model chain override?')) return;
+    if (!confirm("Reset this agent's session chain to the role default?")) return;
     const result = await gqlMutate(
-      `mutation($input: AgentUpdateModelChainInput!) { agentUpdateModelChain(input: $input) { agent { id } } }`,
+      `mutation($input: AgentUpdateSessionChainInput!) { agentUpdateSessionChain(input: $input) { session { chain { primary { name } } } } }`,
       { input: { agentId: "{{ agent.id }}", chain: null } }
     );
     if (result.errors) { alert(result.errors.map(e => e.message).join('\n')); return; }
