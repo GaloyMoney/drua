@@ -8,4 +8,9 @@ pub enum ToolCachingError {
     InvocationNotFound,
     #[error("invalid fetch path: {0}")]
     InvalidPath(String),
+    #[error(
+        "fetch response too large: {size} bytes (max {max}); narrow the query \
+         with a smaller `len`, a deeper `path`, or by switching mode"
+    )]
+    FetchResponseTooLarge { size: usize, max: usize },
 }

@@ -27,7 +27,6 @@ use rmcp::model::{CallToolResult, RawContent};
 pub struct ToolCaching {
     #[allow(dead_code)]
     pool: sqlx::PgPool,
-    #[allow(dead_code)]
     config: ToolCachingConfig,
     repo: ToolCacheRepo,
     walker: Walker,
@@ -121,7 +120,9 @@ impl ToolCaching {
     /// Resolve a path on a previously-persisted invocation and slice
     /// the resolved value with `query`. Owner-scoped — non-owners get
     /// `InvocationNotFound`. Wraps the result back at `path` so the
-    /// response mirrors the caller's request shape.
+    /// response mirrors the caller's request shape. Responses larger
+    /// than `config.max_fetch_response_bytes` are rejected with
+    /// `FetchResponseTooLarge`.
     pub async fn fetch(
         &self,
         owner_id: ToolCallOwnerId,
@@ -130,7 +131,7 @@ impl ToolCaching {
         query: Option<&FetchQuery>,
     ) -> Result<FetchResult, ToolCachingError> {
         let stored = self.repo.find_by_id(id, owner_id).await?;
-        stored.query(path, query)
+        stored.query(path, query, self.config.max_fetch_response_bytes)
     }
 }
 

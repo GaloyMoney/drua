@@ -78,11 +78,13 @@ pub struct FetchResult {
 impl StoredInvocation {
     /// Resolve `path` against the stored root and slice with `query`.
     /// Wraps the result back at `path` so the response shape mirrors
-    /// the caller's request (`$.foo[2]` → `{"foo": [X]}`).
+    /// the caller's request (`$.foo[2]` → `{"foo": [X]}`). Responses
+    /// over `max_bytes` (text channel size) are rejected.
     pub fn query(
         &self,
         path: &str,
         query: Option<&FetchQuery>,
+        max_bytes: usize,
     ) -> Result<FetchResult, ToolCachingError> {
         let resolved = self.navigate(path)?.clone();
         let sliced = match query {
@@ -94,6 +96,12 @@ impl StoredInvocation {
             Value::String(s) => s.clone(),
             other => serde_json::to_string(other).unwrap_or_default(),
         };
+        if text.len() > max_bytes {
+            return Err(ToolCachingError::FetchResponseTooLarge {
+                size: text.len(),
+                max: max_bytes,
+            });
+        }
         Ok(FetchResult {
             result: CallToolResult::success(vec![Content::text(text)]),
             structured: wrapped,
