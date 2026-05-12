@@ -173,6 +173,6 @@ INFO: found existing resource cache
 </summary>
 <recovery>
   <elided path="$" bytes="32474" lines="320">
-    tool_output_fetch(invocation_id="<uuid>", path="$", query={"len":80,"mode":"lines","offset":82})
+    tool_output_fetch(invocation_id="<uuid>", path="$", query={"len":80,"mode":"lines","offset":120})
   </elided>
 </recovery>
