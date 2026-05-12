@@ -169,19 +169,6 @@ impl Audit {
         Self::update_context(|ctx| ctx.metadata = Some(value));
     }
 
-    /// Merge `key`/`value` into the metadata object; no-op when metadata isn't an object.
-    pub fn augment_metadata(key: impl Into<String>, value: serde_json::Value) {
-        Self::update_context(|ctx| {
-            let key = key.into();
-            let entry = ctx
-                .metadata
-                .get_or_insert_with(|| serde_json::Value::Object(Default::default()));
-            if let serde_json::Value::Object(map) = entry {
-                map.insert(key, value);
-            }
-        });
-    }
-
     fn update_context(f: impl FnOnce(&mut AuditContextData)) {
         let mut ec = EventContext::current();
         let mut data: AuditContextData = ec

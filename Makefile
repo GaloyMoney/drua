@@ -42,6 +42,19 @@ generate-default-config:
 integration-tests: reset-deps
 	DATABASE_URL=$(PG_CON) cargo nextest run
 
+# Regenerate bats snapshots under bats/summarized-tool-responses/ from
+# the live gateway. Sets UPDATE_FIXTURES=1 so the bats assertions write
+# fresh files instead of diffing. Rebuilds release binaries first so
+# bats doesn't spawn `cargo run` (too slow for the 15s readiness wait).
+update-fixtures:
+	DATABASE_URL=$(PG_CON) cargo build --release -p drua-cli -p fake-mcp-upstream
+	$(MAKE) reset-deps
+	SKIP_COMPOSE=1 UPDATE_FIXTURES=1 \
+		DRUA_BIN=$(PWD)/target/release/drua \
+		FAKE_UPSTREAM_BIN=$(PWD)/target/release/fake-mcp-upstream \
+		PG_CON=$(PG_CON) \
+		bats -t bats/fake_mcp_upstream.bats
+
 start: reset-deps
 	@PG_CON=$(PG_CON) ANTHROPIC_API_KEY=$(ANTHROPIC_API_KEY) cargo run -p drua-cli -- server --set oauth.login=dev $(ARGS)
 

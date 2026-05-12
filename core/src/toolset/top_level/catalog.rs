@@ -10,6 +10,7 @@
 
 use std::sync::{Arc, LazyLock, RwLock};
 
+use drua_tool_caching::ToolCaching;
 use serde_json::json;
 
 use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
@@ -361,11 +362,15 @@ impl TopLevelTool for DescribeCatalogTool {
 
 pub struct CallCatalogTool {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
+    tool_caching: Option<Arc<ToolCaching>>,
 }
 
 impl CallCatalogTool {
-    pub fn new(sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>) -> Self {
-        Self { sets }
+    pub fn new(
+        sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
+        tool_caching: Option<Arc<ToolCaching>>,
+    ) -> Self {
+        Self { sets, tool_caching }
     }
 
     fn find_set(
@@ -410,12 +415,8 @@ impl TopLevelTool for CallCatalogTool {
         &CALL_SCHEMA
     }
 
-    fn bypass_universal_pipeline(&self) -> bool {
-        true
-    }
-
-    fn records_own_pipeline_metrics(&self) -> bool {
-        true
+    fn default_tool_caching(&self) -> bool {
+        false
     }
 
     async fn call(
@@ -454,13 +455,20 @@ impl TopLevelTool for CallCatalogTool {
 
         Audit::record_action(format!("catalog: {}", tool_name));
 
-        let result = set.call(subject, &name, inner_args).await;
+        let result = set.call(subject, &name, inner_args.clone()).await;
         let result = annotate_envelope_mistake(result, &tool_name, &extra_keys)?;
 
-        // Tool-output caching is disconnected — classifier + envelope wrapping
-        // intentionally skipped. Return the upstream result verbatim.
-        let raw_bytes = super::super::estimate_text_bytes(&result);
-        super::super::record_pipeline_metrics(raw_bytes, raw_bytes, "bypass", false);
+        let result = match self.tool_caching.as_ref() {
+            Some(tc) => {
+                let args_for_cache = inner_args
+                    .map(serde_json::Value::Object)
+                    .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
+                tc.maybe_summarize_and_cache(subject, &tool_name, &args_for_cache, result)
+                    .await?
+                    .result
+            }
+            None => result,
+        };
         Ok(result)
     }
 }

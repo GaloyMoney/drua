@@ -27,6 +27,8 @@ es_entity::entity_id! {
 
     UserId => McpCredsOwnerId,
     AgentId => McpCredsOwnerId,
+    UserId => drua_tool_caching::ToolCallOwnerId,
+    AgentId => drua_tool_caching::ToolCallOwnerId,
     WorkflowRunId => job::JobId,
 }
 

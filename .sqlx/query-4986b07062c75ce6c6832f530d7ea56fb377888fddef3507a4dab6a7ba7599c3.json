@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT query_structure, summary, original_structured\n               FROM tool_invocations\n               WHERE id = $1 AND owner_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "query_structure",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 1,
+        "name": "summary",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 2,
+        "name": "original_structured",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "4986b07062c75ce6c6832f530d7ea56fb377888fddef3507a4dab6a7ba7599c3"
+}
