@@ -403,8 +403,7 @@ impl TopLevelTool for CallCatalogTool {
     fn description(&self) -> &str {
         "Execute an upstream tool by its prefixed name with the provided \
          arguments. Use describe_tool first to understand the parameters. \
-         Oversize results are auto-classified and persisted; recover full \
-         bytes via tool_output_fetch(invocation_id, query)."
+         The upstream result is returned verbatim."
     }
     fn input_schema(&self) -> &serde_json::Value {
         &CALL_SCHEMA

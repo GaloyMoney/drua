@@ -52,15 +52,14 @@ static COMPOSE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct ComposeOutput {
-    /// The JS script's return value. Curated when oversize; recoverable via `tool_output_fetch` using `result_invocation_id`.
+    /// The JS script's return value, returned verbatim.
     #[schemars(schema_with = "crate::toolset::any_json_schema")]
     result: serde_json::Value,
-    /// Set when `result` was curated; pass to `tool_output_fetch` to recover the full JS return.
+    /// Reserved for future curated-output recovery; currently always `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
     result_invocation_id: Option<uuid::Uuid>,
-    /// Recoverable sub-tool calls; excludes passthrough, errored, and bypass-marked calls.
+    /// Reserved for future curated-output recovery; currently always empty.
     sub_invocations: Vec<SubInvocation>,
-    fetch_hint: String,
     console: Vec<String>,
     tool_calls: usize,
     execution_time_ms: u64,
@@ -166,7 +165,6 @@ impl TopLevelTool for ComposeTool {
             result: result.value.clone(),
             result_invocation_id: None,
             sub_invocations: Vec::new(),
-            fetch_hint: COMPOSE_FETCH_HINT.to_string(),
             console: result.console_output.clone(),
             tool_calls: result.tool_calls_made,
             execution_time_ms: result.execution_time.as_millis() as u64,
@@ -201,12 +199,9 @@ impl TopLevelTool for ComposeTool {
             sections.push(format!("=== Sub Invocations ===\n{}", lines.join("\n"),));
         }
         sections.push(format!(
-            "=== Metadata ===\ntool_calls: {}\nexecution_time: {:?}\n{}",
+            "=== Metadata ===\ntool_calls: {}\nexecution_time: {:?}\nresult: verbatim",
             out.tool_calls,
             std::time::Duration::from_millis(out.execution_time_ms),
-            out.result_invocation_id
-                .map(|id| format!("result_invocation_id: {id}"))
-                .unwrap_or_else(|| "result: verbatim (small enough)".to_string()),
         ));
 
         let text = sections.join("\n\n");
@@ -217,10 +212,6 @@ impl TopLevelTool for ComposeTool {
     }
 }
 
-const COMPOSE_FETCH_HINT: &str = "invocation_id is either `result_invocation_id` (full JS return) \
-     or any `sub_invocations[].invocation_id` (specific sub-call's \
-     persisted output) — see `tool_output_fetch` for the full call shape.";
-
 /// Recovery metadata for one sub-tool dispatch inside a compose script.
 #[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
 pub struct SubInvocation {
@@ -229,7 +220,7 @@ pub struct SubInvocation {
     pub tool_name: String,
     /// `tool(key=value, ...)` truncated to 80 chars.
     pub args_digest: String,
-    /// `tool_invocations.id` — pass to `tool_output_fetch`.
+    /// Reserved for future curated-output recovery.
     pub invocation_id: uuid::Uuid,
     /// Summary kind discriminator (e.g. `concourse`, `structured_elision`, `generic`).
     pub kind: String,
