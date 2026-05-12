@@ -1,8 +1,8 @@
 //! `tunnel_registrations` table accessor — the source of truth for
 //! "which pod terminates which tunnel WebSocket". Owned-side mutations
-//! emit `pg_notify('tunnel_registry_changed', deployment_id)`; the
-//! listener on every pod reads and reconciles into `ProxyTunnelToolSet`
-//! entries.
+//! emit `pg_notify('tunnel_registry_changed', deployment_id)` in the
+//! same transaction; the listener on every pod reads and reconciles
+//! into `ProxyTunnelToolSet` entries.
 //!
 //! Heartbeat-driven displacement: the new owner's UPSERT changes
 //! `session_id`, so the prior owner's `heartbeat()` hits zero
@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 
 use super::RegisteredToolSet;
 
@@ -68,6 +68,7 @@ impl TunnelRegistrations {
         let payload = serde_json::to_value(ToolsetsPayload(toolsets.to_vec()))
             .expect("RegisteredToolSet serialization is infallible");
         let ttl_secs = ttl.as_secs() as i64;
+        let mut tx = self.pool.begin().await?;
         sqlx::query(
             r#"
             INSERT INTO tunnel_registrations
@@ -87,10 +88,11 @@ impl TunnelRegistrations {
         .bind(owner_pod_addr)
         .bind(&payload)
         .bind(ttl_secs)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
 
-        self.notify(deployment_id).await;
+        Self::notify_in_tx(&mut tx, deployment_id).await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -127,6 +129,7 @@ impl TunnelRegistrations {
         deployment_id: &str,
         session_id: uuid::Uuid,
     ) -> Result<u64, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
         let result = sqlx::query(
             r#"
             DELETE FROM tunnel_registrations
@@ -135,11 +138,12 @@ impl TunnelRegistrations {
         )
         .bind(deployment_id)
         .bind(session_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
         if result.rows_affected() > 0 {
-            self.notify(deployment_id).await;
+            Self::notify_in_tx(&mut tx, deployment_id).await?;
         }
+        tx.commit().await?;
         Ok(result.rows_affected())
     }
 
@@ -147,6 +151,7 @@ impl TunnelRegistrations {
     /// rolling restart hands ownership over within an HTTP round-trip
     /// rather than waiting for the reaper.
     pub async fn delete_all_owned_by(&self, owner_pod_addr: &str) -> Result<u64, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
         let rows: Vec<(String,)> = sqlx::query_as(
             r#"
             DELETE FROM tunnel_registrations
@@ -155,16 +160,18 @@ impl TunnelRegistrations {
             "#,
         )
         .bind(owner_pod_addr)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
         for (deployment_id,) in &rows {
-            self.notify(deployment_id).await;
+            Self::notify_in_tx(&mut tx, deployment_id).await?;
         }
+        tx.commit().await?;
         Ok(rows.len() as u64)
     }
 
     /// Reaper sweep — idempotent; safe to run on every pod.
     pub async fn reap_expired(&self) -> Result<u64, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
         let rows: Vec<(String,)> = sqlx::query_as(
             r#"
             DELETE FROM tunnel_registrations
@@ -172,11 +179,12 @@ impl TunnelRegistrations {
              RETURNING deployment_id
             "#,
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
         for (deployment_id,) in &rows {
-            self.notify(deployment_id).await;
+            Self::notify_in_tx(&mut tx, deployment_id).await?;
         }
+        tx.commit().await?;
         Ok(rows.len() as u64)
     }
 
@@ -241,19 +249,16 @@ impl TunnelRegistrations {
             .collect())
     }
 
-    async fn notify(&self, deployment_id: &str) {
-        if let Err(e) = sqlx::query("SELECT pg_notify($1, $2)")
+    async fn notify_in_tx(
+        tx: &mut Transaction<'_, Postgres>,
+        deployment_id: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("SELECT pg_notify($1, $2)")
             .bind(NOTIFY_CHANNEL)
             .bind(deployment_id)
-            .execute(&self.pool)
-            .await
-        {
-            tracing::warn!(
-                error = %e,
-                deployment_id = %deployment_id,
-                "pg_notify(tunnel_registry_changed) failed"
-            );
-        }
+            .execute(&mut **tx)
+            .await?;
+        Ok(())
     }
 }
 
