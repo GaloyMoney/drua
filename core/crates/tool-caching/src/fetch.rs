@@ -1,5 +1,5 @@
-//! Recovery side of the universal pipeline: given a stored invocation,
-//! navigate a json-path and optionally slice the resolved value.
+//! Recovery side of tool-caching: given a stored invocation, navigate
+//! a json-path and optionally slice the resolved value.
 
 use rmcp::model::{CallToolResult, Content};
 use serde::{Deserialize, Serialize};
@@ -78,11 +78,13 @@ pub struct FetchResult {
 impl StoredInvocation {
     /// Resolve `path` against the stored root and slice with `query`.
     /// Wraps the result back at `path` so the response shape mirrors
-    /// the caller's request (`$.foo[2]` → `{"foo": [null, null, X]}`).
+    /// the caller's request (`$.foo[2]` → `{"foo": [X]}`). Responses
+    /// over `max_bytes` (text channel size) are rejected.
     pub fn query(
         &self,
         path: &str,
         query: Option<&FetchQuery>,
+        max_bytes: usize,
     ) -> Result<FetchResult, ToolCachingError> {
         let resolved = self.navigate(path)?.clone();
         let sliced = match query {
@@ -94,6 +96,12 @@ impl StoredInvocation {
             Value::String(s) => s.clone(),
             other => serde_json::to_string(other).unwrap_or_default(),
         };
+        if text.len() > max_bytes {
+            return Err(ToolCachingError::FetchResponseTooLarge {
+                size: text.len(),
+                max: max_bytes,
+            });
+        }
         Ok(FetchResult {
             result: CallToolResult::success(vec![Content::text(text)]),
             structured: wrapped,
@@ -118,9 +126,11 @@ impl StoredInvocation {
 
     /// Rebuild the structure implied by `path` around `value`. For
     /// `path == "$"` returns `value` directly. Object-key segments nest
-    /// into `{key: …}`; array-index segments produce a sparse array
-    /// padded with `null` so the position is preserved (`$[3]` →
-    /// `[null, null, null, value]`).
+    /// into `{key: …}`; array-index segments wrap into a single-element
+    /// array (`$[3]` → `[value]`) — callers can read `result[0]` and
+    /// recover the original index from the recovery template's `path`
+    /// field. Leading `null` padding scales linearly with the index and
+    /// would burn tokens at every higher position without adding info.
     fn wrap_at_path(path: &str, value: Value) -> Result<Value, ToolCachingError> {
         let segments = Self::parse_path(path)?;
         let mut acc = value;
@@ -131,11 +141,7 @@ impl StoredInvocation {
                     obj.insert(k, acc);
                     Value::Object(obj)
                 }
-                PathSegment::Index(i) => {
-                    let mut arr = vec![Value::Null; i];
-                    arr.push(acc);
-                    Value::Array(arr)
-                }
+                PathSegment::Index(_) => Value::Array(vec![acc]),
             };
         }
         Ok(acc)
@@ -233,19 +239,16 @@ mod tests {
     }
 
     #[test]
-    fn wrap_at_path_array_root_pads_with_nulls() {
+    fn wrap_at_path_array_root_uses_single_element() {
         let wrapped = StoredInvocation::wrap_at_path("$[2]", Value::String("hi".into())).unwrap();
-        assert_eq!(wrapped, serde_json::json!([null, null, "hi"]));
+        assert_eq!(wrapped, serde_json::json!(["hi"]));
     }
 
     #[test]
     fn wrap_at_path_mixed_keys_and_indices() {
         let wrapped =
             StoredInvocation::wrap_at_path("$.items[1].name", Value::String("hi".into())).unwrap();
-        assert_eq!(
-            wrapped,
-            serde_json::json!({"items": [null, {"name": "hi"}]}),
-        );
+        assert_eq!(wrapped, serde_json::json!({"items": [{"name": "hi"}]}),);
     }
 
     #[test]

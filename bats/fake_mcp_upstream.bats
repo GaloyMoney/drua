@@ -258,7 +258,7 @@ assert_summarized_text_matches() {
 
 @test "fake-upstream: str-large-table summarized into <summary>+<recovery> envelope" {
   # ~13KB kubectl-table-style output (real k8s_list_pods shape); exceeds the
-  # 8KiB threshold so the universal pipeline elides head/tail and renders a
+  # 8KiB threshold so tool-caching elides head/tail and renders a
   # range-mode tool_output_fetch recovery template. Snapshot lives at
   # bats/summarized-tool-responses/str-large-table.txt — open the file to
   # see exactly what the agent receives. Re-run with UPDATE_FIXTURES=1 to

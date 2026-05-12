@@ -42,7 +42,7 @@ pub struct JsEngine {
     /// payloads and filter them before returning.
     max_tool_result_bytes: usize,
     // Anti-runaway hard ceiling only — must stay well above the walker's
-    // threshold or it pre-empts the universal pipeline.
+    // threshold or it pre-empts tool-caching.
     max_return_bytes: usize,
     /// Cap on the console buffer in bytes. Drops oldest entries (tail
     /// truncation) when exceeded. Console is a debug sidecar, not primary

@@ -1,5 +1,5 @@
 -- Drop the pre-disconnect tool_invocations table and recreate against the
--- simplified universal-pipeline schema:
+-- simplified tool-caching schema:
 --
 --   * single polymorphic `owner_id` (agent_id wins on AgentOnBehalfOfUser).
 --   * `query_structure` jsonb holds the parsed root Value the walker
