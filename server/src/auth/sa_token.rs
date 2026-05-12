@@ -1,10 +1,12 @@
 //! Validates Kubernetes projected ServiceAccount tokens via the TokenReview API.
 //!
-//! Sandbox pods authenticate to the MCP gateway using audience-scoped SA tokens
-//! (projected volume, auto-rotated by kubelet). This module validates those tokens
-//! and extracts the agent identity from the bound pod name.
+//! The git-proxy doesn't gate on per-pod identity — a valid
+//! audience-scoped JWT from any sandbox pod is enough to use the proxy
+//! (the global allow-list constrains which repos / refs are reachable).
+//! `validate` therefore returns nothing: it just confirms the JWT
+//! validates for the configured audience, no pod-name parsing.
 
-use k8s_openapi::api::authentication::v1::{TokenReview, TokenReviewSpec, TokenReviewStatus};
+use k8s_openapi::api::authentication::v1::{TokenReview, TokenReviewSpec};
 use kube::api::PostParams;
 use tracing::instrument;
 
@@ -26,9 +28,12 @@ impl SaTokenValidator {
         })
     }
 
-    /// Returns the agent UUID parsed from the bound pod name (`agent-{uuid}`).
+    /// Validates the SA token against the K8s TokenReview API for the
+    /// configured audience. Returns `Ok(())` on success; the bound
+    /// subject's identity isn't propagated — the global git-proxy
+    /// allow-list is the policy gate.
     #[instrument(name = "web.auth.sa_token.validate", skip_all)]
-    pub async fn validate(&self, raw_token: &str) -> Result<String, AuthError> {
+    pub async fn validate(&self, raw_token: &str) -> Result<(), AuthError> {
         let review = TokenReview {
             spec: TokenReviewSpec {
                 token: Some(raw_token.to_string()),
@@ -50,28 +55,8 @@ impl SaTokenValidator {
         if !status.authenticated.unwrap_or(false) {
             return Err(AuthError::InvalidToken);
         }
-
-        let pod_name = extract_pod_name(&status)?;
-        let id_str = pod_name
-            .strip_prefix("agent-")
-            .ok_or(AuthError::InvalidToken)?;
-        // Full UUID required to prevent ambiguous prefix lookups.
-        id_str
-            .parse::<uuid::Uuid>()
-            .map_err(|_| AuthError::InvalidToken)?;
-        Ok(id_str.to_string())
+        Ok(())
     }
-}
-
-/// Kubelet includes `authentication.kubernetes.io/pod-name` in the bound
-/// token's extra fields (nested under `status.user.extra`).
-fn extract_pod_name(status: &TokenReviewStatus) -> Result<String, AuthError> {
-    let user = status.user.as_ref().ok_or(AuthError::InvalidToken)?;
-    let extra = user.extra.as_ref().ok_or(AuthError::InvalidToken)?;
-    let pod_names = extra
-        .get("authentication.kubernetes.io/pod-name")
-        .ok_or(AuthError::InvalidToken)?;
-    pod_names.first().cloned().ok_or(AuthError::InvalidToken)
 }
 
 /// Quick heuristic: SA tokens are JWTs (three dot-separated base64 segments).

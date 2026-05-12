@@ -148,20 +148,23 @@ let
   ];
 
   # Credential helper: reads the projected K8s ServiceAccount token at
-  # invocation time and hands it back to git as an HTTP basic-auth
-  # password. Token rotates on disk; helper re-reads each call.
-  # Used for traffic to the drua git-proxy (`drua-internal:.../git/...`),
-  # which then validates the SA token via TokenReview and mints a fresh
-  # GitHub App installation token upstream — the sandbox never sees a
-  # GitHub credential.
+  # invocation time and hands it to git as a Bearer credential (git
+  # 2.46+ authtype/credential protocol — see `gitcredentials(7)`).
+  # Token rotates on disk; helper re-reads each call. Used for traffic
+  # to the drua git-proxy (`$DRUA_GIT_PROXY_URL/git/...`), whose auth
+  # middleware expects `Authorization: Bearer <SA JWT>`. The proxy
+  # validates the JWT via TokenReview and mints a fresh GitHub App
+  # installation token upstream — the sandbox never sees a GitHub
+  # credential.
   gitCredentialHelper = pkgs.writeShellScriptBin "git-credential-drua-sa" ''
     case "$1" in
       get)
         token_path="''${DRUA_SA_TOKEN_PATH:-/var/run/secrets/galoy-agents-git/token}"
         if [ -f "$token_path" ]; then
-          echo "username=x-access-token"
-          echo "password=$(cat "$token_path")"
-          echo ""
+          printf 'capability[]=authtype\n'
+          printf 'authtype=Bearer\n'
+          printf 'credential=%s\n' "$(cat "$token_path")"
+          printf '\n'
         fi
         ;;
       store|erase) ;;
@@ -188,13 +191,21 @@ let
 
     # Compose the agent's gitconfig: static base + dynamic insteadOf
     # block that points GitHub URLs at the drua git-proxy when
-    # DRUA_GIT_PROXY_URL is set. Helper-name must match the wrapper
-    # written into the image (no path — git resolves via PATH).
+    # DRUA_GIT_PROXY_URL is set. The rewritten URL embeds a
+    # `x-access-token@` username so git invokes the credential helper
+    # proactively (no unauthenticated probe / 401 round-trip needed);
+    # the helper then returns `authtype=Bearer credential=<SA JWT>` and
+    # git sends `Authorization: Bearer <SA JWT>` to the proxy.
+    # Helper-name must match the wrapper written into the image (no
+    # path — git resolves via PATH).
     cp /home/agent/.gitconfig.base /home/agent/.gitconfig
     chown 1000:1000 /home/agent/.gitconfig 2>/dev/null || true
     if [ -n "''${DRUA_GIT_PROXY_URL:-}" ]; then
+      proxy_no_scheme="''${DRUA_GIT_PROXY_URL#*://}"
+      proxy_scheme="''${DRUA_GIT_PROXY_URL%%://*}"
+      proxy_with_user="''${proxy_scheme}://x-access-token@''${proxy_no_scheme%/}/"
       cat >> /home/agent/.gitconfig <<EOF
-[url "''${DRUA_GIT_PROXY_URL%/}/"]
+[url "''${proxy_with_user}"]
     insteadOf = https://github.com/
     insteadOf = git@github.com:
 [credential]
