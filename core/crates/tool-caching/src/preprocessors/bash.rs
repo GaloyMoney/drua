@@ -8,8 +8,13 @@
 //! highlighting failed steps, summarising exit codes) doesn't need
 //! to re-touch the walker dispatch table.
 
+use super::{identity_mapping, Preprocessed};
+
 pub const TOOL_NAMES: &[&str] = &["bash"];
 
-pub fn run(raw: &str) -> String {
-    raw.to_string()
+pub fn run(raw: &str) -> Preprocessed {
+    Preprocessed {
+        text: raw.to_string(),
+        preprocessed_to_raw: identity_mapping(raw),
+    }
 }
