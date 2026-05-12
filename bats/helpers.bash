@@ -17,13 +17,19 @@ start_server() {
     $COMPOSE_CMD -f "$REPO_ROOT/docker-compose.yml" up -d
   fi
 
-  # Wait for postgres
-  for _i in $(seq 1 30); do
+  # Wait for postgres.
+  local pg_ready=0
+  for _i in $(seq 1 60); do
     if psql "$PG_CON" -c "SELECT 1" > /dev/null 2>&1; then
+      pg_ready=1
       break
     fi
     sleep 0.5
   done
+  if [ "$pg_ready" != "1" ]; then
+    echo "postgres did not become ready" >&2
+    return 1
+  fi
 
   # Start the server
   export PG_CON
@@ -37,13 +43,26 @@ start_server() {
   $DRUA_BIN server > "$BATS_FILE_TMPDIR/server.log" 2>&1 &
   echo "$!" > "$SERVER_PID_FILE"
 
-  # Wait for server
-  for _i in $(seq 1 30); do
-    if curl -s -o /dev/null http://localhost:4200/; then
+  # Wait for server. The first file in CI can spend longer in startup
+  # because it pays the initial migration / runtime initialization cost.
+  local server_ready=0
+  for _i in $(seq 1 120); do
+    if curl -fs -o /dev/null http://localhost:4200/; then
+      server_ready=1
       break
+    fi
+    if ! kill -0 "$(cat "$SERVER_PID_FILE")" 2>/dev/null; then
+      echo "server exited before becoming ready" >&2
+      tail -100 "$BATS_FILE_TMPDIR/server.log" >&2 || true
+      return 1
     fi
     sleep 0.5
   done
+  if [ "$server_ready" != "1" ]; then
+    echo "server did not become ready" >&2
+    tail -100 "$BATS_FILE_TMPDIR/server.log" >&2 || true
+    return 1
+  fi
 }
 
 stop_server() {
