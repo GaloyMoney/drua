@@ -394,16 +394,23 @@ fn line_elide_string(s: &str, budget: usize) -> Option<LineElide> {
 
 fn make_line_elide(lines: &[&str], head: usize, tail: usize) -> LineElide {
     let n = lines.len();
-    let head_text = lines[..head].join("\n");
-    let tail_text = lines[n - tail..].join("\n");
     let missing = n - head - tail;
-    let text = format!(
-        "<head lines=\"{head}\">\n{head_text}\n</head>\n\
-         <bulk-elided original-lines=\"{missing}\">\n\
+    let mut text = String::new();
+    if head > 0 {
+        let head_text = lines[..head].join("\n");
+        text.push_str(&format!("<head lines=\"{head}\">\n{head_text}\n</head>\n"));
+    }
+    text.push_str(&format!(
+        "<bulk-elided original-lines=\"{missing}\">\n\
          {missing} lines elided\n\
-         </bulk-elided>\n\
-         <tail lines=\"{tail}\">\n{tail_text}\n</tail>"
-    );
+         </bulk-elided>\n"
+    ));
+    if tail > 0 {
+        let tail_text = lines[n - tail..].join("\n");
+        text.push_str(&format!("<tail lines=\"{tail}\">\n{tail_text}\n</tail>"));
+    } else {
+        text.truncate(text.trim_end_matches('\n').len());
+    }
     LineElide {
         text,
         head_lines: head as u32,
@@ -433,15 +440,26 @@ fn byte_elide_string(s: &str, budget: usize) -> Option<ByteElide> {
     }
     let missing_len = tail_start - head_end;
     let tail_bytes = s.len() - tail_start;
-    let text = format!(
-        "<head bytes=\"{head_end}\">\n{}\n</head>\n\
-         <bulk-elided original-bytes=\"{missing_len}\">\n\
+    let mut text = String::new();
+    if head_end > 0 {
+        text.push_str(&format!(
+            "<head bytes=\"{head_end}\">\n{}\n</head>\n",
+            &s[..head_end],
+        ));
+    }
+    text.push_str(&format!(
+        "<bulk-elided original-bytes=\"{missing_len}\">\n\
          {missing_len} bytes elided\n\
-         </bulk-elided>\n\
-         <tail bytes=\"{tail_bytes}\">\n{}\n</tail>",
-        &s[..head_end],
-        &s[tail_start..],
-    );
+         </bulk-elided>\n"
+    ));
+    if tail_bytes > 0 {
+        text.push_str(&format!(
+            "<tail bytes=\"{tail_bytes}\">\n{}\n</tail>",
+            &s[tail_start..],
+        ));
+    } else {
+        text.truncate(text.trim_end_matches('\n').len());
+    }
     Some(ByteElide {
         text,
         head_end,
