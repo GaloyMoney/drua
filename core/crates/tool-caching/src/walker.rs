@@ -195,16 +195,22 @@ impl Walker {
         // runs first so downstream passes see clean text. Only meaningful
         // at the root — for nested strings we use the empty tool_name (no
         // preprocessor matches), since e.g. only the root concourse log
-        // string benefits from ANSI stripping.
+        // string benefits from ANSI stripping. The mapping flows back
+        // from chain-compacted lines all the way to raw text via
+        // `current_to_original_line` (compacted → preprocessed) plus
+        // `preprocessed_to_raw` (preprocessed → raw).
         let preprocessed = if path == "$" {
             preprocessors::run(tool_name, s)
         } else {
-            s.to_string()
+            preprocessors::Preprocessed {
+                text: s.to_string(),
+                preprocessed_to_raw: preprocessors::identity_mapping(s),
+            }
         };
         // Pattern passes (nix-copy, cargo-compile, rsync, …) compact runs
         // of boring lines in place. Operates on a SegmentedText so order
         // and line indices stay accurate across passes.
-        let mut ctx = SegmentedText::from_initial(&preprocessed);
+        let mut ctx = SegmentedText::from_initial(&preprocessed.text);
         let _ = self.chain.run(&mut ctx);
         let prepared = ctx.log().to_string();
         let modified = prepared != *s;
@@ -227,7 +233,9 @@ impl Walker {
             return Value::String(prepared);
         }
         // Try line-mode first if the string has enough lines to split.
-        if let Some(elide) = line_elide_string(&prepared, budget, &ctx) {
+        if let Some(elide) =
+            line_elide_string(&prepared, budget, &ctx, &preprocessed.preprocessed_to_raw)
+        {
             elided_paths.push(ElidedPath {
                 path: path.to_string(),
                 bytes: s.len() as u64,
@@ -371,16 +379,43 @@ fn line_count(s: &str) -> u32 {
 
 /// `raw_offset` / `raw_missing` are line indices into the *persisted*
 /// raw text (what `tool_output_fetch` slices). They're translated from
-/// the post-chain "current" line indices via `SegmentedText`, so chain
-/// passes that compact `nix-copy`/`cargo`/`git-clone` runs into XML
-/// markers don't desync the recovery template from the on-disk bytes.
+/// the post-chain "current" line indices via two composed mappings:
+///
+///   compacted → preprocessed   (`SegmentedText::current_to_original_line`)
+///   preprocessed → raw         (`preprocessors::Preprocessed::preprocessed_to_raw`)
+///
+/// Both legs matter — chain passes compact `nix-copy`/`cargo`/`git-clone`
+/// runs into XML markers, and the concourse preprocessor splits each
+/// `\r`-packed raw line into one preprocessed line per intermediate
+/// state. Skipping either leg desyncs the recovery template from the
+/// on-disk bytes.
 struct LineElide {
     text: String,
     raw_offset: u32,
     raw_missing: u32,
 }
 
-fn line_elide_string(s: &str, budget: usize, ctx: &SegmentedText) -> Option<LineElide> {
+/// Translate a compacted-line index into a raw-line index by composing
+/// the chain mapping and the preprocessor mapping. Out-of-range indices
+/// resolve to the raw line count (i.e. "past the end"), which lets the
+/// caller compute `raw_missing` as the difference between the head end
+/// and the tail start without special-casing the right boundary.
+fn compacted_to_raw_line(compacted: u32, ctx: &SegmentedText, preprocessed_to_raw: &[u32]) -> u32 {
+    let preprocessed = ctx.current_to_original_line(compacted);
+    let raw_total = preprocessed_to_raw.last().map(|&r| r + 1).unwrap_or(0);
+    if (preprocessed as usize) >= preprocessed_to_raw.len() {
+        raw_total
+    } else {
+        preprocessed_to_raw[preprocessed as usize]
+    }
+}
+
+fn line_elide_string(
+    s: &str,
+    budget: usize,
+    ctx: &SegmentedText,
+    preprocessed_to_raw: &[u32],
+) -> Option<LineElide> {
     let lines: Vec<&str> = s.lines().collect();
     let n = lines.len();
     if n < 3 {
@@ -393,14 +428,14 @@ fn line_elide_string(s: &str, budget: usize, ctx: &SegmentedText) -> Option<Line
     } else {
         head = head.saturating_sub(1);
     }
-    let mut elide = make_line_elide(&lines, head, tail, ctx);
+    let mut elide = make_line_elide(&lines, head, tail, ctx, preprocessed_to_raw);
     while elide.text.len() > budget && (head > 0 || tail > 0) {
         if tail > head {
             tail -= 1;
         } else {
             head -= 1;
         }
-        elide = make_line_elide(&lines, head, tail, ctx);
+        elide = make_line_elide(&lines, head, tail, ctx, preprocessed_to_raw);
     }
     if head == 0 && tail == 0 {
         return None;
@@ -408,12 +443,23 @@ fn line_elide_string(s: &str, budget: usize, ctx: &SegmentedText) -> Option<Line
     Some(elide)
 }
 
-fn make_line_elide(lines: &[&str], head: usize, tail: usize, ctx: &SegmentedText) -> LineElide {
+fn make_line_elide(
+    lines: &[&str],
+    head: usize,
+    tail: usize,
+    ctx: &SegmentedText,
+    preprocessed_to_raw: &[u32],
+) -> LineElide {
     let n = lines.len();
     let missing_compacted = n - head - tail;
-    let raw_offset = ctx.current_to_original_line(head as u32);
-    let raw_after = ctx.current_to_original_line((head + missing_compacted) as u32);
-    let raw_missing = raw_after.saturating_sub(raw_offset);
+    let raw_offset = compacted_to_raw_line(head as u32, ctx, preprocessed_to_raw);
+    let raw_after =
+        compacted_to_raw_line((head + missing_compacted) as u32, ctx, preprocessed_to_raw);
+    // If the elided middle falls entirely inside a single raw line
+    // (e.g. inner `\r`-progress segments of a packed line), return that
+    // raw line as the recovery so the agent gets at least the
+    // containing content instead of an empty slice.
+    let raw_missing = raw_after.saturating_sub(raw_offset).max(1);
     let mut text = String::new();
     if head > 0 {
         let head_text = lines[..head].join("\n");

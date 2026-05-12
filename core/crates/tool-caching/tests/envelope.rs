@@ -25,8 +25,13 @@ fn envelope_text(result: &CallToolResult) -> String {
 
 #[tokio::test]
 async fn root_string_over_threshold_yields_envelope_with_recovery_section() {
+    // Threshold must leave room above the ~200-byte byte-mode marker
+    // overhead so head/tail blocks have non-empty content — otherwise
+    // `byte_elide_string` correctly omits them and the structural
+    // assertions below (which check the byte-mode envelope shape with
+    // all three regions present) wouldn't fire.
     let config = ToolCachingConfig {
-        generic_threshold_bytes: 64,
+        generic_threshold_bytes: 512,
         ..ToolCachingConfig::default()
     };
     let caching = ToolCaching::new(&pool().await, config);
