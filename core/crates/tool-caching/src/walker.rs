@@ -133,10 +133,13 @@ impl Walker {
         if n <= 1 {
             return walked_value;
         }
-        // Sentinel decides head/tail; it also surgically prunes per-item
-        // elided_paths so handles for kept items (e.g. $[0].body) survive
-        // and only handles for dropped indices get cleaned up.
-        self.sentinel_array(
+        // Schema-conforming truncate: emit a shorter array (head ++ tail) of
+        // the same element type so the wrapped outputSchema's `result` stays
+        // valid. Truncation metadata moves into the ElidedPath, where the
+        // structured envelope's `_elided.paths[i]` carries it. Per-item
+        // elided_paths for kept items (e.g. $[0].body) survive; those for
+        // dropped middle indices get pruned.
+        self.truncate_array(
             &walked,
             n,
             original_bytes,
@@ -228,6 +231,8 @@ impl Walker {
                 bytes: s.len() as u64,
                 lines: Some(line_count(s)),
                 length: None,
+                head_count: None,
+                tail_count: None,
                 recover: make_full_recover(invocation_id, path),
             });
             return Value::String(prepared);
@@ -241,6 +246,8 @@ impl Walker {
                 bytes: s.len() as u64,
                 lines: Some(line_count(s)),
                 length: None,
+                head_count: None,
+                tail_count: None,
                 recover: make_lines_recover(
                     invocation_id,
                     path,
@@ -261,6 +268,8 @@ impl Walker {
                 bytes: s.len() as u64,
                 lines: None,
                 length: None,
+                head_count: None,
+                tail_count: None,
                 recover: make_full_recover(invocation_id, path),
             });
             return Value::String(prepared);
@@ -271,6 +280,8 @@ impl Walker {
                 bytes: s.len() as u64,
                 lines: None,
                 length: None,
+                head_count: None,
+                tail_count: None,
                 recover: make_range_recover(invocation_id, path, elide.head_end, elide.missing_len),
             });
             return Value::String(elide.text);
@@ -279,7 +290,7 @@ impl Walker {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn sentinel_array(
+    fn truncate_array(
         &self,
         walked: &[Value],
         original_length: usize,
@@ -298,28 +309,14 @@ impl Walker {
         } else {
             head_count = head_count.saturating_sub(1);
         }
-        let mut sentinel = make_array_sentinel(
-            walked,
-            head_count,
-            tail_count,
-            original_length,
-            original_bytes as usize,
-            path,
-        );
-        while (json_size(&sentinel) as usize) > budget && (head_count > 0 || tail_count > 0) {
+        let mut truncated = make_truncated_array(walked, head_count, tail_count);
+        while (json_size(&truncated) as usize) > budget && (head_count > 0 || tail_count > 0) {
             if tail_count > head_count {
                 tail_count -= 1;
             } else {
                 head_count -= 1;
             }
-            sentinel = make_array_sentinel(
-                walked,
-                head_count,
-                tail_count,
-                original_length,
-                original_bytes as usize,
-                path,
-            );
+            truncated = make_truncated_array(walked, head_count, tail_count);
         }
         // Surgical orphan cleanup: keep per-item elided_paths whose
         // $[i] index landed in head [0..head_count) or tail
@@ -341,9 +338,11 @@ impl Walker {
             bytes: original_bytes,
             lines: None,
             length: Some(original_length as u32),
+            head_count: Some(head_count as u32),
+            tail_count: Some(tail_count as u32),
             recover: make_array_slice_recover(invocation_id, path, head_count, missing_len),
         });
-        sentinel
+        truncated
     }
 }
 
@@ -610,29 +609,8 @@ fn make_array_slice_recover(
     })
 }
 
-fn make_array_sentinel(
-    walked: &[Value],
-    head_count: usize,
-    tail_count: usize,
-    length: usize,
-    bytes: usize,
-    path: &str,
-) -> Value {
-    let head: Vec<Value> = walked.iter().take(head_count).cloned().collect();
-    let tail: Vec<Value> = walked
-        .iter()
-        .rev()
-        .take(tail_count)
-        .rev()
-        .cloned()
-        .collect();
-    serde_json::json!({
-        "_elided": true,
-        "kind": "array",
-        "path": path,
-        "length": length,
-        "bytes": bytes,
-        "head": head,
-        "tail": tail,
-    })
+fn make_truncated_array(walked: &[Value], head_count: usize, tail_count: usize) -> Value {
+    let mut out: Vec<Value> = walked.iter().take(head_count).cloned().collect();
+    out.extend(walked.iter().rev().take(tail_count).rev().cloned());
+    Value::Array(out)
 }

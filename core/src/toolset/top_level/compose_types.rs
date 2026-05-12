@@ -108,10 +108,15 @@ impl TopLevelTool for ComposeTypes {
                 continue;
             }
             let params_ts = json_schema_ts::schema_to_ts_params(tool.input_schema());
-            let return_ts = tool
+            let inner_ts = tool
                 .output_schema()
                 .map(json_schema_ts::schema_to_ts)
                 .unwrap_or_else(|| "any".to_string());
+            let return_ts = if tool.default_tool_caching() {
+                format!("{{ result: {inner_ts} }}")
+            } else {
+                inner_ts
+            };
             top_fns.push((name.clone(), params_ts, return_ts));
             matched.push(name.clone());
         }
@@ -133,7 +138,7 @@ impl TopLevelTool for ComposeTypes {
                 let schema_val =
                     serde_json::Value::Object(entry.description.input_schema.as_ref().clone());
                 let params_ts = json_schema_ts::schema_to_ts_params(&schema_val);
-                let return_ts = entry
+                let inner_ts = entry
                     .description
                     .output_schema
                     .as_ref()
@@ -142,6 +147,8 @@ impl TopLevelTool for ComposeTypes {
                         json_schema_ts::schema_to_ts(&schema_val)
                     })
                     .unwrap_or_else(|| "any".to_string());
+                // Catalog tools always go through tool-caching → always wrap.
+                let return_ts = format!("{{ result: {inner_ts} }}");
 
                 namespaces.entry(prefix.clone()).or_default().push((
                     entry.name.clone(),

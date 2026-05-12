@@ -10,7 +10,7 @@
 
 use std::sync::{Arc, LazyLock, RwLock};
 
-use drua_tool_caching::ToolCaching;
+use drua_tool_caching::{ToolCaching, WrapMode};
 use serde_json::json;
 
 use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
@@ -255,18 +255,21 @@ impl DescribeCatalogTool {
             .unwrap_or("No description available.");
         let schema =
             serde_json::to_string_pretty(&tool.input_schema).unwrap_or_else(|_| "{}".into());
-        let output_section = tool
+        let wrapped_output_schema = tool
             .output_schema
             .as_ref()
-            .and_then(|s| serde_json::to_string_pretty(s.as_ref()).ok())
-            .map(|s| format!("\n\n### Output schema\n```json\n{s}\n```"))
+            .map(|s| wrap_output_schema(&serde_json::Value::Object(s.as_ref().clone())));
+        let output_section = wrapped_output_schema
+            .as_ref()
+            .and_then(|s| serde_json::to_string_pretty(s).ok())
+            .map(|s| format!("\n\n### Output schema (drua-wrapped)\n```json\n{s}\n```"))
             .unwrap_or_default();
 
         // Embed a TS signature so agents writing `compose` scripts can read the typed
         // shape inline; `compose_types` remains useful for batch/prefix-glob lookups.
         let input_schema_value = serde_json::Value::Object(tool.input_schema.as_ref().clone());
         let input_ts = json_schema_ts::schema_to_ts_params(&input_schema_value);
-        let output_ts = tool
+        let inner_ts = tool
             .output_schema
             .as_ref()
             .map(|s| {
@@ -274,6 +277,9 @@ impl DescribeCatalogTool {
                 json_schema_ts::schema_to_ts(&v)
             })
             .unwrap_or_else(|| "any".to_string());
+        // Catalog tools always go through tool-caching, so the wire shape
+        // is `DruaToolResult<UpstreamT>` — compose scripts unwrap `.result`.
+        let output_ts = format!("{{ result: {inner_ts} }}");
         let ts_signature = format!(
             "\n\n### TypeScript signature (for use in `compose`)\n```ts\nfunction {tool}(args: {{ {input_ts} }}): Promise<{output_ts}>;\n```",
             tool = entry.tool_name,
@@ -291,6 +297,48 @@ impl DescribeCatalogTool {
             entry.prefixed_name,
         )
     }
+}
+
+/// Advertise the `DruaToolResult<T>` wrapper as the tool's outputSchema —
+/// the wire shape `cache(WrapMode::Elide)` emits on the structured channel.
+/// MCP clients that validate `structuredContent` against `outputSchema` see
+/// the actual shape (otherwise they reject the wrapped envelope as a
+/// schema mismatch).
+fn wrap_output_schema(upstream: &serde_json::Value) -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "result": upstream,
+            "_elided": {
+                "type": "object",
+                "description": "Present only when something was elided. Mirror of the text-channel <recovery> section.",
+                "properties": {
+                    "invocation_id": { "type": "string" },
+                    "paths": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": { "type": "string" },
+                                "bytes": { "type": "integer" },
+                                "lines": { "type": "integer" },
+                                "length": { "type": "integer" },
+                                "head_count": { "type": "integer" },
+                                "tail_count": { "type": "integer" },
+                                "recover": {
+                                    "type": "object",
+                                    "description": "tool_output_fetch call template"
+                                }
+                            },
+                            "required": ["path", "bytes", "recover"]
+                        }
+                    }
+                },
+                "required": ["invocation_id", "paths"]
+            }
+        },
+        "required": ["result"]
+    })
 }
 
 static DESCRIBE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
@@ -342,10 +390,9 @@ impl TopLevelTool for DescribeCatalogTool {
                     category: entry.category,
                     description: tool.description.as_deref().unwrap_or("").to_string(),
                     input_schema: serde_json::Value::Object(tool.input_schema.as_ref().clone()),
-                    output_schema: tool
-                        .output_schema
-                        .as_ref()
-                        .map(|s| serde_json::Value::Object(s.as_ref().clone())),
+                    output_schema: tool.output_schema.as_ref().map(|s| {
+                        wrap_output_schema(&serde_json::Value::Object(s.as_ref().clone()))
+                    }),
                 };
                 let structured =
                     serde_json::to_value(&out).expect("DescribeToolOutput serialization");
@@ -463,9 +510,15 @@ impl TopLevelTool for CallCatalogTool {
                 let args_for_cache = inner_args
                     .map(serde_json::Value::Object)
                     .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
-                tc.maybe_summarize_and_cache(subject, &tool_name, &args_for_cache, result)
-                    .await?
-                    .result
+                tc.cache(
+                    subject,
+                    &tool_name,
+                    &args_for_cache,
+                    result,
+                    WrapMode::Elide,
+                )
+                .await?
+                .result
             }
             None => result,
         };

@@ -13,7 +13,7 @@ pub use error::ToolCachingError;
 pub use fetch::{FetchQuery, FetchResult};
 pub use primitives::{
     ElidedPath, QueryStructure, ToolCacheResponse, ToolCallOwnerId, ToolCallSummary,
-    ToolInvocationId,
+    ToolInvocationId, WrapMode,
 };
 pub use repo::StoredInvocation;
 pub use string_summarizer::StringSummarizerChain;
@@ -46,17 +46,30 @@ impl ToolCaching {
         }
     }
 
-    /// Passthrough early-returns:
+    /// Cache an upstream tool result and emit a `DruaToolResult<T>`-shaped
+    /// `CallToolResult`. `mode` selects how `T` is presented on the wire:
+    ///
+    /// * [`WrapMode::Elide`] — top-level / catalog dispatch. Walk and elide
+    ///   in place; structured channel emits `{result: T-elided, _elided: M}`
+    ///   when something was elided, `{result: T}` on passthrough.
+    /// * [`WrapMode::Persist`] — compose sub-dispatch. Persist for
+    ///   `tool_output_fetch` recovery but emit `{result: T verbatim}` always —
+    ///   the JS engine has its own size cap and pre-summarising sub-call
+    ///   results would force every compose script to recover through fetch
+    ///   instead of using the value directly.
+    ///
+    /// Passthrough early-returns (no persistence, no wrapping):
     ///   * no owner (workflow executor / anonymous) — nothing to attribute
     ///   * upstream marked the result `is_error` — error responses flow through
     ///   * non-text content (image, multi-part) — only single-text-content
     ///     results are summarisable today
-    pub async fn maybe_summarize_and_cache(
+    pub async fn cache(
         &self,
         owner: impl Into<Option<ToolCallOwnerId>>,
         tool_name: &str,
         args: &serde_json::Value,
         result: CallToolResult,
+        mode: WrapMode,
     ) -> Result<ToolCacheResponse, ToolCachingError> {
         let Some(owner_id) = owner.into() else {
             return Ok(ToolCacheResponse {
@@ -108,8 +121,16 @@ impl ToolCaching {
             )
             .await?;
 
+        // `upstream_t` is what `{result: …}` carries on the wire in Persist
+        // mode (verbatim T) and is unused in Elide mode (the summary is
+        // already there). Prefer the upstream's structured channel when
+        // present so JS engines see the same JSON shape the upstream emits;
+        // otherwise fall back to the parsed text root.
+        let upstream_t = original_structured
+            .clone()
+            .unwrap_or_else(|| query_structure.root.clone());
         let elided_paths = summary.elided_paths.clone();
-        let wrapped = summary.into_call_tool_result(original_structured);
+        let wrapped = summary.into_call_tool_result(mode, Some(invocation_id), upstream_t);
         Ok(ToolCacheResponse {
             result: wrapped,
             elided_paths,

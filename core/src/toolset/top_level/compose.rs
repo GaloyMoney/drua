@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Duration;
 
-use drua_tool_caching::ToolCaching;
+use drua_tool_caching::{ToolCaching, WrapMode};
 use es_entity::context::{EventContext, WithEventContext};
 use rmcp::model::{CallToolResult, Content, JsonObject};
 use serde::Deserialize;
@@ -180,7 +180,13 @@ impl TopLevelTool for ComposeTool {
                 let mut ctr = CallToolResult::success(vec![Content::text(pretty)]);
                 ctr.structured_content = Some(result.value.clone());
                 let resp = tc
-                    .maybe_summarize_and_cache(subject, "compose:result", &recorded_args, ctr)
+                    .cache(
+                        subject,
+                        "compose:result",
+                        &recorded_args,
+                        ctr,
+                        WrapMode::Elide,
+                    )
                     .await?;
                 let id = resp.invocation_id.map(uuid::Uuid::from);
                 let curated = match id {
@@ -246,7 +252,7 @@ impl TopLevelTool for ComposeTool {
 
         let ctr = match self.tool_caching.as_ref() {
             Some(tc) => {
-                tc.maybe_summarize_and_cache(subject, "compose", &recorded_args, ctr)
+                tc.cache(subject, "compose", &recorded_args, ctr, WrapMode::Elide)
                     .await?
                     .result
             }
@@ -330,7 +336,10 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
                             )
                             .await;
                         Audit::record_success();
-                        Ok(value)
+                        // Catalog tools always go through tool-caching, so
+                        // wrap into the `DruaToolResult<T>` shape the JS
+                        // engine should see for every cached tool.
+                        Ok(wrap_compose_value(value))
                     }
                     Err(msg) => {
                         Audit::record_error(msg.clone());
@@ -414,6 +423,12 @@ impl CatalogDispatcher {
                             .await;
                     }
                     Audit::record_success();
+                    // Top-level tools opt in to caching via
+                    // `default_tool_caching`; only wrap into
+                    // `DruaToolResult<T>` for the ones that opt in, so
+                    // bypass tools (bash, read, etc.) keep their native
+                    // shape in JS.
+                    let value = if bypass { value } else { wrap_compose_value(value) };
                     Ok(value)
                 }
                 Err(msg) => {
@@ -461,7 +476,13 @@ impl CatalogDispatcherShared {
         };
         let raw_size = extract_text(raw).len() as u64;
         let Ok(resp) = tc
-            .maybe_summarize_and_cache(&self.subject, tool_name, args, raw.clone())
+            .cache(
+                &self.subject,
+                tool_name,
+                args,
+                raw.clone(),
+                WrapMode::Persist,
+            )
             .await
         else {
             return;
@@ -602,6 +623,13 @@ fn result_to_value(result: &CallToolResult) -> serde_json::Value {
     }
 }
 
+/// Wrap a cached-tool result into the `DruaToolResult<T>` shape compose
+/// scripts unwrap with `.result`. Compose sub-dispatch is `WrapMode::Persist`,
+/// so `_elided` is always absent (the JS engine has its own size cap).
+fn wrap_compose_value(value: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({ "result": value })
+}
+
 fn extract_text(result: &CallToolResult) -> String {
     result
         .content
@@ -614,6 +642,14 @@ fn extract_text(result: &CallToolResult) -> String {
         .join("\n")
 }
 
+/// Wrap a tool's TS return type into the `DruaToolResult<T>` shape — what
+/// compose scripts see from every cached tool. Compose sub-dispatch is
+/// `WrapMode::Persist`, so `_elided` is always absent; the signature only
+/// declares `result`. Scripts unwrap with `.result`.
+fn wrap_return_ts(inner: &str) -> String {
+    format!("{{ result: {inner} }}")
+}
+
 /// Generate TypeScript declarations from the visible catalog entries and
 /// top-level tools, grouped by server prefix. Output looks like:
 ///
@@ -622,13 +658,16 @@ fn extract_text(result: &CallToolResult) -> String {
 ///   function bash(args: { command: string; ... }): Promise<any>;
 ///   function read(args: { file_path: string; ... }): Promise<any>;
 ///   namespace honeycomb {
-///     function list_environments(args: { ... }): Promise<{ env_id: string }>;
+///     function list_environments(args: { ... }): Promise<{ result: { env_id: string } }>;
 ///   }
 /// }
 /// ```
 ///
 /// When a tool has an `output_schema`, the return type is derived from that
-/// schema instead of the default `any`.
+/// schema instead of the default `any`. Cached tools (catalog tools and
+/// top-level tools with `default_tool_caching() == true`) wrap the return
+/// type in `{ result: … }`; bypass tools (bash, read, …) keep their native
+/// shape.
 pub(crate) fn generate_dts(
     subject: &AuthSubject,
     sets: &[Arc<dyn SearchableToolSet>],
@@ -640,10 +679,15 @@ pub(crate) fn generate_dts(
             continue;
         }
         let params_ts = json_schema_ts::schema_to_ts_params(tool.input_schema());
-        let return_ts = tool
+        let inner_ts = tool
             .output_schema()
             .map(json_schema_ts::schema_to_ts)
             .unwrap_or_else(|| "any".to_string());
+        let return_ts = if tool.default_tool_caching() {
+            wrap_return_ts(&inner_ts)
+        } else {
+            inner_ts
+        };
         top_fns.push((name.clone(), params_ts, return_ts));
     }
     top_fns.sort_by(|a, b| a.0.cmp(&b.0));
@@ -659,7 +703,7 @@ pub(crate) fn generate_dts(
             let schema_val =
                 serde_json::Value::Object(entry.description.input_schema.as_ref().clone());
             let params_ts = json_schema_ts::schema_to_ts_params(&schema_val);
-            let return_ts = entry
+            let inner_ts = entry
                 .description
                 .output_schema
                 .as_ref()
@@ -668,7 +712,8 @@ pub(crate) fn generate_dts(
                     json_schema_ts::schema_to_ts(&schema_val)
                 })
                 .unwrap_or_else(|| "any".to_string());
-            tools_in_ns.push((entry.name.clone(), params_ts, return_ts));
+            // Catalog tools always go through tool-caching → always wrap.
+            tools_in_ns.push((entry.name.clone(), params_ts, wrap_return_ts(&inner_ts)));
         }
     }
 
