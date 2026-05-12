@@ -31,7 +31,9 @@ async fn root_string_over_threshold_yields_envelope_with_recovery_section() {
     };
     let caching = ToolCaching::new(&pool().await, config);
 
-    let big = "x".repeat(500);
+    // Stay above walker's MIN_ELIDE_BYTES floor (512) — sub-floor values
+    // passthrough regardless of `generic_threshold_bytes`.
+    let big = "x".repeat(1024);
     let upstream = CallToolResult::success(vec![Content::text(big.clone())]);
 
     let response = caching
@@ -56,7 +58,7 @@ async fn root_string_over_threshold_yields_envelope_with_recovery_section() {
     assert!(text.trim_end().ends_with("</recovery>"));
 
     assert_eq!(
-        text.matches("<elided path=\"$\" bytes=\"500\">").count(),
+        text.matches("<elided path=\"$\" bytes=\"1024\">").count(),
         1,
         "exactly one rendered <elided> per elided path (single-line input → byte-mode, no lines attr)",
     );
@@ -124,7 +126,8 @@ async fn persisted_invocation_round_trips_through_find_by_id() {
     };
     let caching = ToolCaching::new(&pool().await, config);
 
-    let big = "x".repeat(500);
+    // See note in root_string_over_threshold_… — keep above MIN_ELIDE_BYTES (512).
+    let big = "x".repeat(1024);
     let upstream = CallToolResult::success(vec![Content::text(big.clone())]);
     let owner = ToolCallOwnerId::new();
 
