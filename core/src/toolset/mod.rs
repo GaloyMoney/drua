@@ -331,16 +331,6 @@ impl ToolSets {
         );
     }
 
-    /// Install Proxy entries that mirror a peer pod's locally-owned
-    /// tunnel. Returns `false` and is a no-op if any `kind: Local`
-    /// entry already exists for `deployment_id` — that means this pod
-    /// is the owner; the WS handler is authoritative for those slots
-    /// and a Proxy install would race the local cleanup. The caller
-    /// (typically the registry listener) should re-attempt after the
-    /// owning WS loop's cleanup runs.
-    ///
-    /// Stale Proxy entries for `deployment_id` (from a previous owner)
-    /// are removed before the new ones go in.
     pub fn install_proxy_toolsets(
         &self,
         deployment_id: &str,
@@ -381,10 +371,6 @@ impl ToolSets {
         true
     }
 
-    /// Snapshot of deployment_ids that currently have at least one
-    /// `kind: Proxy` entry. Used by the listener's full-sweep
-    /// reconciliation to drop proxies whose row has been deleted on
-    /// another pod while this listener was disconnected.
     pub fn proxy_deployment_ids(&self) -> std::collections::HashSet<String> {
         let sets = self.sets.read().expect("toolset lock poisoned");
         let mut ids = std::collections::HashSet::new();
@@ -401,9 +387,6 @@ impl ToolSets {
         ids
     }
 
-    /// Remove only `kind: Proxy` entries for `deployment_id`. Local
-    /// entries are left intact so that a row delete on a peer doesn't
-    /// disturb this pod's own ownership of the same deployment.
     pub fn remove_proxy_toolsets(&self, deployment_id: &str) {
         let mut sets = self.sets.write().expect("toolset lock poisoned");
         let before = sets.len();
@@ -424,12 +407,6 @@ impl ToolSets {
         }
     }
 
-    /// Remove every tunnel-scoped toolset owned by `session_id`. Called
-    /// from a WS loop's cleanup path. If the session was already evicted
-    /// by a newer connector (which reused the `deployment_id` via
-    /// [`Self::replace_tunnel_toolsets`]), this is a no-op — the new
-    /// session has a different `session_id` and its entries are not
-    /// touched. This is the invariant that makes takeover safe.
     pub fn unregister_searchable_by_session(&self, session_id: uuid::Uuid) {
         let mut sets = self.sets.write().expect("toolset lock poisoned");
         let before = sets.len();
@@ -681,8 +658,6 @@ impl ToolSets {
         }
     }
 
-    /// Public alias of `proxy_deployment_ids` for integration tests
-    /// in sibling crates that don't take a transitive `cfg(test)`.
     pub fn proxy_deployment_ids_for_test(&self) -> std::collections::HashSet<String> {
         self.proxy_deployment_ids()
     }

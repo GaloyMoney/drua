@@ -54,15 +54,8 @@ fn default_mirror_ttl_seconds() -> u64 {
     300
 }
 
-/// Runtime knobs for the HA tunnel registry. Mirrors the relevant
-/// subset of `server::config::TunnelConfig` — split out because `core`
-/// shouldn't depend on `server`. Populated by the server on `App::init`.
 #[derive(Clone, Debug, Deserialize)]
 pub struct TunnelRuntimeConfig {
-    /// `<POD_IP>:<server.port>` — empty in single-replica/local-dev
-    /// mode, in which case the listener treats every row as
-    /// owned-elsewhere (cheap no-op since the WS handler is
-    /// authoritative locally anyway).
     #[serde(default)]
     pub self_pod_addr: Option<String>,
     #[serde(default = "default_tunnel_heartbeat_secs")]
@@ -71,9 +64,6 @@ pub struct TunnelRuntimeConfig {
     pub expires_after_secs: u64,
     #[serde(default = "default_tunnel_reaper_interval_secs")]
     pub reaper_interval_secs: u64,
-    /// Token-file path for SA-token auth on the internal proxy hop, or
-    /// a shared secret if neither is available the proxy disables
-    /// (single-replica deployments don't need it).
     #[serde(default)]
     pub internal_secret: Option<String>,
 }
@@ -90,13 +80,13 @@ impl Default for TunnelRuntimeConfig {
     }
 }
 
-fn default_tunnel_heartbeat_secs() -> u64 {
+pub fn default_tunnel_heartbeat_secs() -> u64 {
     30
 }
-fn default_tunnel_expires_after_secs() -> u64 {
+pub fn default_tunnel_expires_after_secs() -> u64 {
     90
 }
-fn default_tunnel_reaper_interval_secs() -> u64 {
+pub fn default_tunnel_reaper_interval_secs() -> u64 {
     60
 }
 

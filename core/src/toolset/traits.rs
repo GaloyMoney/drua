@@ -9,11 +9,8 @@ pub struct ToolSetEntry {
     pub description: Tool,
 }
 
-/// Dynamic-registration provenance for atomic scope-based replacement of toolsets.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolSetScope {
-    /// `kind` distinguishes a locally-owned tunnel (this pod holds the WS)
-    /// from a proxy entry mirrored from the DB row of a peer pod's tunnel.
     Tunnel {
         deployment_id: String,
         session_id: uuid::Uuid,
@@ -23,11 +20,7 @@ pub enum ToolSetScope {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TunnelKind {
-    /// This pod terminates the connector's WebSocket; tool calls dispatch
-    /// through the in-process `TunnelHandle`.
     Local,
-    /// Another pod owns the WebSocket; tool calls dispatch via
-    /// `POST /internal/tunnel/:deployment_id/call` to that pod.
     Proxy,
 }
 

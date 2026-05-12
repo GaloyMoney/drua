@@ -1,11 +1,3 @@
-//! `/internal/tunnel/:deployment_id/call` — peer-pod proxy receiver.
-//!
-//! When a `ProxyTunnelToolSet` on a peer pod dispatches a tool call,
-//! it lands here. We look up the local in-process `TunnelHandle` (this
-//! pod owns the WS) and forward through it. Auth is shared-secret-only
-//! in v1 — see `core/src/lib.rs::internal_auth_from_runtime` for the
-//! decision.
-
 use axum::{
     extract::{Path, Query, Request, State},
     http::StatusCode,
@@ -16,6 +8,7 @@ use axum::{
 };
 use drua_core::tunnel::wire::{CallToolResult, JsonObject};
 use serde::Deserialize;
+use tracing::instrument;
 
 use crate::AppState;
 
@@ -28,11 +21,7 @@ pub fn internal_router() -> Router<AppState> {
         .layer(axum::middleware::from_fn(internal_auth_middleware))
 }
 
-/// Bearer-token auth against `tunnel.internal_secret`. The shared
-/// secret is loaded from Helm `secrets.tunnelInternalSecret` /
-/// `DRUA_TUNNEL_INTERNAL_SECRET`. Endpoints under this middleware run
-/// *outside* the user-facing `auth_middleware` chain so a session
-/// cookie isn't required.
+#[instrument(name = "web.internal.auth", skip_all)]
 async fn internal_auth_middleware(req: Request, next: Next) -> Response {
     let state = match req.extensions().get::<AppState>().cloned() {
         Some(s) => s,
@@ -42,10 +31,6 @@ async fn internal_auth_middleware(req: Request, next: Next) -> Response {
     let configured_secret = match configured_secret.as_deref() {
         Some(s) if !s.is_empty() => s.to_string(),
         _ => {
-            // Internal route is only meaningful when a secret is
-            // configured. Refuse with 503 so a misconfigured deploy
-            // surfaces immediately rather than silently 401-ing every
-            // proxy hop.
             tracing::warn!("/internal/tunnel called but no internal_secret configured");
             return StatusCode::SERVICE_UNAVAILABLE.into_response();
         }
@@ -65,10 +50,7 @@ async fn internal_auth_middleware(req: Request, next: Next) -> Response {
     }
 }
 
-/// Constant-time equality so timing attacks can't iteratively recover
-/// the shared secret. `subtle` would be the typed dependency, but the
-/// secret comparison is small and one-shot — open-coded keeps the
-/// dep graph clean.
+/// Constant-time equality for internal bearer auth.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
@@ -80,9 +62,6 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// Mirrors `drua_core::tunnel::InternalCallReq` over the wire. We
-/// re-declare here so the route handler's contract is co-located with
-/// its router; the proxy side serializes from the core type.
 #[derive(Deserialize)]
 struct InternalCallReqOwned {
     upstream: String,
@@ -96,6 +75,7 @@ struct InternalCallParams {
     session_id: Option<uuid::Uuid>,
 }
 
+#[instrument(name = "web.internal.tunnel_call", skip_all, fields(deployment_id = %deployment_id))]
 async fn internal_tunnel_call(
     State(state): State<AppState>,
     Path(deployment_id): Path<String>,
@@ -105,10 +85,6 @@ async fn internal_tunnel_call(
     let (local_session, handle) = match state.app.tunnels().local_session(&deployment_id) {
         Some(t) => t,
         None => {
-            // Either the connector disconnected on this pod between
-            // the peer's catalog read and the POST, or the peer is
-            // routing to us based on a stale row. Return 404 so the
-            // proxy bubbles up `ToolSetsError::Tunnel(...)`.
             return (
                 StatusCode::NOT_FOUND,
                 format!("no live tunnel for deployment '{deployment_id}'"),
@@ -117,10 +93,6 @@ async fn internal_tunnel_call(
         }
     };
 
-    // Session-id fencing: if the proxy was built against a session
-    // that has since been displaced on this pod, refuse to dispatch.
-    // 410 Gone signals the proxy that its row is stale; the listener
-    // will refresh shortly via `pg_notify` or the next reconcile.
     if let Some(expected) = params.session_id {
         if expected != local_session {
             tracing::info!(

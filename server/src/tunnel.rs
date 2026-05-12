@@ -183,7 +183,6 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
     let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<String>(256);
     let handle = TunnelHandle::new(outbound_tx);
 
-    // Capacity-1 channel: a single eviction signal is all we ever send.
     let (close_tx, mut close_rx) = tokio::sync::mpsc::channel::<()>(1);
     let session_id = uuid::Uuid::new_v4();
     let evicted = state
@@ -198,11 +197,6 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
         );
     }
 
-    // Cross-pod: stake ownership in `tunnel_registrations` before
-    // installing toolsets so a peer pod's reconcile can never observe
-    // an empty row for a deployment we're about to serve. If the
-    // upsert fails we bail rather than serve a deployment that peer
-    // pods can't see — the connector's exponential backoff retries.
     let runtime = state.app.tunnel_runtime().clone();
     let upsert_target = runtime.self_pod_addr.clone();
     if let Some(self_addr) = upsert_target.as_deref() {
@@ -229,11 +223,6 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
         }
     }
 
-    // `replace_tunnel_toolsets` retains any evicted session's entries out
-    // of the catalog and appends the new ones under a single write lock,
-    // so (a) first-match routing never sees stale entries for this
-    // deployment, and (b) the evicted loop's later session-scoped
-    // cleanup is a no-op on the new entries.
     let mut new_sets: Vec<std::sync::Arc<dyn SearchableToolSet>> =
         Vec::with_capacity(toolset_registrations.len());
     for reg in &toolset_registrations {
@@ -264,9 +253,6 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
         .toolsets()
         .replace_tunnel_toolsets(&deployment_id, new_sets);
 
-    // Heartbeat extends `expires_at` while we hold the WS. Returns
-    // `Ok(false)` when a peer pod's UPSERT changed `session_id` —
-    // that's the cross-pod displacement signal; we close the WS.
     let heartbeat_state = upsert_target.as_deref().map(|_| {
         spawn_heartbeat(
             state.app.tunnel_registrations().clone(),
@@ -289,9 +275,7 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
             }
         };
         tokio::select! {
-            // `biased` so an eviction signal always beats in-flight traffic.
             biased;
-            // Eviction: another connector claimed the same deployment_id.
             _ = close_rx.recv() => {
                 tracing::info!(
                     deployment_id = %deployment_id,
@@ -305,8 +289,6 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
                     .await;
                 break;
             }
-            // Cross-pod displacement: heartbeat saw rows-affected=0,
-            // meaning a peer pod's UPSERT replaced our session_id.
             _ = displaced_fut => {
                 tracing::info!(
                     deployment_id = %deployment_id,
@@ -351,8 +333,6 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
         }
     }
 
-    // Stop the heartbeat task so it doesn't fire one last UPDATE
-    // after we've released ownership.
     if let Some(h) = heartbeat_handle {
         h.abort();
     }
@@ -378,9 +358,6 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
     handle.fail_all_pending("tunnel disconnected").await;
     state.app.tunnels().release(&deployment_id, session_id);
 
-    // Drop our DB row so peer pods stop routing here. delete_if_owner
-    // is a no-op if a takeover already replaced our session_id; in
-    // that case the new owner already owns the row.
     if upsert_target.is_some() {
         match state
             .app
@@ -401,9 +378,6 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
         }
     }
 
-    // Tail-side reconcile: after our Local entries are gone, install
-    // a Proxy if the row has moved to a peer pod (the takeover case).
-    // No-op if the row is genuinely gone (graceful disconnect).
     if upsert_target.is_some() {
         if let Err(e) = state.app.tunnel_reconcile(&deployment_id).await {
             tracing::warn!(
@@ -421,12 +395,6 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
     );
 }
 
-/// Background task that bumps `expires_at` every `heartbeat_every`.
-/// Returns `(abort_handle, displaced_rx)`: the abort handle so the WS
-/// loop can stop the task on cleanup; the receiver yields once if the
-/// row was taken over by a peer pod (rows-affected = 0). Transient DB
-/// errors are logged and retried; only an explicit rows-affected=0
-/// means "displaced".
 fn spawn_heartbeat(
     regs: drua_core::tunnel::TunnelRegistrations,
     deployment_id: String,
@@ -437,7 +405,6 @@ fn spawn_heartbeat(
     let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
     let handle = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(heartbeat_every);
-        // First tick fires immediately — skip it; we just upserted.
         ticker.tick().await;
         loop {
             ticker.tick().await;
@@ -490,7 +457,6 @@ async fn read_registration(
     }
 }
 
-/// Route an inbound message (tool result or error) to the pending request.
 async fn handle_inbound(handle: &TunnelHandle, text: &str) {
     let msg: TunnelMessage = match serde_json::from_str(text) {
         Ok(m) => m,
@@ -524,9 +490,6 @@ mod tests {
     use ed25519_dalek::pkcs8::{spki::der::pem::LineEnding, EncodePublicKey};
     use ed25519_dalek::{Signer, SigningKey};
 
-    /// Returns the keypair along with a PEM encoding of the public half,
-    /// matching the shape `parse_configured_keys` will see in real
-    /// config (emitted by Terraform `tls_private_key`).
     fn make_key() -> (SigningKey, VerifyingKey, String) {
         let signing = SigningKey::generate(&mut rand::thread_rng());
         let verifying = signing.verifying_key();

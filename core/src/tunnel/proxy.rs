@@ -1,9 +1,3 @@
-//! `ProxyTunnelToolSet` — installed by `spawn_tunnel_registry_listener`
-//! on every replica that does *not* own a given deployment's WebSocket.
-//! Mirrors the catalog from the `tunnel_registrations` row so
-//! `search_tools` and `describe_tool` answer locally; routes `call`
-//! through `POST /internal/tunnel/:deployment_id/call` to the owning pod.
-
 use std::sync::Arc;
 
 use rmcp::model::{CallToolResult, JsonObject, Tool};
@@ -14,32 +8,15 @@ use crate::toolset::{SearchableToolSet, ToolSetEntry, ToolSetScope, ToolSetsErro
 
 use super::RegisteredToolSet;
 
-/// Auth presented on the proxy hop. SA token is preferred in cluster;
-/// the shared secret is a local-dev / config-driven fallback.
 #[derive(Clone)]
 pub enum InternalAuth {
-    /// `Authorization: Bearer <token>` — TokenReview validated by the
-    /// receiver. Token is read from `/var/run/secrets/.../token` once
-    /// per call (kubelet rotates the file in place).
-    SaToken { token_path: std::path::PathBuf },
-    /// `Authorization: Bearer <secret>` — fixed env-loaded value.
     SharedSecret { secret: String },
-    /// Local single-replica mode: no internal calls expected.
     Disabled,
 }
 
 impl InternalAuth {
-    pub async fn header_value(&self) -> Result<String, ToolSetsError> {
+    pub fn header_value(&self) -> Result<String, ToolSetsError> {
         match self {
-            InternalAuth::SaToken { token_path } => {
-                let raw = tokio::fs::read_to_string(token_path).await.map_err(|e| {
-                    ToolSetsError::Tunnel(format!(
-                        "read SA token from {}: {e}",
-                        token_path.display()
-                    ))
-                })?;
-                Ok(format!("Bearer {}", raw.trim()))
-            }
             InternalAuth::SharedSecret { secret } => Ok(format!("Bearer {secret}")),
             InternalAuth::Disabled => Err(ToolSetsError::Tunnel(
                 "internal auth disabled — cross-pod tunnel calls unavailable".to_string(),
@@ -48,8 +25,6 @@ impl InternalAuth {
     }
 }
 
-/// Wire shape of the internal proxy POST body. Matches the receiver
-/// in `server::internal_routes`.
 #[derive(Serialize, Deserialize)]
 pub struct InternalCallReq<'a> {
     pub upstream: &'a str,
@@ -66,11 +41,6 @@ pub struct ProxyTunnelToolSet {
     upstream_name: String,
     tools: Vec<ToolSetEntry>,
     deployment_id: String,
-    /// Session ID this proxy was built against. Sent to the receiver
-    /// so it can fence stale calls during a takeover: if the owning
-    /// pod's local session has been displaced (different session_id)
-    /// the receiver returns 410 Gone instead of dispatching through
-    /// the now-stale handle.
     session_id: uuid::Uuid,
     owner_pod_addr: String,
     http: Arc<reqwest::Client>,
@@ -79,9 +49,6 @@ pub struct ProxyTunnelToolSet {
 }
 
 impl ProxyTunnelToolSet {
-    /// Build all `ProxyTunnelToolSet`s for one row of `tunnel_registrations`.
-    /// Mirrors the naming logic from `LocalTunnelToolSet::new` so the same
-    /// `name`/`prefix` is exposed regardless of which pod the request lands on.
     pub fn build(
         deployment_id: &str,
         session_id: uuid::Uuid,
@@ -158,8 +125,6 @@ impl SearchableToolSet for ProxyTunnelToolSet {
         tool_name: &str,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        // session_id in the query so the receiver can fence stale
-        // proxies that were built against a now-displaced WS session.
         let url = format!(
             "http://{}/internal/tunnel/{}/call?session_id={}",
             self.owner_pod_addr, self.deployment_id, self.session_id
@@ -169,11 +134,8 @@ impl SearchableToolSet for ProxyTunnelToolSet {
             tool_name,
             arguments,
         };
-        let auth_header = self.auth.header_value().await?;
+        let auth_header = self.auth.header_value()?;
 
-        // Slightly above the in-process call_tool 120s timeout so the
-        // peer pod's TunnelHandle returns its own timeout error before
-        // ours fires (clearer error attribution).
         let resp = self
             .http
             .post(&url)
@@ -192,8 +154,6 @@ impl SearchableToolSet for ProxyTunnelToolSet {
             )));
         }
 
-        // Response is the raw `CallToolResult` JSON; the peer pod's
-        // handler forwards through with no envelope.
         let result: CallToolResult = resp
             .json()
             .await
@@ -216,26 +176,20 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn header_value_shared_secret() {
+    #[test]
+    fn header_value_shared_secret() {
         let auth = InternalAuth::SharedSecret {
             secret: "shh".to_string(),
         };
-        assert_eq!(auth.header_value().await.unwrap(), "Bearer shh");
+        assert_eq!(auth.header_value().unwrap(), "Bearer shh");
     }
 
-    #[tokio::test]
-    async fn header_value_disabled_errors() {
+    #[test]
+    fn header_value_disabled_errors() {
         let auth = InternalAuth::Disabled;
-        assert!(matches!(
-            auth.header_value().await,
-            Err(ToolSetsError::Tunnel(_))
-        ));
+        assert!(matches!(auth.header_value(), Err(ToolSetsError::Tunnel(_))));
     }
 
-    /// Sandboxed builds (e.g. nix flake check) have no system CA store
-    /// and the default `Client::new()` panics. Skip on that path —
-    /// these cases run normally in the dev shell and CI's nextest.
     fn try_test_client() -> Option<reqwest::Client> {
         reqwest::Client::builder().build().ok()
     }
@@ -258,9 +212,6 @@ mod tests {
             http,
             auth,
         );
-        // Indirect: trigger a call against an unreachable addr; the
-        // returned error message must mention `session_id=` so we know
-        // the URL was built with the fence parameter.
         let err = proxies[0]
             .call(&AuthSubject::Anonymous, "list_pods", None)
             .await
@@ -291,8 +242,6 @@ mod tests {
             auth,
         );
         assert_eq!(proxies.len(), 2);
-        // Same name shape as LocalTunnelToolSet — peer pods can't tell
-        // proxy from local, which is the point.
         assert_eq!(proxies[0].name(), "galoy_staging_kubernetes");
         assert_eq!(proxies[0].prefix(), "galoy_staging_kubernetes");
         assert!(matches!(
@@ -313,7 +262,6 @@ mod tests {
         let auth = Arc::new(InternalAuth::SharedSecret {
             secret: "x".to_string(),
         });
-        // Loopback port 1 is reliably unreachable for a TCP connect.
         let proxies = ProxyTunnelToolSet::build(
             "galoy-staging",
             uuid::Uuid::new_v4(),

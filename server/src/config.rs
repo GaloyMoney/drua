@@ -131,25 +131,17 @@ pub struct ServerConfig {
     pub tunnel: TunnelConfig,
 }
 
-/// `deployment_id` → PEM Ed25519 public key. Keypairs live in Terraform.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TunnelConfig {
     #[serde(default)]
     pub deployments: std::collections::BTreeMap<String, String>,
-    /// How often the owning pod refreshes `expires_at` on its tunnel rows.
-    #[serde(default = "default_tunnel_heartbeat_secs")]
+    #[serde(default = "drua_core::default_tunnel_heartbeat_secs")]
     pub heartbeat_secs: u64,
-    /// TTL written by each heartbeat — must exceed `heartbeat_secs * ~3`
-    /// so a transient heartbeat error doesn't strand a row.
-    #[serde(default = "default_tunnel_expires_after_secs")]
+    #[serde(default = "drua_core::default_tunnel_expires_after_secs")]
     pub expires_after_secs: u64,
-    /// How often each pod sweeps for stale rows (idempotent across pods).
-    #[serde(default = "default_tunnel_reaper_interval_secs")]
+    #[serde(default = "drua_core::default_tunnel_reaper_interval_secs")]
     pub reaper_interval_secs: u64,
-    /// Shared secret accepted by `/internal/tunnel/...` when no SA token
-    /// is presented. Local-dev fallback; in cluster the SA token path is
-    /// preferred. Loaded from env `DRUA_TUNNEL_INTERNAL_SECRET` via Helm.
     #[serde(default, skip)]
     pub internal_secret: Option<String>,
 }
@@ -158,22 +150,12 @@ impl Default for TunnelConfig {
     fn default() -> Self {
         Self {
             deployments: Default::default(),
-            heartbeat_secs: default_tunnel_heartbeat_secs(),
-            expires_after_secs: default_tunnel_expires_after_secs(),
-            reaper_interval_secs: default_tunnel_reaper_interval_secs(),
+            heartbeat_secs: drua_core::default_tunnel_heartbeat_secs(),
+            expires_after_secs: drua_core::default_tunnel_expires_after_secs(),
+            reaper_interval_secs: drua_core::default_tunnel_reaper_interval_secs(),
             internal_secret: None,
         }
     }
-}
-
-fn default_tunnel_heartbeat_secs() -> u64 {
-    30
-}
-fn default_tunnel_expires_after_secs() -> u64 {
-    90
-}
-fn default_tunnel_reaper_interval_secs() -> u64 {
-    60
 }
 
 fn default_port() -> u16 {

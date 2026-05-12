@@ -34,14 +34,11 @@ mod registrations;
 
 pub use listener::{
     reconcile_all as reconcile_all_deployments, reconcile_one as reconcile_one_deployment,
-    spawn_tunnel_registry_listener,
+    spawn_tunnel_registry_listener, ReconcileCtx,
 };
 pub use proxy::{InternalAuth, InternalCallReq, ProxyTunnelToolSet};
 pub use registrations::{TunnelRegistrationRow, TunnelRegistrations};
 
-/// Re-exports for crates (`server`) that don't take rmcp as a direct
-/// dependency but need to type-annotate the JSON wire shapes for
-/// `/internal/tunnel/...`.
 pub mod wire {
     pub use rmcp::model::{CallToolResult, JsonObject};
 }
@@ -77,7 +74,6 @@ pub struct RegisteredToolSet {
     pub prefix: String,
     pub category: String,
     pub category_description: String,
-    /// Each entry is a JSON-serialized `rmcp::model::Tool`.
     pub tools: Vec<serde_json::Value>,
 }
 
@@ -156,10 +152,6 @@ impl TunnelHandle {
         }
     }
 
-    /// Cleanup order (`web/src/tunnel.rs`):
-    /// 1. `unregister_searchable_by_session` (no new calls)
-    /// 2. `fail_all_pending` (drain in-flight)
-    /// 3. `TunnelRegistry::release`
     pub async fn fail_all_pending(&self, error: &str) {
         let mut pending = self.pending.lock().await;
         let drained: Vec<_> = pending.drain().collect();
@@ -175,11 +167,6 @@ impl TunnelHandle {
     }
 }
 
-/// `close_tx` evicts old WS loop on takeover; `session_id` prevents an
-/// evicted loop from removing the new entry during cleanup; `handle`
-/// is exposed so the internal proxy route on this pod can dispatch
-/// peer-pod calls through the in-process WS without re-discovering
-/// the toolset.
 struct RegisteredTunnel {
     session_id: uuid::Uuid,
     close_tx: mpsc::Sender<()>,
@@ -221,39 +208,19 @@ impl TunnelRegistry {
             )
         };
         if let Some(old) = evicted {
-            // Capacity 1; receiver-dropped means old loop already exiting.
-            let _ = old.close_tx.send(()).await;
+            let _ = old.close_tx.try_send(());
             true
         } else {
             false
         }
     }
 
-    /// Return the in-process `TunnelHandle` for `deployment_id`, if this
-    /// pod owns the WebSocket. Used by `/internal/tunnel/:id/call` so a
-    /// peer pod's proxy POST can dispatch through the live channel.
-    pub fn handle_for(&self, deployment_id: &str) -> Option<TunnelHandle> {
-        let map = self.inner.lock().expect("tunnel registry lock poisoned");
-        map.get(deployment_id).map(|t| t.handle.clone())
-    }
-
-    /// Return `(session_id, handle)` for `deployment_id`, if this pod
-    /// owns the WebSocket. Used by the internal proxy route to fence
-    /// stale callers: a proxy that was built against a now-displaced
-    /// session_id is rejected before its call dispatches through the
-    /// (still in-process) handle of the old session.
     pub fn local_session(&self, deployment_id: &str) -> Option<(uuid::Uuid, TunnelHandle)> {
         let map = self.inner.lock().expect("tunnel registry lock poisoned");
         map.get(deployment_id)
             .map(|t| (t.session_id, t.handle.clone()))
     }
 
-    /// If a local session for `deployment_id` exists with a session_id
-    /// that does not match `current`, signal it to close. Used by the
-    /// listener when the DB row's owner has moved to a peer pod —
-    /// without this, the old owner keeps serving stale tool calls
-    /// until its next heartbeat tick (up to `heartbeat_secs`).
-    /// Returns `true` if an eviction signal was sent.
     pub async fn evict_if_session_differs(&self, deployment_id: &str, current: uuid::Uuid) -> bool {
         let close_tx = {
             let map = self.inner.lock().expect("tunnel registry lock poisoned");
@@ -262,13 +229,11 @@ impl TunnelRegistry {
                 _ => None,
             }
         };
-        match close_tx {
-            Some(tx) => {
-                let _ = tx.send(()).await;
-                true
-            }
-            None => false,
-        }
+        close_tx
+            .map(|tx| {
+                let _ = tx.try_send(());
+            })
+            .is_some()
     }
 
     /// Removes only if still owned by `session_id` — evicted loops don't
@@ -308,13 +273,10 @@ pub struct LocalTunnelToolSet {
     upstream_name: String,
     tools: Vec<ToolSetEntry>,
     handle: TunnelHandle,
-    /// `deployment_id` enables atomic takeover swap; `session_id` keeps
-    /// evicted-loop cleanup from removing the live session's entries.
     scope: ToolSetScope,
 }
 
 impl LocalTunnelToolSet {
-    /// Name/prefix are scoped to `deployment_id` to avoid catalog collisions.
     pub fn new(
         deployment_id: &str,
         session_id: uuid::Uuid,
@@ -473,7 +435,6 @@ mod tests {
         assert!(registry.is_empty());
     }
 
-    /// Stale session_id must not remove the live entry.
     #[tokio::test]
     async fn release_with_stale_session_id_is_noop() {
         let registry = TunnelRegistry::new();
@@ -495,22 +456,6 @@ mod tests {
 
         registry.release("galoy-staging", fresh_session);
         assert!(registry.is_empty());
-    }
-
-    #[tokio::test]
-    async fn handle_for_returns_live_handle() {
-        let registry = TunnelRegistry::new();
-        assert!(registry.handle_for("galoy-staging").is_none());
-
-        let session = uuid::Uuid::new_v4();
-        let (tx, _rx) = mpsc::channel::<()>(1);
-        registry
-            .claim("galoy-staging", session, tx, dummy_handle())
-            .await;
-        assert!(registry.handle_for("galoy-staging").is_some());
-
-        registry.release("galoy-staging", session);
-        assert!(registry.handle_for("galoy-staging").is_none());
     }
 
     #[tokio::test]
@@ -537,14 +482,12 @@ mod tests {
             .claim("galoy-staging", local_session, tx, dummy_handle())
             .await;
 
-        // Same session: no-op.
         let evicted = registry
             .evict_if_session_differs("galoy-staging", local_session)
             .await;
         assert!(!evicted);
         assert!(rx.try_recv().is_err());
 
-        // Different session: close_tx fires.
         let other_session = uuid::Uuid::new_v4();
         let evicted = registry
             .evict_if_session_differs("galoy-staging", other_session)
@@ -561,8 +504,6 @@ mod tests {
             .await;
         assert!(!evicted);
     }
-
-    // Each scenario below proves `pending` doesn't leak under abnormal exit.
 
     #[tokio::test]
     async fn pending_cleared_on_success() {
@@ -600,7 +541,6 @@ mod tests {
         assert_eq!(handle.pending_len().await, 0);
     }
 
-    /// PR #127 fix: avoid 120s timeout after tunnel death.
     #[tokio::test(start_paused = true)]
     async fn fail_all_pending_drains_immediately() {
         let (tx, _rx) = mpsc::channel::<String>(8);
@@ -612,7 +552,6 @@ mod tests {
         };
 
         tokio::task::yield_now().await;
-        // Spin to avoid timing race; tokio is paused so no wall-clock sleep.
         for _ in 0..100 {
             if handle.pending_len().await == 1 {
                 break;
@@ -628,7 +567,6 @@ mod tests {
         assert_eq!(handle.pending_len().await, 0);
     }
 
-    /// `start_paused = true` advances the 120s timeout in virtual time.
     #[tokio::test(start_paused = true)]
     async fn pending_cleared_on_timeout() {
         let (tx, mut rx) = mpsc::channel::<String>(8);
@@ -639,7 +577,6 @@ mod tests {
             tokio::spawn(async move { h.call_tool("k8s", "get_pods", None).await })
         };
 
-        // Drain so send succeeds (else exits via send-failure not timeout).
         let _outbound = rx.recv().await.expect("outbound message");
 
         tokio::time::advance(std::time::Duration::from_secs(121)).await;

@@ -1,13 +1,7 @@
-//! `tunnel_registrations` table accessor — the source of truth for
-//! "which pod terminates which tunnel WebSocket". Owned-side mutations
-//! emit `pg_notify('tunnel_registry_changed', deployment_id)` in the
-//! same transaction; the listener on every pod reads and reconciles
-//! into `ProxyTunnelToolSet` entries.
+//! DB ownership registry for tunnel WebSockets.
 //!
-//! Heartbeat-driven displacement: the new owner's UPSERT changes
-//! `session_id`, so the prior owner's `heartbeat()` hits zero
-//! rows-affected and the WS loop closes itself. No pg_notify required
-//! for that signal — `Ok(false)` from heartbeat is authoritative.
+//! Mutations notify in the same transaction so peers cannot miss a
+//! committed ownership change because `pg_notify` failed afterward.
 
 use std::time::Duration;
 
@@ -28,13 +22,9 @@ pub struct TunnelRegistrationRow {
     pub expires_at: DateTime<Utc>,
 }
 
-/// JSONB-serialized payload of `tunnel_registrations.toolsets`. We
-/// store the connector's full `RegisteredToolSet[]` so peer pods can
-/// answer `search_tools`/`describe_tool` without re-querying anything.
 #[derive(Debug, Serialize, Deserialize)]
 struct ToolsetsPayload(Vec<RegisteredToolSet>);
 
-/// SQLx `query_as` row tuple — typed for clippy::type_complexity.
 type ActiveRow = (
     String,
     uuid::Uuid,
@@ -53,10 +43,6 @@ impl TunnelRegistrations {
         Self { pool }
     }
 
-    /// Insert or take over the row for `deployment_id`. Sets
-    /// `session_id`, `owner_pod_addr`, the toolset catalog and an
-    /// `expires_at` based on `ttl`. The displaced previous owner finds
-    /// out via its next heartbeat (rows-affected = 0).
     pub async fn upsert(
         &self,
         deployment_id: &str,
@@ -96,10 +82,6 @@ impl TunnelRegistrations {
         Ok(())
     }
 
-    /// Extend `expires_at` if and only if `(deployment_id, session_id)`
-    /// still matches. Returns `Ok(true)` on extend, `Ok(false)` if the
-    /// row was taken over (or never existed) — caller treats that as
-    /// displacement and closes its WebSocket.
     pub async fn heartbeat(
         &self,
         deployment_id: &str,
@@ -122,8 +104,6 @@ impl TunnelRegistrations {
         Ok(result.rows_affected() > 0)
     }
 
-    /// Delete only if `(deployment_id, session_id)` still matches.
-    /// Returns rows-affected so callers can log on stale-session no-ops.
     pub async fn delete_if_owner(
         &self,
         deployment_id: &str,
@@ -147,9 +127,6 @@ impl TunnelRegistrations {
         Ok(result.rows_affected())
     }
 
-    /// Drop every row this pod owns. Called from `App::shutdown` so a
-    /// rolling restart hands ownership over within an HTTP round-trip
-    /// rather than waiting for the reaper.
     pub async fn delete_all_owned_by(&self, owner_pod_addr: &str) -> Result<u64, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
         let rows: Vec<(String,)> = sqlx::query_as(
@@ -169,7 +146,6 @@ impl TunnelRegistrations {
         Ok(rows.len() as u64)
     }
 
-    /// Reaper sweep — idempotent; safe to run on every pod.
     pub async fn reap_expired(&self) -> Result<u64, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
         let rows: Vec<(String,)> = sqlx::query_as(
@@ -188,8 +164,6 @@ impl TunnelRegistrations {
         Ok(rows.len() as u64)
     }
 
-    /// Fetch one row, treating expired rows as absent so peer pods never
-    /// route through a tunnel the reaper is about to drop.
     pub async fn fetch_active(
         &self,
         deployment_id: &str,
@@ -221,8 +195,6 @@ impl TunnelRegistrations {
         ))
     }
 
-    /// All non-expired rows. Used by the listener for its initial sweep
-    /// after (re)connecting to PG.
     pub async fn fetch_all_active(&self) -> Result<Vec<TunnelRegistrationRow>, sqlx::Error> {
         let rows: Vec<ActiveRow> = sqlx::query_as(
             r#"
