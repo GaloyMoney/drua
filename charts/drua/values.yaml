@@ -120,8 +120,10 @@ galoyAgents:
     ## unrestricted modulo the `modes` list. Lookup on (owner, repo)
     ## is case-insensitive. Empty entries list = no repos allowed.
     gitProxy:
-      ## On-disk root for per-repo bare mirrors. Must match the mount
-      ## path on the PVC below when `mirrorPersistence.enabled = true`.
+      ## On-disk root for per-repo bare mirrors. Backed by an emptyDir
+      ## volume — every pod restart re-clones each repo on first access.
+      ## A PVC was tried but RWO + RollingUpdate deadlocks the deploy
+      ## (new pod waits for the old pod's volume detach).
       mirrorRoot: "/data/git-proxy-mirrors"
       ## Pulls within this window reuse the existing mirror without
       ## re-fetching upstream. github → mirror sync lag is at most
@@ -129,13 +131,6 @@ galoyAgents:
       ## upstream fetches (objects are written locally then pushed
       ## out by the proxy itself).
       mirrorTtlSeconds: 300
-      ## PVC for mirrors — without persistence, every pod restart
-      ## re-clones every repo on first access. With persistence,
-      ## restarts just revalidate (TTL).
-      mirrorPersistence:
-        enabled: true
-        size: 20Gi
-        storageClassName: standard-rwo
       allowlist:
         entries: []
         ## - owner: GaloyMoney

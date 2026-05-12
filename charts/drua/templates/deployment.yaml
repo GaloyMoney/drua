@@ -128,10 +128,8 @@ spec:
           readOnly: true
         {{- end }}
         {{- with .Values.galoyAgents.config.gitProxy }}
-        {{- if .mirrorPersistence.enabled }}
         - name: git-proxy-mirrors
           mountPath: {{ .mirrorRoot | quote }}
-        {{- end }}
         {{- end }}
         env:
         - name: DRUA_CONFIG
@@ -227,10 +225,7 @@ spec:
             - key: "github-app-private-key"
               path: "private-key.pem"
       {{- end }}
-      {{- with .Values.galoyAgents.config.gitProxy }}
-      {{- if .mirrorPersistence.enabled }}
+      {{- if .Values.galoyAgents.config.gitProxy }}
       - name: git-proxy-mirrors
-        persistentVolumeClaim:
-          claimName: {{ template "galoyAgents.fullname" $ }}-git-proxy-mirrors
-      {{- end }}
+        emptyDir: {}
       {{- end }}
