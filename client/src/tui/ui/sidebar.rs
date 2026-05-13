@@ -1,3 +1,7 @@
+//! Project list rendering. The persistent sidebar was dropped in the
+//! onboarding redesign; this body is now invoked from the ^P picker
+//! overlay (see `super::project_picker`) and kept as a reusable helper.
+
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -6,8 +10,9 @@ use ratatui::{
     Frame,
 };
 
-use super::super::state::{Focus, ScreenState};
+use super::super::state::ScreenState;
 
+#[allow(dead_code)]
 pub fn draw_project_list(frame: &mut Frame, state: &ScreenState, area: Rect) {
     let title = format!(
         " Projects ({}/{}) ",
@@ -39,17 +44,11 @@ pub fn draw_project_list(frame: &mut Frame, state: &ScreenState, area: Rect) {
         })
         .collect();
 
-    let border_color = if state.focus == Focus::Sidebar {
-        Color::Yellow
-    } else {
-        Color::Cyan
-    };
-
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
             .title(title)
-            .border_style(Style::default().fg(border_color)),
+            .border_style(Style::default().fg(Color::Cyan)),
     );
 
     frame.render_widget(list, area);

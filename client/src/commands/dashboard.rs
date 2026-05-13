@@ -112,6 +112,30 @@ const PROJECTS_QUERY: &str = r#"
     }
 "#;
 
+const BOOTSTRAP_MUTATION: &str = r#"
+    mutation { bootstrapPersonalProject { project { id name } created } }
+"#;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BootstrapResponse {
+    bootstrap_personal_project: BootstrapPayload,
+}
+
+#[derive(Debug, Deserialize)]
+struct BootstrapPayload {
+    project: BootstrapProject,
+    #[allow(dead_code)]
+    created: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct BootstrapProject {
+    id: String,
+    #[allow(dead_code)]
+    name: String,
+}
+
 const PROJECT_CREATE_MUTATION: &str = r#"
     mutation ProjectCreate($input: ProjectCreateInput!) {
         projectCreate(input: $input) {
@@ -426,6 +450,18 @@ fn parse_gql_event(event: &serde_json::Value) -> Option<ChatStreamEvent> {
         }
         "AssistantDoneEvent" => Some(ChatStreamEvent::Done),
         _ => None,
+    }
+}
+
+/// Best-effort: silently degrades to `None` so a missing/disabled bootstrap
+/// mutation doesn't block TUI launch.
+async fn bootstrap_personal_project(client: &GraphqlClient) -> Option<String> {
+    let resp: Result<BootstrapResponse> = client
+        .query(BOOTSTRAP_MUTATION, serde_json::json!({}))
+        .await;
+    match resp {
+        Ok(r) => Some(r.bootstrap_personal_project.project.id),
+        Err(_) => None,
     }
 }
 
@@ -1009,9 +1045,25 @@ async fn ensure_authenticated(server: Option<String>) -> Result<(Config, Graphql
 
 pub async fn run(server: Option<String>) -> Result<()> {
     let (config, client, user_name) = ensure_authenticated(server).await?;
+    let bootstrap_id = bootstrap_personal_project(&client).await;
     let projects = fetch_projects(&client).await?;
 
-    let mut state = ScreenState::new(projects, config.server_url.clone(), user_name);
+    let landing = config
+        .last_project_id
+        .as_deref()
+        .filter(|id| projects.iter().any(|p| p.id.as_str() == *id))
+        .map(|s| s.to_string())
+        .or(bootstrap_id);
+
+    let mut state = ScreenState::new(
+        projects,
+        config.server_url.clone(),
+        user_name,
+        landing.as_deref(),
+    );
+    if let Some(id) = state.selected_project().map(|p| p.id.clone()) {
+        let _ = Config::save_last_project(&id);
+    }
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -1036,6 +1088,7 @@ async fn run_event_loop(
 ) -> Result<()> {
     let (stream_tx, mut stream_rx) = mpsc::unbounded_channel::<ChatStreamEvent>();
     let mut event_stream = EventStream::new();
+    let mut persisted_project_id: Option<String> = state.selected_project().map(|p| p.id.clone());
     loop {
         terminal.draw(|frame| ui::draw(frame, state))?;
 
@@ -1129,6 +1182,14 @@ async fn run_event_loop(
                 }
             }
             _ = tokio::time::sleep(timeout) => {}
+        }
+
+        let current_project_id = state.selected_project().map(|p| p.id.clone());
+        if current_project_id != persisted_project_id {
+            if let Some(id) = current_project_id.as_deref() {
+                let _ = Config::save_last_project(id);
+            }
+            persisted_project_id = current_project_id;
         }
 
         // Fetch history when the selected agent changes (and we're not streaming).

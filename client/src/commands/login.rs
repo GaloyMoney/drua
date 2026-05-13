@@ -66,6 +66,7 @@ pub async fn run(server: Option<String>) -> Result<()> {
     let config = Config {
         server_url,
         auth_token: token,
+        last_project_id: None,
     };
     config.save()?;
 

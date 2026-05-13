@@ -1,6 +1,7 @@
 mod agents;
 mod chat_pane;
 mod grid;
+mod project_picker;
 mod sidebar;
 
 use ratatui::{
@@ -24,27 +25,23 @@ pub fn draw(frame: &mut Frame, state: &mut ScreenState) {
 
     let panels = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(24),
-            Constraint::Min(1),
-            Constraint::Length(44),
-        ])
+        .constraints([Constraint::Min(1), Constraint::Length(44)])
         .split(main_area);
 
     let right_col = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(panels[2]);
+        .split(panels[1]);
 
-    sidebar::draw_project_list(frame, state, panels[0]);
-    chat_pane::draw_chat_pane(frame, state, panels[1]);
+    chat_pane::draw_chat_pane(frame, state, panels[0]);
     agents::draw_agents_list(frame, state, right_col[0]);
     agents::draw_agent_details(frame, state, right_col[1]);
     draw_status_bar(frame, state, status_area);
 
-    match state.mode {
+    match &state.mode {
         Mode::CreateProject => draw_create_modal(frame, state),
         Mode::ExportThread => draw_export_modal(frame, state),
+        Mode::ProjectPicker { .. } => project_picker::draw_project_picker(frame, state),
         Mode::Browse => {}
     }
 }
@@ -56,11 +53,18 @@ fn draw_status_bar(frame: &mut Frame, state: &ScreenState, area: Rect) {
         state.user_name.clone()
     };
 
+    let project_name = state
+        .selected_project()
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| "—".to_string());
+
     let mut spans = vec![
         Span::styled(" Server: ", Style::default().fg(Color::DarkGray)),
         Span::styled(&state.server_url, Style::default().fg(Color::White)),
         Span::styled(" │ User: ", Style::default().fg(Color::DarkGray)),
         Span::styled(user_short, Style::default().fg(Color::White)),
+        Span::styled(" │ Project: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(project_name, Style::default().fg(Color::White)),
     ];
 
     if let Some(msg) = &state.status_message {
@@ -69,12 +73,9 @@ fn draw_status_bar(frame: &mut Frame, state: &ScreenState, area: Rect) {
     }
 
     let keys = match state.focus {
-        Focus::Sidebar => " │ ↑/↓:nav  n:new  r:refresh  Tab:agents  q:quit ",
-        Focus::Agents => " │ ↑/↓:nav  Enter:chat  Tab:chat  Esc:sidebar ",
-        Focus::Chat => " │ Enter:send  Esc:sidebar  ↑/↓:scroll  ^T:threads ",
-        Focus::Threads => {
-            " │ ←→:pos  ↑↓:thread  Tab:next  g/G:jump  e:export  ^T:close  Esc:sidebar "
-        }
+        Focus::Agents => " │ ↑/↓:nav  Enter:chat  Tab:chat  ^P:project  Esc:chat ",
+        Focus::Chat => " │ Enter:send  ↑/↓:scroll  ^P:project  ^T:threads  ^C:quit ",
+        Focus::Threads => " │ ←→:pos  ↑↓:thread  Tab:next  g/G:jump  e:export  ^T:close  Esc:chat ",
     };
     spans.push(Span::styled(keys, Style::default().fg(Color::DarkGray)));
 
