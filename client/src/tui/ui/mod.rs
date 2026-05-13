@@ -2,7 +2,6 @@ mod agents;
 mod chat_pane;
 mod grid;
 mod project_picker;
-mod sidebar;
 
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
