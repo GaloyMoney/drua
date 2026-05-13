@@ -1,4 +1,4 @@
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::CallToolResult;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -78,50 +78,12 @@ pub struct ToolCallSummary {
     pub shown_lines: Option<u32>,
 }
 
-/// Which channel-wrapping strategy `cache()` should apply.
-///
-/// All modes persist the upstream result for `tool_output_fetch` recovery.
-/// They differ in what reaches the wire:
-///
-/// * [`WrapMode::Elide`] — top-level agent-facing. Walk and elide in place;
-///   structured channel becomes `{result: T-elided, _elided?: M}` and the
-///   text channel carries the `<summary>+<recovery>` envelope.
-/// * [`WrapMode::Persist`] — compose sub-dispatch. Persist for recovery but
-///   emit `{result: T verbatim}` on the structured channel — the JS engine
-///   has its own size cap and we don't want sub-call results pre-summarised
-///   before scripts touch them.
-/// * [`WrapMode::TextOnly`] — compose's own output (and other tools whose
-///   `default_tool_caching() == false`). Persist for recovery and emit the
-///   `<summary>+<recovery>` text envelope, but leave `structured_content`
-///   exactly as the upstream tool produced it. These tools own their own
-///   structured shape (e.g. `ComposeOutput`) so the `DruaToolResult<T>`
-///   wrapper would shadow their native fields.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WrapMode {
-    Elide,
-    Persist,
-    TextOnly,
-}
-
 impl ToolCallSummary {
-    /// Build the wrapped `CallToolResult` the agent sees.
-    ///
-    /// Text channel: the `<summary>` + `<recovery>` envelope, identical for
-    /// every mode. Tag style mirrors the kebab-case convention used inside
-    /// chain markers (`<head bytes="…">` etc.) so the agent sees one
-    /// consistent grammar.
-    ///
-    /// Structured channel varies by mode:
-    /// * `Elide` — `{result: T-elided, _elided?: {invocation_id, paths}}`
-    /// * `Persist` — `{result: T verbatim}` (no `_elided`)
-    /// * `TextOnly` — `original_structured` verbatim (no wrapper at all)
-    pub fn into_call_tool_result(
-        self,
-        mode: WrapMode,
-        invocation_id: Option<ToolInvocationId>,
-        original_structured: Option<serde_json::Value>,
-        upstream_t: serde_json::Value,
-    ) -> CallToolResult {
+    /// Build the `<summary>…</summary><recovery>…</recovery>` text-channel
+    /// envelope from the walked summary. The structured channel is built
+    /// separately by the caller (lib.rs) since its shape varies between
+    /// the two public entry points.
+    pub fn build_envelope_text(&self) -> String {
         let summary_text = match &self.summary {
             Value::String(s) => s.clone(),
             other => serde_json::to_string(other).unwrap_or_default(),
@@ -149,30 +111,7 @@ impl ToolCallSummary {
             envelope.push_str(&path.render());
         }
         envelope.push_str("</recovery>\n");
-
-        let structured = match mode {
-            WrapMode::Elide => {
-                let mut obj = serde_json::Map::new();
-                obj.insert("result".to_string(), self.wire_result);
-                if !self.elided_paths.is_empty() {
-                    let inv = invocation_id.map(|id| id.to_string()).unwrap_or_default();
-                    obj.insert(
-                        "_elided".to_string(),
-                        serde_json::json!({
-                            "invocation_id": inv,
-                            "paths": self.elided_paths,
-                        }),
-                    );
-                }
-                Some(Value::Object(obj))
-            }
-            WrapMode::Persist => Some(serde_json::json!({ "result": upstream_t })),
-            WrapMode::TextOnly => original_structured,
-        };
-
-        let mut result = CallToolResult::success(vec![Content::text(envelope)]);
-        result.structured_content = structured;
-        result
+        envelope
     }
 }
 

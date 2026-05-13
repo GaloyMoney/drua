@@ -1,6 +1,6 @@
 use rmcp::model::{CallToolResult, Content, RawContent};
 
-use drua_tool_caching::{ToolCaching, ToolCachingConfig, ToolCallOwnerId, WrapMode};
+use drua_tool_caching::{ToolCaching, ToolCachingConfig, ToolCallOwnerId};
 
 const PG_CON: &str = "postgres://user:password@localhost:5432/drua";
 
@@ -47,7 +47,6 @@ async fn root_string_over_threshold_yields_envelope_with_recovery_section() {
             "bash",
             &serde_json::json!({}),
             upstream,
-            WrapMode::Elide,
         )
         .await
         .expect("persistence is stubbed; this must not error");
@@ -148,7 +147,6 @@ async fn sub_threshold_input_is_passthrough_with_no_envelope() {
             "bash",
             &serde_json::json!({}),
             upstream,
-            WrapMode::Elide,
         )
         .await
         .expect("persistence is stubbed; this must not error");
@@ -196,7 +194,6 @@ async fn persisted_invocation_round_trips_through_find_by_id() {
             "bash",
             &serde_json::json!({}),
             upstream,
-            WrapMode::Elide,
         )
         .await
         .expect("persist must succeed");
@@ -239,12 +236,11 @@ async fn persist_mode_emits_verbatim_t_without_elided_block() {
     let upstream = CallToolResult::success(vec![Content::text(big.clone())]);
 
     let response = caching
-        .cache(
+        .persist_for_compose(
             ToolCallOwnerId::new(),
             "bash",
             &serde_json::json!({}),
             upstream,
-            WrapMode::Persist,
         )
         .await
         .expect("persistence must succeed");
@@ -286,7 +282,6 @@ async fn no_owner_is_passthrough() {
             "bash",
             &serde_json::json!({}),
             upstream,
-            WrapMode::Elide,
         )
         .await
         .expect("no-owner path must not error");
