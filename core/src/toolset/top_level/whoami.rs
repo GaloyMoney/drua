@@ -70,7 +70,7 @@ impl TopLevelTool for WhoAmI {
         &WHOAMI_SCHEMA
     }
 
-    fn output_schema(&self) -> Option<&serde_json::Value> {
+    fn inner_output_schema(&self) -> Option<&serde_json::Value> {
         Some(&WHOAMI_OUTPUT_SCHEMA)
     }
 

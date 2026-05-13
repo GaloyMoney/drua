@@ -6,6 +6,7 @@ mod inspect;
 pub mod searchable;
 pub mod top_level;
 mod traits;
+pub(crate) mod wrap;
 
 pub use config::*;
 pub use error::*;
@@ -21,7 +22,7 @@ pub use traits::*;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use drua_tool_caching::ToolCaching;
+use drua_tool_caching::{ToolCaching, WrapMode};
 use rmcp::model::{CallToolResult, JsonObject};
 
 use crate::audit::Audit;
@@ -525,7 +526,7 @@ impl ToolSets {
                             let args_for_cache = args_value
                                 .clone()
                                 .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
-                            tc.maybe_summarize_and_cache(subject, name, &args_for_cache, raw)
+                            tc.cache(subject, name, &args_for_cache, raw, WrapMode::Elide)
                                 .await?
                                 .result
                         }
@@ -929,7 +930,7 @@ mod tests {
             static EMPTY: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
             EMPTY.get_or_init(|| serde_json::json!({ "type": "object" }))
         }
-        fn output_schema(&self) -> Option<&serde_json::Value> {
+        fn inner_output_schema(&self) -> Option<&serde_json::Value> {
             self.output_schema.as_ref()
         }
         fn composable(&self) -> bool {

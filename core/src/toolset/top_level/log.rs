@@ -159,7 +159,7 @@ impl TopLevelTool for ProjectLog {
         &PROJECT_LOG_SCHEMA
     }
 
-    fn output_schema(&self) -> Option<&serde_json::Value> {
+    fn inner_output_schema(&self) -> Option<&serde_json::Value> {
         Some(&PROJECT_LOG_OUTPUT_SCHEMA)
     }
 

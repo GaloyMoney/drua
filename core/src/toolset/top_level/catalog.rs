@@ -10,7 +10,7 @@
 
 use std::sync::{Arc, LazyLock, RwLock};
 
-use drua_tool_caching::ToolCaching;
+use drua_tool_caching::{ToolCaching, WrapMode};
 use serde_json::json;
 
 use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
@@ -20,6 +20,7 @@ use crate::auth::AuthSubject;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::{SearchableToolSet, TopLevelTool};
+use super::super::wrap::{wrap_output_schema, wrap_output_ts};
 use super::schema_for;
 
 pub struct CatalogEntry {
@@ -185,7 +186,7 @@ impl TopLevelTool for SearchCatalog {
     fn input_schema(&self) -> &serde_json::Value {
         &SEARCH_SCHEMA
     }
-    fn output_schema(&self) -> Option<&serde_json::Value> {
+    fn inner_output_schema(&self) -> Option<&serde_json::Value> {
         Some(&SEARCH_OUTPUT_SCHEMA)
     }
 
@@ -255,18 +256,21 @@ impl DescribeCatalogTool {
             .unwrap_or("No description available.");
         let schema =
             serde_json::to_string_pretty(&tool.input_schema).unwrap_or_else(|_| "{}".into());
-        let output_section = tool
+        let wrapped_output_schema = tool
             .output_schema
             .as_ref()
-            .and_then(|s| serde_json::to_string_pretty(s.as_ref()).ok())
-            .map(|s| format!("\n\n### Output schema\n```json\n{s}\n```"))
+            .map(|s| wrap_output_schema(&serde_json::Value::Object(s.as_ref().clone())));
+        let output_section = wrapped_output_schema
+            .as_ref()
+            .and_then(|s| serde_json::to_string_pretty(s).ok())
+            .map(|s| format!("\n\n### Output schema (drua-wrapped)\n```json\n{s}\n```"))
             .unwrap_or_default();
 
         // Embed a TS signature so agents writing `compose` scripts can read the typed
         // shape inline; `compose_types` remains useful for batch/prefix-glob lookups.
         let input_schema_value = serde_json::Value::Object(tool.input_schema.as_ref().clone());
         let input_ts = json_schema_ts::schema_to_ts_params(&input_schema_value);
-        let output_ts = tool
+        let inner_ts = tool
             .output_schema
             .as_ref()
             .map(|s| {
@@ -274,6 +278,9 @@ impl DescribeCatalogTool {
                 json_schema_ts::schema_to_ts(&v)
             })
             .unwrap_or_else(|| "any".to_string());
+        // Catalog tools always go through tool-caching, so the wire shape
+        // is `DruaToolResult<UpstreamT>` — compose scripts unwrap `.result`.
+        let output_ts = wrap_output_ts(&inner_ts);
         let ts_signature = format!(
             "\n\n### TypeScript signature (for use in `compose`)\n```ts\nfunction {tool}(args: {{ {input_ts} }}): Promise<{output_ts}>;\n```",
             tool = entry.tool_name,
@@ -318,7 +325,7 @@ impl TopLevelTool for DescribeCatalogTool {
     fn input_schema(&self) -> &serde_json::Value {
         &DESCRIBE_SCHEMA
     }
-    fn output_schema(&self) -> Option<&serde_json::Value> {
+    fn inner_output_schema(&self) -> Option<&serde_json::Value> {
         Some(&DESCRIBE_OUTPUT_SCHEMA)
     }
 
@@ -342,10 +349,9 @@ impl TopLevelTool for DescribeCatalogTool {
                     category: entry.category,
                     description: tool.description.as_deref().unwrap_or("").to_string(),
                     input_schema: serde_json::Value::Object(tool.input_schema.as_ref().clone()),
-                    output_schema: tool
-                        .output_schema
-                        .as_ref()
-                        .map(|s| serde_json::Value::Object(s.as_ref().clone())),
+                    output_schema: tool.output_schema.as_ref().map(|s| {
+                        wrap_output_schema(&serde_json::Value::Object(s.as_ref().clone()))
+                    }),
                 };
                 let structured =
                     serde_json::to_value(&out).expect("DescribeToolOutput serialization");
@@ -463,9 +469,15 @@ impl TopLevelTool for CallCatalogTool {
                 let args_for_cache = inner_args
                     .map(serde_json::Value::Object)
                     .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
-                tc.maybe_summarize_and_cache(subject, &tool_name, &args_for_cache, result)
-                    .await?
-                    .result
+                tc.cache(
+                    subject,
+                    &tool_name,
+                    &args_for_cache,
+                    result,
+                    WrapMode::Elide,
+                )
+                .await?
+                .result
             }
             None => result,
         };

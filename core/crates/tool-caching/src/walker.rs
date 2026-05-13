@@ -38,7 +38,12 @@ impl Walker {
     ) -> ToolCallSummary {
         let mut elided_paths = Vec::new();
         let root_path = "$";
-        let original_bytes = json_size(&query_structure.root);
+        // For string roots, count raw string bytes (matches what's persisted
+        // as `raw_text` and what the per-path `<elided>` tag reports for the
+        // same path). For arrays/objects, use the JSON-serialized size since
+        // there's no other natural representation. Otherwise `<summary>` and
+        // `<elided>` at the same `$` path would disagree on `total-bytes`.
+        let total_bytes = byte_size(&query_structure.root);
         let summary = self.walk(
             &query_structure.root,
             root_path,
@@ -47,11 +52,39 @@ impl Walker {
             tool_name,
             &mut elided_paths,
         );
+        let shown_bytes = byte_size(&summary);
+
+        // Root-shape dimensions: only emit when root is the corresponding
+        // kind. For an object root (with inner elisions) items/lines stay
+        // None and the agent reads dimensional totals off the per-path
+        // `<elided>` tags instead.
+        let (total_items, shown_items) = match (&query_structure.root, &summary) {
+            (Value::Array(orig), Value::Array(walked)) => {
+                (Some(orig.len() as u32), Some(walked.len() as u32))
+            }
+            _ => (None, None),
+        };
+        let (total_lines, shown_lines) = if matches!(query_structure.root, Value::String(_)) {
+            elided_paths
+                .iter()
+                .find(|e| e.path == root_path)
+                .and_then(|e| Some((e.total_lines?, e.shown_lines?)))
+                .map(|(t, s)| (Some(t), Some(s)))
+                .unwrap_or((None, None))
+        } else {
+            (None, None)
+        };
+
         ToolCallSummary {
             summary,
             elided_paths,
             root_path: root_path.to_string(),
-            original_bytes,
+            total_bytes,
+            shown_bytes,
+            total_items,
+            shown_items,
+            total_lines,
+            shown_lines,
         }
     }
 
@@ -133,10 +166,13 @@ impl Walker {
         if n <= 1 {
             return walked_value;
         }
-        // Sentinel decides head/tail; it also surgically prunes per-item
-        // elided_paths so handles for kept items (e.g. $[0].body) survive
-        // and only handles for dropped indices get cleaned up.
-        self.sentinel_array(
+        // Schema-conforming truncate: emit a shorter (head-only) array of
+        // the same element type so the wrapped outputSchema's `result`
+        // stays valid. Truncation metadata moves into the ElidedPath,
+        // where the structured envelope's `_elided.paths[i]` carries it.
+        // Per-item elided_paths for kept items (e.g. $[0].body) survive;
+        // those for dropped tail indices get pruned.
+        self.truncate_array(
             &walked,
             n,
             original_bytes,
@@ -225,9 +261,12 @@ impl Walker {
         if modified && prepared.len() <= budget {
             elided_paths.push(ElidedPath {
                 path: path.to_string(),
-                bytes: s.len() as u64,
-                lines: Some(line_count(s)),
-                length: None,
+                total_bytes: s.len() as u64,
+                shown_bytes: prepared.len() as u64,
+                total_lines: Some(line_count(s)),
+                shown_lines: Some(line_count(&prepared)),
+                total_items: None,
+                shown_items: None,
                 recover: make_full_recover(invocation_id, path),
             });
             return Value::String(prepared);
@@ -238,9 +277,12 @@ impl Walker {
         {
             elided_paths.push(ElidedPath {
                 path: path.to_string(),
-                bytes: s.len() as u64,
-                lines: Some(line_count(s)),
-                length: None,
+                total_bytes: s.len() as u64,
+                shown_bytes: elide.text.len() as u64,
+                total_lines: Some(line_count(s)),
+                shown_lines: Some(elide.shown_lines),
+                total_items: None,
+                shown_items: None,
                 recover: make_lines_recover(
                     invocation_id,
                     path,
@@ -258,9 +300,12 @@ impl Walker {
         if modified {
             elided_paths.push(ElidedPath {
                 path: path.to_string(),
-                bytes: s.len() as u64,
-                lines: None,
-                length: None,
+                total_bytes: s.len() as u64,
+                shown_bytes: prepared.len() as u64,
+                total_lines: None,
+                shown_lines: None,
+                total_items: None,
+                shown_items: None,
                 recover: make_full_recover(invocation_id, path),
             });
             return Value::String(prepared);
@@ -268,9 +313,12 @@ impl Walker {
         if let Some(elide) = byte_elide_string(&prepared, budget) {
             elided_paths.push(ElidedPath {
                 path: path.to_string(),
-                bytes: s.len() as u64,
-                lines: None,
-                length: None,
+                total_bytes: s.len() as u64,
+                shown_bytes: elide.text.len() as u64,
+                total_lines: None,
+                shown_lines: None,
+                total_items: None,
+                shown_items: None,
                 recover: make_range_recover(invocation_id, path, elide.head_end, elide.missing_len),
             });
             return Value::String(elide.text);
@@ -279,7 +327,7 @@ impl Walker {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn sentinel_array(
+    fn truncate_array(
         &self,
         walked: &[Value],
         original_length: usize,
@@ -289,61 +337,43 @@ impl Walker {
         paths_before: usize,
         elided_paths: &mut Vec<ElidedPath>,
     ) -> Value {
+        // Head-only truncate: emit `[item0..item(K-1)]` and record
+        // `_elided.paths[i]={length:N, head_count:K, recover:…}` so the
+        // agent can slice `[K..N)` via `tool_output_fetch` if they need
+        // more. Head+tail would be ambiguous on the wire — without a
+        // delimiter the agent can't tell where the gap lives.
         let budget = self.sentinel_budget();
         let n = walked.len();
-        let mut head_count = n / 2;
-        let mut tail_count = n - head_count;
-        if tail_count > 0 {
-            tail_count -= 1;
-        } else {
-            head_count = head_count.saturating_sub(1);
+        let mut head_count = n.saturating_sub(1);
+        let mut truncated = make_truncated_array(walked, head_count);
+        while (json_size(&truncated) as usize) > budget && head_count > 0 {
+            head_count -= 1;
+            truncated = make_truncated_array(walked, head_count);
         }
-        let mut sentinel = make_array_sentinel(
-            walked,
-            head_count,
-            tail_count,
-            original_length,
-            original_bytes as usize,
-            path,
-        );
-        while (json_size(&sentinel) as usize) > budget && (head_count > 0 || tail_count > 0) {
-            if tail_count > head_count {
-                tail_count -= 1;
-            } else {
-                head_count -= 1;
-            }
-            sentinel = make_array_sentinel(
-                walked,
-                head_count,
-                tail_count,
-                original_length,
-                original_bytes as usize,
-                path,
-            );
-        }
-        // Surgical orphan cleanup: keep per-item elided_paths whose
-        // $[i] index landed in head [0..head_count) or tail
-        // [n-tail_count..n). Indices in between point at items that
-        // dropped out of the kept shape — drop their recovery handles.
-        let kept_low = head_count;
-        let kept_high = n - tail_count;
+        // Surgical orphan cleanup: keep per-item elided_paths for kept
+        // indices `[0..head_count)`. Indices `[head_count..n)` dropped
+        // out of the wrapped shape — their recovery handles go too.
         let after_walk: Vec<ElidedPath> = elided_paths.split_off(paths_before);
         for entry in after_walk {
             match parse_array_index(&entry.path, path) {
-                Some(i) if i < kept_low || i >= kept_high => elided_paths.push(entry),
+                Some(i) if i < head_count => elided_paths.push(entry),
                 None => elided_paths.push(entry),
-                _ => {} // drop: this index is in the missing middle
+                _ => {} // drop: this index is in the dropped tail
             }
         }
-        let missing_len = original_length.saturating_sub(head_count + tail_count);
+        let missing_len = original_length.saturating_sub(head_count);
+        let shown_bytes = json_size(&truncated);
         elided_paths.push(ElidedPath {
             path: path.to_string(),
-            bytes: original_bytes,
-            lines: None,
-            length: Some(original_length as u32),
+            total_bytes: original_bytes,
+            shown_bytes,
+            total_lines: None,
+            shown_lines: None,
+            total_items: Some(original_length as u32),
+            shown_items: Some(head_count as u32),
             recover: make_array_slice_recover(invocation_id, path, head_count, missing_len),
         });
-        sentinel
+        truncated
     }
 }
 
@@ -365,6 +395,19 @@ fn json_size(value: &Value) -> u64 {
     serde_json::to_string(value)
         .map(|s| s.len() as u64)
         .unwrap_or(0)
+}
+
+/// Type-aware byte size used for the root summary's `total-bytes` /
+/// `shown-bytes`. Strings report raw byte length (no JSON quoting /
+/// escape inflation), so the per-path `<elided>` tag — which also uses
+/// `s.len()` for strings — and the `<summary>` tag agree on the count
+/// for the same path. Arrays/objects fall back to JSON-serialized size
+/// (no "natural" alternative representation).
+fn byte_size(value: &Value) -> u64 {
+    match value {
+        Value::String(s) => s.len() as u64,
+        other => json_size(other),
+    }
 }
 
 fn line_count(s: &str) -> u32 {
@@ -393,6 +436,9 @@ struct LineElide {
     text: String,
     raw_offset: u32,
     raw_missing: u32,
+    /// Compacted-line count kept in `text` (head + tail). The bulk-elided
+    /// marker block itself isn't counted — it's metadata, not data.
+    shown_lines: u32,
 }
 
 /// Translate a compacted-line index into a raw-line index by composing
@@ -466,7 +512,7 @@ fn make_line_elide(
         text.push_str(&format!("<head lines=\"{head}\">\n{head_text}\n</head>\n"));
     }
     text.push_str(&format!(
-        "<bulk-elided original-lines=\"{raw_missing}\">\n\
+        "<bulk-elided lines=\"{raw_missing}\">\n\
          {raw_missing} lines elided\n\
          </bulk-elided>\n"
     ));
@@ -480,6 +526,7 @@ fn make_line_elide(
         text,
         raw_offset,
         raw_missing,
+        shown_lines: (head + tail) as u32,
     }
 }
 
@@ -513,7 +560,7 @@ fn byte_elide_string(s: &str, budget: usize) -> Option<ByteElide> {
         ));
     }
     text.push_str(&format!(
-        "<bulk-elided original-bytes=\"{missing_len}\">\n\
+        "<bulk-elided bytes=\"{missing_len}\">\n\
          {missing_len} bytes elided\n\
          </bulk-elided>\n"
     ));
@@ -610,29 +657,6 @@ fn make_array_slice_recover(
     })
 }
 
-fn make_array_sentinel(
-    walked: &[Value],
-    head_count: usize,
-    tail_count: usize,
-    length: usize,
-    bytes: usize,
-    path: &str,
-) -> Value {
-    let head: Vec<Value> = walked.iter().take(head_count).cloned().collect();
-    let tail: Vec<Value> = walked
-        .iter()
-        .rev()
-        .take(tail_count)
-        .rev()
-        .cloned()
-        .collect();
-    serde_json::json!({
-        "_elided": true,
-        "kind": "array",
-        "path": path,
-        "length": length,
-        "bytes": bytes,
-        "head": head,
-        "tail": tail,
-    })
+fn make_truncated_array(walked: &[Value], head_count: usize) -> Value {
+    Value::Array(walked.iter().take(head_count).cloned().collect())
 }

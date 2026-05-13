@@ -617,7 +617,7 @@ impl TopLevelTool for WorkflowTool {
         &WORKFLOW_SCHEMA
     }
 
-    fn output_schema(&self) -> Option<&serde_json::Value> {
+    fn inner_output_schema(&self) -> Option<&serde_json::Value> {
         Some(&WORKFLOW_OUTPUT_SCHEMA)
     }
 

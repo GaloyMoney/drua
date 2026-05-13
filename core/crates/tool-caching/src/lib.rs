@@ -13,7 +13,7 @@ pub use error::ToolCachingError;
 pub use fetch::{FetchQuery, FetchResult};
 pub use primitives::{
     ElidedPath, QueryStructure, ToolCacheResponse, ToolCallOwnerId, ToolCallSummary,
-    ToolInvocationId,
+    ToolInvocationId, WrapMode,
 };
 pub use repo::StoredInvocation;
 pub use string_summarizer::StringSummarizerChain;
@@ -46,17 +46,35 @@ impl ToolCaching {
         }
     }
 
-    /// Passthrough early-returns:
+    /// Cache an upstream tool result and emit a `DruaToolResult<T>`-shaped
+    /// `CallToolResult`. `mode` selects how `T` is presented on the wire:
+    ///
+    /// * [`WrapMode::Elide`] — top-level / catalog dispatch. Walk and elide
+    ///   in place; structured channel emits `{result: T-elided, _elided: M}`
+    ///   when something was elided, `{result: T}` on passthrough.
+    /// * [`WrapMode::Persist`] — compose sub-dispatch. Persist for
+    ///   `tool_output_fetch` recovery but emit `{result: T verbatim}` always —
+    ///   the JS engine has its own size cap and pre-summarising sub-call
+    ///   results would force every compose script to recover through fetch
+    ///   instead of using the value directly.
+    ///
+    /// Passthrough early-returns (no persistence, no wrap, raw CTR):
     ///   * no owner (workflow executor / anonymous) — nothing to attribute
     ///   * upstream marked the result `is_error` — error responses flow through
     ///   * non-text content (image, multi-part) — only single-text-content
     ///     results are summarisable today
-    pub async fn maybe_summarize_and_cache(
+    ///
+    /// When the walker decides no elision is needed, the text channel
+    /// stays raw (no envelope) but the structured channel is still wrapped
+    /// per `mode` — otherwise sub-threshold results would emit `T` on the
+    /// wire while `outputSchema` / `compose_types` advertise `{result: T}`.
+    pub async fn cache(
         &self,
         owner: impl Into<Option<ToolCallOwnerId>>,
         tool_name: &str,
         args: &serde_json::Value,
         result: CallToolResult,
+        mode: WrapMode,
     ) -> Result<ToolCacheResponse, ToolCachingError> {
         let Some(owner_id) = owner.into() else {
             return Ok(ToolCacheResponse {
@@ -84,12 +102,21 @@ impl ToolCaching {
             .walker
             .summarize(&query_structure, invocation_id, tool_name);
 
-        // Nothing was elided ⇒ upstream result is correct verbatim; skip
-        // both persistence and the envelope rebuild so byte-for-byte
-        // passthrough is preserved.
+        // Nothing was elided ⇒ skip persistence, keep the text channel
+        // raw. Structured channel is still wrapped to match what
+        // `output_schema()` and `compose_types` advertise so sub- and
+        // over-threshold responses share one wire shape.
         if summary.elided_paths.is_empty() {
+            let mut passthrough = result;
+            passthrough.structured_content = match mode {
+                WrapMode::Elide | WrapMode::Persist => {
+                    let t = original_structured.unwrap_or_else(|| query_structure.root.clone());
+                    Some(serde_json::json!({ "result": t }))
+                }
+                WrapMode::TextOnly => original_structured,
+            };
             return Ok(ToolCacheResponse {
-                result,
+                result: passthrough,
                 elided_paths: Vec::new(),
                 invocation_id: None,
             });
@@ -108,8 +135,21 @@ impl ToolCaching {
             )
             .await?;
 
+        // `upstream_t` is what `{result: …}` carries on the wire in Persist
+        // mode (verbatim T) and is unused in Elide / TextOnly. Prefer the
+        // upstream's structured channel when present so JS engines see the
+        // same JSON shape the upstream emits; otherwise fall back to the
+        // parsed text root.
+        let upstream_t = original_structured
+            .clone()
+            .unwrap_or_else(|| query_structure.root.clone());
         let elided_paths = summary.elided_paths.clone();
-        let wrapped = summary.into_call_tool_result(original_structured);
+        let wrapped = summary.into_call_tool_result(
+            mode,
+            Some(invocation_id),
+            original_structured,
+            upstream_t,
+        );
         Ok(ToolCacheResponse {
             result: wrapped,
             elided_paths,

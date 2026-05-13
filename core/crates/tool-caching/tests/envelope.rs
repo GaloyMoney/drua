@@ -1,6 +1,6 @@
 use rmcp::model::{CallToolResult, Content, RawContent};
 
-use drua_tool_caching::{ToolCaching, ToolCachingConfig, ToolCallOwnerId};
+use drua_tool_caching::{ToolCaching, ToolCachingConfig, ToolCallOwnerId, WrapMode};
 
 const PG_CON: &str = "postgres://user:password@localhost:5432/drua";
 
@@ -42,11 +42,12 @@ async fn root_string_over_threshold_yields_envelope_with_recovery_section() {
     let upstream = CallToolResult::success(vec![Content::text(big.clone())]);
 
     let response = caching
-        .maybe_summarize_and_cache(
+        .cache(
             ToolCallOwnerId::new(),
             "bash",
             &serde_json::json!({}),
             upstream,
+            WrapMode::Elide,
         )
         .await
         .expect("persistence is stubbed; this must not error");
@@ -56,16 +57,24 @@ async fn root_string_over_threshold_yields_envelope_with_recovery_section() {
     let text = envelope_text(&response.result);
 
     assert!(
-        text.starts_with("<summary path=\"$\" original-bytes=\""),
-        "envelope must open with <summary path=\"$\" original-bytes=\"…\">; got: {text}",
+        text.starts_with("<summary path=\"$\" total-bytes=\""),
+        "envelope must open with <summary path=\"$\" total-bytes=\"…\">; got: {text}",
+    );
+    assert!(
+        text.contains("shown-bytes=\""),
+        "summary must declare shown-bytes; got: {text}",
     );
     assert!(text.contains("</summary>\n<recovery>\n"));
     assert!(text.trim_end().ends_with("</recovery>"));
 
     assert_eq!(
-        text.matches("<elided path=\"$\" bytes=\"1024\">").count(),
+        text.matches("<elided path=\"$\" total-bytes=\"1024\"").count(),
         1,
         "exactly one rendered <elided> per elided path (single-line input → byte-mode, no lines attr)",
+    );
+    assert!(
+        text.contains(" shown-bytes=\""),
+        "elided tag must declare shown-bytes; got: {text}",
     );
     assert!(text.contains("tool_output_fetch("));
     // The rendered call carries a real uuid id (36 chars with 4 dashes),
@@ -89,10 +98,37 @@ async fn root_string_over_threshold_yields_envelope_with_recovery_section() {
 
     assert!(text.contains("<head bytes=\""));
     assert!(text.contains("</head>"));
-    assert!(text.contains("<bulk-elided original-bytes=\""));
+    assert!(text.contains("<bulk-elided bytes=\""));
     assert!(text.contains("</bulk-elided>"));
     assert!(text.contains("<tail bytes=\""));
     assert!(text.contains("</tail>"));
+
+    // Structured channel mirrors the text envelope: {result, _elided} with
+    // `result` schema-conforming (the elided string in this case) and
+    // `_elided.paths` carrying the same recovery info as <recovery>.
+    let structured = response
+        .result
+        .structured_content
+        .as_ref()
+        .expect("Elide mode emits structuredContent");
+    assert!(structured.is_object(), "wrapper is an object: {structured}");
+    assert!(
+        structured.get("result").is_some(),
+        "wrapper has `result`: {structured}",
+    );
+    let elided = structured
+        .get("_elided")
+        .expect("`_elided` present when something was elided");
+    let inv_id = elided
+        .get("invocation_id")
+        .and_then(|v| v.as_str())
+        .expect("`_elided.invocation_id` is a string");
+    assert_eq!(inv_id.len(), 36, "uuid must be 36 chars; got: {inv_id}");
+    let paths = elided
+        .get("paths")
+        .and_then(|v| v.as_array())
+        .expect("`_elided.paths` is an array");
+    assert_eq!(paths.len(), 1, "one elided path: {paths:?}");
 }
 
 #[tokio::test]
@@ -107,11 +143,12 @@ async fn sub_threshold_input_is_passthrough_with_no_envelope() {
     let upstream = CallToolResult::success(vec![Content::text(small.clone())]);
 
     let response = caching
-        .maybe_summarize_and_cache(
+        .cache(
             ToolCallOwnerId::new(),
             "bash",
             &serde_json::json!({}),
             upstream,
+            WrapMode::Elide,
         )
         .await
         .expect("persistence is stubbed; this must not error");
@@ -121,6 +158,23 @@ async fn sub_threshold_input_is_passthrough_with_no_envelope() {
     assert_eq!(text, small);
     assert!(!text.contains("<summary"));
     assert!(!text.contains("<recovery"));
+
+    // Sub-threshold structured channel is still wrapped in `{result: T}`
+    // so the wire shape matches the advertised outputSchema regardless
+    // of whether elision actually ran.
+    let structured = response
+        .result
+        .structured_content
+        .as_ref()
+        .expect("Elide passthrough still wraps structuredContent");
+    let result_field = structured
+        .get("result")
+        .expect("Elide passthrough emits {result: T}");
+    assert_eq!(result_field, &serde_json::Value::String(small.clone()));
+    assert!(
+        structured.get("_elided").is_none(),
+        "no elision → no `_elided` key",
+    );
 }
 
 #[tokio::test]
@@ -137,7 +191,13 @@ async fn persisted_invocation_round_trips_through_find_by_id() {
     let owner = ToolCallOwnerId::new();
 
     let response = caching
-        .maybe_summarize_and_cache(owner, "bash", &serde_json::json!({}), upstream)
+        .cache(
+            owner,
+            "bash",
+            &serde_json::json!({}),
+            upstream,
+            WrapMode::Elide,
+        )
         .await
         .expect("persist must succeed");
 
@@ -165,6 +225,55 @@ async fn persisted_invocation_round_trips_through_find_by_id() {
 }
 
 #[tokio::test]
+async fn persist_mode_emits_verbatim_t_without_elided_block() {
+    let config = ToolCachingConfig {
+        generic_threshold_bytes: 512,
+        ..ToolCachingConfig::default()
+    };
+    let caching = ToolCaching::new(&pool().await, config);
+
+    // Pick a value the walker WOULD elide so we hit the persist path —
+    // Persist mode persists to DB but emits {result: T verbatim} on the
+    // wire (no `_elided`); the JS engine in compose has its own size cap.
+    let big = "x".repeat(1024);
+    let upstream = CallToolResult::success(vec![Content::text(big.clone())]);
+
+    let response = caching
+        .cache(
+            ToolCallOwnerId::new(),
+            "bash",
+            &serde_json::json!({}),
+            upstream,
+            WrapMode::Persist,
+        )
+        .await
+        .expect("persistence must succeed");
+
+    assert!(
+        response.invocation_id.is_some(),
+        "persist mode still persists for tool_output_fetch recovery",
+    );
+
+    let structured = response
+        .result
+        .structured_content
+        .as_ref()
+        .expect("Persist mode emits structuredContent");
+    let result_field = structured
+        .get("result")
+        .expect("Persist wire shape is {result: T}");
+    assert_eq!(
+        result_field,
+        &serde_json::Value::String(big.clone()),
+        "Persist mode emits T verbatim on the wire",
+    );
+    assert!(
+        structured.get("_elided").is_none(),
+        "Persist mode never emits `_elided`",
+    );
+}
+
+#[tokio::test]
 async fn no_owner_is_passthrough() {
     let caching = ToolCaching::new(&pool().await, ToolCachingConfig::default());
 
@@ -172,7 +281,13 @@ async fn no_owner_is_passthrough() {
     let upstream = CallToolResult::success(vec![Content::text(big.clone())]);
 
     let response = caching
-        .maybe_summarize_and_cache(None, "bash", &serde_json::json!({}), upstream)
+        .cache(
+            None,
+            "bash",
+            &serde_json::json!({}),
+            upstream,
+            WrapMode::Elide,
+        )
         .await
         .expect("no-owner path must not error");
 

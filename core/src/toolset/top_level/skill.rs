@@ -154,7 +154,7 @@ impl TopLevelTool for SkillTool {
         &SKILL_SCHEMA
     }
 
-    fn output_schema(&self) -> Option<&serde_json::Value> {
+    fn inner_output_schema(&self) -> Option<&serde_json::Value> {
         Some(&SKILL_OUTPUT_SCHEMA)
     }
 

@@ -63,7 +63,7 @@ impl TopLevelTool for Ls {
         &LS_SCHEMA
     }
 
-    fn output_schema(&self) -> Option<&serde_json::Value> {
+    fn inner_output_schema(&self) -> Option<&serde_json::Value> {
         Some(LS_OUTPUT.schema())
     }
 
