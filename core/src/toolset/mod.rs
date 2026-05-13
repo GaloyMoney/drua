@@ -357,7 +357,22 @@ impl ToolSets {
     }
 
     /// Human-readable summary used as the MCP server's `instructions` payload.
+    /// Lists every registered toolset without filtering — the MCP gateway has
+    /// no per-client auth context at protocol-init time, and per-call paths
+    /// (`list_tools`, `search_tools`, dispatch) enforce visibility.
     pub fn mcp_gateway_info(&self) -> String {
+        self.render_gateway_info(|_| true)
+    }
+
+    /// Subject-filtered variant of [`Self::mcp_gateway_info`] for callers
+    /// that have an `AuthSubject` available (e.g. agent system prompts).
+    /// Only toolsets whose `SearchableToolSet::is_visible(subject)` returns
+    /// `true` are listed.
+    pub fn mcp_gateway_info_for(&self, subject: &AuthSubject) -> String {
+        self.render_gateway_info(|set| set.is_visible(subject))
+    }
+
+    fn render_gateway_info(&self, include: impl Fn(&dyn SearchableToolSet) -> bool) -> String {
         let sets = self.sets.read().expect("toolset lock poisoned");
         let mut lines = vec![
             "Tools from upstream services are available via progressive disclosure:".to_string(),
@@ -367,7 +382,7 @@ impl ToolSets {
             String::new(),
             "Available toolsets:".to_string(),
         ];
-        for set in sets.iter() {
+        for set in sets.iter().filter(|s| include(s.as_ref())) {
             lines.push(format!(
                 "  {} ({}, {} tools) — {}",
                 set.name(),
@@ -597,6 +612,7 @@ mod tests {
         name: String,
         scope: Option<ToolSetScope>,
         tools: Vec<ToolSetEntry>,
+        admin_only: bool,
     }
 
     impl StubToolSet {
@@ -608,6 +624,7 @@ mod tests {
                     session_id,
                 }),
                 tools: Vec::new(),
+                admin_only: false,
             }
         }
 
@@ -616,6 +633,16 @@ mod tests {
                 name: name.to_string(),
                 scope: None,
                 tools: Vec::new(),
+                admin_only: false,
+            }
+        }
+
+        fn admin_only(name: &str) -> Self {
+            Self {
+                name: name.to_string(),
+                scope: None,
+                tools: Vec::new(),
+                admin_only: true,
             }
         }
     }
@@ -636,6 +663,9 @@ mod tests {
         }
         fn scope(&self) -> Option<&ToolSetScope> {
             self.scope.as_ref()
+        }
+        fn is_visible(&self, subject: &AuthSubject) -> bool {
+            !self.admin_only || subject.is_admin()
         }
         async fn call(
             &self,
@@ -982,5 +1012,59 @@ mod tests {
             Err(WorkflowToolLookupError::NoOutputSchema(name)) => assert_eq!(name, "no_schema"),
             _ => panic!("expected NoOutputSchema"),
         }
+    }
+
+    #[test]
+    fn mcp_gateway_info_for_hides_admin_only_toolsets_from_non_admin() {
+        use crate::auth::AuthScope;
+        use crate::primitives::{AgentId, ProjectId};
+
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_searchable(StubToolSet::static_("concourse"));
+        toolsets.register_searchable(StubToolSet::admin_only("drua_admin"));
+
+        let project_id = ProjectId::new();
+        let project_lead = AuthSubject::Agent(
+            project_id,
+            AgentId::new(),
+            vec![AuthScope::ProjectAdmin(project_id)],
+        );
+
+        let info = toolsets.mcp_gateway_info_for(&project_lead);
+        assert!(
+            !info.contains("drua_admin"),
+            "project lead must not see admin-only toolsets in progressive-disclosure note:\n{info}"
+        );
+        assert!(
+            info.contains("concourse"),
+            "non-admin toolsets must still be listed:\n{info}"
+        );
+    }
+
+    #[test]
+    fn mcp_gateway_info_for_shows_admin_only_toolsets_to_admin() {
+        use crate::primitives::UserId;
+
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_searchable(StubToolSet::admin_only("drua_admin"));
+
+        let admin = AuthSubject::User(UserId::new());
+        let info = toolsets.mcp_gateway_info_for(&admin);
+        assert!(
+            info.contains("drua_admin"),
+            "admin must see admin-only toolsets:\n{info}"
+        );
+    }
+
+    #[test]
+    fn mcp_gateway_info_unfiltered_lists_admin_only_toolsets() {
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_searchable(StubToolSet::admin_only("drua_admin"));
+
+        let info = toolsets.mcp_gateway_info();
+        assert!(
+            info.contains("drua_admin"),
+            "unfiltered gateway info lists every toolset:\n{info}"
+        );
     }
 }
