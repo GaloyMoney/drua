@@ -122,8 +122,11 @@ SQL
 
 @test "bootstrap: disabled by config raises an error" {
   # Render a minimal config with the bootstrap flag turned off and
-  # restart the server against it.
-  stop_server
+  # restart the server against it. SKIP_COMPOSE keeps the shared PG
+  # container alive across the in-test restart — `stop_server`'s default
+  # path runs `down -v` and would yank postgres out from under the next
+  # test.
+  SKIP_COMPOSE=1 stop_server
   local out="$BATS_FILE_TMPDIR/drua-disabled.yml"
   cat > "$out" <<EOF
 server:
