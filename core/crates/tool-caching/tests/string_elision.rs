@@ -21,9 +21,11 @@ fn multi_line_string_uses_line_mode() {
     assert_eq!(summary.elided_paths.len(), 1);
     let entry = &summary.elided_paths[0];
     assert_eq!(entry.path, "$");
-    assert_eq!(entry.bytes as usize, big.len());
-    assert_eq!(entry.lines, Some(200));
-    assert_eq!(entry.length, None);
+    assert_eq!(entry.total_bytes as usize, big.len());
+    assert!(entry.shown_bytes < entry.total_bytes);
+    assert_eq!(entry.total_lines, Some(200));
+    assert!(entry.shown_lines.is_some_and(|n| n > 0 && n < 200));
+    assert_eq!(entry.total_items, None);
     let query = &entry.recover["args_template"]["query"];
     assert_eq!(query["mode"], "lines");
     assert!(query["offset"].as_u64().is_some());
@@ -31,7 +33,7 @@ fn multi_line_string_uses_line_mode() {
 
     let kept = summary.summary.as_str().unwrap();
     assert!(kept.contains("<head lines=\""));
-    assert!(kept.contains("<bulk-elided original-lines=\""));
+    assert!(kept.contains("<bulk-elided lines=\""));
     assert!(kept.contains("<tail lines=\""));
     assert!(
         !kept.contains("bytes=\""),
@@ -54,13 +56,14 @@ fn single_line_string_falls_back_to_byte_mode() {
 
     assert_eq!(summary.elided_paths.len(), 1);
     let entry = &summary.elided_paths[0];
-    assert_eq!(entry.lines, None);
+    assert_eq!(entry.total_lines, None);
+    assert_eq!(entry.shown_lines, None);
     let query = &entry.recover["args_template"]["query"];
     assert_eq!(query["mode"], "range");
 
     let kept = summary.summary.as_str().unwrap();
     assert!(kept.contains("<head bytes=\""));
-    assert!(kept.contains("<bulk-elided original-bytes=\""));
+    assert!(kept.contains("<bulk-elided bytes=\""));
     assert!(kept.contains("<tail bytes=\""));
     assert!(
         !kept.contains("lines=\""),
