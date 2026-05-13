@@ -62,6 +62,12 @@ impl ToolCaching {
     /// * structured channel: `{result: T-elided, _elided?: {invocation_id, paths}}`
     /// * text channel: `<summary path="…" …>…</summary><recovery><elided …>…</elided></recovery>`
     ///
+    /// If the upstream has no text content but does carry a structured
+    /// channel, the text channel is filled with `serde_json::to_string_pretty`
+    /// of the structured payload before walking — so callers (notably
+    /// compose) can hand off an empty text channel and let cache() produce
+    /// the agent-facing rendering.
+    ///
     /// Passthrough early-returns (no persistence, raw CTR with the
     /// `{result: T}` wrapper added to structured for schema parity):
     ///   * no owner (workflow executor / anonymous)
@@ -74,6 +80,7 @@ impl ToolCaching {
         args: &serde_json::Value,
         result: CallToolResult,
     ) -> Result<ToolCacheResponse, ToolCachingError> {
+        let result = ensure_text_channel(result);
         let Some(owner_id) = owner.into() else {
             return Ok(passthrough_no_owner(result));
         };
@@ -125,6 +132,7 @@ impl ToolCaching {
         args: &serde_json::Value,
         result: CallToolResult,
     ) -> Result<ToolCacheResponse, ToolCachingError> {
+        let result = ensure_text_channel(result);
         let Some(owner_id) = owner.into() else {
             return Ok(passthrough_no_owner(result));
         };
@@ -282,4 +290,26 @@ fn extract_text(result: &CallToolResult) -> String {
 
 fn is_simple_text_result(result: &CallToolResult) -> bool {
     result.content.len() == 1 && matches!(result.content[0].raw, RawContent::Text(_))
+}
+
+/// If the upstream carries a structured channel but no text content,
+/// fill the text channel with a pretty-printed JSON rendering of the
+/// structured payload. Lets callers (notably compose) pass an empty
+/// text channel and rely on `cache()` to produce the agent-facing
+/// rendering — either as the passthrough text or, when walking elides
+/// something, replaced in place by the `<summary>+<recovery>` envelope.
+fn ensure_text_channel(mut result: CallToolResult) -> CallToolResult {
+    let has_text = result
+        .content
+        .iter()
+        .any(|c| matches!(&c.raw, RawContent::Text(_)));
+    if has_text {
+        return result;
+    }
+    let Some(structured) = result.structured_content.as_ref() else {
+        return result;
+    };
+    let text = serde_json::to_string_pretty(structured).unwrap_or_default();
+    result.content = vec![Content::text(text)];
+    result
 }

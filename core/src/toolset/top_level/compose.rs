@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use drua_tool_caching::ToolCaching;
 use es_entity::context::{EventContext, WithEventContext};
-use rmcp::model::{CallToolResult, Content, JsonObject};
+use rmcp::model::{CallToolResult, JsonObject};
 use serde::Deserialize;
 
 use crate::audit::{Audit, InteractionType};
@@ -187,47 +187,16 @@ impl TopLevelTool for ComposeTool {
             execution_time_ms: result.execution_time.as_millis() as u64,
         };
 
-        let mut sections = Vec::new();
-        let value_str =
-            serde_json::to_string_pretty(&out.result).unwrap_or_else(|_| "null".to_string());
-        sections.push(format!("=== Result ===\n{value_str}"));
-        if !out.console.is_empty() {
-            sections.push(format!("=== Console ===\n{}", out.console.join("\n")));
-        }
-        if !dts.is_empty() {
-            sections.push(format!("=== Available Types ===\n{dts}"));
-        }
-        if !out.sub_invocations.is_empty() {
-            let lines: Vec<String> = out
-                .sub_invocations
-                .iter()
-                .map(|s| {
-                    format!(
-                        "  [{}] {} → {} ({} bytes raw, kind={})",
-                        s.seq, s.args_digest, s.invocation_id, s.raw_size_bytes, s.kind,
-                    )
-                })
-                .collect();
-            sections.push(format!("=== Sub Invocations ===\n{}", lines.join("\n"),));
-        }
-        sections.push(format!(
-            "=== Metadata ===\ntool_calls: {}\nexecution_time: {:?}",
-            out.tool_calls,
-            std::time::Duration::from_millis(out.execution_time_ms),
-        ));
-
-        let text = sections.join("\n\n");
         let structured = serde_json::to_value(&out).expect("ComposeOutput serialization");
-        let mut ctr = CallToolResult::success(vec![Content::text(text)]);
+        let mut ctr = CallToolResult::success(Vec::new());
         ctr.structured_content = Some(structured);
 
         let ctr = match self.tool_caching.as_ref() {
             Some(tc) => {
                 // Plain `cache()` — same path every other top-level tool
-                // takes. Walker walks the full ComposeOutput on structured;
-                // elides `.result` / `.console` / `.sub_invocations` in
-                // place if any overflow. Wire shape:
-                // `{result: ComposeOutput-elided, _elided?: M}`.
+                // takes. We hand off an empty text channel; cache() fills
+                // it from the structured payload (or replaces it with the
+                // `<summary>+<recovery>` envelope when walking elides).
                 tc.cache(subject, "compose", &recorded_args, ctr)
                     .await?
                     .result
@@ -244,10 +213,9 @@ const COMPOSE_FETCH_HINT: &str =
      `<summary>+<recovery>` envelope you'd have seen calling that tool directly.";
 
 /// Recovery metadata for one sub-tool dispatch inside a compose script.
+/// Array order is completion order (0-based).
 #[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
 pub struct SubInvocation {
-    /// Order within the script (0-based, stable across re-runs).
-    pub seq: u32,
     pub tool_name: String,
     /// `tool(key=value, ...)` truncated to 80 chars.
     pub args_digest: String,
@@ -470,14 +438,8 @@ impl CatalogDispatcherShared {
             return;
         };
         let kind = sub_invocation_kind(&resp.elided_paths);
-        let seq = self
-            .sub_invocations
-            .lock()
-            .map(|guard| guard.len() as u32)
-            .unwrap_or(0);
         if let Ok(mut guard) = self.sub_invocations.lock() {
             guard.push(SubInvocation {
-                seq,
                 tool_name: tool_name.to_string(),
                 args_digest: format_args_digest(tool_name, args),
                 invocation_id: uuid::Uuid::from(invocation_id),

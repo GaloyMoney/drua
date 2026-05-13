@@ -1647,7 +1647,6 @@
         "invocation_id": "<uuid>",
         "kind": "lines",
         "raw_size_bytes": 13051,
-        "seq": 0,
         "tool_name": "fake_upstream_str-large-table"
       },
       {
@@ -1655,7 +1654,6 @@
         "invocation_id": "<uuid>",
         "kind": "json_array_slice",
         "raw_size_bytes": 10391,
-        "seq": 1,
         "tool_name": "fake_upstream_arr-large-passthrough-items"
       }
     ],

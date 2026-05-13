@@ -526,9 +526,7 @@ impl ToolSets {
                             let args_for_cache = args_value
                                 .clone()
                                 .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
-                            tc.cache(subject, name, &args_for_cache, raw)
-                                .await?
-                                .result
+                            tc.cache(subject, name, &args_for_cache, raw).await?.result
                         }
                         _ => raw,
                     };

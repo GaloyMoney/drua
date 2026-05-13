@@ -189,12 +189,7 @@ async fn persisted_invocation_round_trips_through_find_by_id() {
     let owner = ToolCallOwnerId::new();
 
     let response = caching
-        .cache(
-            owner,
-            "bash",
-            &serde_json::json!({}),
-            upstream,
-        )
+        .cache(owner, "bash", &serde_json::json!({}), upstream)
         .await
         .expect("persist must succeed");
 
@@ -277,12 +272,7 @@ async fn no_owner_is_passthrough() {
     let upstream = CallToolResult::success(vec![Content::text(big.clone())]);
 
     let response = caching
-        .cache(
-            None,
-            "bash",
-            &serde_json::json!({}),
-            upstream,
-        )
+        .cache(None, "bash", &serde_json::json!({}), upstream)
         .await
         .expect("no-owner path must not error");
 
