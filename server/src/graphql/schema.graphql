@@ -139,6 +139,15 @@ input AuditLogQueryInput {
 	projectId: ProjectId
 }
 
+type BootstrapPersonalProjectPayload {
+	"""
+	`true` if this call created the project; `false` if a project with
+	the same name already existed and was returned as-is.
+	"""
+	created: Boolean!
+	project: Project!
+}
+
 union ChatContentBlock = TextContent | ToolUseContent | ThinkingContent | ToolResultContent | SandboxNotificationContent
 
 type ChatMessage {
@@ -277,6 +286,7 @@ type Mutation {
 	agentDelete(input: AgentDeleteInput!): AgentDeletePayload!
 	agentDetachSandbox(input: AgentDetachSandboxInput!): AgentDetachSandboxPayload!
 	agentUpdateModelChain(input: AgentUpdateModelChainInput!): AgentUpdateModelChainPayload!
+	bootstrapPersonalProject: BootstrapPersonalProjectPayload!
 	mcpCredentialsCreate(input: McpCredentialsCreateInput!): McpCredentialsCreatePayload!
 	mcpCredentialsRevoke(input: McpCredentialsRevokeInput!): McpCredentialsRevokePayload!
 	noteDelete(input: NoteDeleteInput!): NoteDeletePayload!

@@ -53,6 +53,22 @@ impl Mutation {
         Ok(ProjectDeletePayload::from(Project::from(project)))
     }
 
+    async fn bootstrap_personal_project(
+        &self,
+        ctx: &Context<'_>,
+    ) -> async_graphql::Result<BootstrapPersonalProjectPayload> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        let user_id = sub
+            .originating_user_id()
+            .ok_or_else(|| async_graphql::Error::new("Authentication required"))?;
+        let user = app.users().find_by_id(user_id).await?;
+        let (project, created) = app.projects().find_or_create_personal(&user).await?;
+        Ok(BootstrapPersonalProjectPayload {
+            project: Project::from(project),
+            created,
+        })
+    }
+
     async fn project_update_model_chain(
         &self,
         ctx: &Context<'_>,

@@ -112,6 +112,30 @@ const PROJECTS_QUERY: &str = r#"
     }
 "#;
 
+const BOOTSTRAP_MUTATION: &str = r#"
+    mutation { bootstrapPersonalProject { project { id name } created } }
+"#;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BootstrapResponse {
+    bootstrap_personal_project: BootstrapPayload,
+}
+
+#[derive(Debug, Deserialize)]
+struct BootstrapPayload {
+    project: BootstrapProject,
+    #[allow(dead_code)]
+    created: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct BootstrapProject {
+    id: String,
+    #[allow(dead_code)]
+    name: String,
+}
+
 const PROJECT_CREATE_MUTATION: &str = r#"
     mutation ProjectCreate($input: ProjectCreateInput!) {
         projectCreate(input: $input) {
@@ -356,9 +380,35 @@ enum ChatStreamEvent {
     ToolResult(String),
     Error(String),
     Done,
-    HistoryLoaded(String, Vec<ChatMessage>),
-    ThreadsLoaded(String, Box<ThreadGridState>),
+    HistoryLoaded(Vec<ChatMessage>),
+    ThreadsLoaded(Box<ThreadGridState>),
     ExportComplete(String),
+}
+
+/// Every stream event is tagged with the agent it originated from (or `None`
+/// for global events like `ExportComplete`). When the user switches projects
+/// mid-stream, the previous task's in-flight events would otherwise pollute
+/// the newly-selected project's chat — `dispatch_stream_event` drops events
+/// whose tag doesn't match `state.selected_agent_id()`.
+struct TaggedEvent {
+    agent_id: Option<String>,
+    event: ChatStreamEvent,
+}
+
+impl TaggedEvent {
+    fn for_agent(agent_id: &str, event: ChatStreamEvent) -> Self {
+        Self {
+            agent_id: Some(agent_id.to_string()),
+            event,
+        }
+    }
+
+    fn untagged(event: ChatStreamEvent) -> Self {
+        Self {
+            agent_id: None,
+            event,
+        }
+    }
 }
 
 fn spawn_chat_stream(
@@ -366,9 +416,11 @@ fn spawn_chat_stream(
     token: String,
     agent_id: String,
     prompt: String,
-    tx: mpsc::UnboundedSender<ChatStreamEvent>,
+    tx: mpsc::UnboundedSender<TaggedEvent>,
 ) {
     tokio::spawn(async move {
+        let stream_id = agent_id.clone();
+        let send_id = agent_id.clone();
         let result = crate::graphql::subscribe_agent_message(
             &base_url,
             &token,
@@ -377,7 +429,7 @@ fn spawn_chat_stream(
             |event| {
                 let evt = parse_gql_event(&event);
                 if let Some(evt) = evt {
-                    return tx.send(evt).is_ok();
+                    return tx.send(TaggedEvent::for_agent(&send_id, evt)).is_ok();
                 }
                 true
             },
@@ -385,9 +437,12 @@ fn spawn_chat_stream(
         .await;
 
         if let Err(e) = result {
-            let _ = tx.send(ChatStreamEvent::Error(e.to_string()));
+            let _ = tx.send(TaggedEvent::for_agent(
+                &stream_id,
+                ChatStreamEvent::Error(e.to_string()),
+            ));
         }
-        let _ = tx.send(ChatStreamEvent::Done);
+        let _ = tx.send(TaggedEvent::for_agent(&stream_id, ChatStreamEvent::Done));
     });
 }
 
@@ -426,6 +481,18 @@ fn parse_gql_event(event: &serde_json::Value) -> Option<ChatStreamEvent> {
         }
         "AssistantDoneEvent" => Some(ChatStreamEvent::Done),
         _ => None,
+    }
+}
+
+/// Best-effort: silently degrades to `None` so a missing/disabled bootstrap
+/// mutation doesn't block TUI launch.
+async fn bootstrap_personal_project(client: &GraphqlClient) -> Option<String> {
+    let resp: Result<BootstrapResponse> = client
+        .query(BOOTSTRAP_MUTATION, serde_json::json!({}))
+        .await;
+    match resp {
+        Ok(r) => Some(r.bootstrap_personal_project.project.id),
+        Err(_) => None,
     }
 }
 
@@ -530,18 +597,22 @@ fn spawn_chat_history_fetch(
     base_url: String,
     token: String,
     agent_id: String,
-    tx: mpsc::UnboundedSender<ChatStreamEvent>,
+    tx: mpsc::UnboundedSender<TaggedEvent>,
 ) {
     tokio::spawn(async move {
         let client = GraphqlClient::new(&base_url, &token);
         match fetch_chat_history(&client, &agent_id).await {
             Ok(messages) => {
-                let _ = tx.send(ChatStreamEvent::HistoryLoaded(agent_id, messages));
+                let _ = tx.send(TaggedEvent::for_agent(
+                    &agent_id,
+                    ChatStreamEvent::HistoryLoaded(messages),
+                ));
             }
             Err(e) => {
-                let _ = tx.send(ChatStreamEvent::Error(format!(
-                    "Failed to load history: {e}"
-                )));
+                let _ = tx.send(TaggedEvent::for_agent(
+                    &agent_id,
+                    ChatStreamEvent::Error(format!("Failed to load history: {e}")),
+                ));
             }
         }
     });
@@ -882,7 +953,7 @@ fn spawn_thread_export(
     token: String,
     agent_id: String,
     path: String,
-    tx: mpsc::UnboundedSender<ChatStreamEvent>,
+    tx: mpsc::UnboundedSender<TaggedEvent>,
 ) {
     tokio::spawn(async move {
         let client = GraphqlClient::new(&base_url, &token);
@@ -895,18 +966,22 @@ fn spawn_thread_export(
         match result {
             Ok(resp) => match std::fs::write(&path, &resp.export_thread) {
                 Ok(()) => {
-                    let _ = tx.send(ChatStreamEvent::ExportComplete(format!(
-                        "Exported to {path}"
+                    let _ = tx.send(TaggedEvent::untagged(ChatStreamEvent::ExportComplete(
+                        format!("Exported to {path}"),
                     )));
                 }
                 Err(e) => {
-                    let _ = tx.send(ChatStreamEvent::Error(format!(
-                        "Failed to write {path}: {e}"
-                    )));
+                    let _ = tx.send(TaggedEvent::for_agent(
+                        &agent_id,
+                        ChatStreamEvent::Error(format!("Failed to write {path}: {e}")),
+                    ));
                 }
             },
             Err(e) => {
-                let _ = tx.send(ChatStreamEvent::Error(format!("Export failed: {e}")));
+                let _ = tx.send(TaggedEvent::for_agent(
+                    &agent_id,
+                    ChatStreamEvent::Error(format!("Export failed: {e}")),
+                ));
             }
         }
     });
@@ -916,25 +991,37 @@ fn spawn_threads_fetch(
     base_url: String,
     token: String,
     agent_id: String,
-    tx: mpsc::UnboundedSender<ChatStreamEvent>,
+    tx: mpsc::UnboundedSender<TaggedEvent>,
 ) {
     tokio::spawn(async move {
         let client = GraphqlClient::new(&base_url, &token);
         match fetch_threads(&client, &agent_id).await {
             Ok(grid) => {
-                let _ = tx.send(ChatStreamEvent::ThreadsLoaded(agent_id, Box::new(grid)));
+                let _ = tx.send(TaggedEvent::for_agent(
+                    &agent_id,
+                    ChatStreamEvent::ThreadsLoaded(Box::new(grid)),
+                ));
             }
             Err(e) => {
-                let _ = tx.send(ChatStreamEvent::Error(format!(
-                    "Failed to load threads: {e}"
-                )));
+                let _ = tx.send(TaggedEvent::for_agent(
+                    &agent_id,
+                    ChatStreamEvent::Error(format!("Failed to load threads: {e}")),
+                ));
             }
         }
     });
 }
 
-fn dispatch_stream_event(state: &mut ScreenState, evt: ChatStreamEvent) {
-    match evt {
+fn dispatch_stream_event(state: &mut ScreenState, tagged: TaggedEvent) {
+    // Drop tagged events whose originating agent no longer matches the
+    // user's selection — e.g. in-flight deltas from a chat stream
+    // kicked off in a project the user just switched away from.
+    if let Some(agent_id) = tagged.agent_id.as_deref() {
+        if state.selected_agent_id().as_deref() != Some(agent_id) {
+            return;
+        }
+    }
+    match tagged.event {
         ChatStreamEvent::Delta(text) => {
             state.chat_view.assistant.append_text(&text);
         }
@@ -953,18 +1040,14 @@ fn dispatch_stream_event(state: &mut ScreenState, evt: ChatStreamEvent) {
         ChatStreamEvent::Done => {
             state.chat_view.assistant.finish_streaming();
         }
-        ChatStreamEvent::HistoryLoaded(agent_id, messages) => {
-            if state.selected_agent_id().as_deref() == Some(agent_id.as_str()) {
-                state.chat_view.assistant.load_history(messages);
-                state.chat_view.reset_scroll();
-            }
+        ChatStreamEvent::HistoryLoaded(messages) => {
+            state.chat_view.assistant.load_history(messages);
+            state.chat_view.reset_scroll();
         }
-        ChatStreamEvent::ThreadsLoaded(agent_id, grid) => {
-            if state.selected_agent_id().as_deref() == Some(agent_id.as_str()) {
-                state.status_message = None;
-                state.thread_view = Some(*grid);
-                state.focus = Focus::Threads;
-            }
+        ChatStreamEvent::ThreadsLoaded(grid) => {
+            state.status_message = None;
+            state.thread_view = Some(*grid);
+            state.focus = Focus::Threads;
         }
         ChatStreamEvent::ExportComplete(msg) => {
             state.status_message = Some(msg);
@@ -1009,9 +1092,25 @@ async fn ensure_authenticated(server: Option<String>) -> Result<(Config, Graphql
 
 pub async fn run(server: Option<String>) -> Result<()> {
     let (config, client, user_name) = ensure_authenticated(server).await?;
+    let bootstrap_id = bootstrap_personal_project(&client).await;
     let projects = fetch_projects(&client).await?;
 
-    let mut state = ScreenState::new(projects, config.server_url.clone(), user_name);
+    let landing = config
+        .last_project_id
+        .as_deref()
+        .filter(|id| projects.iter().any(|p| p.id.as_str() == *id))
+        .map(|s| s.to_string())
+        .or(bootstrap_id);
+
+    let mut state = ScreenState::new(
+        projects,
+        config.server_url.clone(),
+        user_name,
+        landing.as_deref(),
+    );
+    if let Some(id) = state.selected_project().map(|p| p.id.clone()) {
+        let _ = Config::save_last_project(&id);
+    }
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -1034,8 +1133,9 @@ async fn run_event_loop(
     client: &GraphqlClient,
     config: &Config,
 ) -> Result<()> {
-    let (stream_tx, mut stream_rx) = mpsc::unbounded_channel::<ChatStreamEvent>();
+    let (stream_tx, mut stream_rx) = mpsc::unbounded_channel::<TaggedEvent>();
     let mut event_stream = EventStream::new();
+    let mut persisted_project_id: Option<String> = state.selected_project().map(|p| p.id.clone());
     loop {
         terminal.draw(|frame| ui::draw(frame, state))?;
 
@@ -1129,6 +1229,14 @@ async fn run_event_loop(
                 }
             }
             _ = tokio::time::sleep(timeout) => {}
+        }
+
+        let current_project_id = state.selected_project().map(|p| p.id.clone());
+        if current_project_id != persisted_project_id {
+            if let Some(id) = current_project_id.as_deref() {
+                let _ = Config::save_last_project(id);
+            }
+            persisted_project_id = current_project_id;
         }
 
         // Fetch history when the selected agent changes (and we're not streaming).

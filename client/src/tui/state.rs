@@ -32,14 +32,27 @@ pub enum Mode {
     Browse,
     CreateProject,
     ExportThread,
+    /// Centered overlay for switching projects. `^P` opens; case-insensitive
+    /// substring match against project names. A virtual final row offers
+    /// `+ Create new "<query>"` which hands off to `Mode::CreateProject`.
+    ProjectPicker {
+        input: String,
+        list_cursor: usize,
+    },
 }
 
-#[derive(Default, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum PickerOutcome {
+    Switched,
+    CreateRequested,
+    Cancelled,
+}
+
+#[derive(Debug, Default, PartialEq, Eq, Clone, Copy)]
 pub enum Focus {
     #[default]
-    Sidebar,
-    Agents,
     Chat,
+    Agents,
     Threads,
 }
 
@@ -267,15 +280,23 @@ pub struct ScreenState {
 }
 
 impl ScreenState {
-    pub fn new(projects: Vec<ProjectItem>, server_url: String, user_name: String) -> Self {
+    pub fn new(
+        projects: Vec<ProjectItem>,
+        server_url: String,
+        user_name: String,
+        landing_project_id: Option<&str>,
+    ) -> Self {
+        let cursor = landing_project_id
+            .and_then(|id| projects.iter().position(|p| p.id == id))
+            .unwrap_or(0);
         let selected_lead_id = projects
-            .first()
+            .get(cursor)
             .and_then(|project| project.lead.as_ref())
             .map(|l| l.id.clone());
 
         Self {
             projects,
-            cursor: 0,
+            cursor,
             server_url,
             user_name,
             should_quit: false,
@@ -380,6 +401,59 @@ impl ScreenState {
         self.export_path.clear();
     }
 
+    pub fn enter_project_picker(&mut self) {
+        self.mode = Mode::ProjectPicker {
+            input: String::new(),
+            list_cursor: 0,
+        };
+    }
+
+    pub fn exit_project_picker(&mut self) {
+        self.mode = Mode::Browse;
+    }
+
+    /// Case-insensitive substring match in original-order; returns `(idx, name)`.
+    pub fn picker_matches(&self, query: &str) -> Vec<(usize, String)> {
+        let q = query.to_lowercase();
+        self.projects
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| q.is_empty() || p.name.to_lowercase().contains(&q))
+            .map(|(i, p)| (i, p.name.clone()))
+            .collect()
+    }
+
+    /// Returns `true` when the picker handed off to the create modal —
+    /// the dashboard caller treats that as "stay in modal, just a different one".
+    pub fn picker_confirm(&mut self) -> PickerOutcome {
+        let (query, list_cursor) = match &self.mode {
+            Mode::ProjectPicker { input, list_cursor } => (input.clone(), *list_cursor),
+            _ => return PickerOutcome::Cancelled,
+        };
+        let matches = self.picker_matches(&query);
+        if list_cursor < matches.len() {
+            let (idx, _) = matches[list_cursor];
+            self.exit_project_picker();
+            self.switch_to_project(idx);
+            PickerOutcome::Switched
+        } else {
+            // Virtual "Create new" row.
+            self.exit_project_picker();
+            self.enter_create_mode();
+            self.input_name = query;
+            PickerOutcome::CreateRequested
+        }
+    }
+
+    pub fn switch_to_project(&mut self, idx: usize) {
+        if idx >= self.projects.len() {
+            return;
+        }
+        self.cursor = idx;
+        self.sync_lead_and_clear_chat();
+        self.focus = Focus::Chat;
+    }
+
     pub fn active_input_mut(&mut self) -> &mut String {
         if self.input_field == 0 {
             &mut self.input_name
@@ -388,30 +462,25 @@ impl ScreenState {
         }
     }
 
+    /// Cycle reduces to Chat ↔ Agents; Threads is reachable via ^T only.
     pub fn toggle_focus(&mut self) {
         self.focus = match self.focus {
-            Focus::Sidebar => Focus::Chat,
             Focus::Chat => Focus::Agents,
-            Focus::Agents => Focus::Sidebar,
-            Focus::Threads => Focus::Sidebar,
+            Focus::Agents | Focus::Threads => Focus::Chat,
         };
     }
 
     pub fn focus_left(&mut self) {
         self.focus = match self.focus {
-            Focus::Sidebar => Focus::Agents,
-            Focus::Chat => Focus::Sidebar,
             Focus::Agents => Focus::Chat,
-            Focus::Threads => Focus::Sidebar,
+            Focus::Chat | Focus::Threads => Focus::Chat,
         };
     }
 
     pub fn focus_right(&mut self) {
         self.focus = match self.focus {
-            Focus::Sidebar => Focus::Chat,
             Focus::Chat => Focus::Agents,
-            Focus::Agents => Focus::Sidebar,
-            Focus::Threads => Focus::Agents,
+            Focus::Agents | Focus::Threads => Focus::Agents,
         };
     }
 
@@ -681,6 +750,15 @@ impl ScreenState {
         }
     }
 
+    /// Test access for the picker-input string.
+    #[cfg(test)]
+    fn picker_input(&self) -> Option<&str> {
+        match &self.mode {
+            Mode::ProjectPicker { input, .. } => Some(input.as_str()),
+            _ => None,
+        }
+    }
+
     fn sync_lead_and_clear_chat(&mut self) {
         self.selected_lead_id = self
             .selected_project()
@@ -689,8 +767,167 @@ impl ScreenState {
         self.agent_cursor = 0;
         self.loaded_agent_id = None;
         self.thread_view = None;
+        // `clear()` already resets `streaming` — set it again explicitly so
+        // the project-switch contract doesn't silently rot if clear's
+        // implementation ever changes. The reactive history-fetch in
+        // run_event_loop gates on `!streaming`, so a stale `true` here
+        // would leave the new project's chat permanently un-loaded.
         self.chat_view.assistant.clear();
+        self.chat_view.assistant.streaming = false;
         self.input_clear();
         self.chat_view.reset_scroll();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn proj(id: &str, name: &str) -> ProjectItem {
+        ProjectItem {
+            id: id.into(),
+            name: name.into(),
+            description: None,
+            created_at: None,
+            lead: Some(AgentItem {
+                id: format!("lead-{id}"),
+                name: "lead".into(),
+                role: "PROJECT_LEAD".into(),
+                model: "test".into(),
+                sandbox: None,
+            }),
+            agents: vec![],
+        }
+    }
+
+    fn make_state(projects: Vec<ProjectItem>, landing: Option<&str>) -> ScreenState {
+        ScreenState::new(projects, "http://s".into(), "u".into(), landing)
+    }
+
+    #[test]
+    fn new_lands_on_provided_project_id_in_chat_focus() {
+        let state = make_state(
+            vec![proj("a", "Alpha"), proj("b", "Beta"), proj("c", "Gamma")],
+            Some("b"),
+        );
+        assert_eq!(state.cursor, 1);
+        assert_eq!(state.focus, Focus::Chat);
+        assert_eq!(state.selected_lead_id.as_deref(), Some("lead-b"));
+    }
+
+    #[test]
+    fn new_defaults_to_first_project_when_landing_missing() {
+        let state = make_state(vec![proj("a", "Alpha"), proj("b", "Beta")], None);
+        assert_eq!(state.cursor, 0);
+        assert_eq!(state.focus, Focus::Chat);
+    }
+
+    #[test]
+    fn new_falls_back_when_landing_id_unknown() {
+        let state = make_state(
+            vec![proj("a", "Alpha"), proj("b", "Beta")],
+            Some("stale-id"),
+        );
+        assert_eq!(state.cursor, 0);
+    }
+
+    #[test]
+    fn picker_matches_are_case_insensitive_substrings() {
+        let state = make_state(
+            vec![
+                proj("a", "Alpha"),
+                proj("b", "BetaProj"),
+                proj("c", "Gamma"),
+            ],
+            None,
+        );
+        let m = state.picker_matches("eta");
+        assert_eq!(
+            m.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>(),
+            vec!["BetaProj"]
+        );
+
+        let m = state.picker_matches("a");
+        // Order preserved from the projects vector.
+        assert_eq!(
+            m.iter().map(|(_, n)| n.as_str()).collect::<Vec<_>>(),
+            vec!["Alpha", "BetaProj", "Gamma"]
+        );
+    }
+
+    #[test]
+    fn picker_confirm_match_switches_and_exits_modal() {
+        let mut state = make_state(
+            vec![proj("a", "Alpha"), proj("b", "Beta"), proj("c", "Gamma")],
+            None,
+        );
+        state.enter_project_picker();
+        if let Mode::ProjectPicker { input, list_cursor } = &mut state.mode {
+            *input = "amma".into();
+            *list_cursor = 0;
+        }
+        assert_eq!(state.picker_confirm(), PickerOutcome::Switched);
+        assert_eq!(state.cursor, 2);
+        assert!(matches!(state.mode, Mode::Browse));
+    }
+
+    #[test]
+    fn picker_confirm_on_create_row_prefills_create_modal() {
+        // Realistic state: query "fresh-name" doesn't match "Alpha", so
+        // `matches` is empty and the virtual create row sits at index 0 —
+        // exactly what `handle_picker_key` produces after each keystroke
+        // (it resets `list_cursor` to 0 on every typed char).
+        let mut state = make_state(vec![proj("a", "Alpha")], None);
+        state.enter_project_picker();
+        if let Mode::ProjectPicker { input, list_cursor } = &mut state.mode {
+            *input = "fresh-name".into();
+            *list_cursor = 0;
+        }
+        assert_eq!(state.picker_matches("fresh-name").len(), 0);
+        assert_eq!(state.picker_confirm(), PickerOutcome::CreateRequested);
+        assert!(matches!(state.mode, Mode::CreateProject));
+        assert_eq!(state.input_name, "fresh-name");
+    }
+
+    #[test]
+    fn switch_to_project_clears_chat_and_focuses_chat() {
+        let mut state = make_state(vec![proj("a", "Alpha"), proj("b", "Beta")], None);
+        state.chat_input = "draft".into();
+        state.loaded_agent_id = Some("lead-a".into());
+        state.thread_view = None;
+        state.focus = Focus::Agents;
+
+        state.switch_to_project(1);
+
+        assert_eq!(state.cursor, 1);
+        assert_eq!(state.focus, Focus::Chat);
+        assert!(state.chat_input.is_empty());
+        assert!(state.loaded_agent_id.is_none());
+        assert!(state.thread_view.is_none());
+    }
+
+    #[test]
+    fn enter_project_picker_initializes_empty_input() {
+        let mut state = make_state(vec![proj("a", "A")], None);
+        state.enter_project_picker();
+        assert_eq!(state.picker_input(), Some(""));
+    }
+
+    #[test]
+    fn switch_to_project_resets_streaming_flag() {
+        // Regression: a mid-stream project switch must clear
+        // `chat_view.assistant.streaming`. The reactive history-fetch in
+        // `run_event_loop` gates on `!streaming`, so a stale `true` would
+        // prevent the new project's chat history from ever loading — and
+        // the dropped `Done` event (filtered by the agent-id guard in
+        // `dispatch_stream_event`) can't unstick it.
+        let mut state = make_state(vec![proj("a", "Alpha"), proj("b", "Beta")], None);
+        state.chat_view.assistant.add_user_message("hi");
+        assert!(state.chat_view.assistant.streaming);
+
+        state.switch_to_project(1);
+
+        assert!(!state.chat_view.assistant.streaming);
+        assert!(state.chat_view.assistant.messages.is_empty());
     }
 }

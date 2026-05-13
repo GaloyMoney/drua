@@ -18,65 +18,90 @@ pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
     if ctrl {
+        // ^C/^Z fire from any mode — they're terminal-level signals.
         match key.code {
             KeyCode::Char('c') => return Action::Quit,
             KeyCode::Char('z') => return Action::Suspend,
-            KeyCode::Char('o') => {
-                state.select_lead_and_focus_chat();
-                return Action::None;
-            }
-            KeyCode::Char('r') => return Action::Refresh,
-            KeyCode::Char('h') => {
-                state.focus_left();
-                return Action::None;
-            }
-            KeyCode::Char('l') => {
-                state.focus_right();
-                return Action::None;
-            }
-            KeyCode::Char('t') => return Action::ToggleThreads,
             _ => {}
+        }
+        // Browse-mode-only shortcuts. Modals (CreateProject, ExportThread,
+        // ProjectPicker) own their input — letting `^R`/`^T`/`^H`/`^L`/`^O`
+        // fire here would mutate state the modal depends on
+        // (e.g. `^R` refresh would swap the projects list mid-picker).
+        if matches!(state.mode, Mode::Browse) {
+            match key.code {
+                KeyCode::Char('p') => {
+                    state.enter_project_picker();
+                    return Action::None;
+                }
+                KeyCode::Char('o') => {
+                    state.select_lead_and_focus_chat();
+                    return Action::None;
+                }
+                KeyCode::Char('r') => return Action::Refresh,
+                KeyCode::Char('h') => {
+                    state.focus_left();
+                    return Action::None;
+                }
+                KeyCode::Char('l') => {
+                    state.focus_right();
+                    return Action::None;
+                }
+                KeyCode::Char('t') => return Action::ToggleThreads,
+                _ => {}
+            }
         }
     }
 
-    match state.mode {
+    match &state.mode {
         Mode::Browse => match state.focus {
-            Focus::Sidebar => handle_sidebar_key(state, key),
             Focus::Agents => handle_agents_key(state, key),
             Focus::Chat => handle_chat_key(state, key),
             Focus::Threads => handle_threads_key(state, key),
         },
         Mode::CreateProject => handle_create_key(state, key),
         Mode::ExportThread => handle_export_key(state, key),
+        Mode::ProjectPicker { .. } => handle_picker_key(state, key),
     }
 }
 
-fn handle_sidebar_key(state: &mut ScreenState, key: KeyEvent) -> Action {
-    state.status_message = None;
+fn handle_picker_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
-        KeyCode::Char('q') => Action::Quit,
-        KeyCode::Char('j') | KeyCode::Down => {
-            state.cursor_down();
-            Action::None
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            state.cursor_up();
-            Action::None
+        KeyCode::Esc => {
+            state.exit_project_picker();
+            return Action::None;
         }
         KeyCode::Enter => {
-            state.select_lead_and_focus_chat();
-            Action::None
+            let _ = state.picker_confirm();
+            return Action::None;
         }
-        KeyCode::Char('n') => {
-            state.enter_create_mode();
-            Action::None
-        }
-        KeyCode::Tab => {
-            state.toggle_focus();
-            Action::None
-        }
-        _ => Action::None,
+        _ => {}
     }
+    // matches_len+1 because the virtual "Create new" row sits at index = matches_len.
+    let matches_len = match &state.mode {
+        Mode::ProjectPicker { input, .. } => state.picker_matches(&input.clone()).len(),
+        _ => return Action::None,
+    };
+    let Mode::ProjectPicker { input, list_cursor } = &mut state.mode else {
+        return Action::None;
+    };
+    match key.code {
+        KeyCode::Up => *list_cursor = list_cursor.saturating_sub(1),
+        KeyCode::Char('p') if ctrl => *list_cursor = list_cursor.saturating_sub(1),
+        KeyCode::Down if *list_cursor < matches_len => *list_cursor += 1,
+        KeyCode::Char('n') if ctrl && *list_cursor < matches_len => *list_cursor += 1,
+        KeyCode::Backspace => {
+            input.pop();
+            *list_cursor = 0;
+        }
+        KeyCode::Char(c) if !ctrl => {
+            input.push(c);
+            *list_cursor = 0;
+        }
+        _ => {}
+    }
+    Action::None
 }
 
 fn handle_agents_key(state: &mut ScreenState, key: KeyEvent) -> Action {
@@ -95,7 +120,7 @@ fn handle_agents_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             Action::None
         }
         KeyCode::Esc => {
-            state.focus = Focus::Sidebar;
+            state.focus = Focus::Chat;
             Action::None
         }
         KeyCode::Enter => {
@@ -109,10 +134,6 @@ fn handle_agents_key(state: &mut ScreenState, key: KeyEvent) -> Action {
 
 fn handle_chat_key(state: &mut ScreenState, key: KeyEvent) -> Action {
     match key.code {
-        KeyCode::Esc => {
-            state.focus = Focus::Sidebar;
-            Action::None
-        }
         KeyCode::Tab => {
             state.toggle_focus();
             Action::None
@@ -179,7 +200,7 @@ fn handle_threads_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             Action::None
         }
         KeyCode::Esc => {
-            state.focus = Focus::Sidebar;
+            state.focus = Focus::Chat;
             Action::None
         }
         _ => Action::None,
@@ -205,6 +226,7 @@ fn handle_input_editing(state: &mut ScreenState, key: &KeyEvent) {
 }
 
 fn handle_create_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Esc => {
             state.exit_create_mode();
@@ -218,7 +240,7 @@ fn handle_create_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             state.active_input_mut().pop();
             Action::None
         }
-        KeyCode::Char(c) => {
+        KeyCode::Char(c) if !ctrl => {
             state.active_input_mut().push(c);
             Action::None
         }
@@ -236,6 +258,7 @@ fn handle_create_key(state: &mut ScreenState, key: KeyEvent) -> Action {
 }
 
 fn handle_export_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Esc => {
             state.exit_export_mode();
@@ -245,7 +268,7 @@ fn handle_export_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             state.export_path.pop();
             Action::None
         }
-        KeyCode::Char(c) => {
+        KeyCode::Char(c) if !ctrl => {
             state.export_path.push(c);
             Action::None
         }

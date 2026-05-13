@@ -5,8 +5,8 @@ pub(crate) mod repo;
 use drua_library::{CommitAttribution, CommitSubjectKind};
 use tracing::instrument;
 
+pub(crate) use entity::NewUser;
 pub use entity::User;
-use entity::*;
 pub use error::*;
 use repo::*;
 

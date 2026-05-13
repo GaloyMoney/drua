@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 pub struct Config {
     pub server_url: String,
     pub auth_token: String,
+    /// Project the TUI landed on last; restored on relaunch when present.
+    #[serde(default)]
+    pub last_project_id: Option<String>,
 }
 
 fn config_dir() -> Result<PathBuf> {
@@ -44,6 +47,19 @@ impl Config {
         }
 
         Ok(())
+    }
+
+    /// Load → update → save in place. Silent no-op when the user isn't
+    /// logged in so the TUI's project-switch never errors on first run.
+    pub fn save_last_project(project_id: &str) -> Result<()> {
+        let Ok(mut cfg) = Self::load() else {
+            return Ok(());
+        };
+        if cfg.last_project_id.as_deref() == Some(project_id) {
+            return Ok(());
+        }
+        cfg.last_project_id = Some(project_id.to_string());
+        cfg.save()
     }
 
     pub fn delete() -> Result<()> {
