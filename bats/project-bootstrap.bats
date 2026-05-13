@@ -120,67 +120,9 @@ SQL
   [[ "$output" == *'"created":true'* ]]
 }
 
-@test "bootstrap: disabled by config raises an error" {
-  # Render a minimal config with the bootstrap flag turned off and
-  # restart the server against it. SKIP_COMPOSE keeps the shared PG
-  # container alive across the in-test restart — `stop_server`'s default
-  # path runs `down -v` and would yank postgres out from under the next
-  # test.
-  local old_pid=""
-  [ -f "$SERVER_PID_FILE" ] && old_pid="$(cat "$SERVER_PID_FILE")"
-  SKIP_COMPOSE=1 stop_server
-  # Wait for the old process to die AND for port 4200 to free up. CI
-  # occasionally sees the old server still binding the port when the new
-  # one tries to start; the wait loop in `start_server` then short-
-  # circuits on the dying server's last response, leaving the new
-  # config un-loaded.
-  if [ -n "$old_pid" ]; then
-    for _i in $(seq 1 50); do
-      kill -0 "$old_pid" 2>/dev/null || break
-      sleep 0.1
-    done
-    kill -9 "$old_pid" 2>/dev/null || true
-  fi
-  for _i in $(seq 1 30); do
-    curl -s --max-time 0.2 -o /dev/null http://localhost:4200/ 2>/dev/null || break
-    sleep 0.2
-  done
-  local out="$BATS_FILE_TMPDIR/drua-disabled.yml"
-  cat > "$out" <<EOF
-server:
-  port: 4200
-  host: "0.0.0.0"
-  secure_cookies: false
-  mcp_endpoint: "http://localhost:4200/mcp"
-oauth:
-  login: dev
-  dev_mode_agent_tokens: true
-  github_redirect_uri: "http://localhost:4200/auth/github/callback"
-  github_client_id: "bats"
-  github_allowed_teams: []
-agents:
-  models:
-    bats-test-model:
-      model: bats-test-model
-      max_tokens_per_response: 1024
-      context_window_tokens: 4096
-  default_chain:
-    primary: { name: "bats-test-model", max_tokens: 1024 }
-sandbox:
-  backend:
-    provider: local
-    sandbox_spawn_cmd: "true"
-    local_repo_root: "."
-library:
-  repo_url: "https://github.com/galoymoney/drua-test-library"
-  skill_sync_interval_secs: 3600
-auto_bootstrap_personal_project: false
-EOF
-  SKIP_COMPOSE=1 DRUA_CONFIG="$out" start_server
-
-  create_test_user_with "Disabled" "disabled-$(uuidgen | cut -c1-8)"
-  run graphql_query 'mutation { bootstrapPersonalProject { created } }' "$AGENT_TOKEN"
-  echo "$output"
-  [[ "$output" == *'"errors"'* ]]
-  [[ "$output" == *'disabled'* ]]
-}
+# Scenario "disabled by config raises an error" lives in
+# `bats/project-bootstrap-disabled.bats` — it needs its own setup_file
+# so the server boots with `auto_bootstrap_personal_project: false`
+# from the start (an in-test stop/start cycle is racy in CI because
+# `cargo run`'s child can survive its parent kill and keep port 4200
+# bound while the replacement boots).
