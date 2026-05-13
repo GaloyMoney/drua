@@ -64,7 +64,11 @@ fn record_trigger_filtered_audit(
     condition_body: &str,
     trigger_context: &serde_json::Value,
 ) {
-    Audit::record_action_if_unset(AUDIT_ACTION_TRIGGER_FILTERED);
+    // Overwrite (not `_if_unset`): MCP trigger paths pre-set
+    // `action = "workflow.trigger"` before invoking the gate; the
+    // gate's outcome must replace it so the audit row records the
+    // actual disposition, not the verb.
+    Audit::record_action(AUDIT_ACTION_TRIGGER_FILTERED);
     Audit::record_workflow_id(definition.id);
     Audit::record_metadata(serde_json::json!({
         "definition_id": definition.id.to_string(),
@@ -86,7 +90,8 @@ fn record_trigger_condition_errored_audit(
     trigger_context: &serde_json::Value,
     reason: &str,
 ) {
-    Audit::record_action_if_unset(AUDIT_ACTION_TRIGGER_CONDITION_ERRORED);
+    // See `record_trigger_filtered_audit` — same overwrite rationale.
+    Audit::record_action(AUDIT_ACTION_TRIGGER_CONDITION_ERRORED);
     Audit::record_workflow_id(definition.id);
     Audit::record_metadata(serde_json::json!({
         "definition_id": definition.id.to_string(),

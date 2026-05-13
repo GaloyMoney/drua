@@ -43,6 +43,32 @@ extract_id_field() {
     | awk '{print $2}'
 }
 
+# Query the audit log via the `drua_admin_log` MCP tool. Same shape
+# as `_audit_log` in compose.bats; duplicated here so workflow.bats
+# doesn't take a cross-file source dependency.
+_audit_log() {
+  local args_json="$1"
+  local response
+  response="$(mcp_call "$AGENT_TOKEN" "tools/call" \
+    "$(jq -nc --argjson args "$args_json" \
+      '{name:"call_tool", arguments:{tool_name:"drua_admin_log", arguments:$args}}')")"
+  echo "$response" | jq -r '.result.content[0].text // ""'
+}
+
+_wait_for_audit_log() {
+  local args_json="$1"
+  for _i in $(seq 1 40); do
+    local out
+    out="$(_audit_log "$args_json")"
+    if [[ "$out" != "No audit entries found."* ]] && [ -n "$out" ]; then
+      echo "$out"
+      return 0
+    fi
+    sleep 0.1
+  done
+  return 1
+}
+
 @test "workflow: tool_step dispatches whoami and surfaces workflow_executor identity" {
   # Unique-per-run names so re-runs against a persisted PG (developer
   # iteration with SKIP_COMPOSE=1) don't collide.
@@ -326,6 +352,18 @@ extract_id_field() {
     # Belt-and-braces — make sure no `id: <uuid>` line snuck in.
     ! echo "$output" | grep -qE 'id: [0-9a-f-]{36}'
   }
+
+  # 3a. Audit row regression (PR #341 review): the MCP trigger
+  # dispatcher pre-sets `action = "workflow.trigger"` before invoking
+  # the gate. The gate must OVERWRITE that to
+  # `"workflow.trigger_filtered"` so suppressed events are visible
+  # in the audit log. Cursor Bugbot caught this when the helpers
+  # used `record_action_if_unset` (a no-op when set).
+  local audit_row
+  audit_row="$(_wait_for_audit_log '{"action":"workflow.trigger_filtered","limit":1}')" \
+    || { echo "no workflow.trigger_filtered audit row appeared"; return 1; }
+  echo "audit_row=$audit_row"
+  [[ "$audit_row" == *"workflow.trigger_filtered"* ]]
 
   # 4. Update with malformed CEL must be rejected. The admin tool
   #    surfaces the WorkflowError as an MCP error response.
