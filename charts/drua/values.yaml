@@ -74,9 +74,9 @@ galoyAgents:
     ## WorkflowDefinition entity itself rather than a separate config key.
     agents:
       defaultChain:
-        primary: {name: "deepseek/deepseek-v3.2", maxTokens: 8192}
+        primary: {name: "openai/gpt-5-mini", maxTokens: 8192}
         fallbacks:
-          - {name: "openai/gpt-5-mini", maxTokens: 8192}
+          - {name: "deepseek/deepseek-v3.2", maxTokens: 8192}
       projectLead:
         ## Optional per-role chain override:
         # chain:

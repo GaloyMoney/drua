@@ -18,14 +18,9 @@ galoyAgents:
       githubRedirectUri: "https://dashboard.agents.galoy.io/auth/github/callback"
       githubAllowedTeams:
         - "GaloyMoney/galoy-devs"
-    # `providers` inherits from charts/drua/values.yaml. `defaultChain`
-    # is pinned here so prod and dev can diverge (dev keeps the chart
-    # default with deepseek-v3.2 primary).
+    # `providers` and `defaultChain` inherit from charts/drua/values.yaml
+    # (gpt-5-mini primary → deepseek-v3.2 fallback).
     agents:
-      defaultChain:
-        primary: { name: "openai/gpt-5-mini", maxTokens: 8192 }
-        fallbacks:
-          - { name: "deepseek/deepseek-v3.2", maxTokens: 8192 }
       projectLead:
         compaction:
           resetTimeDeltaSeconds: 3600
