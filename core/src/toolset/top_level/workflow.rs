@@ -28,6 +28,10 @@ enum WorkflowParams {
         provider: Option<String>,
         #[serde(default)]
         manual: bool,
+        /// Bare CEL boolean evaluated against `trigger` before a run
+        /// is created. Memo 019e20a2.
+        #[serde(default)]
+        trigger_condition: Option<String>,
         /// Multi-step form. When non-empty this takes precedence over
         /// the single-step shorthand (`skill`/`sandbox`/`sandbox_mode`/
         /// `timeout_seconds`).
@@ -102,6 +106,11 @@ enum WorkflowParams {
         provider: Option<String>,
         #[serde(default)]
         manual: bool,
+        /// Bare CEL boolean evaluated against `trigger` before a run
+        /// is created. Applies when `update_trigger=true`. Memo
+        /// 019e20a2.
+        #[serde(default)]
+        trigger_condition: Option<String>,
         /// Replace the workflow-wide chain. `clear_model_chain: true`
         /// clears it to `None`; otherwise omitting leaves untouched.
         #[serde(default)]
@@ -649,6 +658,7 @@ impl TopLevelTool for WorkflowTool {
                 description,
                 provider,
                 manual,
+                trigger_condition,
                 steps,
                 skill,
                 sandbox,
@@ -658,12 +668,15 @@ impl TopLevelTool for WorkflowTool {
                 model_chain,
             } => {
                 let trigger = if manual {
-                    WorkflowTrigger::Manual
+                    WorkflowTrigger::Manual {
+                        condition: trigger_condition.clone(),
+                    }
                 } else {
                     // Empty secret → Workflows::create generates one.
                     WorkflowTrigger::Webhook {
                         provider: provider.clone(),
                         secret: String::new(),
+                        condition: trigger_condition.clone(),
                     }
                 };
 
@@ -770,15 +783,21 @@ impl TopLevelTool for WorkflowTool {
                 .await?;
                 let payload =
                     payload.unwrap_or_else(|| serde_json::Value::Object(Default::default()));
-                let run = self
+                let maybe_run = self
                     .workflows
                     .trigger_run(subject, resolved_id, payload)
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
-                let text = format_run_text(&run);
+                let (text, run_out) = match &maybe_run {
+                    Some(run) => (format_run_text(run), Some(run_to_output(run))),
+                    None => (
+                        "Trigger condition evaluated to false; no run created.".to_string(),
+                        None,
+                    ),
+                };
                 let out = WorkflowOutput {
                     command: "trigger".to_string(),
-                    run: Some(run_to_output(&run)),
+                    run: run_out,
                     ..Default::default()
                 };
                 (text, out)
@@ -845,6 +864,7 @@ impl TopLevelTool for WorkflowTool {
                 update_trigger,
                 provider,
                 manual,
+                trigger_condition,
                 model_chain,
                 clear_model_chain,
             } => {
@@ -855,11 +875,14 @@ impl TopLevelTool for WorkflowTool {
                 };
                 let trigger = if update_trigger {
                     Some(if manual {
-                        WorkflowTrigger::Manual
+                        WorkflowTrigger::Manual {
+                            condition: trigger_condition.clone(),
+                        }
                     } else {
                         WorkflowTrigger::Webhook {
                             provider,
                             secret: String::new(),
+                            condition: trigger_condition.clone(),
                         }
                     })
                 } else {
@@ -919,9 +942,11 @@ fn definition_to_output(d: &WorkflowDefinition) -> WorkflowDefinitionOutput {
     let mut cron_timezone = None;
     let mut next_run_at = None;
     let (trigger_type, trigger_provider) = match &d.trigger {
-        WorkflowTrigger::Manual => ("manual".to_string(), None),
+        WorkflowTrigger::Manual { .. } => ("manual".to_string(), None),
         WorkflowTrigger::Webhook { provider, .. } => ("webhook".to_string(), provider.clone()),
-        WorkflowTrigger::Cron { schedule, timezone } => {
+        WorkflowTrigger::Cron {
+            schedule, timezone, ..
+        } => {
             cron_schedule = Some(schedule.clone());
             cron_timezone = timezone.clone();
             next_run_at = crate::workflow::next_cron_fire_at(
@@ -1056,7 +1081,7 @@ fn run_state_str(state: WorkflowRunState) -> &'static str {
 impl WorkflowTool {
     fn webhook_url_and_secret(&self, def: &WorkflowDefinition) -> (Option<String>, Option<String>) {
         match &def.trigger {
-            WorkflowTrigger::Manual | WorkflowTrigger::Cron { .. } => (None, None),
+            WorkflowTrigger::Manual { .. } | WorkflowTrigger::Cron { .. } => (None, None),
             WorkflowTrigger::Webhook { secret, .. } => {
                 let url = match &self.public_host {
                     Some(host) => format!("{host}/webhooks/{}", def.id),
@@ -1074,12 +1099,14 @@ impl WorkflowTool {
         webhook_secret: &Option<String>,
     ) -> String {
         let trigger_label = match &def.trigger {
-            WorkflowTrigger::Manual => "manual".to_string(),
+            WorkflowTrigger::Manual { .. } => "manual".to_string(),
             WorkflowTrigger::Webhook { provider, .. } => match provider {
                 Some(p) => format!("webhook ({p})"),
                 None => "webhook".to_string(),
             },
-            WorkflowTrigger::Cron { schedule, timezone } => match timezone {
+            WorkflowTrigger::Cron {
+                schedule, timezone, ..
+            } => match timezone {
                 Some(tz) => format!("cron ({schedule} {tz})"),
                 None => format!("cron ({schedule})"),
             },
@@ -1128,7 +1155,7 @@ fn format_list_text(defs: &[WorkflowDefinition]) -> String {
 
     for d in defs {
         let trigger = match &d.trigger {
-            WorkflowTrigger::Manual => "manual".to_string(),
+            WorkflowTrigger::Manual { .. } => "manual".to_string(),
             WorkflowTrigger::Webhook { provider, .. } => match provider {
                 Some(p) => format!("webhook:{p}"),
                 None => "webhook".to_string(),
@@ -1148,15 +1175,19 @@ fn format_list_text(defs: &[WorkflowDefinition]) -> String {
 
 fn format_get_text(d: &WorkflowDefinition) -> String {
     let trigger = match &d.trigger {
-        WorkflowTrigger::Manual => "manual".to_string(),
-        WorkflowTrigger::Webhook { provider, secret } => {
+        WorkflowTrigger::Manual { .. } => "manual".to_string(),
+        WorkflowTrigger::Webhook {
+            provider, secret, ..
+        } => {
             let label = match provider {
                 Some(p) => format!("webhook ({p})"),
                 None => "webhook".to_string(),
             };
             format!("{label}\n  webhook_secret: {secret}")
         }
-        WorkflowTrigger::Cron { schedule, timezone } => {
+        WorkflowTrigger::Cron {
+            schedule, timezone, ..
+        } => {
             let mut s = format!("cron\n  schedule:    {schedule}");
             let tz_label = timezone.as_deref().unwrap_or("UTC");
             s.push_str(&format!("\n  timezone:    {tz_label}"));

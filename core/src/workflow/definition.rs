@@ -60,12 +60,29 @@ impl<'de> Deserialize<'de> for OutputSchema {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum WorkflowTrigger {
-    Manual,
+    Manual {
+        /// Bare CEL boolean evaluated against `trigger` before a run
+        /// is created. `None` → fire as today. See `Webhook::condition`
+        /// for full semantics.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        condition: Option<String>,
+    },
     Webhook {
         /// `Some("honeycomb")` selects the `X-Honeycomb-Webhook-Token`
         /// header; `None` falls back to `Authorization: Bearer`.
         provider: Option<String>,
         secret: String,
+        /// Bare CEL boolean evaluated against `trigger` (only —
+        /// `steps` is rejected at parse time, no steps have run yet)
+        /// before a run is created. `None` → always fire (back-compat).
+        /// `Some(expr)` and `expr` evaluates to `false` → no run is
+        /// created and a `workflow.trigger_filtered` audit row is
+        /// written. Errors → no run + `workflow.trigger_condition_errored`
+        /// audit row. Compiled and validated at workflow create/update
+        /// time so authors learn syntax issues then, not on the first
+        /// webhook.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        condition: Option<String>,
     },
     /// Time-based scheduled execution. `schedule` is a 6- or 7-field
     /// cron expression as accepted by the `cron` crate (sec min hr dom
@@ -74,7 +91,27 @@ pub enum WorkflowTrigger {
         schedule: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timezone: Option<String>,
+        /// See `Webhook::condition`. Degenerate today — the cron
+        /// trigger context is empty, so any reference to
+        /// `trigger.payload.X` resolves to null. Useful once a
+        /// `trigger.now` binding lands; permitted in the grammar
+        /// today for uniformity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        condition: Option<String>,
     },
+}
+
+impl WorkflowTrigger {
+    /// Bare CEL boolean expression gating run creation. `None` →
+    /// always fire (back-compat with definitions that predate the
+    /// field).
+    pub fn condition(&self) -> Option<&str> {
+        match self {
+            Self::Manual { condition }
+            | Self::Webhook { condition, .. }
+            | Self::Cron { condition, .. } => condition.as_deref(),
+        }
+    }
 }
 
 /// IANA name parses through `chrono_tz`; `None` → `UTC`. Surfaces a
@@ -510,6 +547,7 @@ mod tests {
         let trigger = WorkflowTrigger::Cron {
             schedule: "0 */6 * * * *".to_string(),
             timezone: Some("UTC".to_string()),
+            condition: None,
         };
         let s = serde_yaml::to_string(&trigger).unwrap();
         assert!(s.contains("type: cron"));
@@ -518,9 +556,14 @@ mod tests {
 
         let back: WorkflowTrigger = serde_yaml::from_str(&s).unwrap();
         match back {
-            WorkflowTrigger::Cron { schedule, timezone } => {
+            WorkflowTrigger::Cron {
+                schedule,
+                timezone,
+                condition,
+            } => {
                 assert_eq!(schedule, "0 */6 * * * *");
                 assert_eq!(timezone.as_deref(), Some("UTC"));
+                assert!(condition.is_none());
             }
             _ => panic!("expected Cron variant"),
         }
@@ -531,8 +574,43 @@ mod tests {
         let trigger = WorkflowTrigger::Cron {
             schedule: "0 */6 * * * *".to_string(),
             timezone: None,
+            condition: None,
         };
         let s = serde_yaml::to_string(&trigger).unwrap();
         assert!(!s.contains("timezone"));
+    }
+
+    #[test]
+    fn manual_trigger_with_condition_round_trips() {
+        let trigger = WorkflowTrigger::Manual {
+            condition: Some("trigger.payload.env == 'staging'".to_string()),
+        };
+        let s = serde_yaml::to_string(&trigger).unwrap();
+        let back: WorkflowTrigger = serde_yaml::from_str(&s).unwrap();
+        assert_eq!(back.condition(), Some("trigger.payload.env == 'staging'"));
+    }
+
+    #[test]
+    fn manual_trigger_omits_absent_condition() {
+        let trigger = WorkflowTrigger::Manual { condition: None };
+        let s = serde_yaml::to_string(&trigger).unwrap();
+        assert!(!s.contains("condition"));
+    }
+
+    /// Old serialized triggers without the `condition` field must
+    /// hydrate cleanly (replay-safety on `WorkflowDefinitionEvent::Initialized`).
+    #[test]
+    fn legacy_trigger_without_condition_deserializes_to_none() {
+        let yaml = "type: webhook\nprovider: github_app\nsecret: whsec_x\n";
+        let trigger: WorkflowTrigger = serde_yaml::from_str(yaml).unwrap();
+        assert!(trigger.condition().is_none());
+
+        let yaml = "type: manual\n";
+        let trigger: WorkflowTrigger = serde_yaml::from_str(yaml).unwrap();
+        assert!(trigger.condition().is_none());
+
+        let yaml = "type: cron\nschedule: '0 0 * * * *'\n";
+        let trigger: WorkflowTrigger = serde_yaml::from_str(yaml).unwrap();
+        assert!(trigger.condition().is_none());
     }
 }

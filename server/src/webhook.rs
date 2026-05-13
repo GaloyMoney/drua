@@ -50,8 +50,10 @@ pub async fn handle_webhook(
     };
 
     let (provider, expected_secret) = match &definition.trigger {
-        WorkflowTrigger::Webhook { provider, secret } => (provider.clone(), secret.clone()),
-        WorkflowTrigger::Manual | WorkflowTrigger::Cron { .. } => {
+        WorkflowTrigger::Webhook {
+            provider, secret, ..
+        } => (provider.clone(), secret.clone()),
+        WorkflowTrigger::Manual { .. } | WorkflowTrigger::Cron { .. } => {
             return StatusCode::METHOD_NOT_ALLOWED.into_response();
         }
     };
@@ -89,9 +91,13 @@ pub async fn handle_webhook(
         .trigger_run_for_definition(definition, trigger_context)
         .await
     {
-        Ok(run) => {
+        Ok(Some(run)) => {
             tracing::info!(run_id = %run.id, "workflow run triggered via webhook");
             (StatusCode::OK, run.id.to_string()).into_response()
+        }
+        Ok(None) => {
+            tracing::info!("webhook accepted; run suppressed by trigger condition");
+            (StatusCode::OK, "filtered").into_response()
         }
         Err(e) => {
             tracing::error!(error = %e, "webhook: failed to trigger run");

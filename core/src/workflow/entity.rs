@@ -135,11 +135,16 @@ impl WorkflowDefinition {
             .as_ref()
             .map(|incoming| match (incoming, &self.trigger) {
                 (
-                    WorkflowTrigger::Webhook { provider, .. },
+                    WorkflowTrigger::Webhook {
+                        provider,
+                        condition,
+                        ..
+                    },
                     WorkflowTrigger::Webhook { secret, .. },
                 ) => WorkflowTrigger::Webhook {
                     provider: provider.clone(),
                     secret: secret.clone(),
+                    condition: condition.clone(),
                 },
                 _ => incoming.clone(),
             });
@@ -199,11 +204,16 @@ impl WorkflowDefinition {
             .as_ref()
             .map(|incoming| match (incoming, &self.trigger) {
                 (
-                    WorkflowTrigger::Webhook { provider, .. },
+                    WorkflowTrigger::Webhook {
+                        provider,
+                        condition,
+                        ..
+                    },
                     WorkflowTrigger::Webhook { secret, .. },
                 ) => WorkflowTrigger::Webhook {
                     provider: provider.clone(),
                     secret: secret.clone(),
+                    condition: condition.clone(),
                 },
                 _ => incoming.clone(),
             });
@@ -437,6 +447,7 @@ mod tests {
             .trigger(WorkflowTrigger::Webhook {
                 provider: Some("honeycomb".into()),
                 secret: "whsec_xxx".into(),
+                condition: None,
             })
             .steps(vec![sample_step()])
             .build()
@@ -501,13 +512,16 @@ mod tests {
             .trigger(WorkflowTrigger::Cron {
                 schedule: "0 */6 * * * *".to_string(),
                 timezone: Some("UTC".to_string()),
+                condition: None,
             })
             .steps(vec![sample_step()])
             .build()
             .unwrap();
         let def = WorkflowDefinition::try_from_events(new.into_events()).unwrap();
         match &def.trigger {
-            WorkflowTrigger::Cron { schedule, timezone } => {
+            WorkflowTrigger::Cron {
+                schedule, timezone, ..
+            } => {
                 assert_eq!(schedule, "0 */6 * * * *");
                 assert_eq!(timezone.as_deref(), Some("UTC"));
             }
@@ -515,12 +529,84 @@ mod tests {
         }
     }
 
+    /// Regression for the bats failure in PR #341 CI: after `update_content`
+    /// attaches a trigger with a CEL `condition:`, hydrating fresh from the
+    /// event log must reproduce the condition. Previously slipped through
+    /// `try_from_events` cleanly in isolation but failed end-to-end —
+    /// pinning the round-trip here narrows the search space if it breaks
+    /// again.
+    #[test]
+    fn update_content_preserves_trigger_condition_through_hydration() {
+        let mut def = build();
+        let res = def.update_content(
+            None,
+            None,
+            Some(WorkflowTrigger::Manual {
+                condition: Some("trigger.payload.env == 'staging'".to_string()),
+            }),
+            None,
+            None,
+            None,
+        );
+        assert!(matches!(res, Idempotent::Executed(())));
+        assert_eq!(
+            def.trigger.condition(),
+            Some("trigger.payload.env == 'staging'"),
+            "in-memory trigger should reflect the update"
+        );
+
+        let events = def.events.clone();
+        let hydrated = WorkflowDefinition::try_from_events(events).unwrap();
+        assert_eq!(
+            hydrated.trigger.condition(),
+            Some("trigger.payload.env == 'staging'"),
+            "hydrated trigger should carry the condition from the Updated event"
+        );
+    }
+
+    /// Serialize a definition's events to JSON and back, then hydrate.
+    /// Catches any event-shape regression where the new `condition` field
+    /// is dropped during persistence (the actual repo serializes events
+    /// via serde_json into a JSONB column).
+    #[test]
+    fn update_content_preserves_trigger_condition_through_json_roundtrip() {
+        let mut def = build();
+        let _ = def.update_content(
+            None,
+            None,
+            Some(WorkflowTrigger::Manual {
+                condition: Some("trigger.payload.env == 'staging'".to_string()),
+            }),
+            None,
+            None,
+            None,
+        );
+        let raw_events: Vec<serde_json::Value> = def
+            .events
+            .iter_all()
+            .map(|e| serde_json::to_value(e).unwrap())
+            .collect();
+        let updated = raw_events
+            .iter()
+            .find(|v| v.get("type").and_then(|t| t.as_str()) == Some("updated"))
+            .expect("updated event present");
+        let trigger = updated
+            .get("trigger")
+            .expect("updated event carries trigger field");
+        assert_eq!(trigger.get("type").and_then(|t| t.as_str()), Some("manual"));
+        assert_eq!(
+            trigger.get("condition").and_then(|c| c.as_str()),
+            Some("trigger.payload.env == 'staging'"),
+            "condition must round-trip through JSON"
+        );
+    }
+
     #[test]
     fn workflow_definition_hydrates_preexisting_sandbox_decl() {
         let new = NewWorkflowDefinition::builder()
             .project_id(ProjectId::new())
             .name("uses-existing")
-            .trigger(WorkflowTrigger::Manual)
+            .trigger(WorkflowTrigger::Manual { condition: None })
             .steps(vec![sample_step()])
             .sandboxes(vec![WorkflowSandboxDecl::Preexisting {
                 name: "investigation".to_string(),

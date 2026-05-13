@@ -536,6 +536,12 @@ struct WorkflowParams {
     /// `create`: opt out of webhooks (Manual trigger).
     #[serde(default)]
     manual: bool,
+    /// Bare CEL boolean expression evaluated against `trigger`
+    /// (only — `steps` is rejected) before a run is created.
+    /// Omit to leave the trigger ungated. Applies on `create` and
+    /// when `update_trigger=true` on `update`. Memo `019e20a2`.
+    #[serde(default)]
+    trigger_condition: Option<String>,
 
     /// `create` / `update`: full step list. Required for create.
     #[serde(default)]
@@ -1301,11 +1307,14 @@ impl AdminToolSet {
                 Audit::record_action("workflow.create");
                 let project = self.projects.find_by_id(subject, project_id).await?;
                 let trigger = if params.manual {
-                    WorkflowTrigger::Manual
+                    WorkflowTrigger::Manual {
+                        condition: params.trigger_condition.clone(),
+                    }
                 } else {
                     WorkflowTrigger::Webhook {
                         provider: params.provider.clone(),
                         secret: String::new(),
+                        condition: params.trigger_condition.clone(),
                     }
                 };
                 let steps = params
@@ -1382,11 +1391,14 @@ impl AdminToolSet {
                 };
                 let trigger = if params.update_trigger {
                     Some(if params.manual {
-                        WorkflowTrigger::Manual
+                        WorkflowTrigger::Manual {
+                            condition: params.trigger_condition.clone(),
+                        }
                     } else {
                         WorkflowTrigger::Webhook {
                             provider: params.provider.clone(),
                             secret: String::new(),
+                            condition: params.trigger_condition.clone(),
                         }
                     })
                 } else {
@@ -1448,14 +1460,16 @@ impl AdminToolSet {
                 let payload = params
                     .payload
                     .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
-                let run = self
+                let maybe_run = self
                     .workflows
                     .trigger_run(subject, definition_id, payload)
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
-                Ok(CallToolResult::success(vec![Content::text(format_run(
-                    &run,
-                ))]))
+                let body = match maybe_run {
+                    Some(run) => format_run(&run),
+                    None => "Trigger condition evaluated to false; no run created.".to_string(),
+                };
+                Ok(CallToolResult::success(vec![Content::text(body)]))
             }
 
             WorkflowCommand::AwaitRun => {
@@ -2044,12 +2058,14 @@ fn format_workflow(d: &WorkflowDefinition, created: bool) -> String {
         "Workflow:"
     };
     let trigger = match &d.trigger {
-        WorkflowTrigger::Manual => "manual".to_string(),
+        WorkflowTrigger::Manual { .. } => "manual".to_string(),
         WorkflowTrigger::Webhook { provider, .. } => match provider {
             Some(p) => format!("webhook ({p})"),
             None => "webhook".to_string(),
         },
-        WorkflowTrigger::Cron { schedule, timezone } => match timezone {
+        WorkflowTrigger::Cron {
+            schedule, timezone, ..
+        } => match timezone {
             Some(tz) => format!("cron ({schedule} {tz})"),
             None => format!("cron ({schedule})"),
         },
@@ -2116,7 +2132,7 @@ fn format_workflows(defs: &[WorkflowDefinition]) -> String {
     lines.push("-".repeat(110));
     for d in defs {
         let trigger = match &d.trigger {
-            WorkflowTrigger::Manual => "manual".to_string(),
+            WorkflowTrigger::Manual { .. } => "manual".to_string(),
             WorkflowTrigger::Webhook { provider, .. } => match provider {
                 Some(p) => format!("webhook:{p}"),
                 None => "webhook".to_string(),
@@ -2675,6 +2691,45 @@ mod tests {
         assert!(!p.update_sandboxes);
         assert!(!p.update_trigger);
         assert!(!p.clear_description);
+    }
+
+    #[test]
+    fn workflow_update_parses_trigger_condition() {
+        let definition_id = uuid::Uuid::new_v4();
+        let p: WorkflowParams = parse_params(args(serde_json::json!({
+            "command": "update",
+            "definition_id": definition_id,
+            "update_trigger": true,
+            "manual": true,
+            "trigger_condition": "trigger.payload.env == \"staging\"",
+        })))
+        .expect("parse");
+        assert_eq!(
+            p.trigger_condition.as_deref(),
+            Some("trigger.payload.env == \"staging\"")
+        );
+        assert!(p.update_trigger);
+        assert!(p.manual);
+    }
+
+    #[test]
+    fn workflow_create_parses_trigger_condition() {
+        let project_id = uuid::Uuid::new_v4();
+        let p: WorkflowParams = parse_params(args(serde_json::json!({
+            "command": "create",
+            "project_id": project_id,
+            "name": "with-cond",
+            "manual": true,
+            "trigger_condition": "trigger.payload.action == 'opened'",
+            "steps": [
+                { "type": "agent_step", "name": "investigate", "skill": "auditor" }
+            ],
+        })))
+        .expect("parse");
+        assert_eq!(
+            p.trigger_condition.as_deref(),
+            Some("trigger.payload.action == 'opened'")
+        );
     }
 
     #[test]

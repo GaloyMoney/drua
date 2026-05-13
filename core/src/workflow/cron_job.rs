@@ -109,7 +109,9 @@ impl JobRunner for TriggerCronRunner {
         };
 
         let (schedule, timezone) = match &definition.trigger {
-            WorkflowTrigger::Cron { schedule, timezone } => (schedule.clone(), timezone.clone()),
+            WorkflowTrigger::Cron {
+                schedule, timezone, ..
+            } => (schedule.clone(), timezone.clone()),
             _ => {
                 tracing::info!("trigger no longer cron; schedule terminating");
                 return Ok(JobCompletion::Complete);
@@ -133,8 +135,13 @@ impl JobRunner for TriggerCronRunner {
         )
         .await
         {
-            Ok(run) => {
+            Ok(Some(run)) => {
                 tracing::info!(run_id = %run.id, "cron-triggered workflow run spawned");
+            }
+            Ok(None) => {
+                tracing::info!(
+                    "cron-triggered run suppressed by trigger condition; schedule continues"
+                );
             }
             Err(e) => {
                 tracing::warn!(error = %e, "cron-triggered run spawn failed; continuing schedule");
