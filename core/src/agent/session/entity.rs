@@ -196,8 +196,9 @@ impl AgentSession {
                 AgentSessionEvent::ModelChainUpdated { .. } | AgentSessionEvent::Initialized { .. }
         );
         self.model_chain = new_chain.clone();
-        self.events
-            .push(AgentSessionEvent::ModelChainUpdated { model_chain: new_chain });
+        self.events.push(AgentSessionEvent::ModelChainUpdated {
+            model_chain: new_chain,
+        });
         Idempotent::Executed(())
     }
 
