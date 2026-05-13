@@ -1,4 +1,4 @@
-<summary path="$" total-bytes="32994" shown-bytes="8443" total-lines="320" shown-lines="164">
+<summary path="$" total-bytes="32474" shown-bytes="8137" total-lines="320" shown-lines="164">
 <head lines="82">
 INFO: found existing resource cache
 
