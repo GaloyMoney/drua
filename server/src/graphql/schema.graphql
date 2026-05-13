@@ -291,6 +291,7 @@ type Mutation {
 	sandboxRestart(input: SandboxRestartInput!): SandboxRestartPayload!
 	sandboxSuspend(input: SandboxSuspendInput!): SandboxSuspendPayload!
 	skillDelete(input: SkillDeleteInput!): SkillDeletePayload!
+	workflowDelete(input: WorkflowDeleteInput!): WorkflowDeletePayload!
 }
 
 input NoteDeleteInput {
@@ -746,6 +747,16 @@ scalar UUID
 
 type UserMessageEvent {
 	text: String!
+}
+
+scalar WorkflowDefinitionId
+
+input WorkflowDeleteInput {
+	id: WorkflowDefinitionId!
+}
+
+type WorkflowDeletePayload {
+	deletedId: WorkflowDefinitionId!
 }
 
 scalar Yaml

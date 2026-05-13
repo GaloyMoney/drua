@@ -15,6 +15,7 @@ mod session;
 mod skill;
 mod subscription;
 mod types;
+mod workflow;
 
 use std::convert::Infallible;
 

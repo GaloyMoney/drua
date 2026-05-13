@@ -14,6 +14,7 @@ pub use importer::WorkflowsImporter;
 
 use std::sync::Arc;
 
+use drua_library::{CommitAttribution, WriteOp};
 use rand::RngCore;
 use tracing::instrument;
 
@@ -21,9 +22,11 @@ use crate::agent::Agents;
 use crate::audit::{Audit, InteractionOutcome};
 use crate::primitives::*;
 use crate::sandbox::Sandboxes;
+use crate::skill::file::slugify;
 use crate::skill::Skills;
 use crate::toolset::ToolSets;
 use crate::user::Users;
+use yaml::canonical_workflow_path;
 
 pub const WORKFLOW_DOC_TYPE: drua_library::DocType = drua_library::DocType::new("workflow");
 
@@ -161,6 +164,13 @@ pub struct Workflows {
     /// `tool_step.params` — looks up the called tool's
     /// `output_schema()` + `composable()` flag.
     toolsets: Arc<ToolSets>,
+    /// Forward-sync delete-out path: held directly (alongside the
+    /// repo's own handle) so `delete_in_op` can enqueue a
+    /// `WriteOp::DeleteFile`. Soft-delete events don't fire the
+    /// post-persist sync hook, so without this the canonical YAML
+    /// would linger in upstream git forever (skill peer:
+    /// `enqueue_skill_delete_in_op`).
+    library: drua_library::Library,
     execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
     cron_spawner: ::job::JobSpawner<TriggerCronConfig>,
     /// Cloned `Jobs` handle so `await_run_completion` can block on the
@@ -198,11 +208,12 @@ impl Workflows {
             execute_run_spawner.clone(),
         ));
         Self {
-            repo: WorkflowDefinitionRepo::new(pool, library),
+            repo: WorkflowDefinitionRepo::new(pool, library.clone()),
             run_repo: WorkflowRunRepo::new(pool),
             skills,
             users,
             toolsets,
+            library,
             execute_run_spawner,
             cron_spawner,
             jobs: jobs.clone(),
@@ -236,6 +247,22 @@ impl Workflows {
         } = parsed;
 
         Self::validate_trigger(&trigger)?;
+
+        // Race guard: if an operator just deleted this workflow via
+        // the project surface, the soft-deleted row is still in the
+        // table. The default `maybe_find_by_id` filters deleted rows,
+        // so without this probe a reverse-sync poll that races the
+        // forward-sync `DeleteFile` write would resurrect the entity
+        // (memo 019e218a, delete-direction). Drop the import — once
+        // the queued `DeleteFile` lands upstream the file is gone and
+        // future polls won't see it.
+        if self.repo.is_soft_deleted_in_op(op, workflow_id).await? {
+            tracing::info!(
+                %workflow_id,
+                "skipping reverse-sync import for soft-deleted workflow"
+            );
+            return Ok(None);
+        }
 
         let file_hash = drua_library::GitFileHash::new(rendered);
 
@@ -566,7 +593,7 @@ impl Workflows {
             .map_err(|e| WorkflowError::BuildEntity(e.to_string()))?;
 
         let mut op = self.repo.begin_op().await?;
-        self.users.commit_attribution().await;
+        self.populate_attribution().await;
         let workflow = self.repo.create_in_op(&mut op, new).await?;
         self.register_cron_in_op(&mut op, &workflow).await?;
         op.commit().await?;
@@ -623,7 +650,7 @@ impl Workflows {
             .did_execute()
         {
             let mut op = self.repo.begin_op().await?;
-            self.users.commit_attribution().await;
+            self.populate_attribution().await;
             self.repo.update_in_op(&mut op, &mut definition).await?;
             let is_cron = matches!(definition.trigger, WorkflowTrigger::Cron { .. });
             if !was_cron && is_cron {
@@ -632,6 +659,46 @@ impl Workflows {
             op.commit().await?;
         }
         Ok(definition)
+    }
+
+    /// Populates `EventContext` with the rich
+    /// [`drua_library::CommitAttribution`] so post-persist library
+    /// sync hooks pick it up, and returns the resolved attribution
+    /// for callers (e.g. `delete`) that need to enqueue a write op
+    /// of their own (skill peer: `Skills::populate_attribution`).
+    async fn populate_attribution(&self) -> CommitAttribution {
+        self.users.commit_attribution().await
+    }
+
+    /// Enqueue a [`WriteOp::DeleteFile`] for the canonical YAML +
+    /// wipe the search-store row in the same DbOp. Soft-delete events
+    /// don't fire the post-persist hook, so without this the YAML
+    /// would orphan in upstream git and `library.search` would keep
+    /// returning the deleted workflow (skill peer:
+    /// `enqueue_skill_delete_in_op`, PR #266 / memory 019df72f).
+    async fn enqueue_workflow_delete_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        workflow: &WorkflowDefinition,
+        attribution: CommitAttribution,
+    ) -> Result<(), WorkflowError> {
+        let path = canonical_workflow_path(&workflow.name, workflow.project_name.as_deref());
+        let id_uuid: uuid::Uuid = workflow.id.into();
+        let message = format!(
+            "workflow: delete {}-{}",
+            slugify(&workflow.name),
+            &id_uuid.to_string()[..8]
+        );
+        self.library
+            .enqueue_full_in_op(
+                op,
+                None,
+                vec![(id_uuid, WORKFLOW_DOC_TYPE)],
+                Some(WriteOp::DeleteFile { path, message }),
+                attribution,
+            )
+            .await?;
+        Ok(())
     }
 
     /// Spawn the next cron fire in the same atomic op as the
@@ -914,6 +981,75 @@ impl Workflows {
             .cascade_delete_for_project_in_op(op, project_id)
             .await?;
         Ok(())
+    }
+
+    /// Soft-deletes the workflow definition, cascades its runs to
+    /// soft-deleted, and queues a [`WriteOp::DeleteFile`] for the
+    /// canonical YAML so the next library-write tick removes it
+    /// upstream. In-flight `ExecuteRun` jobs against this definition
+    /// keep running against the soft-deleted row and reach a terminal
+    /// state on their own; cron jobs self-terminate on next fire
+    /// (`TriggerCronRunner` exits when `find_by_id` returns None).
+    #[instrument(name = "core.workflow.delete", skip_all)]
+    pub async fn delete(
+        &self,
+        sub: &AuthSubject,
+        id: WorkflowDefinitionId,
+    ) -> Result<(), WorkflowError> {
+        let workflow = self.repo.find_by_id(id).await?;
+        sub.can(
+            AuthVerb::Delete,
+            AuthResource::Workflow(workflow.project_id, Some(workflow.id)),
+        )?;
+        Audit::record_action_if_unset("workflow.delete");
+        Audit::record_project_id(workflow.project_id);
+        Audit::record_workflow_id(workflow.id);
+
+        let mut op = self.repo.begin_op().await?;
+        let attribution = self.populate_attribution().await;
+        self.enqueue_workflow_delete_in_op(&mut op, &workflow, attribution)
+            .await?;
+        self.run_repo
+            .cascade_delete_for_definition_in_op(&mut op, id)
+            .await?;
+        self.repo.delete_in_op(&mut op, workflow).await?;
+        op.commit().await?;
+        Ok(())
+    }
+
+    /// Reverse-sync delete: an external author removed the workflow
+    /// YAML in git. Soft-deletes the matching DB row by canonical-path
+    /// lookup and wipes the search-store row in the same op. Returns
+    /// `Ok(Some(id))` when a row was actually deleted; `Ok(None)` when
+    /// the path doesn't resolve to a known workflow (e.g. unknown
+    /// project name).
+    ///
+    /// Skips the library write op — the file is already gone in git;
+    /// this is the inbound direction (skill peer:
+    /// `Skills::delete_by_path_in_op`).
+    pub(crate) async fn delete_by_path_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        project_id: ProjectId,
+        path: &str,
+    ) -> Result<Option<WorkflowDefinitionId>, WorkflowError> {
+        let Some(workflow) = self
+            .repo
+            .maybe_find_by_canonical_path_in_op(op, project_id, path)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let id = workflow.id;
+        self.library
+            .search()
+            .delete_in_op(op, id.into(), WORKFLOW_DOC_TYPE)
+            .await?;
+        self.run_repo
+            .cascade_delete_for_definition_in_op(op, id)
+            .await?;
+        self.repo.delete_in_op(op, workflow).await?;
+        Ok(Some(id))
     }
 }
 

@@ -319,6 +319,10 @@ enum WorkflowCommand {
     List,
     Get,
     Update,
+    /// Soft-delete the definition. Cascades runs to soft-deleted and
+    /// queues a `DeleteFile` write on the canonical YAML. Cron jobs
+    /// self-terminate on next fire.
+    Delete,
     /// Spawn a run with the given trigger payload. Returns the run id.
     Trigger,
     /// Block until a run reaches a terminal state, then surface the
@@ -507,9 +511,9 @@ struct WorkflowParams {
     #[schemars(with = "Option<uuid::Uuid>")]
     project_id: Option<ProjectId>,
 
-    /// Required for `get`, `update`, `trigger`. UUID — admin tier
-    /// keeps it strict; the top-level `workflow` tool accepts
-    /// names too for skill-author ergonomics.
+    /// Required for `get`, `update`, `trigger`, `delete`. UUID —
+    /// admin tier keeps it strict; the top-level `workflow` tool
+    /// accepts names too for skill-author ergonomics.
     #[schemars(with = "Option<uuid::Uuid>")]
     definition_id: Option<WorkflowDefinitionId>,
 
@@ -701,7 +705,8 @@ static TOOLS: &[ToolDef] = &[
                        `update` (requires `definition_id`; optional `name`, \
                        `description`+`clear_description` for None semantics, \
                        `provider`+`update_trigger`, `steps`+`update_steps`, \
-                       `sandboxes`+`update_sandboxes`).",
+                       `sandboxes`+`update_sandboxes`), \
+                       `delete` (requires `definition_id`; cascades to runs).",
         schema: &WORKFLOW_SCHEMA,
     },
     ToolDef {
@@ -1448,6 +1453,22 @@ impl AdminToolSet {
                 Ok(CallToolResult::success(vec![Content::text(
                     format_workflow(&definition, false),
                 )]))
+            }
+
+            WorkflowCommand::Delete => {
+                let definition_id = params.definition_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument(
+                        "definition_id is required for delete".to_string(),
+                    )
+                })?;
+                Audit::record_action("workflow.delete");
+                self.workflows
+                    .delete(subject, definition_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Workflow deleted (id {definition_id})."
+                ))]))
             }
 
             WorkflowCommand::Trigger => {
@@ -2735,9 +2756,21 @@ mod tests {
     #[test]
     fn workflow_schema_includes_command_enum() {
         let s = serde_json::to_string(&*WORKFLOW_SCHEMA).unwrap();
-        for v in ["create", "list", "get", "update"] {
+        for v in ["create", "list", "get", "update", "delete"] {
             assert!(s.contains(&format!("\"{v}\"")), "missing {v} in schema");
         }
+    }
+
+    #[test]
+    fn workflow_delete_takes_definition_id() {
+        let definition_id = uuid::Uuid::new_v4();
+        let p: WorkflowParams = parse_params(args(serde_json::json!({
+            "command": "delete",
+            "definition_id": definition_id,
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, WorkflowCommand::Delete));
+        assert_eq!(p.definition_id.map(uuid::Uuid::from), Some(definition_id));
     }
 
     #[test]

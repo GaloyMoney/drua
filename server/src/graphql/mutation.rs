@@ -8,6 +8,7 @@ use super::note::*;
 use super::project::*;
 use super::project_secret::*;
 use super::skill::*;
+use super::workflow::*;
 
 pub struct Mutation;
 
@@ -238,6 +239,18 @@ impl Mutation {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
         app.notes().delete(sub, input.project_id, input.id).await?;
         Ok(NoteDeletePayload {
+            deleted_id: input.id,
+        })
+    }
+
+    async fn workflow_delete(
+        &self,
+        ctx: &Context<'_>,
+        input: WorkflowDeleteInput,
+    ) -> async_graphql::Result<WorkflowDeletePayload> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        app.workflows().delete(sub, input.id).await?;
+        Ok(WorkflowDeletePayload {
             deleted_id: input.id,
         })
     }

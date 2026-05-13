@@ -82,6 +82,8 @@ pub enum WorkflowError {
     Sandbox(#[from] SandboxError),
     #[error("WorkflowError - Job: {0}")]
     Job(String),
+    #[error("WorkflowError - Library: {0}")]
+    Library(#[from] drua_library::LibraryError),
     #[error("WorkflowError - Authorization: {0}")]
     Authorization(#[from] AuthorizationError),
     /// Cooperative cancellation. The runner observes the job's shutdown

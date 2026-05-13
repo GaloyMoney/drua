@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 #[allow(unused_imports)]
 pub use drua_core::primitives::{
     AgentId, McpCredsId, NoteId, ProjectId, ProjectSecretId, SandboxId, SkillId, UserId,
+    WorkflowDefinitionId,
 };
 
 #[allow(unused_imports)]
