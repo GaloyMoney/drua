@@ -16,15 +16,6 @@ pub struct ModelSpec {
     pub max_tokens: Option<i32>,
 }
 
-impl From<DomainModelSpec> for ModelSpec {
-    fn from(s: DomainModelSpec) -> Self {
-        Self {
-            name: s.name,
-            max_tokens: s.max_tokens.map(|n| n as i32),
-        }
-    }
-}
-
 impl From<ModelSpec> for DomainModelSpec {
     fn from(s: ModelSpec) -> Self {
         DomainModelSpec {
@@ -41,15 +32,6 @@ pub struct ModelChain {
     pub fallbacks: Vec<ModelSpec>,
 }
 
-impl From<DomainModelChain> for ModelChain {
-    fn from(c: DomainModelChain) -> Self {
-        Self {
-            primary: c.primary.into(),
-            fallbacks: c.fallbacks.into_iter().map(Into::into).collect(),
-        }
-    }
-}
-
 impl From<ModelChain> for DomainModelChain {
     fn from(c: ModelChain) -> Self {
         DomainModelChain {
@@ -64,14 +46,14 @@ impl From<drua_core::agent::ModelChain> for ModelChain {
         Self {
             primary: ModelSpec {
                 name: c.primary.model,
-                max_tokens: None,
+                max_tokens: Some(c.primary.max_tokens_per_response as i32),
             },
             fallbacks: c
                 .fallbacks
                 .into_iter()
                 .map(|m| ModelSpec {
                     name: m.model,
-                    max_tokens: None,
+                    max_tokens: Some(m.max_tokens_per_response as i32),
                 })
                 .collect(),
         }
