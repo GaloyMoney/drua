@@ -153,11 +153,7 @@ fn render_workflow_role(output_schema: Option<&crate::workflow::OutputSchema>) -
 
 /// Tools section: does NOT re-list top-level tools (already in `tools`
 /// array). Covers sandbox prerequisites and progressive disclosure.
-fn build_tools_section(
-    role: AgentRole,
-    toolsets: &Arc<ToolSets>,
-    _subject: &AuthSubject,
-) -> String {
+fn build_tools_section(role: AgentRole, toolsets: &Arc<ToolSets>, subject: &AuthSubject) -> String {
     let mut section = String::new();
 
     if matches!(role, AgentRole::Agent | AgentRole::WorkflowStepAgent) {
@@ -167,7 +163,7 @@ fn build_tools_section(
         );
     }
 
-    let gateway_info = toolsets.mcp_gateway_info();
+    let gateway_info = toolsets.mcp_gateway_info_for(subject);
     if !gateway_info.is_empty() {
         section.push_str("\n# Additional tools (progressive disclosure)\n\n");
         section.push_str(&gateway_info);
