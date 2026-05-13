@@ -18,31 +18,38 @@ pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
 
     if ctrl {
-        // ^P opens the picker from any focus, but not while another modal owns input.
-        if let KeyCode::Char('p') = key.code {
-            if matches!(state.mode, Mode::Browse) {
-                state.enter_project_picker();
-                return Action::None;
-            }
-        }
+        // ^C/^Z fire from any mode — they're terminal-level signals.
         match key.code {
             KeyCode::Char('c') => return Action::Quit,
             KeyCode::Char('z') => return Action::Suspend,
-            KeyCode::Char('o') => {
-                state.select_lead_and_focus_chat();
-                return Action::None;
-            }
-            KeyCode::Char('r') => return Action::Refresh,
-            KeyCode::Char('h') => {
-                state.focus_left();
-                return Action::None;
-            }
-            KeyCode::Char('l') => {
-                state.focus_right();
-                return Action::None;
-            }
-            KeyCode::Char('t') => return Action::ToggleThreads,
             _ => {}
+        }
+        // Browse-mode-only shortcuts. Modals (CreateProject, ExportThread,
+        // ProjectPicker) own their input — letting `^R`/`^T`/`^H`/`^L`/`^O`
+        // fire here would mutate state the modal depends on
+        // (e.g. `^R` refresh would swap the projects list mid-picker).
+        if matches!(state.mode, Mode::Browse) {
+            match key.code {
+                KeyCode::Char('p') => {
+                    state.enter_project_picker();
+                    return Action::None;
+                }
+                KeyCode::Char('o') => {
+                    state.select_lead_and_focus_chat();
+                    return Action::None;
+                }
+                KeyCode::Char('r') => return Action::Refresh,
+                KeyCode::Char('h') => {
+                    state.focus_left();
+                    return Action::None;
+                }
+                KeyCode::Char('l') => {
+                    state.focus_right();
+                    return Action::None;
+                }
+                KeyCode::Char('t') => return Action::ToggleThreads,
+                _ => {}
+            }
         }
     }
 

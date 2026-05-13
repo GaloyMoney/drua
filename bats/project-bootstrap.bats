@@ -126,7 +126,25 @@ SQL
   # container alive across the in-test restart — `stop_server`'s default
   # path runs `down -v` and would yank postgres out from under the next
   # test.
+  local old_pid=""
+  [ -f "$SERVER_PID_FILE" ] && old_pid="$(cat "$SERVER_PID_FILE")"
   SKIP_COMPOSE=1 stop_server
+  # Wait for the old process to die AND for port 4200 to free up. CI
+  # occasionally sees the old server still binding the port when the new
+  # one tries to start; the wait loop in `start_server` then short-
+  # circuits on the dying server's last response, leaving the new
+  # config un-loaded.
+  if [ -n "$old_pid" ]; then
+    for _i in $(seq 1 50); do
+      kill -0 "$old_pid" 2>/dev/null || break
+      sleep 0.1
+    done
+    kill -9 "$old_pid" 2>/dev/null || true
+  fi
+  for _i in $(seq 1 30); do
+    curl -s --max-time 0.2 -o /dev/null http://localhost:4200/ 2>/dev/null || break
+    sleep 0.2
+  done
   local out="$BATS_FILE_TMPDIR/drua-disabled.yml"
   cat > "$out" <<EOF
 server:

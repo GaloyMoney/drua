@@ -1,5 +1,5 @@
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, List, ListItem, Paragraph},
@@ -7,6 +7,7 @@ use ratatui::{
 };
 
 use super::super::state::{Mode, ScreenState};
+use super::centered_rect;
 
 pub fn draw_project_picker(frame: &mut Frame, state: &ScreenState) {
     let Mode::ProjectPicker { input, list_cursor } = &state.mode else {
@@ -85,10 +86,4 @@ pub fn draw_project_picker(frame: &mut Frame, state: &ScreenState) {
         Style::default().fg(Color::DarkGray),
     )));
     frame.render_widget(hint, inner[2]);
-}
-
-fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
-    let x = area.x + area.width.saturating_sub(width) / 2;
-    let y = area.y + area.height.saturating_sub(height) / 2;
-    Rect::new(x, y, width.min(area.width), height.min(area.height))
 }
