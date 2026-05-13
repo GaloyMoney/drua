@@ -867,12 +867,17 @@ mod tests {
 
     #[test]
     fn picker_confirm_on_create_row_prefills_create_modal() {
+        // Realistic state: query "fresh-name" doesn't match "Alpha", so
+        // `matches` is empty and the virtual create row sits at index 0 —
+        // exactly what `handle_picker_key` produces after each keystroke
+        // (it resets `list_cursor` to 0 on every typed char).
         let mut state = make_state(vec![proj("a", "Alpha")], None);
         state.enter_project_picker();
         if let Mode::ProjectPicker { input, list_cursor } = &mut state.mode {
             *input = "fresh-name".into();
-            *list_cursor = 1; // matches.len() == 1, so 1 is the virtual create row
+            *list_cursor = 0;
         }
+        assert_eq!(state.picker_matches("fresh-name").len(), 0);
         assert_eq!(state.picker_confirm(), PickerOutcome::CreateRequested);
         assert!(matches!(state.mode, Mode::CreateProject));
         assert_eq!(state.input_name, "fresh-name");
