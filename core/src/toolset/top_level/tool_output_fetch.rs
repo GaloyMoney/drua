@@ -32,8 +32,11 @@ impl ToolOutputFetch {
 const DESCRIPTION: &str = "Recover a slice of a previously-summarised tool output. \
     `invocation_id` is the uuid advertised inside the envelope's <recovery> block. \
     `path` (default `$`) is a json-path anchor against the persisted root value. \
-    `query` (optional) further slices the resolved value: `{mode:\"range\", offset, len}` \
-    returns bytes `[offset..offset+len]` of a string at the path. \
+    `query` (optional) further slices the resolved value: \
+    `{mode:\"range\", offset, len}` returns bytes `[offset..offset+len]` of a string at the path; \
+    `{mode:\"lines\", offset, len}` returns line range `[offset..offset+len]` of a string at the path; \
+    `{mode:\"json_array_slice\", offset, len}` returns item range `arr[offset..offset+len]` of an array at the path; \
+    `{mode:\"summary\"}` replays the original curated `<summary>+<recovery>` envelope (ignores `path`). \
     The response is the resolved (and optionally sliced) value, wrapped back at `path`.";
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
