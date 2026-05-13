@@ -47,6 +47,13 @@ pub enum WorkflowError {
         body: String,
         value: String,
     },
+    /// Trigger-level `condition:` failed at runtime — CEL compile,
+    /// runtime, or non-boolean result. No run was created; an
+    /// audit row was written.
+    #[error(
+        "WorkflowError - TriggerConditionErrored: trigger condition `{body}` failed: {reason}"
+    )]
+    TriggerConditionErrored { body: String, reason: String },
     #[error("WorkflowError - ToolNotFound: {0}")]
     ToolNotFound(String),
     #[error("WorkflowError - ToolDispatch: {0}")]

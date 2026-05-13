@@ -171,32 +171,56 @@ impl WorkflowSandboxYaml {
     }
 }
 
-#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum WorkflowTriggerYaml {
-    #[default]
-    Manual,
+    Manual {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        condition: Option<String>,
+    },
     Webhook {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         provider: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        condition: Option<String>,
     },
     Cron {
         schedule: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timezone: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        condition: Option<String>,
     },
+}
+
+impl Default for WorkflowTriggerYaml {
+    fn default() -> Self {
+        Self::Manual { condition: None }
+    }
 }
 
 impl WorkflowTriggerYaml {
     fn from_runtime(t: &WorkflowTrigger) -> Self {
         match t {
-            WorkflowTrigger::Manual => WorkflowTriggerYaml::Manual,
-            WorkflowTrigger::Webhook { provider, .. } => WorkflowTriggerYaml::Webhook {
-                provider: provider.clone(),
+            WorkflowTrigger::Manual { condition } => WorkflowTriggerYaml::Manual {
+                condition: condition.clone(),
             },
-            WorkflowTrigger::Cron { schedule, timezone } => WorkflowTriggerYaml::Cron {
+            WorkflowTrigger::Webhook {
+                provider,
+                condition,
+                ..
+            } => WorkflowTriggerYaml::Webhook {
+                provider: provider.clone(),
+                condition: condition.clone(),
+            },
+            WorkflowTrigger::Cron {
+                schedule,
+                timezone,
+                condition,
+            } => WorkflowTriggerYaml::Cron {
                 schedule: schedule.clone(),
                 timezone: timezone.clone(),
+                condition: condition.clone(),
             },
         }
     }
@@ -381,14 +405,24 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
     };
 
     let trigger = match yaml.trigger {
-        WorkflowTriggerYaml::Manual => WorkflowTrigger::Manual,
-        WorkflowTriggerYaml::Webhook { provider } => WorkflowTrigger::Webhook {
+        WorkflowTriggerYaml::Manual { condition } => WorkflowTrigger::Manual { condition },
+        WorkflowTriggerYaml::Webhook {
+            provider,
+            condition,
+        } => WorkflowTrigger::Webhook {
             provider,
             secret: String::new(),
+            condition,
         },
-        WorkflowTriggerYaml::Cron { schedule, timezone } => {
-            WorkflowTrigger::Cron { schedule, timezone }
-        }
+        WorkflowTriggerYaml::Cron {
+            schedule,
+            timezone,
+            condition,
+        } => WorkflowTrigger::Cron {
+            schedule,
+            timezone,
+            condition,
+        },
     };
 
     let steps: Vec<WorkflowStepDef> = yaml
@@ -511,6 +545,7 @@ mod tests {
         let trigger = WorkflowTrigger::Webhook {
             provider: Some("honeycomb".to_string()),
             secret: "whsec_should-not-be-serialized".to_string(),
+            condition: None,
         };
         let content = render(
             id,
@@ -536,6 +571,7 @@ mod tests {
             WorkflowTrigger::Webhook {
                 ref provider,
                 ref secret,
+                ..
             } => {
                 assert_eq!(provider.as_deref(), Some("honeycomb"));
                 assert_eq!(secret, "");
@@ -552,7 +588,7 @@ mod tests {
             id,
             "alert-response",
             None,
-            &WorkflowTrigger::Manual,
+            &WorkflowTrigger::Manual { condition: None },
             &sample_sandboxes(),
         );
         let path = canonical_workflow_path("alert-response", None);
@@ -604,7 +640,7 @@ steps:
         let parsed = parse_workflow_yaml(content, path).expect("parses");
         assert!(parsed.needs_rewrite);
         assert_eq!(parsed.name, "simple-flow");
-        assert!(matches!(parsed.trigger, WorkflowTrigger::Manual));
+        assert!(matches!(parsed.trigger, WorkflowTrigger::Manual { .. }));
     }
 
     #[test]
@@ -613,6 +649,7 @@ steps:
         let trigger = WorkflowTrigger::Cron {
             schedule: "0 */6 * * * *".to_string(),
             timezone: Some("America/New_York".to_string()),
+            condition: None,
         };
         let content = render(id, "scheduled", None, &trigger, &sample_sandboxes());
         assert!(content.contains("type: cron"));
@@ -622,7 +659,9 @@ steps:
         let path = canonical_workflow_path("scheduled", None);
         let parsed = parse_workflow_yaml(&content, &path).expect("parses");
         match parsed.trigger {
-            WorkflowTrigger::Cron { schedule, timezone } => {
+            WorkflowTrigger::Cron {
+                schedule, timezone, ..
+            } => {
                 assert_eq!(schedule, "0 */6 * * * *");
                 assert_eq!(timezone.as_deref(), Some("America/New_York"));
             }
@@ -645,7 +684,9 @@ steps:
         let path = "runtime/workflows/scheduled.yml";
         let parsed = parse_workflow_yaml(content, path).expect("parses");
         match parsed.trigger {
-            WorkflowTrigger::Cron { schedule, timezone } => {
+            WorkflowTrigger::Cron {
+                schedule, timezone, ..
+            } => {
                 assert_eq!(schedule, "0 */6 * * * *");
                 assert!(timezone.is_none());
             }
@@ -683,7 +724,7 @@ steps:
             id,
             "judge-flow",
             None,
-            &WorkflowTrigger::Manual,
+            &WorkflowTrigger::Manual { condition: None },
             &steps,
             &[],
             None,
@@ -737,7 +778,7 @@ steps:
             id,
             "alert-response",
             None,
-            &WorkflowTrigger::Manual,
+            &WorkflowTrigger::Manual { condition: None },
             &[
                 WorkflowSandboxDecl::Provisioned {
                     name: "investigation".to_string(),
@@ -777,7 +818,7 @@ steps:
             id,
             "uses-existing",
             None,
-            &WorkflowTrigger::Manual,
+            &WorkflowTrigger::Manual { condition: None },
             &[WorkflowSandboxDecl::Preexisting {
                 name: "investigation".to_string(),
             }],

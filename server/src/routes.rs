@@ -1714,8 +1714,10 @@ fn workflow_definition_to_view_for_list(
     d: &domain::workflow::WorkflowDefinition,
 ) -> WorkflowDefinitionView {
     let (trigger_type, trigger_provider, secret) = match &d.trigger {
-        WorkflowTrigger::Manual => ("manual".to_string(), None, None),
-        WorkflowTrigger::Webhook { provider, secret } => (
+        WorkflowTrigger::Manual { .. } => ("manual".to_string(), None, None),
+        WorkflowTrigger::Webhook {
+            provider, secret, ..
+        } => (
             "webhook".to_string(),
             provider.clone(),
             Some(secret.clone()),
@@ -1743,13 +1745,17 @@ fn workflow_definition_to_view_for_detail(
     public_host: Option<&str>,
 ) -> WorkflowDefinitionView {
     let (trigger_type, trigger_provider, secret) = match &d.trigger {
-        WorkflowTrigger::Manual => ("manual".to_string(), None, None),
-        WorkflowTrigger::Webhook { provider, secret } => (
+        WorkflowTrigger::Manual { .. } => ("manual".to_string(), None, None),
+        WorkflowTrigger::Webhook {
+            provider, secret, ..
+        } => (
             "webhook".to_string(),
             provider.clone(),
             Some(secret.clone()),
         ),
-        WorkflowTrigger::Cron { schedule, timezone } => {
+        WorkflowTrigger::Cron {
+            schedule, timezone, ..
+        } => {
             let label = match timezone {
                 Some(tz) => format!("cron ({schedule} {tz})"),
                 None => format!("cron ({schedule})"),
@@ -2041,8 +2047,16 @@ async fn project_workflow_trigger(
         .trigger_run(&sub, workflow_id, payload)
         .await
     {
-        Ok(run) => Redirect::to(&format!("/projects/{id}/workflows/{wf_id}/runs/{}", run.id))
+        Ok(Some(run)) => Redirect::to(&format!("/projects/{id}/workflows/{wf_id}/runs/{}", run.id))
             .into_response(),
+        Ok(None) => {
+            let msg = "trigger condition evaluated to false; no run created".to_string();
+            Redirect::to(&format!(
+                "/projects/{id}/workflows/{wf_id}?flash={}",
+                encode_query_value(&msg)
+            ))
+            .into_response()
+        }
         Err(e) => {
             let msg = format!("failed to trigger run: {e}");
             Redirect::to(&format!(

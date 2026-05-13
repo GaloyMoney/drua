@@ -135,11 +135,16 @@ impl WorkflowDefinition {
             .as_ref()
             .map(|incoming| match (incoming, &self.trigger) {
                 (
-                    WorkflowTrigger::Webhook { provider, .. },
+                    WorkflowTrigger::Webhook {
+                        provider,
+                        condition,
+                        ..
+                    },
                     WorkflowTrigger::Webhook { secret, .. },
                 ) => WorkflowTrigger::Webhook {
                     provider: provider.clone(),
                     secret: secret.clone(),
+                    condition: condition.clone(),
                 },
                 _ => incoming.clone(),
             });
@@ -199,11 +204,16 @@ impl WorkflowDefinition {
             .as_ref()
             .map(|incoming| match (incoming, &self.trigger) {
                 (
-                    WorkflowTrigger::Webhook { provider, .. },
+                    WorkflowTrigger::Webhook {
+                        provider,
+                        condition,
+                        ..
+                    },
                     WorkflowTrigger::Webhook { secret, .. },
                 ) => WorkflowTrigger::Webhook {
                     provider: provider.clone(),
                     secret: secret.clone(),
+                    condition: condition.clone(),
                 },
                 _ => incoming.clone(),
             });
@@ -437,6 +447,7 @@ mod tests {
             .trigger(WorkflowTrigger::Webhook {
                 provider: Some("honeycomb".into()),
                 secret: "whsec_xxx".into(),
+                condition: None,
             })
             .steps(vec![sample_step()])
             .build()
@@ -501,13 +512,16 @@ mod tests {
             .trigger(WorkflowTrigger::Cron {
                 schedule: "0 */6 * * * *".to_string(),
                 timezone: Some("UTC".to_string()),
+                condition: None,
             })
             .steps(vec![sample_step()])
             .build()
             .unwrap();
         let def = WorkflowDefinition::try_from_events(new.into_events()).unwrap();
         match &def.trigger {
-            WorkflowTrigger::Cron { schedule, timezone } => {
+            WorkflowTrigger::Cron {
+                schedule, timezone, ..
+            } => {
                 assert_eq!(schedule, "0 */6 * * * *");
                 assert_eq!(timezone.as_deref(), Some("UTC"));
             }
@@ -520,7 +534,7 @@ mod tests {
         let new = NewWorkflowDefinition::builder()
             .project_id(ProjectId::new())
             .name("uses-existing")
-            .trigger(WorkflowTrigger::Manual)
+            .trigger(WorkflowTrigger::Manual { condition: None })
             .steps(vec![sample_step()])
             .sandboxes(vec![WorkflowSandboxDecl::Preexisting {
                 name: "investigation".to_string(),

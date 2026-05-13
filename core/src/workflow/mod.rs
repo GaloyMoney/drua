@@ -18,6 +18,7 @@ use rand::RngCore;
 use tracing::instrument;
 
 use crate::agent::Agents;
+use crate::audit::{Audit, InteractionOutcome};
 use crate::primitives::*;
 use crate::sandbox::Sandboxes;
 use crate::skill::Skills;
@@ -39,6 +40,77 @@ use job::{ExecuteRunConfig, ExecuteRunJobInitializer};
 use repo::WorkflowDefinitionRepo;
 use run::entity::NewWorkflowRun;
 use template::TemplateRef;
+
+/// Audit action recorded when a `trigger.condition:` evaluates to
+/// `false` and the run is deliberately suppressed.
+const AUDIT_ACTION_TRIGGER_FILTERED: &str = "workflow.trigger_filtered";
+/// Audit action recorded when a `trigger.condition:` errors at
+/// runtime (compile, runtime, non-boolean result).
+const AUDIT_ACTION_TRIGGER_CONDITION_ERRORED: &str = "workflow.trigger_condition_errored";
+
+/// SHA-256 hex digest of the JSON-encoded trigger context. Stored
+/// in audit metadata so operators can correlate filtered events
+/// to specific deliveries without persisting the full payload
+/// (memo 019e20a2 §7).
+fn payload_digest(trigger_context: &serde_json::Value) -> String {
+    use sha2::{Digest, Sha256};
+    let bytes = serde_json::to_vec(trigger_context).unwrap_or_default();
+    let digest = Sha256::digest(&bytes);
+    hex::encode(digest)
+}
+
+fn record_trigger_filtered_audit(
+    definition: &WorkflowDefinition,
+    condition_body: &str,
+    trigger_context: &serde_json::Value,
+) {
+    Audit::record_action_if_unset(AUDIT_ACTION_TRIGGER_FILTERED);
+    Audit::record_workflow_id(definition.id);
+    Audit::record_metadata(serde_json::json!({
+        "definition_id": definition.id.to_string(),
+        "trigger_kind": trigger_kind_label(&definition.trigger),
+        "condition_body": condition_body,
+        "payload_digest": payload_digest(trigger_context),
+    }));
+    Audit::record_outcome_if_unset(InteractionOutcome::Success);
+    tracing::info!(
+        definition_id = %definition.id,
+        condition_body,
+        "workflow run suppressed by trigger condition"
+    );
+}
+
+fn record_trigger_condition_errored_audit(
+    definition: &WorkflowDefinition,
+    condition_body: &str,
+    trigger_context: &serde_json::Value,
+    reason: &str,
+) {
+    Audit::record_action_if_unset(AUDIT_ACTION_TRIGGER_CONDITION_ERRORED);
+    Audit::record_workflow_id(definition.id);
+    Audit::record_metadata(serde_json::json!({
+        "definition_id": definition.id.to_string(),
+        "trigger_kind": trigger_kind_label(&definition.trigger),
+        "condition_body": condition_body,
+        "payload_digest": payload_digest(trigger_context),
+        "error": reason,
+    }));
+    Audit::record_error(reason.to_string());
+    tracing::warn!(
+        definition_id = %definition.id,
+        condition_body,
+        error = reason,
+        "trigger condition errored; run not created"
+    );
+}
+
+fn trigger_kind_label(trigger: &WorkflowTrigger) -> &'static str {
+    match trigger {
+        WorkflowTrigger::Manual { .. } => "manual",
+        WorkflowTrigger::Webhook { .. } => "webhook",
+        WorkflowTrigger::Cron { .. } => "cron",
+    }
+}
 
 /// CEL identifier shape — `[A-Za-z_][A-Za-z0-9_]*`. Step names
 /// must conform so `${{ steps.<name>.outputs.… }}` parses as a
@@ -191,12 +263,15 @@ impl Workflows {
         }
 
         let trigger = match trigger {
-            WorkflowTrigger::Webhook { provider, secret } if secret.is_empty() => {
-                WorkflowTrigger::Webhook {
-                    provider,
-                    secret: Self::generate_webhook_secret(),
-                }
-            }
+            WorkflowTrigger::Webhook {
+                provider,
+                secret,
+                condition,
+            } if secret.is_empty() => WorkflowTrigger::Webhook {
+                provider,
+                secret: Self::generate_webhook_secret(),
+                condition,
+            },
             other => other,
         };
 
@@ -232,9 +307,16 @@ impl Workflows {
     /// Reject cron triggers whose schedule or timezone won't parse so
     /// the failure surfaces at create-time, not on the first fire.
     fn validate_trigger(trigger: &WorkflowTrigger) -> Result<(), WorkflowError> {
-        if let WorkflowTrigger::Cron { schedule, timezone } = trigger {
+        if let WorkflowTrigger::Cron {
+            schedule, timezone, ..
+        } = trigger
+        {
             parse_cron_schedule(schedule).map_err(WorkflowError::InvalidCronExpression)?;
             parse_timezone(timezone.as_deref()).map_err(WorkflowError::InvalidTimezone)?;
+        }
+        if let Some(body) = trigger.condition() {
+            template::parse_trigger_condition(body)
+                .map_err(|e| WorkflowError::InvalidCondition(format!("trigger: {e}")))?;
         }
         Ok(())
     }
@@ -449,12 +531,15 @@ impl Workflows {
             .await?;
 
         let trigger = match trigger {
-            WorkflowTrigger::Webhook { provider, secret } if secret.is_empty() => {
-                WorkflowTrigger::Webhook {
-                    provider,
-                    secret: Self::generate_webhook_secret(),
-                }
-            }
+            WorkflowTrigger::Webhook {
+                provider,
+                secret,
+                condition,
+            } if secret.is_empty() => WorkflowTrigger::Webhook {
+                provider,
+                secret: Self::generate_webhook_secret(),
+                condition,
+            },
             other => other,
         };
 
@@ -554,7 +639,10 @@ impl Workflows {
         op: &mut OP,
         workflow: &WorkflowDefinition,
     ) -> Result<(), WorkflowError> {
-        let WorkflowTrigger::Cron { schedule, timezone } = &workflow.trigger else {
+        let WorkflowTrigger::Cron {
+            schedule, timezone, ..
+        } = &workflow.trigger
+        else {
             return Ok(());
         };
         let next_at = match next_cron_fire_at(schedule, timezone.as_deref(), chrono::Utc::now())
@@ -632,13 +720,16 @@ impl Workflows {
     }
 
     /// Spawns the executor as a job and returns the run synchronously.
+    /// `Ok(None)` means the trigger's `condition:` evaluated to false
+    /// and the run was deliberately suppressed (an audit row was
+    /// written).
     #[instrument(name = "core.workflow.trigger_run", skip_all)]
     pub async fn trigger_run(
         &self,
         sub: &AuthSubject,
         definition_id: WorkflowDefinitionId,
         trigger_context: serde_json::Value,
-    ) -> Result<WorkflowRun, WorkflowError> {
+    ) -> Result<Option<WorkflowRun>, WorkflowError> {
         let definition = self.repo.find_by_id(definition_id).await?;
         sub.can(
             AuthVerb::Use,
@@ -649,12 +740,14 @@ impl Workflows {
 
     /// No auth check — pairs with [`Self::find_by_id_unchecked`] so
     /// the webhook handler doesn't double-load the definition.
+    /// `Ok(None)` carries the same "filtered by trigger condition"
+    /// meaning as [`Self::trigger_run`].
     #[instrument(name = "core.workflow.trigger_run_for_definition", skip_all)]
     pub async fn trigger_run_for_definition(
         &self,
         definition: WorkflowDefinition,
         trigger_context: serde_json::Value,
-    ) -> Result<WorkflowRun, WorkflowError> {
+    ) -> Result<Option<WorkflowRun>, WorkflowError> {
         self.spawn_run(definition, trigger_context).await
     }
 
@@ -662,7 +755,7 @@ impl Workflows {
         &self,
         definition: WorkflowDefinition,
         trigger_context: serde_json::Value,
-    ) -> Result<WorkflowRun, WorkflowError> {
+    ) -> Result<Option<WorkflowRun>, WorkflowError> {
         Self::spawn_run_static(
             &self.run_repo,
             &self.execute_run_spawner,
@@ -677,7 +770,43 @@ impl Workflows {
         execute_run_spawner: &::job::JobSpawner<ExecuteRunConfig>,
         definition: WorkflowDefinition,
         trigger_context: serde_json::Value,
-    ) -> Result<WorkflowRun, WorkflowError> {
+    ) -> Result<Option<WorkflowRun>, WorkflowError> {
+        if let Some(body) = definition.trigger.condition() {
+            match template::evaluate_trigger_condition(body, &trigger_context) {
+                Ok(template::ConditionOutcome::True) => {}
+                Ok(template::ConditionOutcome::False) => {
+                    record_trigger_filtered_audit(&definition, body, &trigger_context);
+                    return Ok(None);
+                }
+                Ok(template::ConditionOutcome::NotBoolean(rendered)) => {
+                    let reason = format!("condition evaluated to non-boolean: {rendered}");
+                    record_trigger_condition_errored_audit(
+                        &definition,
+                        body,
+                        &trigger_context,
+                        &reason,
+                    );
+                    return Err(WorkflowError::TriggerConditionErrored {
+                        body: body.to_string(),
+                        reason,
+                    });
+                }
+                Err(e) => {
+                    let reason = e.to_string();
+                    record_trigger_condition_errored_audit(
+                        &definition,
+                        body,
+                        &trigger_context,
+                        &reason,
+                    );
+                    return Err(WorkflowError::TriggerConditionErrored {
+                        body: body.to_string(),
+                        reason,
+                    });
+                }
+            }
+        }
+
         let new = NewWorkflowRun::builder()
             .definition_id(definition.id)
             .project_id(definition.project_id)
@@ -694,7 +823,7 @@ impl Workflows {
             .await
             .map_err(|e| WorkflowError::Job(e.to_string()))?;
 
-        Ok(run)
+        Ok(Some(run))
     }
 
     #[instrument(name = "core.workflow.list_runs", skip_all)]
@@ -789,10 +918,11 @@ mod tests {
 
     #[test]
     fn validate_trigger_accepts_manual_and_webhook() {
-        Workflows::validate_trigger(&WorkflowTrigger::Manual).unwrap();
+        Workflows::validate_trigger(&WorkflowTrigger::Manual { condition: None }).unwrap();
         Workflows::validate_trigger(&WorkflowTrigger::Webhook {
             provider: Some("honeycomb".into()),
             secret: "whsec".into(),
+            condition: None,
         })
         .unwrap();
     }
@@ -802,6 +932,7 @@ mod tests {
         Workflows::validate_trigger(&WorkflowTrigger::Cron {
             schedule: "0 */6 * * * *".into(),
             timezone: Some("UTC".into()),
+            condition: None,
         })
         .unwrap();
     }
@@ -811,6 +942,7 @@ mod tests {
         let err = Workflows::validate_trigger(&WorkflowTrigger::Cron {
             schedule: "not a cron".into(),
             timezone: None,
+            condition: None,
         })
         .unwrap_err();
         assert!(matches!(err, WorkflowError::InvalidCronExpression(_)));
@@ -821,9 +953,42 @@ mod tests {
         let err = Workflows::validate_trigger(&WorkflowTrigger::Cron {
             schedule: "0 */6 * * * *".into(),
             timezone: Some("Mars/Olympus_Mons".into()),
+            condition: None,
         })
         .unwrap_err();
         assert!(matches!(err, WorkflowError::InvalidTimezone(_)));
+    }
+
+    #[test]
+    fn validate_trigger_rejects_malformed_cel_condition() {
+        let err = Workflows::validate_trigger(&WorkflowTrigger::Webhook {
+            provider: None,
+            secret: "whsec".into(),
+            condition: Some("trigger.payload.x ==".into()),
+        })
+        .unwrap_err();
+        assert!(matches!(err, WorkflowError::InvalidCondition(_)));
+    }
+
+    #[test]
+    fn validate_trigger_rejects_condition_referencing_steps() {
+        let err = Workflows::validate_trigger(&WorkflowTrigger::Webhook {
+            provider: None,
+            secret: "whsec".into(),
+            condition: Some("steps.x.outputs.y == 1".into()),
+        })
+        .unwrap_err();
+        assert!(matches!(err, WorkflowError::InvalidCondition(_)));
+    }
+
+    #[test]
+    fn validate_trigger_accepts_well_formed_condition() {
+        Workflows::validate_trigger(&WorkflowTrigger::Webhook {
+            provider: Some("github_app".into()),
+            secret: "whsec".into(),
+            condition: Some("trigger.payload.action == 'opened'".into()),
+        })
+        .unwrap();
     }
 
     #[test]

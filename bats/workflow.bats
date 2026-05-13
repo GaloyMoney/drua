@@ -254,3 +254,100 @@ extract_id_field() {
   [[ "$output" == *".tags[0]"* ]]
   [[ "$output" == *"trigger.payload.pipeline"* ]]
 }
+
+# Memo 019e20a2: trigger-level `condition:` gates run creation
+# BEFORE the WorkflowRun row is written. Three scenarios pinned
+# end-to-end:
+#  1. condition true → run created, terminates cleanly.
+#  2. condition false → no run created; admin `trigger` returns the
+#     "no run created" text; `list_runs` reports empty.
+#  3. malformed condition rejected at workflow create time.
+@test "workflow: trigger condition gates run creation end-to-end" {
+  local suffix
+  suffix="$(uuidgen | tr '[:upper:]' '[:lower:]' | cut -c1-8)"
+  local proj_name="proj-trigger-cond-$suffix"
+
+  run graphql_query "mutation { projectCreate(input: { name: \"$proj_name\" }) { project { id } } }" "$AGENT_TOKEN"
+  local project_id
+  project_id="$(echo "$output" | jq -r '.data.projectCreate.project.id')"
+  [ -n "$project_id" ] && [ "$project_id" != "null" ]
+
+  # 1. Create with a trigger condition matching only env="staging".
+  run admin_call "workflow" "$(jq -nc --arg pid "$project_id" '{
+    command: "create",
+    project_id: $pid,
+    name: "trigger-cond-flow",
+    manual: true,
+    steps: [
+      { type: "tool_step", name: "identify", tool: "whoami", params: {} }
+    ]
+  }')"
+  echo "$output"
+  local def_id
+  def_id="$(extract_id_field "$output")"
+  [ -n "$def_id" ] || { echo "could not extract definition id"; return 1; }
+
+  # Update to attach a condition gating on `trigger.payload.env`.
+  run admin_call "workflow" "$(jq -nc --arg did "$def_id" '{
+    command: "update",
+    definition_id: $did,
+    update_trigger: true,
+    manual: true,
+    trigger_condition: "trigger.payload.env == \"staging\""
+  }')"
+  echo "$output"
+
+  # 2. Trigger with payload that PASSES the condition.
+  run admin_call "workflow" "$(jq -nc --arg did "$def_id" '{
+    command: "trigger",
+    definition_id: $did,
+    payload: { env: "staging" }
+  }')"
+  echo "$output"
+  local run_id
+  run_id="$(extract_id_field "$output")"
+  [ -n "$run_id" ] || { echo "expected run to be created when condition true"; return 1; }
+
+  run admin_call "workflow" "$(jq -nc --arg rid "$run_id" '{
+    command: "await_run", run_id: $rid, timeout_seconds: 60
+  }')"
+  echo "$output"
+  [[ "$output" == *"state: succeeded"* ]]
+
+  # 3. Trigger with payload that FAILS the condition. No run id.
+  run admin_call "workflow" "$(jq -nc --arg did "$def_id" '{
+    command: "trigger",
+    definition_id: $did,
+    payload: { env: "prod" }
+  }')"
+  echo "$output"
+  [[ "$output" == *"Trigger condition evaluated to false"* ]]
+  [[ "$output" != *"id: "* ]] || {
+    # Belt-and-braces — make sure no `id: <uuid>` line snuck in.
+    ! echo "$output" | grep -qE 'id: [0-9a-f-]{36}'
+  }
+
+  # 4. Update with malformed CEL must be rejected. The admin tool
+  #    surfaces the WorkflowError as an MCP error response.
+  run admin_call "workflow" "$(jq -nc --arg did "$def_id" '{
+    command: "update",
+    definition_id: $did,
+    update_trigger: true,
+    manual: true,
+    trigger_condition: "trigger.payload.x =="
+  }')"
+  echo "$output"
+  [[ "$output" == *"InvalidCondition"* ]] || [[ "$output" == *"failed to compile"* ]]
+
+  # 5. Update with a condition referencing `steps` must be rejected
+  #    (steps aren't in scope at trigger time).
+  run admin_call "workflow" "$(jq -nc --arg did "$def_id" '{
+    command: "update",
+    definition_id: $did,
+    update_trigger: true,
+    manual: true,
+    trigger_condition: "steps.identify.outputs.x == 1"
+  }')"
+  echo "$output"
+  [[ "$output" == *"InvalidCondition"* ]] || [[ "$output" == *"steps"* ]]
+}

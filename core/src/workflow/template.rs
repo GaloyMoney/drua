@@ -64,6 +64,8 @@ pub enum TemplateError {
     Resolve(String, String),
     #[error("template ref `{0}`: result could not be converted to JSON: {1}")]
     JsonConvert(String, String),
+    #[error("trigger condition `{0}`: references `steps` but no step has run yet at trigger-evaluation time; only `trigger` is in scope")]
+    StepsNotInScopeAtTrigger(String),
 }
 
 /// Resolution context borrowed for one substitution pass. The two
@@ -247,6 +249,44 @@ pub fn parse_condition(body: &str) -> Result<TemplateRef, TemplateError> {
     let r = parse_path(body)?;
     validate_root(&r)?;
     Ok(r)
+}
+
+/// Compile-time parse + root validation for a `trigger.condition:`.
+/// Stricter than [`parse_condition`]: rejects any reference to
+/// `steps` because no step has run yet at trigger-evaluation time —
+/// the run hasn't even been created. Only `trigger` is in scope.
+pub fn parse_trigger_condition(body: &str) -> Result<TemplateRef, TemplateError> {
+    let r = parse_path(body)?;
+    let program = Program::compile(&r.body)
+        .map_err(|e| TemplateError::Compile(r.raw.clone(), e.to_string()))?;
+    for ident in program.references().variables() {
+        if ident == "trigger" {
+            continue;
+        }
+        if ident == "steps" {
+            return Err(TemplateError::StepsNotInScopeAtTrigger(r.raw.clone()));
+        }
+        return Err(TemplateError::UnknownRoot(r.raw.clone(), ident.to_string()));
+    }
+    Ok(r)
+}
+
+/// Evaluate a `trigger.condition:` body against a payload-only
+/// context. Mirrors [`TemplateContext::evaluate_condition`] but with
+/// `steps` deliberately empty — no step has run yet. Returns the
+/// usual `ConditionOutcome` (True / False / NotBoolean) so callers
+/// can distinguish a clean `false` (suppress run) from a malformed
+/// body (audit-error + suppress run).
+pub fn evaluate_trigger_condition(
+    body: &str,
+    trigger_payload: &Value,
+) -> Result<ConditionOutcome, TemplateError> {
+    let empty_steps: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
+    let ctx = TemplateContext {
+        trigger: trigger_payload,
+        steps: &empty_steps,
+    };
+    ctx.evaluate_condition(body)
 }
 
 /// Reject expressions that reference identifiers other than the two
@@ -988,6 +1028,110 @@ mod tests {
     fn referenced_step_names_ignores_trigger() {
         let r = parse_path("trigger.payload.build").unwrap();
         assert!(referenced_step_names(&r).is_empty());
+    }
+
+    #[test]
+    fn parse_trigger_condition_accepts_trigger_only() {
+        parse_trigger_condition("trigger.payload.action == 'opened'").unwrap();
+    }
+
+    #[test]
+    fn parse_trigger_condition_rejects_steps_reference() {
+        let err = parse_trigger_condition("steps.x.outputs.y == 1").unwrap_err();
+        assert!(matches!(err, TemplateError::StepsNotInScopeAtTrigger(_)));
+    }
+
+    #[test]
+    fn parse_trigger_condition_rejects_unknown_root() {
+        let err = parse_trigger_condition("env.HOME == 'x'").unwrap_err();
+        assert!(matches!(err, TemplateError::UnknownRoot(_, _)));
+    }
+
+    #[test]
+    fn parse_trigger_condition_rejects_compile_error() {
+        let err = parse_trigger_condition("trigger.payload.x ==").unwrap_err();
+        assert!(matches!(err, TemplateError::Compile(_, _)));
+    }
+
+    #[test]
+    fn parse_trigger_condition_accepts_function_calls_over_trigger() {
+        parse_trigger_condition("has(trigger.payload.action)").unwrap();
+        parse_trigger_condition("size(trigger.payload.commits) > 0").unwrap();
+    }
+
+    #[test]
+    fn evaluate_trigger_condition_true() {
+        let payload = json!({ "action": "opened", "repo": { "name": "drua" } });
+        assert_eq!(
+            evaluate_trigger_condition("trigger.payload.action == 'opened'", &payload).unwrap(),
+            ConditionOutcome::True
+        );
+    }
+
+    #[test]
+    fn evaluate_trigger_condition_false() {
+        let payload = json!({ "action": "closed" });
+        assert_eq!(
+            evaluate_trigger_condition("trigger.payload.action == 'opened'", &payload).unwrap(),
+            ConditionOutcome::False
+        );
+    }
+
+    /// Missing field on a NON-null payload surfaces as a CEL
+    /// `NoSuchKey` runtime error — the null-coalescing path only
+    /// kicks in when the whole payload is `null`. Authors writing
+    /// conditions over heterogeneous webhook payloads must guard
+    /// optional fields with `has(...)` to avoid spurious
+    /// `trigger.condition_errored` audit rows.
+    #[test]
+    fn evaluate_trigger_condition_missing_field_surfaces_as_runtime_error() {
+        let payload = json!({ "other": 1 });
+        let err =
+            evaluate_trigger_condition("trigger.payload.action == 'opened'", &payload).unwrap_err();
+        assert!(matches!(err, TemplateError::Resolve(_, _)));
+    }
+
+    /// Null payload (no body / manual `trigger` with no payload)
+    /// behaves the same as an empty-object payload — `build_cel_context`
+    /// coerces both to `{}` before binding, so `trigger.payload.x`
+    /// raises `NoSuchKey` rather than collapsing silently. Authors
+    /// must guard with `has(...)` (see following test).
+    #[test]
+    fn evaluate_trigger_condition_null_payload_unguarded_errors() {
+        let err = evaluate_trigger_condition("trigger.payload.action == 'opened'", &json!(null))
+            .unwrap_err();
+        assert!(matches!(err, TemplateError::Resolve(_, _)));
+    }
+
+    /// `has(...)`-guarded conditions are the recommended idiom for
+    /// optional fields — they evaluate cleanly to false instead of
+    /// raising NoSuchKey, even on payloads that lack the key.
+    #[test]
+    fn evaluate_trigger_condition_has_guard_handles_missing_field() {
+        let payload = json!({ "other": 1 });
+        assert_eq!(
+            evaluate_trigger_condition(
+                "has(trigger.payload.action) && trigger.payload.action == 'opened'",
+                &payload,
+            )
+            .unwrap(),
+            ConditionOutcome::False
+        );
+    }
+
+    #[test]
+    fn evaluate_trigger_condition_non_boolean_surfaces() {
+        let payload = json!({ "x": "y" });
+        match evaluate_trigger_condition("trigger.payload.x + '!'", &payload) {
+            Ok(ConditionOutcome::NotBoolean(s)) => assert!(s.contains("y!")),
+            other => panic!("expected NotBoolean, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluate_trigger_condition_propagates_compile_error() {
+        let err = evaluate_trigger_condition("trigger.payload.x ==", &json!({})).unwrap_err();
+        assert!(matches!(err, TemplateError::Compile(_, _)));
     }
 
     /// Hyphens fall outside the CEL identifier alphabet, so the
