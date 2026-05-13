@@ -271,11 +271,19 @@ input ModelChainInput {
 }
 
 type ModelSpec {
+	"""
+	Input: optional override of the registry's `max_tokens_per_response`.
+	Output: the effective max_tokens currently in force (registry value or override).
+	"""
 	maxTokens: Int
 	name: String!
 }
 
 input ModelSpecInput {
+	"""
+	Input: optional override of the registry's `max_tokens_per_response`.
+	Output: the effective max_tokens currently in force (registry value or override).
+	"""
 	maxTokens: Int
 	name: String!
 }

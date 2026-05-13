@@ -13,6 +13,8 @@ use drua_core::{ModelChain as DomainModelChain, ModelSpec as DomainModelSpec};
 #[graphql(input_name = "ModelSpecInput")]
 pub struct ModelSpec {
     pub name: String,
+    /// Input: optional override of the registry's `max_tokens_per_response`.
+    /// Output: the effective max_tokens currently in force (registry value or override).
     pub max_tokens: Option<i32>,
 }
 

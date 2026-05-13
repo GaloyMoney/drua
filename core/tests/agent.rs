@@ -875,3 +875,34 @@ async fn detach_conflicting_writer_is_noop_when_unattached() {
     op.commit().await.expect("commit");
     assert!(detached.is_empty());
 }
+
+#[tokio::test]
+async fn update_session_chain_rejects_workflow_agents() {
+    let pool = pool().await;
+    let (agents, _sandboxes) = build_agents(&pool).await;
+    let project_id = insert_project(&pool).await;
+    let (workflow_id, run_id) = seed_workflow_run(&pool, project_id).await;
+
+    let mut op = agents.begin_op().await.expect("begin op");
+    let agent = agents
+        .create_for_workflow_run_in_op(
+            &mut op,
+            project_id,
+            workflow_id,
+            run_id,
+            "wf-step",
+            None,
+            None,
+            drua_core::workflow::default_output_schema(),
+        )
+        .await
+        .expect("create workflow agent");
+    op.commit().await.expect("commit");
+
+    let sub = AuthSubject::User(UserId::new());
+    let result = agents.update_session_chain(&sub, agent.id, None).await;
+    assert!(matches!(
+        result,
+        Err(drua_core::agent::AgentError::WorkflowAgentChainImmutable)
+    ));
+}
