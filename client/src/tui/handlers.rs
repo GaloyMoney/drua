@@ -226,6 +226,7 @@ fn handle_input_editing(state: &mut ScreenState, key: &KeyEvent) {
 }
 
 fn handle_create_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Esc => {
             state.exit_create_mode();
@@ -239,7 +240,7 @@ fn handle_create_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             state.active_input_mut().pop();
             Action::None
         }
-        KeyCode::Char(c) => {
+        KeyCode::Char(c) if !ctrl => {
             state.active_input_mut().push(c);
             Action::None
         }
@@ -257,6 +258,7 @@ fn handle_create_key(state: &mut ScreenState, key: KeyEvent) -> Action {
 }
 
 fn handle_export_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Esc => {
             state.exit_export_mode();
@@ -266,7 +268,7 @@ fn handle_export_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             state.export_path.pop();
             Action::None
         }
-        KeyCode::Char(c) => {
+        KeyCode::Char(c) if !ctrl => {
             state.export_path.push(c);
             Action::None
         }
