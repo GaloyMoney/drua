@@ -282,12 +282,22 @@ _wait_for_audit_log() {
 }
 
 # Memo 019e20a2: trigger-level `condition:` gates run creation
-# BEFORE the WorkflowRun row is written. Three scenarios pinned
-# end-to-end:
-#  1. condition true → run created, terminates cleanly.
-#  2. condition false → no run created; admin `trigger` returns the
-#     "no run created" text; `list_runs` reports empty.
-#  3. malformed condition rejected at workflow create time.
+# BEFORE the WorkflowRun row is written.
+#
+# IMPORTANT — race avoidance: the workflow is created WITH the
+# `trigger_condition` set, NOT via a follow-up `update`. The library
+# forward-sync is async (writes are queued via `enqueue_in_op` and
+# committed to git by a background worker); the reverse-sync polls
+# every 1 second and re-imports YAML it sees on disk. If we create
+# the workflow without a condition and then update to attach one,
+# the reverse-sync can poll during the window after the DB Updated
+# event commits but before the background worker writes the new
+# YAML — observing the stale (pre-update) YAML, file_hashes diverge,
+# and `update_from_library` clobbers the entity back to the
+# pre-update trigger (memo `019e20a3` follow-up: the merged PR #341
+# original test hit this race and flaked between CIs). Creating with
+# the condition collapses to a single event + single forward-sync,
+# closing the race window.
 @test "workflow: trigger condition gates run creation end-to-end" {
   local suffix
   suffix="$(uuidgen | tr '[:upper:]' '[:lower:]' | cut -c1-8)"
@@ -298,12 +308,15 @@ _wait_for_audit_log() {
   project_id="$(echo "$output" | jq -r '.data.projectCreate.project.id')"
   [ -n "$project_id" ] && [ "$project_id" != "null" ]
 
-  # 1. Create with a trigger condition matching only env="staging".
+  # 1. Create the workflow WITH a trigger condition matching only
+  #    env="staging". Setting the condition at create-time avoids
+  #    the forward-sync/reverse-sync race window described above.
   run admin_call "workflow" "$(jq -nc --arg pid "$project_id" '{
     command: "create",
     project_id: $pid,
     name: "trigger-cond-flow",
     manual: true,
+    trigger_condition: "trigger.payload.env == \"staging\"",
     steps: [
       { type: "tool_step", name: "identify", tool: "whoami", params: {} }
     ]
@@ -312,16 +325,6 @@ _wait_for_audit_log() {
   local def_id
   def_id="$(extract_id_field "$output")"
   [ -n "$def_id" ] || { echo "could not extract definition id"; return 1; }
-
-  # Update to attach a condition gating on `trigger.payload.env`.
-  run admin_call "workflow" "$(jq -nc --arg did "$def_id" '{
-    command: "update",
-    definition_id: $did,
-    update_trigger: true,
-    manual: true,
-    trigger_condition: "trigger.payload.env == \"staging\""
-  }')"
-  echo "$output"
 
   # 2. Trigger with payload that PASSES the condition.
   run admin_call "workflow" "$(jq -nc --arg did "$def_id" '{
@@ -365,26 +368,34 @@ _wait_for_audit_log() {
   echo "audit_row=$audit_row"
   [[ "$audit_row" == *"workflow.trigger_filtered"* ]]
 
-  # 4. Update with malformed CEL must be rejected. The admin tool
-  #    surfaces the WorkflowError as an MCP error response.
-  run admin_call "workflow" "$(jq -nc --arg did "$def_id" '{
-    command: "update",
-    definition_id: $did,
-    update_trigger: true,
+  # 4. Create with malformed CEL must be rejected. The admin tool
+  #    surfaces the WorkflowError as an MCP error response. Uses a
+  #    fresh project + name so the rejection doesn't depend on the
+  #    state of the workflow above.
+  run admin_call "workflow" "$(jq -nc --arg pid "$project_id" '{
+    command: "create",
+    project_id: $pid,
+    name: "trigger-cond-malformed",
     manual: true,
-    trigger_condition: "trigger.payload.x =="
+    trigger_condition: "trigger.payload.x ==",
+    steps: [
+      { type: "tool_step", name: "identify", tool: "whoami", params: {} }
+    ]
   }')"
   echo "$output"
   [[ "$output" == *"InvalidCondition"* ]] || [[ "$output" == *"failed to compile"* ]]
 
-  # 5. Update with a condition referencing `steps` must be rejected
+  # 5. Create with a condition referencing `steps` must be rejected
   #    (steps aren't in scope at trigger time).
-  run admin_call "workflow" "$(jq -nc --arg did "$def_id" '{
-    command: "update",
-    definition_id: $did,
-    update_trigger: true,
+  run admin_call "workflow" "$(jq -nc --arg pid "$project_id" '{
+    command: "create",
+    project_id: $pid,
+    name: "trigger-cond-steps-ref",
     manual: true,
-    trigger_condition: "steps.identify.outputs.x == 1"
+    trigger_condition: "steps.identify.outputs.x == 1",
+    steps: [
+      { type: "tool_step", name: "identify", tool: "whoami", params: {} }
+    ]
   }')"
   echo "$output"
   [[ "$output" == *"InvalidCondition"* ]] || [[ "$output" == *"steps"* ]]
