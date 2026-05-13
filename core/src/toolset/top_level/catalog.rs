@@ -328,6 +328,9 @@ impl TopLevelTool for DescribeCatalogTool {
     fn inner_output_schema(&self) -> Option<&serde_json::Value> {
         Some(&DESCRIBE_OUTPUT_SCHEMA)
     }
+    fn default_tool_caching(&self) -> bool {
+        false
+    }
 
     async fn call(
         &self,
