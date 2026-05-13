@@ -56,7 +56,7 @@ impl TunnelRuntimeConfig {
         if self.heartbeat_secs == 0 {
             return Err(TunnelConfigError::ZeroHeartbeat);
         }
-        if self.expires_after_secs < self.heartbeat_secs * 2 {
+        if self.expires_after_secs / 2 < self.heartbeat_secs {
             return Err(TunnelConfigError::TtlTooLow {
                 heartbeat_secs: self.heartbeat_secs,
                 expires_after_secs: self.expires_after_secs,

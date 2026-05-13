@@ -1,5 +1,14 @@
 use rmcp::model::{CallToolResult, JsonObject};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+pub const TUNNEL_TOOL_CALL_TIMEOUT_SECS: u64 = 120;
+pub const TUNNEL_PROXY_TIMEOUT_SLACK_SECS: u64 = 10;
+pub const TUNNEL_TOOL_CALL_TIMEOUT: Duration = Duration::from_secs(TUNNEL_TOOL_CALL_TIMEOUT_SECS);
+pub const TUNNEL_PROXY_TIMEOUT_SLACK: Duration =
+    Duration::from_secs(TUNNEL_PROXY_TIMEOUT_SLACK_SECS);
+pub const TUNNEL_PROXY_CALL_TIMEOUT: Duration =
+    Duration::from_secs(TUNNEL_TOOL_CALL_TIMEOUT_SECS + TUNNEL_PROXY_TIMEOUT_SLACK_SECS);
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -56,9 +65,9 @@ impl InternalAuth {
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct InternalCallReq<'a> {
-    pub upstream: &'a str,
-    pub tool_name: &'a str,
+pub struct InternalCallReq {
+    pub upstream: String,
+    pub tool_name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub arguments: Option<JsonObject>,
 }

@@ -6,7 +6,7 @@ use axum::{
     routing::post,
     Json, Router,
 };
-use drua_core::tunnel::wire::{CallToolResult, JsonObject};
+use drua_core::tunnel::{wire::CallToolResult, InternalCallReq};
 use serde::Deserialize;
 use tracing::instrument;
 
@@ -28,25 +28,34 @@ async fn internal_auth_middleware(req: Request, next: Next) -> Response {
         None => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
     let configured_secret = state.app.tunnel_runtime().internal_secret.clone();
-    let configured_secret = match configured_secret.as_deref() {
-        Some(s) if !s.is_empty() => s.to_string(),
-        _ => {
-            tracing::warn!("/internal/tunnel called but no internal_secret configured");
-            return StatusCode::SERVICE_UNAVAILABLE.into_response();
-        }
-    };
-
-    let presented = req
+    let auth_header = req
         .headers()
         .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "));
+        .and_then(|v| v.to_str().ok());
 
-    match presented {
-        Some(s) if constant_time_eq(s.as_bytes(), configured_secret.as_bytes()) => {
-            next.run(req).await
+    match internal_auth_status(auth_header, configured_secret.as_deref()) {
+        Ok(()) => next.run(req).await,
+        Err(StatusCode::SERVICE_UNAVAILABLE) => {
+            tracing::warn!("/internal/tunnel called but no internal_secret configured");
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
         }
-        _ => StatusCode::UNAUTHORIZED.into_response(),
+        Err(status) => status.into_response(),
+    }
+}
+
+fn internal_auth_status(
+    auth_header: Option<&str>,
+    configured_secret: Option<&str>,
+) -> Result<(), StatusCode> {
+    let configured_secret = match configured_secret {
+        Some(s) if !s.is_empty() => s,
+        _ => return Err(StatusCode::SERVICE_UNAVAILABLE),
+    };
+
+    let presented = auth_header.and_then(|v| v.strip_prefix("Bearer "));
+    match presented {
+        Some(s) if constant_time_eq(s.as_bytes(), configured_secret.as_bytes()) => Ok(()),
+        _ => Err(StatusCode::UNAUTHORIZED),
     }
 }
 
@@ -63,16 +72,8 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 #[derive(Deserialize)]
-struct InternalCallReqOwned {
-    upstream: String,
-    tool_name: String,
-    #[serde(default)]
-    arguments: Option<JsonObject>,
-}
-
-#[derive(Deserialize)]
 struct InternalCallParams {
-    session_id: Option<uuid::Uuid>,
+    session_id: uuid::Uuid,
 }
 
 #[instrument(name = "web.internal.tunnel_call", skip_all, fields(deployment_id = %deployment_id))]
@@ -80,7 +81,7 @@ async fn internal_tunnel_call(
     State(state): State<AppState>,
     Path(deployment_id): Path<String>,
     Query(params): Query<InternalCallParams>,
-    Json(req): Json<InternalCallReqOwned>,
+    Json(req): Json<InternalCallReq>,
 ) -> Response {
     let (local_session, handle) = match state.app.tunnels().local_session(&deployment_id) {
         Some(t) => t,
@@ -93,22 +94,21 @@ async fn internal_tunnel_call(
         }
     };
 
-    if let Some(expected) = params.session_id {
-        if expected != local_session {
-            tracing::info!(
-                deployment_id = %deployment_id,
-                expected_session = %expected,
-                local_session = %local_session,
-                "rejecting stale proxy call (session_id mismatch)"
-            );
-            return (
-                StatusCode::GONE,
-                format!(
-                    "tunnel '{deployment_id}' session_id mismatch: expected {expected}, have {local_session}"
-                ),
-            )
-                .into_response();
-        }
+    if params.session_id != local_session {
+        tracing::info!(
+            deployment_id = %deployment_id,
+            expected_session = %params.session_id,
+            local_session = %local_session,
+            "rejecting stale proxy call (session_id mismatch)"
+        );
+        return (
+            StatusCode::GONE,
+            format!(
+                "tunnel '{deployment_id}' session_id mismatch: expected {}, have {local_session}",
+                params.session_id
+            ),
+        )
+            .into_response();
     }
 
     match handle
@@ -117,5 +117,56 @@ async fn internal_tunnel_call(
     {
         Ok(result) => Json::<CallToolResult>(result).into_response(),
         Err(e) => (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn internal_auth_rejects_missing_secret() {
+        assert_eq!(
+            internal_auth_status(Some("Bearer secret"), None),
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        );
+        assert_eq!(
+            internal_auth_status(Some("Bearer secret"), Some("")),
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        );
+    }
+
+    #[test]
+    fn internal_auth_rejects_missing_or_wrong_header() {
+        assert_eq!(
+            internal_auth_status(None, Some("secret")),
+            Err(StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(
+            internal_auth_status(Some("Bearer wrong"), Some("secret")),
+            Err(StatusCode::UNAUTHORIZED)
+        );
+        assert_eq!(
+            internal_auth_status(Some("Basic secret"), Some("secret")),
+            Err(StatusCode::UNAUTHORIZED)
+        );
+    }
+
+    #[test]
+    fn internal_auth_accepts_matching_bearer() {
+        assert_eq!(
+            internal_auth_status(Some("Bearer secret"), Some("secret")),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn internal_call_params_require_session_id() {
+        assert!(serde_urlencoded::from_str::<InternalCallParams>("").is_err());
+        let session_id = uuid::Uuid::new_v4();
+        let parsed =
+            serde_urlencoded::from_str::<InternalCallParams>(&format!("session_id={session_id}"))
+                .expect("session_id parses");
+        assert_eq!(parsed.session_id, session_id);
     }
 }

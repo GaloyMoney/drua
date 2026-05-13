@@ -51,16 +51,15 @@ impl TunnelRegistrations {
         toolsets: &[RegisteredToolSet],
         ttl: Duration,
     ) -> Result<(), sqlx::Error> {
-        let payload = serde_json::to_value(ToolsetsPayload(toolsets.to_vec()))
-            .expect("RegisteredToolSet serialization is infallible");
-        let ttl_secs = ttl.as_secs() as i64;
+        let payload = sqlx::types::Json(ToolsetsPayload(toolsets.to_vec()));
+        let ttl_secs = ttl.as_secs_f64();
         let mut tx = self.pool.begin().await?;
-        sqlx::query(
+        sqlx::query!(
             r#"
             INSERT INTO tunnel_registrations
                 (deployment_id, session_id, owner_pod_addr, toolsets, expires_at)
             VALUES
-                ($1, $2, $3, $4, now() + make_interval(secs => $5::int))
+                ($1, $2, $3, $4, now() + ($5::double precision * INTERVAL '1 second'))
             ON CONFLICT (deployment_id) DO UPDATE
                 SET session_id     = EXCLUDED.session_id,
                     owner_pod_addr = EXCLUDED.owner_pod_addr,
@@ -68,12 +67,12 @@ impl TunnelRegistrations {
                     registered_at  = now(),
                     expires_at     = EXCLUDED.expires_at
             "#,
+            deployment_id,
+            session_id,
+            owner_pod_addr,
+            payload as _,
+            ttl_secs,
         )
-        .bind(deployment_id)
-        .bind(session_id)
-        .bind(owner_pod_addr)
-        .bind(&payload)
-        .bind(ttl_secs)
         .execute(&mut *tx)
         .await?;
 
@@ -88,17 +87,17 @@ impl TunnelRegistrations {
         session_id: uuid::Uuid,
         ttl: Duration,
     ) -> Result<bool, sqlx::Error> {
-        let ttl_secs = ttl.as_secs() as i64;
-        let result = sqlx::query(
+        let ttl_secs = ttl.as_secs_f64();
+        let result = sqlx::query!(
             r#"
             UPDATE tunnel_registrations
-               SET expires_at = now() + make_interval(secs => $3::int)
-             WHERE deployment_id = $1 AND session_id = $2
+               SET expires_at = now() + ($3::double precision * INTERVAL '1 second')
+             WHERE deployment_id = $1 AND session_id = $2 AND expires_at > now()
             "#,
+            deployment_id,
+            session_id,
+            ttl_secs,
         )
-        .bind(deployment_id)
-        .bind(session_id)
-        .bind(ttl_secs)
         .execute(&self.pool)
         .await?;
         Ok(result.rows_affected() > 0)

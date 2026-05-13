@@ -5,7 +5,7 @@ use rmcp::model::{CallToolResult, JsonObject, Tool};
 use crate::auth::AuthSubject;
 use crate::toolset::{SearchableToolSet, ToolSetEntry, ToolSetScope, ToolSetsError, TunnelRoute};
 
-use super::{InternalAuth, InternalCallReq, RegisteredToolSet};
+use super::{InternalAuth, InternalCallReq, RegisteredToolSet, TUNNEL_PROXY_CALL_TIMEOUT};
 
 pub struct ProxyTunnelToolSet {
     name: String,
@@ -104,8 +104,8 @@ impl SearchableToolSet for ProxyTunnelToolSet {
             self.owner_pod_addr, self.deployment_id, self.session_id
         );
         let body = InternalCallReq {
-            upstream: &self.upstream_name,
-            tool_name,
+            upstream: self.upstream_name.clone(),
+            tool_name: tool_name.to_string(),
             arguments,
         };
         let auth_header = self
@@ -118,7 +118,7 @@ impl SearchableToolSet for ProxyTunnelToolSet {
             .post(&url)
             .header(reqwest::header::AUTHORIZATION, auth_header)
             .json(&body)
-            .timeout(std::time::Duration::from_secs(130))
+            .timeout(TUNNEL_PROXY_CALL_TIMEOUT)
             .send()
             .await
             .map_err(|e| ToolSetsError::Tunnel(format!("proxy POST {url}: {e}")))?;

@@ -138,9 +138,10 @@ async fn registry_lifecycle_heartbeats_takeover_and_owner_cleanup() {
         .is_none());
     assert!(regs.fetch_active(&deployment_id).await.unwrap().is_some());
 
+    let expired_session = uuid::Uuid::new_v4();
     regs.upsert(
         &expired_deployment_id,
-        uuid::Uuid::new_v4(),
+        expired_session,
         &unique_owner("reap"),
         &[registration()],
         Duration::from_secs(0),
@@ -150,6 +151,18 @@ async fn registry_lifecycle_heartbeats_takeover_and_owner_cleanup() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     let view = regs.fetch_active(&expired_deployment_id).await.unwrap();
     assert!(view.is_none(), "expires_at <= now() makes row inactive");
+    let revived = regs
+        .heartbeat(
+            &expired_deployment_id,
+            expired_session,
+            Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !revived,
+        "heartbeat must not revive ownership after the row expires"
+    );
     regs.reap_expired().await.unwrap();
     let still_in_table: Option<(uuid::Uuid,)> =
         sqlx::query_as("SELECT session_id FROM tunnel_registrations WHERE deployment_id = $1")

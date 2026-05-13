@@ -4,7 +4,7 @@ use std::sync::Arc;
 use rmcp::model::{CallToolResult, JsonObject};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
-use crate::protocol::{PendingResult, TunnelError, TunnelMessage};
+use crate::protocol::{PendingResult, TunnelError, TunnelMessage, TUNNEL_TOOL_CALL_TIMEOUT};
 
 type PendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<PendingResult>>>>;
 
@@ -64,9 +64,14 @@ impl TunnelHandle {
             return Err(TunnelError("tunnel disconnected".to_string()));
         }
 
-        tokio::time::timeout(std::time::Duration::from_secs(120), resp_rx)
+        tokio::time::timeout(TUNNEL_TOOL_CALL_TIMEOUT, resp_rx)
             .await
-            .map_err(|_| TunnelError("tool call timed out after 120s".to_string()))?
+            .map_err(|_| {
+                TunnelError(format!(
+                    "tool call timed out after {}s",
+                    TUNNEL_TOOL_CALL_TIMEOUT.as_secs()
+                ))
+            })?
             .map_err(|_| TunnelError("tunnel disconnected".to_string()))?
             .map_err(TunnelError)
     }

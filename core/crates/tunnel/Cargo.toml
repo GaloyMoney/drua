@@ -9,7 +9,7 @@ chrono = { version = "0.4", features = ["clock", "serde"], default-features = fa
 rmcp = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json", "macros"] }
 thiserror = { workspace = true }
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 tracing = { workspace = true }

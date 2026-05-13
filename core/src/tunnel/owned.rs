@@ -5,7 +5,7 @@ use crate::toolset::{SearchableToolSet, ToolSetEntry, ToolSetScope, ToolSetsErro
 
 use super::{RegisteredToolSet, TunnelHandle};
 
-pub struct LocalTunnelToolSet {
+pub struct OwnedTunnelToolSet {
     name: String,
     prefix: String,
     category: String,
@@ -16,7 +16,7 @@ pub struct LocalTunnelToolSet {
     scope: ToolSetScope,
 }
 
-impl LocalTunnelToolSet {
+impl OwnedTunnelToolSet {
     pub fn new(
         deployment_id: &str,
         session_id: uuid::Uuid,
@@ -56,7 +56,7 @@ impl LocalTunnelToolSet {
 }
 
 #[async_trait::async_trait]
-impl SearchableToolSet for LocalTunnelToolSet {
+impl SearchableToolSet for OwnedTunnelToolSet {
     fn name(&self) -> &str {
         &self.name
     }

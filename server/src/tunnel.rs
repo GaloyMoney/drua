@@ -19,7 +19,7 @@ use tracing::instrument;
 use drua_core as domain;
 
 use domain::toolset::SearchableToolSet;
-use domain::tunnel::{LocalTunnelToolSet, TunnelHandle, TunnelMessage};
+use domain::tunnel::{OwnedTunnelToolSet, TunnelHandle, TunnelMessage};
 
 use crate::config::TunnelConfig;
 use crate::AppState;
@@ -226,7 +226,7 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
     let mut new_sets: Vec<std::sync::Arc<dyn SearchableToolSet>> =
         Vec::with_capacity(toolset_registrations.len());
     for reg in &toolset_registrations {
-        match LocalTunnelToolSet::new(&deployment_id, session_id, reg, handle.clone()) {
+        match OwnedTunnelToolSet::new(&deployment_id, session_id, reg, handle.clone()) {
             Ok(ts) => {
                 tracing::info!(
                     deployment_id = %deployment_id,
@@ -348,7 +348,7 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
     //      tunnel going down and the unregister completing. Without this,
     //      those callers wait the full 120s timeout for a response that
     //      will never arrive (the `TunnelHandle` clones inside the now-
-    //      unregistered `LocalTunnelToolSet`s kept the pending map alive).
+    //      unregistered `OwnedTunnelToolSet`s kept the pending map alive).
     //
     //   3. `TunnelRegistry::release` — same session_id invariant as above.
     state
