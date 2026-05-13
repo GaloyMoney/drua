@@ -27,7 +27,7 @@ pub enum SessionThreadEvent {
         id: SessionThreadId,
         session_id: AgentSessionId,
         start_reason: ThreadStartReason,
-        chain: ModelChain,
+        model_chain: ModelChain,
         system_view: SystemView,
         tool_definitions_view: ToolDefinitionsView,
         initial_user_messages: UserMessagesView,
@@ -35,7 +35,7 @@ pub enum SessionThreadEvent {
     InitializedFromCompaction {
         id: SessionThreadId,
         session_id: AgentSessionId,
-        chain: ModelChain,
+        model_chain: ModelChain,
         system_view: SystemView,
         tool_definitions_view: ToolDefinitionsView,
         messages: Vec<MessageView>,
@@ -45,7 +45,7 @@ pub enum SessionThreadEvent {
     InitializedFromRefresh {
         id: SessionThreadId,
         session_id: AgentSessionId,
-        chain: ModelChain,
+        model_chain: ModelChain,
         system_view: SystemView,
         tool_definitions_view: ToolDefinitionsView,
         messages: Vec<MessageView>,
@@ -116,7 +116,7 @@ impl SessionThread {
     }
 
     pub fn prompt_definition(&self) -> PromptDefinition {
-        let mut chain = ModelChain::default();
+        let mut model_chain = ModelChain::default();
         let mut system_view = SystemView { indexes: vec![] };
         let mut tool_definitions_view = ToolDefinitionsView { indexes: vec![] };
         let mut messages = Vec::new();
@@ -124,32 +124,32 @@ impl SessionThread {
         for event in self.events.iter_all() {
             match event {
                 SessionThreadEvent::Initialized {
-                    chain: c,
+                    model_chain: c,
                     system_view: sv,
                     tool_definitions_view: tdv,
                     initial_user_messages,
                     ..
                 } => {
-                    chain = c.clone();
+                    model_chain = c.clone();
                     system_view = sv.clone();
                     tool_definitions_view = tdv.clone();
                     messages.push(MessageView::User(initial_user_messages.clone()));
                 }
                 SessionThreadEvent::InitializedFromCompaction {
-                    chain: c,
+                    model_chain: c,
                     system_view: sv,
                     tool_definitions_view: tdv,
                     messages: init_messages,
                     ..
                 }
                 | SessionThreadEvent::InitializedFromRefresh {
-                    chain: c,
+                    model_chain: c,
                     system_view: sv,
                     tool_definitions_view: tdv,
                     messages: init_messages,
                     ..
                 } => {
-                    chain = c.clone();
+                    model_chain = c.clone();
                     system_view = sv.clone();
                     tool_definitions_view = tdv.clone();
                     messages.extend(init_messages.iter().cloned());
@@ -178,7 +178,7 @@ impl SessionThread {
         }
 
         PromptDefinition {
-            chain,
+            model_chain,
             system_view,
             tool_definitions_view,
             messages,
@@ -270,7 +270,7 @@ pub struct NewSessionThread {
     pub(super) id: SessionThreadId,
     pub(super) session_id: AgentSessionId,
     pub(super) start_reason: ThreadStartReason,
-    pub(super) chain: ModelChain,
+    pub(super) model_chain: ModelChain,
     pub(super) system_view: SystemView,
     pub(super) tool_definitions_view: ToolDefinitionsView,
     init: ThreadInitData,
@@ -297,7 +297,7 @@ impl NewSessionThread {
             id: SessionThreadId::new(),
             session_id: None,
             start_reason: None,
-            chain: None,
+            model_chain: None,
             system_view: None,
             tool_definitions_view: None,
             initial_user_messages: None,
@@ -307,7 +307,7 @@ impl NewSessionThread {
     pub fn compacted(
         id: SessionThreadId,
         session_id: AgentSessionId,
-        chain: ModelChain,
+        model_chain: ModelChain,
         system_view: SystemView,
         tool_definitions_view: ToolDefinitionsView,
         messages: Vec<MessageView>,
@@ -319,7 +319,7 @@ impl NewSessionThread {
             start_reason: ThreadStartReason::Compaction {
                 from_thread: follows_from,
             },
-            chain,
+            model_chain,
             system_view,
             tool_definitions_view,
             init: ThreadInitData::Compacted {
@@ -333,7 +333,7 @@ impl NewSessionThread {
     pub fn refreshed(
         id: SessionThreadId,
         session_id: AgentSessionId,
-        chain: ModelChain,
+        model_chain: ModelChain,
         system_view: SystemView,
         tool_definitions_view: ToolDefinitionsView,
         messages: Vec<MessageView>,
@@ -345,7 +345,7 @@ impl NewSessionThread {
             start_reason: ThreadStartReason::ContextRefreshed {
                 from_thread: follows_from,
             },
-            chain,
+            model_chain,
             system_view,
             tool_definitions_view,
             init: ThreadInitData::Refreshed {
@@ -360,7 +360,7 @@ impl NewSessionThread {
         id: SessionThreadId,
         session_id: AgentSessionId,
         from_thread: SessionThreadId,
-        chain: ModelChain,
+        model_chain: ModelChain,
         system_view: super::view::SystemView,
         tool_definitions_view: super::view::ToolDefinitionsView,
         pending_user_messages: super::view::UserMessagesView,
@@ -369,7 +369,7 @@ impl NewSessionThread {
             id,
             session_id,
             start_reason: ThreadStartReason::Orphan { from_thread },
-            chain,
+            model_chain,
             system_view,
             tool_definitions_view,
             init: ThreadInitData::Initial {
@@ -383,7 +383,7 @@ pub struct NewSessionThreadBuilder {
     id: SessionThreadId,
     session_id: Option<AgentSessionId>,
     start_reason: Option<ThreadStartReason>,
-    chain: Option<ModelChain>,
+    model_chain: Option<ModelChain>,
     system_view: Option<SystemView>,
     tool_definitions_view: Option<ToolDefinitionsView>,
     initial_user_messages: Option<UserMessagesView>,
@@ -405,8 +405,8 @@ impl NewSessionThreadBuilder {
         self
     }
 
-    pub fn chain(mut self, chain: ModelChain) -> Self {
-        self.chain = Some(chain);
+    pub fn model_chain(mut self, model_chain: ModelChain) -> Self {
+        self.model_chain = Some(model_chain);
         self
     }
 
@@ -434,8 +434,8 @@ impl NewSessionThreadBuilder {
             start_reason: self.start_reason.ok_or(EntityHydrationError::from(
                 derive_builder::UninitializedFieldError::from("start_reason"),
             ))?,
-            chain: self.chain.ok_or(EntityHydrationError::from(
-                derive_builder::UninitializedFieldError::from("chain"),
+            model_chain: self.model_chain.ok_or(EntityHydrationError::from(
+                derive_builder::UninitializedFieldError::from("model_chain"),
             ))?,
             system_view: self.system_view.ok_or(EntityHydrationError::from(
                 derive_builder::UninitializedFieldError::from("system_view"),
@@ -465,7 +465,7 @@ impl IntoEvents<SessionThreadEvent> for NewSessionThread {
                 id: self.id,
                 session_id: self.session_id,
                 start_reason: self.start_reason,
-                chain: self.chain,
+                model_chain: self.model_chain,
                 system_view: self.system_view,
                 tool_definitions_view: self.tool_definitions_view,
                 initial_user_messages,
@@ -476,7 +476,7 @@ impl IntoEvents<SessionThreadEvent> for NewSessionThread {
             } => SessionThreadEvent::InitializedFromCompaction {
                 id: self.id,
                 session_id: self.session_id,
-                chain: self.chain,
+                model_chain: self.model_chain,
                 system_view: self.system_view,
                 tool_definitions_view: self.tool_definitions_view,
                 messages,
@@ -488,7 +488,7 @@ impl IntoEvents<SessionThreadEvent> for NewSessionThread {
             } => SessionThreadEvent::InitializedFromRefresh {
                 id: self.id,
                 session_id: self.session_id,
-                chain: self.chain,
+                model_chain: self.model_chain,
                 system_view: self.system_view,
                 tool_definitions_view: self.tool_definitions_view,
                 messages,

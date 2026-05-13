@@ -140,7 +140,7 @@ pub(super) fn maybe_prune(
     let tool_definitions_view = current_prompt_definition.tool_definitions_view().clone();
 
     let prompt_definition = PromptDefinition {
-        chain: model_chain.clone(),
+        model_chain: model_chain.clone(),
         system_view: system_view.clone(),
         tool_definitions_view: tool_definitions_view.clone(),
         messages: transformed_messages.clone(),
@@ -253,7 +253,7 @@ fn build_orphan_result<'a>(
     };
 
     let prompt_definition = PromptDefinition {
-        chain: model_chain.clone(),
+        model_chain: model_chain.clone(),
         system_view: system_view.clone(),
         tool_definitions_view: tool_definitions_view.clone(),
         messages: vec![MessageView::User(user_messages.clone())],

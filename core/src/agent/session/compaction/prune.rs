@@ -327,6 +327,7 @@ impl SandboxTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::config::ModelChain;
     use crate::agent::session::message::*;
     use crate::agent::session::metadata::*;
     use crate::agent::session::settings::*;
@@ -367,7 +368,7 @@ mod tests {
             })]
         };
         PromptDefinition {
-            chain: crate::agent::config::ModelChain::default(),
+            model_chain: ModelChain::default(),
             system_view: SystemView { indexes: vec![] },
             tool_definitions_view: ToolDefinitionsView { indexes: vec![] },
             messages,

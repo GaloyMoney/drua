@@ -123,7 +123,6 @@ pub struct AgentSession {
     #[builder(default)]
     current_main_thread: Option<SessionThreadId>,
 
-    #[builder(default)]
     model_chain: ModelChain,
 
     #[builder(default)]
@@ -744,7 +743,7 @@ impl AgentSession {
             .id(thread_id)
             .session_id(self.id)
             .start_reason(ThreadStartReason::InitialThread)
-            .chain(self.model_chain.clone())
+            .model_chain(self.model_chain.clone())
             .system_view(prompt_definition.system_view().clone())
             .tool_definitions_view(prompt_definition.tool_definitions_view().clone())
             .initial_user_messages(prompt_definition.user_messages_view())
@@ -1174,7 +1173,10 @@ mod tests {
         // The rebuilt prompt mirrors the one emitted by `next_prompt`:
         // same model, same messages, same system view.
         assert_eq!(pending.messages.len(), issued.messages.len());
-        assert_eq!(pending.chain.primary.model, issued.chain.primary.model);
+        assert_eq!(
+            pending.model_chain.primary.model,
+            issued.model_chain.primary.model
+        );
     }
 
     #[test]
@@ -1399,7 +1401,7 @@ mod tests {
             .next_prompt(TargetThread::Main)
             .expect("next_prompt should succeed");
 
-        assert_eq!(prompt.chain.primary.model, "test-model");
+        assert_eq!(prompt.model_chain.primary.model, "test-model");
         let expected_cache_key = format!("agent-session:{}", session.id);
         assert_eq!(
             prompt.cache_key.as_deref(),
