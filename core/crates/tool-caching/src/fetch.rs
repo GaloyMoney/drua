@@ -22,6 +22,14 @@ pub enum FetchQuery {
     /// Item range on an array-typed value at `path`. Returns the slice
     /// `arr[offset..offset+len]` as a `Value::Array`.
     JsonArraySlice { offset: usize, len: usize },
+    /// Return the persisted curated `<summary>+<recovery>` envelope —
+    /// the same view the agent would have seen from a top-level
+    /// `call_tool` invocation. Useful for inspecting a compose
+    /// sub-invocation's curated form (JS scripts see verbatim T; the
+    /// agent reading `sub_invocations[i].invocation_id` post-hoc can
+    /// fetch the summary view here). `path` is ignored — the summary
+    /// is always the root view.
+    Summary,
 }
 
 impl FetchQuery {
@@ -61,6 +69,11 @@ impl FetchQuery {
                 let end = offset.saturating_add(*len).min(arr.len());
                 Ok(Value::Array(arr[start..end].to_vec()))
             }
+            // Summary is short-circuited in `StoredInvocation::query` —
+            // it doesn't fit the slice-at-resolved-path pattern.
+            FetchQuery::Summary => Err(ToolCachingError::InvalidPath(
+                "summary query is handled at the invocation level".into(),
+            )),
         }
     }
 }
@@ -86,6 +99,11 @@ impl StoredInvocation {
         query: Option<&FetchQuery>,
         max_bytes: usize,
     ) -> Result<FetchResult, ToolCachingError> {
+        // `Summary` short-circuits navigation — return the stored
+        // envelope and its structured wrapper, regardless of `path`.
+        if matches!(query, Some(FetchQuery::Summary)) {
+            return self.summary_view(max_bytes);
+        }
         let resolved = self.navigate(path)?.clone();
         let sliced = match query {
             Some(q) => q.apply(resolved)?,
@@ -106,6 +124,25 @@ impl StoredInvocation {
             result: CallToolResult::success(vec![Content::text(text)]),
             structured: wrapped,
         })
+    }
+
+    /// Replay the curated `<summary>+<recovery>` envelope from the
+    /// persisted `ToolCallSummary`. Output is byte-identical to what
+    /// `cache()` originally returned — both share
+    /// `ToolCallSummary::build_wire`.
+    fn summary_view(&self, max_bytes: usize) -> Result<FetchResult, ToolCachingError> {
+        let (result, structured) = self.summary.build_wire(self.id);
+        let envelope_len = match result.content.first().map(|c| &c.raw) {
+            Some(rmcp::model::RawContent::Text(t)) => t.text.len(),
+            _ => 0,
+        };
+        if envelope_len > max_bytes {
+            return Err(ToolCachingError::FetchResponseTooLarge {
+                size: envelope_len,
+                max: max_bytes,
+            });
+        }
+        Ok(FetchResult { result, structured })
     }
 
     fn navigate(&self, path: &str) -> Result<&Value, ToolCachingError> {

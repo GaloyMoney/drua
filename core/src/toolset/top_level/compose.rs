@@ -4,9 +4,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Duration;
 
-use drua_tool_caching::{ToolCaching, WrapMode};
+use drua_tool_caching::ToolCaching;
 use es_entity::context::{EventContext, WithEventContext};
-use rmcp::model::{CallToolResult, Content, JsonObject};
+use rmcp::model::{CallToolResult, JsonObject};
 use serde::Deserialize;
 
 use crate::audit::{Audit, InteractionType};
@@ -56,12 +56,13 @@ static COMPOSE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct ComposeOutput {
-    /// The JS script's return value. Curated when oversize; recoverable via `tool_output_fetch` using `result_invocation_id`.
+    /// The JS script's return value, verbatim. If oversize, the outer
+    /// `cache()` call walks the full ComposeOutput tree and elides this
+    /// field in place; the agent recovers via `tool_output_fetch` with
+    /// `path: "$.result.result"` (outer `DruaToolResult` wrap + this
+    /// field) or `query: {mode: "summary"}` for the full envelope.
     #[schemars(schema_with = "crate::toolset::any_json_schema")]
     result: serde_json::Value,
-    /// Set when `result` was curated; pass to `tool_output_fetch` to recover the full JS return.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    result_invocation_id: Option<uuid::Uuid>,
     /// Recoverable sub-tool calls; excludes passthrough, errored, and bypass-marked calls.
     sub_invocations: Vec<SubInvocation>,
     fetch_hint: String,
@@ -170,37 +171,15 @@ impl TopLevelTool for ComposeTool {
             .map(|guard| guard.clone())
             .unwrap_or_default();
 
-        // Cache the JS return value itself — if it's oversized the agent
-        // gets a `result_invocation_id` to recover the full value via
-        // `tool_output_fetch`. Builds a fake `CallToolResult` carrying
-        // the value as JSON text so the existing pipeline can summarise it.
-        let (curated_result, result_invocation_id) = match self.tool_caching.as_ref() {
-            Some(tc) => {
-                let pretty = serde_json::to_string_pretty(&result.value).unwrap_or_default();
-                let mut ctr = CallToolResult::success(vec![Content::text(pretty)]);
-                ctr.structured_content = Some(result.value.clone());
-                let resp = tc
-                    .cache(
-                        subject,
-                        "compose:result",
-                        &recorded_args,
-                        ctr,
-                        WrapMode::Elide,
-                    )
-                    .await?;
-                let id = resp.invocation_id.map(uuid::Uuid::from);
-                let curated = match id {
-                    Some(_) => serde_json::Value::String(extract_text(&resp.result)),
-                    None => result.value.clone(),
-                };
-                (curated, id)
-            }
-            None => (result.value.clone(), None),
-        };
-
+        // The JS return value goes into `ComposeOutput.result` verbatim.
+        // The outer `cache()` below walks the full ComposeOutput on the
+        // structured channel — if `.result` is oversize the walker
+        // elides it in place + records the path in `_elided.paths`.
+        // Agents can recover via `tool_output_fetch(invocation_id, path:
+        // "$.result.result")` (outer wrap + ComposeOutput.result field)
+        // or `query: {mode: "summary"}` for the full curated envelope.
         let out = ComposeOutput {
-            result: curated_result,
-            result_invocation_id,
+            result: result.value.clone(),
             sub_invocations: collected_sub_invocations,
             fetch_hint: COMPOSE_FETCH_HINT.to_string(),
             console: result.console_output.clone(),
@@ -208,56 +187,17 @@ impl TopLevelTool for ComposeTool {
             execution_time_ms: result.execution_time.as_millis() as u64,
         };
 
-        let mut sections = Vec::new();
-        let value_str =
-            serde_json::to_string_pretty(&out.result).unwrap_or_else(|_| "null".to_string());
-        sections.push(format!("=== Result ===\n{value_str}"));
-        if !out.console.is_empty() {
-            sections.push(format!("=== Console ===\n{}", out.console.join("\n")));
-        }
-        if !dts.is_empty() {
-            sections.push(format!("=== Available Types ===\n{dts}"));
-        }
-        if !out.sub_invocations.is_empty() {
-            let lines: Vec<String> = out
-                .sub_invocations
-                .iter()
-                .map(|s| {
-                    format!(
-                        "  [{}] {} → {} ({} bytes raw / {} bytes summary, kind={})",
-                        s.seq,
-                        s.args_digest,
-                        s.invocation_id,
-                        s.raw_size_bytes,
-                        s.summary_size_bytes,
-                        s.kind,
-                    )
-                })
-                .collect();
-            sections.push(format!("=== Sub Invocations ===\n{}", lines.join("\n"),));
-        }
-        sections.push(format!(
-            "=== Metadata ===\ntool_calls: {}\nexecution_time: {:?}\n{}",
-            out.tool_calls,
-            std::time::Duration::from_millis(out.execution_time_ms),
-            out.result_invocation_id
-                .map(|id| format!("result_invocation_id: {id}"))
-                .unwrap_or_else(|| "result: verbatim (small enough)".to_string()),
-        ));
-
-        let text = sections.join("\n\n");
         let structured = serde_json::to_value(&out).expect("ComposeOutput serialization");
-        let mut ctr = CallToolResult::success(vec![Content::text(text)]);
+        let mut ctr = CallToolResult::success(Vec::new());
         ctr.structured_content = Some(structured);
 
         let ctr = match self.tool_caching.as_ref() {
             Some(tc) => {
-                // Compose's structured channel is `ComposeOutput`, not a
-                // `DruaToolResult<T>` wrapper (`default_tool_caching=false`).
-                // `TextOnly` persists for recovery + elides the multi-section
-                // text envelope while preserving `ComposeOutput` verbatim on
-                // the structured channel.
-                tc.cache(subject, "compose", &recorded_args, ctr, WrapMode::TextOnly)
+                // Plain `cache()` — same path every other top-level tool
+                // takes. We hand off an empty text channel; cache() fills
+                // it from the structured payload (or replaces it with the
+                // `<summary>+<recovery>` envelope when walking elides).
+                tc.cache(subject, "compose", &recorded_args, ctr)
                     .await?
                     .result
             }
@@ -267,24 +207,25 @@ impl TopLevelTool for ComposeTool {
     }
 }
 
-const COMPOSE_FETCH_HINT: &str = "invocation_id is either `result_invocation_id` (full JS return) \
-     or any `sub_invocations[].invocation_id` (specific sub-call's \
-     persisted output) — see `tool_output_fetch` for the full call shape.";
+const COMPOSE_FETCH_HINT: &str =
+    "Use any `sub_invocations[].invocation_id` with `tool_output_fetch` to fetch a \
+     sub-call's persisted output; `query: {mode: \"summary\"}` returns the curated \
+     `<summary>+<recovery>` envelope you'd have seen calling that tool directly.";
 
 /// Recovery metadata for one sub-tool dispatch inside a compose script.
+/// Array order is completion order (0-based).
 #[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
 pub struct SubInvocation {
-    /// Order within the script (0-based, stable across re-runs).
-    pub seq: u32,
     pub tool_name: String,
     /// `tool(key=value, ...)` truncated to 80 chars.
     pub args_digest: String,
     /// `tool_invocations.id` — pass to `tool_output_fetch`.
     pub invocation_id: uuid::Uuid,
-    /// Summary kind discriminator (e.g. `concourse`, `structured_elision`, `generic`).
+    /// Summary kind discriminator (`lines`, `range`, `json_array_slice`,
+    /// `summarized`) — hint for which `tool_output_fetch` query mode
+    /// would naturally slice this sub-call's output.
     pub kind: String,
     pub raw_size_bytes: u64,
-    pub summary_size_bytes: u64,
 }
 
 struct CatalogDispatcher {
@@ -485,13 +426,7 @@ impl CatalogDispatcherShared {
         };
         let raw_size = extract_text(raw).len() as u64;
         let Ok(resp) = tc
-            .cache(
-                &self.subject,
-                tool_name,
-                args,
-                raw.clone(),
-                WrapMode::Persist,
-            )
+            .persist_for_compose(&self.subject, tool_name, args, raw.clone())
             .await
         else {
             return;
@@ -502,22 +437,14 @@ impl CatalogDispatcherShared {
         let Some(invocation_id) = resp.invocation_id else {
             return;
         };
-        let summary_size = extract_text(&resp.result).len() as u64;
         let kind = sub_invocation_kind(&resp.elided_paths);
-        let seq = self
-            .sub_invocations
-            .lock()
-            .map(|guard| guard.len() as u32)
-            .unwrap_or(0);
         if let Ok(mut guard) = self.sub_invocations.lock() {
             guard.push(SubInvocation {
-                seq,
                 tool_name: tool_name.to_string(),
                 args_digest: format_args_digest(tool_name, args),
                 invocation_id: uuid::Uuid::from(invocation_id),
                 kind,
                 raw_size_bytes: raw_size,
-                summary_size_bytes: summary_size,
             });
         }
     }

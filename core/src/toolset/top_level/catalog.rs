@@ -10,7 +10,7 @@
 
 use std::sync::{Arc, LazyLock, RwLock};
 
-use drua_tool_caching::{ToolCaching, WrapMode};
+use drua_tool_caching::ToolCaching;
 use serde_json::json;
 
 use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
@@ -472,15 +472,9 @@ impl TopLevelTool for CallCatalogTool {
                 let args_for_cache = inner_args
                     .map(serde_json::Value::Object)
                     .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
-                tc.cache(
-                    subject,
-                    &tool_name,
-                    &args_for_cache,
-                    result,
-                    WrapMode::Elide,
-                )
-                .await?
-                .result
+                tc.cache(subject, &tool_name, &args_for_cache, result)
+                    .await?
+                    .result
             }
             None => result,
         };

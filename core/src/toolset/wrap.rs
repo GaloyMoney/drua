@@ -13,7 +13,7 @@
 use serde_json::{json, Value};
 
 /// Advertise the `DruaToolResult<T>` wrapper as a tool's outputSchema —
-/// matches what `cache(WrapMode::Elide)` actually emits on the structured
+/// matches what `cache()` actually emits on the structured
 /// channel. MCP clients that validate `structuredContent` against
 /// `outputSchema` need this to see the same shape.
 pub fn wrap_output_schema(upstream: &Value) -> Value {
@@ -56,7 +56,7 @@ pub fn wrap_output_schema(upstream: &Value) -> Value {
 }
 
 /// Wrap a TS type into `{ result: T }` — the compose-script-visible shape.
-/// Compose sub-dispatch is `WrapMode::Persist`, so `_elided` is always
+/// Compose sub-dispatch uses `persist_for_compose`, so `_elided` is always
 /// absent; the TS signature stays a single field.
 pub fn wrap_output_ts(inner_ts: &str) -> String {
     format!("{{ result: {inner_ts} }}")

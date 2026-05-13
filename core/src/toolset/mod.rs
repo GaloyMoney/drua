@@ -22,7 +22,7 @@ pub use traits::*;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-use drua_tool_caching::{ToolCaching, WrapMode};
+use drua_tool_caching::ToolCaching;
 use rmcp::model::{CallToolResult, JsonObject};
 
 use crate::audit::Audit;
@@ -541,9 +541,7 @@ impl ToolSets {
                             let args_for_cache = args_value
                                 .clone()
                                 .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
-                            tc.cache(subject, name, &args_for_cache, raw, WrapMode::Elide)
-                                .await?
-                                .result
+                            tc.cache(subject, name, &args_for_cache, raw).await?.result
                         }
                         _ => raw,
                     };

@@ -13,7 +13,7 @@ pub use error::ToolCachingError;
 pub use fetch::{FetchQuery, FetchResult};
 pub use primitives::{
     ElidedPath, QueryStructure, ToolCacheResponse, ToolCallOwnerId, ToolCallSummary,
-    ToolInvocationId, WrapMode,
+    ToolInvocationId,
 };
 pub use repo::StoredInvocation;
 pub use string_summarizer::StringSummarizerChain;
@@ -21,7 +21,8 @@ pub use walker::Walker;
 
 use repo::ToolCacheRepo;
 
-use rmcp::model::{CallToolResult, RawContent};
+use rmcp::model::{CallToolResult, Content, RawContent};
+use serde_json::Value;
 
 #[derive(Clone)]
 pub struct ToolCaching {
@@ -30,6 +31,14 @@ pub struct ToolCaching {
     config: ToolCachingConfig,
     repo: ToolCacheRepo,
     walker: Walker,
+}
+
+/// Internal walk + persist result. Shared by the two public entry points.
+struct Processed {
+    summary: ToolCallSummary,
+    invocation_id: ToolInvocationId,
+    upstream_t: Value,
+    persisted: bool,
 }
 
 impl ToolCaching {
@@ -46,93 +55,49 @@ impl ToolCaching {
         }
     }
 
-    /// Cache an upstream tool result and emit a `DruaToolResult<T>`-shaped
-    /// `CallToolResult`. `mode` selects how `T` is presented on the wire:
+    /// Agent-facing call path. Walks the upstream's structured channel
+    /// (or parsed text as fallback), elides if over threshold, persists
+    /// for `tool_output_fetch` recovery. Wire shape:
     ///
-    /// * [`WrapMode::Elide`] — top-level / catalog dispatch. Walk and elide
-    ///   in place; structured channel emits `{result: T-elided, _elided: M}`
-    ///   when something was elided, `{result: T}` on passthrough.
-    /// * [`WrapMode::Persist`] — compose sub-dispatch. Persist for
-    ///   `tool_output_fetch` recovery but emit `{result: T verbatim}` always —
-    ///   the JS engine has its own size cap and pre-summarising sub-call
-    ///   results would force every compose script to recover through fetch
-    ///   instead of using the value directly.
+    /// * structured channel: `{result: T-elided, _elided?: {invocation_id, paths}}`
+    /// * text channel: `<summary path="…" …>…</summary><recovery><elided …>…</elided></recovery>`
     ///
-    /// Passthrough early-returns (no persistence, no wrap, raw CTR):
-    ///   * no owner (workflow executor / anonymous) — nothing to attribute
-    ///   * upstream marked the result `is_error` — error responses flow through
-    ///   * non-text content (image, multi-part) — only single-text-content
-    ///     results are summarisable today
+    /// If the upstream has no text content but does carry a structured
+    /// channel, the text channel is filled with `serde_json::to_string_pretty`
+    /// of the structured payload before walking — so callers (notably
+    /// compose) can hand off an empty text channel and let cache() produce
+    /// the agent-facing rendering.
     ///
-    /// When the walker decides no elision is needed, the text channel
-    /// stays raw (no envelope) but the structured channel is still wrapped
-    /// per `mode` — otherwise sub-threshold results would emit `T` on the
-    /// wire while `outputSchema` / `compose_types` advertise `{result: T}`.
+    /// Passthrough early-returns (no persistence, raw CTR with the
+    /// `{result: T}` wrapper added to structured for schema parity):
+    ///   * no owner (workflow executor / anonymous)
+    ///   * upstream marked the result `is_error`
+    ///   * non-text content (image, multi-part)
     pub async fn cache(
         &self,
         owner: impl Into<Option<ToolCallOwnerId>>,
         tool_name: &str,
         args: &serde_json::Value,
         result: CallToolResult,
-        mode: WrapMode,
     ) -> Result<ToolCacheResponse, ToolCachingError> {
+        let result = ensure_text_channel(result);
         let Some(owner_id) = owner.into() else {
-            return Ok(ToolCacheResponse {
-                result,
-                elided_paths: Vec::new(),
-                invocation_id: None,
-            });
+            return Ok(passthrough_no_owner(result));
         };
         if result.is_error == Some(true) || !is_simple_text_result(&result) {
-            return Ok(ToolCacheResponse {
-                result,
-                elided_paths: Vec::new(),
-                invocation_id: None,
-            });
+            return Ok(passthrough_no_owner(result));
         }
 
-        let original_structured = result.structured_content.clone();
-        let original_text = extract_text(&result);
+        let processed = self.process(owner_id, tool_name, args, &result).await?;
 
-        // Walk the upstream's structured channel when present — that's
-        // the canonical `T` whose shape MCP clients validate against the
-        // advertised outputSchema. The walked summary becomes `result`
-        // in `{result: T-elided, _elided?: M}`; for the (text-only)
-        // tools that don't emit structured_content, fall back to the
-        // parsed-text Value (matches today's behaviour for bash, k8s
-        // logs, etc.).
-        //
-        // Why this matters for meta-tools: `search_tools`/`describe_tool`/
-        // `compose_types` emit human-readable markdown text PLUS a
-        // structured object of a different shape. Walking the text
-        // channel produced a `Value::String(elided_markdown)` for
-        // `result`, breaking schema validation. Walking structured
-        // yields the schema-conforming object.
-        let query_structure = QueryStructure {
-            root: original_structured
-                .clone()
-                .unwrap_or_else(|| QueryStructure::new(&original_text).root),
-        };
-        // Mint the id up front so recover templates carry the real uuid;
-        // persistence reuses the same value as the row's primary key.
-        let invocation_id = ToolInvocationId::new();
-        let summary = self
-            .walker
-            .summarize(&query_structure, invocation_id, tool_name);
-
-        // Nothing was elided ⇒ skip persistence, keep the text channel
-        // raw. Structured channel is still wrapped to match what
-        // `output_schema()` and `compose_types` advertise so sub- and
-        // over-threshold responses share one wire shape.
-        if summary.elided_paths.is_empty() {
+        if !processed.persisted {
+            // Sub-threshold passthrough — keep the text channel raw,
+            // still wrap structured as `{result: T}` so the wire shape
+            // matches what `output_schema()` / `compose_types` advertise.
             let mut passthrough = result;
-            passthrough.structured_content = match mode {
-                WrapMode::Elide | WrapMode::Persist => {
-                    let t = original_structured.unwrap_or_else(|| query_structure.root.clone());
-                    Some(serde_json::json!({ "result": t }))
-                }
-                WrapMode::TextOnly => original_structured,
-            };
+            passthrough.structured_content = Some(serde_json::json!({
+                "result": processed.upstream_t,
+            }));
             return Ok(ToolCacheResponse {
                 result: passthrough,
                 elided_paths: Vec::new(),
@@ -140,38 +105,62 @@ impl ToolCaching {
             });
         }
 
-        self.repo
-            .persist(
-                invocation_id,
-                owner_id,
-                tool_name,
-                args,
-                &query_structure,
-                &summary,
-                &original_text,
-                original_structured.as_ref(),
-            )
-            .await?;
-
-        // `upstream_t` is what `{result: …}` carries on the wire in Persist
-        // mode (verbatim T) and is unused in Elide / TextOnly. Prefer the
-        // upstream's structured channel when present so JS engines see the
-        // same JSON shape the upstream emits; otherwise fall back to the
-        // parsed text root.
-        let upstream_t = original_structured
-            .clone()
-            .unwrap_or_else(|| query_structure.root.clone());
-        let elided_paths = summary.elided_paths.clone();
-        let wrapped = summary.into_call_tool_result(
-            mode,
-            Some(invocation_id),
-            original_structured,
-            upstream_t,
-        );
+        let elided_paths = processed.summary.elided_paths.clone();
+        let wrapped = build_elide_ctr(processed.summary, processed.invocation_id);
         Ok(ToolCacheResponse {
             result: wrapped,
             elided_paths,
-            invocation_id: Some(invocation_id),
+            invocation_id: Some(processed.invocation_id),
+        })
+    }
+
+    /// Compose sub-dispatch call path. The JS engine has its own size
+    /// cap and scripts use the sub-tool's return directly — pre-elided
+    /// data would force every script to recover through
+    /// `tool_output_fetch`. So the wire shape is `{result: T verbatim}`
+    /// even when the value is over threshold.
+    ///
+    /// Walker still runs, summary is still persisted: the agent (out of
+    /// the JS sandbox, reading `compose_response.sub_invocations[i].invocation_id`)
+    /// can later call `tool_output_fetch(invocation_id, query={mode:"summary"})`
+    /// to get the curated envelope they'd have seen from a top-level
+    /// `call_tool` invocation.
+    pub async fn persist_for_compose(
+        &self,
+        owner: impl Into<Option<ToolCallOwnerId>>,
+        tool_name: &str,
+        args: &serde_json::Value,
+        result: CallToolResult,
+    ) -> Result<ToolCacheResponse, ToolCachingError> {
+        let result = ensure_text_channel(result);
+        let Some(owner_id) = owner.into() else {
+            return Ok(passthrough_no_owner(result));
+        };
+        if result.is_error == Some(true) || !is_simple_text_result(&result) {
+            return Ok(passthrough_no_owner(result));
+        }
+
+        let processed = self.process(owner_id, tool_name, args, &result).await?;
+
+        // For compose JS engine: always emit T verbatim, regardless of
+        // whether the walker found anything elision-worthy.
+        let mut wrapped = result;
+        wrapped.structured_content = Some(serde_json::json!({
+            "result": processed.upstream_t,
+        }));
+
+        if !processed.persisted {
+            return Ok(ToolCacheResponse {
+                result: wrapped,
+                elided_paths: Vec::new(),
+                invocation_id: None,
+            });
+        }
+
+        Ok(ToolCacheResponse {
+            result: wrapped,
+            elided_paths: processed.summary.elided_paths,
+            invocation_id: Some(processed.invocation_id),
         })
     }
 
@@ -191,6 +180,86 @@ impl ToolCaching {
         let stored = self.repo.find_by_id(id, owner_id).await?;
         stored.query(path, query, self.config.max_fetch_response_bytes)
     }
+
+    /// Shared walk + persist. Both public entry points feed into this:
+    /// `cache()` consumes `processed.summary` to build the elided wire
+    /// shape; `persist_for_compose()` discards the summary on the wire
+    /// (emits T verbatim) but persists it so the agent can re-fetch
+    /// with `{mode: "summary"}` later.
+    async fn process(
+        &self,
+        owner_id: ToolCallOwnerId,
+        tool_name: &str,
+        args: &serde_json::Value,
+        result: &CallToolResult,
+    ) -> Result<Processed, ToolCachingError> {
+        let original_structured = result.structured_content.clone();
+        let original_text = extract_text(result);
+
+        // Walk the upstream's structured channel when present — that's
+        // the canonical `T` whose shape MCP clients validate against the
+        // advertised outputSchema. Fall back to parsed-text Value for
+        // text-only tools (bash, k8s logs, etc.).
+        let query_structure = QueryStructure {
+            root: original_structured
+                .clone()
+                .unwrap_or_else(|| QueryStructure::new(&original_text).root),
+        };
+        let invocation_id = ToolInvocationId::new();
+        let summary = self
+            .walker
+            .summarize(&query_structure, invocation_id, tool_name);
+
+        let upstream_t = original_structured
+            .clone()
+            .unwrap_or_else(|| query_structure.root.clone());
+
+        if summary.elided_paths.is_empty() {
+            return Ok(Processed {
+                summary,
+                invocation_id,
+                upstream_t,
+                persisted: false,
+            });
+        }
+
+        self.repo
+            .persist(
+                invocation_id,
+                owner_id,
+                tool_name,
+                args,
+                &query_structure,
+                &summary,
+                &original_text,
+                original_structured.as_ref(),
+            )
+            .await?;
+
+        Ok(Processed {
+            summary,
+            invocation_id,
+            upstream_t,
+            persisted: true,
+        })
+    }
+}
+
+/// Owner-less passthrough — workflow executor / anonymous callers
+/// don't get persistence or wrapping.
+fn passthrough_no_owner(result: CallToolResult) -> ToolCacheResponse {
+    ToolCacheResponse {
+        result,
+        elided_paths: Vec::new(),
+        invocation_id: None,
+    }
+}
+
+/// Build the agent-facing wrapped `CallToolResult` — delegates to
+/// `ToolCallSummary::build_wire` so this and the `FetchQuery::Summary`
+/// replay path share one wire-shape construction site.
+fn build_elide_ctr(summary: ToolCallSummary, invocation_id: ToolInvocationId) -> CallToolResult {
+    summary.build_wire(invocation_id).0
 }
 
 fn extract_text(result: &CallToolResult) -> String {
@@ -207,4 +276,27 @@ fn extract_text(result: &CallToolResult) -> String {
 
 fn is_simple_text_result(result: &CallToolResult) -> bool {
     result.content.len() == 1 && matches!(result.content[0].raw, RawContent::Text(_))
+}
+
+/// If the upstream carries a structured channel and the content vec is
+/// empty, fill the text channel with a pretty-printed JSON rendering of
+/// the structured payload. Lets callers (notably compose) pass an empty
+/// content vec and rely on `cache()` to produce the agent-facing
+/// rendering — either as the passthrough text or, when walking elides
+/// something, replaced in place by the `<summary>+<recovery>` envelope.
+///
+/// Strictly `is_empty()`, not "no text content present": multi-part
+/// results (e.g. images alongside structured data) must keep their
+/// non-text parts intact and fall through to the
+/// `!is_simple_text_result` passthrough below.
+fn ensure_text_channel(mut result: CallToolResult) -> CallToolResult {
+    if !result.content.is_empty() {
+        return result;
+    }
+    let Some(structured) = result.structured_content.as_ref() else {
+        return result;
+    };
+    let text = serde_json::to_string_pretty(structured).unwrap_or_default();
+    result.content = vec![Content::text(text)];
+    result
 }

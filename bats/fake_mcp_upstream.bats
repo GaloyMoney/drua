@@ -422,16 +422,20 @@ assert_compose_snapshot() {
   local r1_struct
   r1_struct="$(echo "$output" | jq -r '.result.structuredContent')"
 
+  # Compose is a top-level cached tool — its structured channel is the
+  # `DruaToolResult<ComposeOutput>` wrapper. ComposeOutput fields live
+  # under `.result.` (outer wrap key).
+  #
   # Structural: 2 sub_invocations expected (small obj is passthrough →
   # no recovery; large str + large arr are persisted).
   local n_subs
-  n_subs="$(echo "$r1_struct" | jq -r '.sub_invocations | length')"
+  n_subs="$(echo "$r1_struct" | jq -r '.result.sub_invocations | length')"
   [ "$n_subs" = "2" ]
 
   # Each persisted sub_invocation carries a uuid + a kind discriminator.
   local subs_summary
   subs_summary="$(echo "$r1_struct" | jq -r \
-    '.sub_invocations | map({tool_name, kind})')"
+    '.result.sub_invocations | map({tool_name, kind})')"
   echo "$subs_summary"
   [[ "$subs_summary" == *"str-large-table"* ]]
   [[ "$subs_summary" == *"arr-large-passthrough-items"* ]]
@@ -440,23 +444,15 @@ assert_compose_snapshot() {
   assert_compose_snapshot "$r1_struct" "compose-roundtrip-1"
 
   # Round 2 — feed each captured invocation_id back through
-  # tool_output_fetch inside a fresh compose script, replaying the
-  # advertised query for each. Asserts end-to-end recoverability.
-  local str_id arr_id str_q arr_q
+  # tool_output_fetch inside a fresh compose script. Asserts end-to-end
+  # recoverability of sub-call data persisted by persist_for_compose.
+  local str_id arr_id
   str_id="$(echo "$r1_struct" | jq -r \
-    '.sub_invocations[] | select(.tool_name | endswith("str-large-table")) | .invocation_id')"
+    '.result.sub_invocations[] | select(.tool_name | endswith("str-large-table")) | .invocation_id')"
   arr_id="$(echo "$r1_struct" | jq -r \
-    '.sub_invocations[] | select(.tool_name | endswith("arr-large-passthrough-items")) | .invocation_id')"
+    '.result.sub_invocations[] | select(.tool_name | endswith("arr-large-passthrough-items")) | .invocation_id')"
   [[ "$str_id" =~ ^[0-9a-f-]{36}$ ]]
   [[ "$arr_id" =~ ^[0-9a-f-]{36}$ ]]
-
-  # Pull the advertised query off the rendered <recovery> block of the
-  # round-1 result (it's the curated compose:result envelope).
-  local r1_result_text
-  r1_result_text="$(echo "$r1_struct" | jq -r '.result')"
-  # str-large-table is line-mode; arr is json_array_slice.
-  str_q="$(echo "$r1_result_text" | grep -oE '"mode":"lines"[^}]*' | head -1)"
-  arr_q="$(echo "$r1_result_text" | grep -oE '"mode":"json_array_slice"[^}]*' | head -1)"
 
   # Construct a recovery script via jq so quoting is correct.
   local r2_script r2_body
@@ -470,14 +466,16 @@ assert_compose_snapshot() {
   [ "$status" -eq 0 ]
 
   # The recovered slices must match the elided middle of each fixture.
-  local r2_struct r2_result
+  # Outer compose wrap puts ComposeOutput at `.result`; ComposeOutput.result
+  # is the JS return — `{ str_slice: <fetched_string>, arr_slice: <fetched_array> }`.
+  local r2_struct r2_inner
   r2_struct="$(echo "$output" | jq -r '.result.structuredContent')"
-  r2_result="$(echo "$r2_struct" | jq -r '.result')"
+  r2_inner="$(echo "$r2_struct" | jq -r '.result.result')"
 
   # str_slice is a JSON string; arr_slice is a JSON array.
   local str_slice arr_slice_len
-  str_slice="$(echo "$r2_result" | jq -r '.str_slice' | head -c 60)"
-  arr_slice_len="$(echo "$r2_result" | jq -r '.arr_slice | length')"
+  str_slice="$(echo "$r2_inner" | jq -r '.str_slice' | head -c 60)"
+  arr_slice_len="$(echo "$r2_inner" | jq -r '.arr_slice | length')"
 
   # Sanity: line-mode slice begins with a known kubectl row prefix.
   [[ "$str_slice" == kube-system* ]] || {

@@ -1,28 +1,1662 @@
 {
-  "console": [],
-  "execution_time_ms": "<ms>",
-  "fetch_hint": "invocation_id is either `result_invocation_id` (full JS return) or any `sub_invocations[].invocation_id` (specific sub-call's persisted output) — see `tool_output_fetch` for the full call shape.",
-  "result": "<summary path=\"$\" total-bytes=\"23562\" shown-bytes=\"12787\">\n{\"arr\":{\"result\":[{\"id\":0,\"tag\":\"x\"},{\"id\":1,\"tag\":\"x\"},{\"id\":2,\"tag\":\"x\"},{\"id\":3,\"tag\":\"x\"},{\"id\":4,\"tag\":\"x\"},{\"id\":5,\"tag\":\"x\"},{\"id\":6,\"tag\":\"x\"},{\"id\":7,\"tag\":\"x\"},{\"id\":8,\"tag\":\"x\"},{\"id\":9,\"tag\":\"x\"},{\"id\":10,\"tag\":\"x\"},{\"id\":11,\"tag\":\"x\"},{\"id\":12,\"tag\":\"x\"},{\"id\":13,\"tag\":\"x\"},{\"id\":14,\"tag\":\"x\"},{\"id\":15,\"tag\":\"x\"},{\"id\":16,\"tag\":\"x\"},{\"id\":17,\"tag\":\"x\"},{\"id\":18,\"tag\":\"x\"},{\"id\":19,\"tag\":\"x\"},{\"id\":20,\"tag\":\"x\"},{\"id\":21,\"tag\":\"x\"},{\"id\":22,\"tag\":\"x\"},{\"id\":23,\"tag\":\"x\"},{\"id\":24,\"tag\":\"x\"},{\"id\":25,\"tag\":\"x\"},{\"id\":26,\"tag\":\"x\"},{\"id\":27,\"tag\":\"x\"},{\"id\":28,\"tag\":\"x\"},{\"id\":29,\"tag\":\"x\"},{\"id\":30,\"tag\":\"x\"},{\"id\":31,\"tag\":\"x\"},{\"id\":32,\"tag\":\"x\"},{\"id\":33,\"tag\":\"x\"},{\"id\":34,\"tag\":\"x\"},{\"id\":35,\"tag\":\"x\"},{\"id\":36,\"tag\":\"x\"},{\"id\":37,\"tag\":\"x\"},{\"id\":38,\"tag\":\"x\"},{\"id\":39,\"tag\":\"x\"},{\"id\":40,\"tag\":\"x\"},{\"id\":41,\"tag\":\"x\"},{\"id\":42,\"tag\":\"x\"},{\"id\":43,\"tag\":\"x\"},{\"id\":44,\"tag\":\"x\"},{\"id\":45,\"tag\":\"x\"},{\"id\":46,\"tag\":\"x\"},{\"id\":47,\"tag\":\"x\"},{\"id\":48,\"tag\":\"x\"},{\"id\":49,\"tag\":\"x\"},{\"id\":50,\"tag\":\"x\"},{\"id\":51,\"tag\":\"x\"},{\"id\":52,\"tag\":\"x\"},{\"id\":53,\"tag\":\"x\"},{\"id\":54,\"tag\":\"x\"},{\"id\":55,\"tag\":\"x\"},{\"id\":56,\"tag\":\"x\"},{\"id\":57,\"tag\":\"x\"},{\"id\":58,\"tag\":\"x\"},{\"id\":59,\"tag\":\"x\"},{\"id\":60,\"tag\":\"x\"},{\"id\":61,\"tag\":\"x\"},{\"id\":62,\"tag\":\"x\"},{\"id\":63,\"tag\":\"x\"},{\"id\":64,\"tag\":\"x\"},{\"id\":65,\"tag\":\"x\"},{\"id\":66,\"tag\":\"x\"},{\"id\":67,\"tag\":\"x\"},{\"id\":68,\"tag\":\"x\"},{\"id\":69,\"tag\":\"x\"},{\"id\":70,\"tag\":\"x\"},{\"id\":71,\"tag\":\"x\"},{\"id\":72,\"tag\":\"x\"},{\"id\":73,\"tag\":\"x\"},{\"id\":74,\"tag\":\"x\"},{\"id\":75,\"tag\":\"x\"},{\"id\":76,\"tag\":\"x\"},{\"id\":77,\"tag\":\"x\"},{\"id\":78,\"tag\":\"x\"},{\"id\":79,\"tag\":\"x\"},{\"id\":80,\"tag\":\"x\"},{\"id\":81,\"tag\":\"x\"},{\"id\":82,\"tag\":\"x\"},{\"id\":83,\"tag\":\"x\"},{\"id\":84,\"tag\":\"x\"},{\"id\":85,\"tag\":\"x\"},{\"id\":86,\"tag\":\"x\"},{\"id\":87,\"tag\":\"x\"},{\"id\":88,\"tag\":\"x\"},{\"id\":89,\"tag\":\"x\"},{\"id\":90,\"tag\":\"x\"},{\"id\":91,\"tag\":\"x\"},{\"id\":92,\"tag\":\"x\"},{\"id\":93,\"tag\":\"x\"},{\"id\":94,\"tag\":\"x\"},{\"id\":95,\"tag\":\"x\"},{\"id\":96,\"tag\":\"x\"},{\"id\":97,\"tag\":\"x\"},{\"id\":98,\"tag\":\"x\"},{\"id\":99,\"tag\":\"x\"},{\"id\":100,\"tag\":\"x\"},{\"id\":101,\"tag\":\"x\"},{\"id\":102,\"tag\":\"x\"},{\"id\":103,\"tag\":\"x\"},{\"id\":104,\"tag\":\"x\"},{\"id\":105,\"tag\":\"x\"},{\"id\":106,\"tag\":\"x\"},{\"id\":107,\"tag\":\"x\"},{\"id\":108,\"tag\":\"x\"},{\"id\":109,\"tag\":\"x\"},{\"id\":110,\"tag\":\"x\"},{\"id\":111,\"tag\":\"x\"},{\"id\":112,\"tag\":\"x\"},{\"id\":113,\"tag\":\"x\"},{\"id\":114,\"tag\":\"x\"},{\"id\":115,\"tag\":\"x\"},{\"id\":116,\"tag\":\"x\"},{\"id\":117,\"tag\":\"x\"},{\"id\":118,\"tag\":\"x\"},{\"id\":119,\"tag\":\"x\"},{\"id\":120,\"tag\":\"x\"},{\"id\":121,\"tag\":\"x\"},{\"id\":122,\"tag\":\"x\"},{\"id\":123,\"tag\":\"x\"},{\"id\":124,\"tag\":\"x\"},{\"id\":125,\"tag\":\"x\"},{\"id\":126,\"tag\":\"x\"},{\"id\":127,\"tag\":\"x\"},{\"id\":128,\"tag\":\"x\"},{\"id\":129,\"tag\":\"x\"},{\"id\":130,\"tag\":\"x\"},{\"id\":131,\"tag\":\"x\"},{\"id\":132,\"tag\":\"x\"},{\"id\":133,\"tag\":\"x\"},{\"id\":134,\"tag\":\"x\"},{\"id\":135,\"tag\":\"x\"},{\"id\":136,\"tag\":\"x\"},{\"id\":137,\"tag\":\"x\"},{\"id\":138,\"tag\":\"x\"},{\"id\":139,\"tag\":\"x\"},{\"id\":140,\"tag\":\"x\"},{\"id\":141,\"tag\":\"x\"},{\"id\":142,\"tag\":\"x\"},{\"id\":143,\"tag\":\"x\"},{\"id\":144,\"tag\":\"x\"},{\"id\":145,\"tag\":\"x\"},{\"id\":146,\"tag\":\"x\"},{\"id\":147,\"tag\":\"x\"},{\"id\":148,\"tag\":\"x\"},{\"id\":149,\"tag\":\"x\"},{\"id\":150,\"tag\":\"x\"},{\"id\":151,\"tag\":\"x\"},{\"id\":152,\"tag\":\"x\"},{\"id\":153,\"tag\":\"x\"},{\"id\":154,\"tag\":\"x\"},{\"id\":155,\"tag\":\"x\"},{\"id\":156,\"tag\":\"x\"},{\"id\":157,\"tag\":\"x\"},{\"id\":158,\"tag\":\"x\"},{\"id\":159,\"tag\":\"x\"},{\"id\":160,\"tag\":\"x\"},{\"id\":161,\"tag\":\"x\"},{\"id\":162,\"tag\":\"x\"},{\"id\":163,\"tag\":\"x\"},{\"id\":164,\"tag\":\"x\"},{\"id\":165,\"tag\":\"x\"},{\"id\":166,\"tag\":\"x\"},{\"id\":167,\"tag\":\"x\"},{\"id\":168,\"tag\":\"x\"},{\"id\":169,\"tag\":\"x\"},{\"id\":170,\"tag\":\"x\"},{\"id\":171,\"tag\":\"x\"},{\"id\":172,\"tag\":\"x\"},{\"id\":173,\"tag\":\"x\"},{\"id\":174,\"tag\":\"x\"},{\"id\":175,\"tag\":\"x\"},{\"id\":176,\"tag\":\"x\"},{\"id\":177,\"tag\":\"x\"},{\"id\":178,\"tag\":\"x\"},{\"id\":179,\"tag\":\"x\"},{\"id\":180,\"tag\":\"x\"},{\"id\":181,\"tag\":\"x\"},{\"id\":182,\"tag\":\"x\"},{\"id\":183,\"tag\":\"x\"},{\"id\":184,\"tag\":\"x\"},{\"id\":185,\"tag\":\"x\"},{\"id\":186,\"tag\":\"x\"},{\"id\":187,\"tag\":\"x\"},{\"id\":188,\"tag\":\"x\"},{\"id\":189,\"tag\":\"x\"},{\"id\":190,\"tag\":\"x\"},{\"id\":191,\"tag\":\"x\"},{\"id\":192,\"tag\":\"x\"},{\"id\":193,\"tag\":\"x\"},{\"id\":194,\"tag\":\"x\"},{\"id\":195,\"tag\":\"x\"},{\"id\":196,\"tag\":\"x\"},{\"id\":197,\"tag\":\"x\"},{\"id\":198,\"tag\":\"x\"},{\"id\":199,\"tag\":\"x\"},{\"id\":200,\"tag\":\"x\"},{\"id\":201,\"tag\":\"x\"},{\"id\":202,\"tag\":\"x\"},{\"id\":203,\"tag\":\"x\"},{\"id\":204,\"tag\":\"x\"},{\"id\":205,\"tag\":\"x\"},{\"id\":206,\"tag\":\"x\"},{\"id\":207,\"tag\":\"x\"},{\"id\":208,\"tag\":\"x\"},{\"id\":209,\"tag\":\"x\"},{\"id\":210,\"tag\":\"x\"},{\"id\":211,\"tag\":\"x\"},{\"id\":212,\"tag\":\"x\"},{\"id\":213,\"tag\":\"x\"},{\"id\":214,\"tag\":\"x\"},{\"id\":215,\"tag\":\"x\"},{\"id\":216,\"tag\":\"x\"},{\"id\":217,\"tag\":\"x\"},{\"id\":218,\"tag\":\"x\"},{\"id\":219,\"tag\":\"x\"},{\"id\":220,\"tag\":\"x\"},{\"id\":221,\"tag\":\"x\"},{\"id\":222,\"tag\":\"x\"},{\"id\":223,\"tag\":\"x\"},{\"id\":224,\"tag\":\"x\"},{\"id\":225,\"tag\":\"x\"},{\"id\":226,\"tag\":\"x\"},{\"id\":227,\"tag\":\"x\"},{\"id\":228,\"tag\":\"x\"},{\"id\":229,\"tag\":\"x\"},{\"id\":230,\"tag\":\"x\"},{\"id\":231,\"tag\":\"x\"},{\"id\":232,\"tag\":\"x\"},{\"id\":233,\"tag\":\"x\"},{\"id\":234,\"tag\":\"x\"},{\"id\":235,\"tag\":\"x\"},{\"id\":236,\"tag\":\"x\"},{\"id\":237,\"tag\":\"x\"},{\"id\":238,\"tag\":\"x\"},{\"id\":239,\"tag\":\"x\"},{\"id\":240,\"tag\":\"x\"},{\"id\":241,\"tag\":\"x\"},{\"id\":242,\"tag\":\"x\"},{\"id\":243,\"tag\":\"x\"},{\"id\":244,\"tag\":\"x\"},{\"id\":245,\"tag\":\"x\"},{\"id\":246,\"tag\":\"x\"},{\"id\":247,\"tag\":\"x\"},{\"id\":248,\"tag\":\"x\"},{\"id\":249,\"tag\":\"x\"},{\"id\":250,\"tag\":\"x\"},{\"id\":251,\"tag\":\"x\"},{\"id\":252,\"tag\":\"x\"},{\"id\":253,\"tag\":\"x\"},{\"id\":254,\"tag\":\"x\"},{\"id\":255,\"tag\":\"x\"},{\"id\":256,\"tag\":\"x\"},{\"id\":257,\"tag\":\"x\"},{\"id\":258,\"tag\":\"x\"},{\"id\":259,\"tag\":\"x\"},{\"id\":260,\"tag\":\"x\"},{\"id\":261,\"tag\":\"x\"},{\"id\":262,\"tag\":\"x\"},{\"id\":263,\"tag\":\"x\"},{\"id\":264,\"tag\":\"x\"},{\"id\":265,\"tag\":\"x\"},{\"id\":266,\"tag\":\"x\"},{\"id\":267,\"tag\":\"x\"},{\"id\":268,\"tag\":\"x\"},{\"id\":269,\"tag\":\"x\"},{\"id\":270,\"tag\":\"x\"},{\"id\":271,\"tag\":\"x\"},{\"id\":272,\"tag\":\"x\"},{\"id\":273,\"tag\":\"x\"},{\"id\":274,\"tag\":\"x\"},{\"id\":275,\"tag\":\"x\"},{\"id\":276,\"tag\":\"x\"},{\"id\":277,\"tag\":\"x\"},{\"id\":278,\"tag\":\"x\"},{\"id\":279,\"tag\":\"x\"},{\"id\":280,\"tag\":\"x\"},{\"id\":281,\"tag\":\"x\"},{\"id\":282,\"tag\":\"x\"},{\"id\":283,\"tag\":\"x\"},{\"id\":284,\"tag\":\"x\"},{\"id\":285,\"tag\":\"x\"},{\"id\":286,\"tag\":\"x\"},{\"id\":287,\"tag\":\"x\"},{\"id\":288,\"tag\":\"x\"},{\"id\":289,\"tag\":\"x\"},{\"id\":290,\"tag\":\"x\"},{\"id\":291,\"tag\":\"x\"},{\"id\":292,\"tag\":\"x\"},{\"id\":293,\"tag\":\"x\"},{\"id\":294,\"tag\":\"x\"},{\"id\":295,\"tag\":\"x\"},{\"id\":296,\"tag\":\"x\"},{\"id\":297,\"tag\":\"x\"},{\"id\":298,\"tag\":\"x\"},{\"id\":299,\"tag\":\"x\"},{\"id\":300,\"tag\":\"x\"},{\"id\":301,\"tag\":\"x\"},{\"id\":302,\"tag\":\"x\"},{\"id\":303,\"tag\":\"x\"},{\"id\":304,\"tag\":\"x\"},{\"id\":305,\"tag\":\"x\"},{\"id\":306,\"tag\":\"x\"},{\"id\":307,\"tag\":\"x\"},{\"id\":308,\"tag\":\"x\"},{\"id\":309,\"tag\":\"x\"},{\"id\":310,\"tag\":\"x\"},{\"id\":311,\"tag\":\"x\"},{\"id\":312,\"tag\":\"x\"},{\"id\":313,\"tag\":\"x\"},{\"id\":314,\"tag\":\"x\"},{\"id\":315,\"tag\":\"x\"},{\"id\":316,\"tag\":\"x\"},{\"id\":317,\"tag\":\"x\"},{\"id\":318,\"tag\":\"x\"},{\"id\":319,\"tag\":\"x\"},{\"id\":320,\"tag\":\"x\"},{\"id\":321,\"tag\":\"x\"},{\"id\":322,\"tag\":\"x\"},{\"id\":323,\"tag\":\"x\"},{\"id\":324,\"tag\":\"x\"},{\"id\":325,\"tag\":\"x\"},{\"id\":326,\"tag\":\"x\"},{\"id\":327,\"tag\":\"x\"},{\"id\":328,\"tag\":\"x\"},{\"id\":329,\"tag\":\"x\"},{\"id\":330,\"tag\":\"x\"},{\"id\":331,\"tag\":\"x\"},{\"id\":332,\"tag\":\"x\"},{\"id\":333,\"tag\":\"x\"},{\"id\":334,\"tag\":\"x\"},{\"id\":335,\"tag\":\"x\"},{\"id\":336,\"tag\":\"x\"},{\"id\":337,\"tag\":\"x\"},{\"id\":338,\"tag\":\"x\"},{\"id\":339,\"tag\":\"x\"},{\"id\":340,\"tag\":\"x\"},{\"id\":341,\"tag\":\"x\"},{\"id\":342,\"tag\":\"x\"},{\"id\":343,\"tag\":\"x\"},{\"id\":344,\"tag\":\"x\"},{\"id\":345,\"tag\":\"x\"},{\"id\":346,\"tag\":\"x\"},{\"id\":347,\"tag\":\"x\"},{\"id\":348,\"tag\":\"x\"},{\"id\":349,\"tag\":\"x\"},{\"id\":350,\"tag\":\"x\"},{\"id\":351,\"tag\":\"x\"},{\"id\":352,\"tag\":\"x\"},{\"id\":353,\"tag\":\"x\"},{\"id\":354,\"tag\":\"x\"},{\"id\":355,\"tag\":\"x\"},{\"id\":356,\"tag\":\"x\"},{\"id\":357,\"tag\":\"x\"},{\"id\":358,\"tag\":\"x\"},{\"id\":359,\"tag\":\"x\"},{\"id\":360,\"tag\":\"x\"},{\"id\":361,\"tag\":\"x\"},{\"id\":362,\"tag\":\"x\"},{\"id\":363,\"tag\":\"x\"},{\"id\":364,\"tag\":\"x\"},{\"id\":365,\"tag\":\"x\"},{\"id\":366,\"tag\":\"x\"},{\"id\":367,\"tag\":\"x\"},{\"id\":368,\"tag\":\"x\"},{\"id\":369,\"tag\":\"x\"},{\"id\":370,\"tag\":\"x\"},{\"id\":371,\"tag\":\"x\"},{\"id\":372,\"tag\":\"x\"},{\"id\":373,\"tag\":\"x\"},{\"id\":374,\"tag\":\"x\"},{\"id\":375,\"tag\":\"x\"},{\"id\":376,\"tag\":\"x\"},{\"id\":377,\"tag\":\"x\"},{\"id\":378,\"tag\":\"x\"},{\"id\":379,\"tag\":\"x\"},{\"id\":380,\"tag\":\"x\"},{\"id\":381,\"tag\":\"x\"},{\"id\":382,\"tag\":\"x\"},{\"id\":383,\"tag\":\"x\"},{\"id\":384,\"tag\":\"x\"},{\"id\":385,\"tag\":\"x\"},{\"id\":386,\"tag\":\"x\"},{\"id\":387,\"tag\":\"x\"},{\"id\":388,\"tag\":\"x\"},{\"id\":389,\"tag\":\"x\"},{\"id\":390,\"tag\":\"x\"},{\"id\":391,\"tag\":\"x\"},{\"id\":392,\"tag\":\"x\"},{\"id\":393,\"tag\":\"x\"},{\"id\":394,\"tag\":\"x\"}]},\"small\":{\"result\":{\"count\":3,\"ok\":true}},\"str\":{\"result\":\"<head lines=\\\"7\\\">\\nNAMESPACE     APIVERSION   KIND   NAME                                                             READY   STATUS    RESTARTS   AGE    IP             NODE                                                  NOMINATED NODE   READINESS GATES   LABELS\\nkube-system   v1           Pod    calico-node-kxw8s                                                1/1     Running   0          21h    10.1.0.31      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-2xv8   <none>           <none>            controller-revision-hash=75869d67,k8s-app=calico-node,pod-template-generation=2\\nkube-system   v1           Pod    calico-node-qjjtd                                                1/1     Running   0          21h    10.1.0.30      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-m84i   <none>           <none>            controller-revision-hash=75869d67,k8s-app=calico-node,pod-template-generation=2\\nkube-system   v1           Pod    calico-node-v5nmp                                                1/1     Running   0          2d2h   10.1.0.29      gke-galoy-agents-clust-sandbox-gvisor-87c7278e-q9ts   <none>           <none>            controller-revision-hash=75869d67,k8s-app=calico-node,pod-template-generation=2\\nkube-system   v1           Pod    calico-node-vertical-autoscaler-bbb8bfb74-r76x7                  1/1     Running   0          21h    192.168.1.5    gke-galoy-agents-clu-galoy-agents-n2--46ac1569-m84i   <none>           <none>            k8s-app=calico-node-autoscaler,pod-template-hash=bbb8bfb74\\nkube-system   v1           Pod    calico-typha-5d84858687-2zhk7                                    1/1     Running   0          21h    10.1.0.30      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-m84i   <none>           <none>            k8s-app=calico-typha,pod-template-hash=5d84858687\\nkube-system   v1           Pod    calico-typha-5d84858687-9bx5b                                    1/1     Running   0          21h    10.1.0.31      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-2xv8   <none>           <none>            k8s-app=calico-typha,pod-template-hash=5d84858687\\n</head>\\n<bulk-elided lines=\\\"27\\\">\\n27 lines elided\\n</bulk-elided>\\n<tail lines=\\\"7\\\">\\nkube-system   v1           Pod    netd-k9w4z                                                       3/3     Running   0          21h    10.1.0.31      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-2xv8   <none>           <none>            controller-revision-hash=db7d5f7f8,k8s-app=netd,pod-template-generation=3\\nkube-system   v1           Pod    netd-vgs2g                                                       3/3     Running   0          21h    10.1.0.30      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-m84i   <none>           <none>            controller-revision-hash=db7d5f7f8,k8s-app=netd,pod-template-generation=3\\nkube-system   v1           Pod    netd-xxd4r                                                       3/3     Running   0          2d2h   10.1.0.29      gke-galoy-agents-clust-sandbox-gvisor-87c7278e-q9ts   <none>           <none>            controller-revision-hash=db7d5f7f8,k8s-app=netd,pod-template-generation=3\\nkube-system   v1           Pod    pdcsi-node-5tr4q                                                 2/2     Running   0          21h    10.1.0.31      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-2xv8   <none>           <none>            controller-revision-hash=6b568d99d5,k8s-app=gcp-compute-persistent-disk-csi-driver,pod-template-generation=6\\nkube-system   v1           Pod    pdcsi-node-7z9zs                                                 2/2     Running   0          21h    10.1.0.30      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-m84i   <none>           <none>            controller-revision-hash=6b568d99d5,k8s-app=gcp-compute-persistent-disk-csi-driver,pod-template-generation=6\\nkube-system   v1           Pod    pdcsi-node-lcxtr                                                 2/2     Running   0          21h    10.1.0.29      gke-galoy-agents-clust-sandbox-gvisor-87c7278e-q9ts   <none>           <none>            controller-revision-hash=6b568d99d5,k8s-app=gcp-compute-persistent-disk-csi-driver,pod-template-generation=6\\nkube-system   v1           Pod    runsc-metric-server-qr24t                                        1/1     Running   0          2d2h   10.1.0.29      gke-galoy-agents-clust-sandbox-gvisor-87c7278e-q9ts   <none>           <none>            controller-revision-hash=6b657887d,k8s-app=runsc-metric-server,pod-template-generation=2\\n</tail>\"}}\n</summary>\n<recovery>\n  <elided path=\"$.arr.result\" total-bytes=\"10391\" shown-bytes=\"8186\" total-items=\"500\" shown-items=\"395\">\n    tool_output_fetch(invocation_id=\"<uuid>\", path=\"$.arr.result\", query={\"len\":105,\"mode\":\"json_array_slice\",\"offset\":395})\n  </elided>\n  <elided path=\"$.str.result\" total-bytes=\"13051\" shown-bytes=\"4495\" total-lines=\"41\" shown-lines=\"14\">\n    tool_output_fetch(invocation_id=\"<uuid>\", path=\"$.str.result\", query={\"len\":27,\"mode\":\"lines\",\"offset\":7})\n  </elided>\n</recovery>\n",
-  "result_invocation_id": "<uuid>",
-  "sub_invocations": [
-    {
-      "args_digest": "fake_upstream_str-large-table({})",
-      "invocation_id": "<uuid>",
-      "kind": "lines",
-      "raw_size_bytes": 13051,
-      "seq": 0,
-      "summary_size_bytes": 8233,
-      "tool_name": "fake_upstream_str-large-table"
+  "_elided": {
+    "invocation_id": "<uuid>",
+    "paths": [
+      {
+        "path": "$.result.arr.result",
+        "recover": {
+          "args_template": {
+            "invocation_id": "<uuid>",
+            "path": "$.result.arr.result",
+            "query": {
+              "len": 105,
+              "mode": "json_array_slice",
+              "offset": 395
+            }
+          },
+          "tool": "tool_output_fetch"
+        },
+        "shown_bytes": 8186,
+        "shown_items": 395,
+        "total_bytes": 10391,
+        "total_items": 500
+      },
+      {
+        "path": "$.result.str.result",
+        "recover": {
+          "args_template": {
+            "invocation_id": "<uuid>",
+            "path": "$.result.str.result",
+            "query": {
+              "len": 28,
+              "mode": "lines",
+              "offset": 6
+            }
+          },
+          "tool": "tool_output_fetch"
+        },
+        "shown_bytes": 4206,
+        "shown_lines": 13,
+        "total_bytes": 13051,
+        "total_lines": 41
+      }
+    ]
+  },
+  "result": {
+    "console": [],
+    "execution_time_ms": "<ms>",
+    "fetch_hint": "Use any `sub_invocations[].invocation_id` with `tool_output_fetch` to fetch a sub-call's persisted output; `query: {mode: \"summary\"}` returns the curated `<summary>+<recovery>` envelope you'd have seen calling that tool directly.",
+    "result": {
+      "arr": {
+        "result": [
+          {
+            "id": 0,
+            "tag": "x"
+          },
+          {
+            "id": 1,
+            "tag": "x"
+          },
+          {
+            "id": 2,
+            "tag": "x"
+          },
+          {
+            "id": 3,
+            "tag": "x"
+          },
+          {
+            "id": 4,
+            "tag": "x"
+          },
+          {
+            "id": 5,
+            "tag": "x"
+          },
+          {
+            "id": 6,
+            "tag": "x"
+          },
+          {
+            "id": 7,
+            "tag": "x"
+          },
+          {
+            "id": 8,
+            "tag": "x"
+          },
+          {
+            "id": 9,
+            "tag": "x"
+          },
+          {
+            "id": 10,
+            "tag": "x"
+          },
+          {
+            "id": 11,
+            "tag": "x"
+          },
+          {
+            "id": 12,
+            "tag": "x"
+          },
+          {
+            "id": 13,
+            "tag": "x"
+          },
+          {
+            "id": 14,
+            "tag": "x"
+          },
+          {
+            "id": 15,
+            "tag": "x"
+          },
+          {
+            "id": 16,
+            "tag": "x"
+          },
+          {
+            "id": 17,
+            "tag": "x"
+          },
+          {
+            "id": 18,
+            "tag": "x"
+          },
+          {
+            "id": 19,
+            "tag": "x"
+          },
+          {
+            "id": 20,
+            "tag": "x"
+          },
+          {
+            "id": 21,
+            "tag": "x"
+          },
+          {
+            "id": 22,
+            "tag": "x"
+          },
+          {
+            "id": 23,
+            "tag": "x"
+          },
+          {
+            "id": 24,
+            "tag": "x"
+          },
+          {
+            "id": 25,
+            "tag": "x"
+          },
+          {
+            "id": 26,
+            "tag": "x"
+          },
+          {
+            "id": 27,
+            "tag": "x"
+          },
+          {
+            "id": 28,
+            "tag": "x"
+          },
+          {
+            "id": 29,
+            "tag": "x"
+          },
+          {
+            "id": 30,
+            "tag": "x"
+          },
+          {
+            "id": 31,
+            "tag": "x"
+          },
+          {
+            "id": 32,
+            "tag": "x"
+          },
+          {
+            "id": 33,
+            "tag": "x"
+          },
+          {
+            "id": 34,
+            "tag": "x"
+          },
+          {
+            "id": 35,
+            "tag": "x"
+          },
+          {
+            "id": 36,
+            "tag": "x"
+          },
+          {
+            "id": 37,
+            "tag": "x"
+          },
+          {
+            "id": 38,
+            "tag": "x"
+          },
+          {
+            "id": 39,
+            "tag": "x"
+          },
+          {
+            "id": 40,
+            "tag": "x"
+          },
+          {
+            "id": 41,
+            "tag": "x"
+          },
+          {
+            "id": 42,
+            "tag": "x"
+          },
+          {
+            "id": 43,
+            "tag": "x"
+          },
+          {
+            "id": 44,
+            "tag": "x"
+          },
+          {
+            "id": 45,
+            "tag": "x"
+          },
+          {
+            "id": 46,
+            "tag": "x"
+          },
+          {
+            "id": 47,
+            "tag": "x"
+          },
+          {
+            "id": 48,
+            "tag": "x"
+          },
+          {
+            "id": 49,
+            "tag": "x"
+          },
+          {
+            "id": 50,
+            "tag": "x"
+          },
+          {
+            "id": 51,
+            "tag": "x"
+          },
+          {
+            "id": 52,
+            "tag": "x"
+          },
+          {
+            "id": 53,
+            "tag": "x"
+          },
+          {
+            "id": 54,
+            "tag": "x"
+          },
+          {
+            "id": 55,
+            "tag": "x"
+          },
+          {
+            "id": 56,
+            "tag": "x"
+          },
+          {
+            "id": 57,
+            "tag": "x"
+          },
+          {
+            "id": 58,
+            "tag": "x"
+          },
+          {
+            "id": 59,
+            "tag": "x"
+          },
+          {
+            "id": 60,
+            "tag": "x"
+          },
+          {
+            "id": 61,
+            "tag": "x"
+          },
+          {
+            "id": 62,
+            "tag": "x"
+          },
+          {
+            "id": 63,
+            "tag": "x"
+          },
+          {
+            "id": 64,
+            "tag": "x"
+          },
+          {
+            "id": 65,
+            "tag": "x"
+          },
+          {
+            "id": 66,
+            "tag": "x"
+          },
+          {
+            "id": 67,
+            "tag": "x"
+          },
+          {
+            "id": 68,
+            "tag": "x"
+          },
+          {
+            "id": 69,
+            "tag": "x"
+          },
+          {
+            "id": 70,
+            "tag": "x"
+          },
+          {
+            "id": 71,
+            "tag": "x"
+          },
+          {
+            "id": 72,
+            "tag": "x"
+          },
+          {
+            "id": 73,
+            "tag": "x"
+          },
+          {
+            "id": 74,
+            "tag": "x"
+          },
+          {
+            "id": 75,
+            "tag": "x"
+          },
+          {
+            "id": 76,
+            "tag": "x"
+          },
+          {
+            "id": 77,
+            "tag": "x"
+          },
+          {
+            "id": 78,
+            "tag": "x"
+          },
+          {
+            "id": 79,
+            "tag": "x"
+          },
+          {
+            "id": 80,
+            "tag": "x"
+          },
+          {
+            "id": 81,
+            "tag": "x"
+          },
+          {
+            "id": 82,
+            "tag": "x"
+          },
+          {
+            "id": 83,
+            "tag": "x"
+          },
+          {
+            "id": 84,
+            "tag": "x"
+          },
+          {
+            "id": 85,
+            "tag": "x"
+          },
+          {
+            "id": 86,
+            "tag": "x"
+          },
+          {
+            "id": 87,
+            "tag": "x"
+          },
+          {
+            "id": 88,
+            "tag": "x"
+          },
+          {
+            "id": 89,
+            "tag": "x"
+          },
+          {
+            "id": 90,
+            "tag": "x"
+          },
+          {
+            "id": 91,
+            "tag": "x"
+          },
+          {
+            "id": 92,
+            "tag": "x"
+          },
+          {
+            "id": 93,
+            "tag": "x"
+          },
+          {
+            "id": 94,
+            "tag": "x"
+          },
+          {
+            "id": 95,
+            "tag": "x"
+          },
+          {
+            "id": 96,
+            "tag": "x"
+          },
+          {
+            "id": 97,
+            "tag": "x"
+          },
+          {
+            "id": 98,
+            "tag": "x"
+          },
+          {
+            "id": 99,
+            "tag": "x"
+          },
+          {
+            "id": 100,
+            "tag": "x"
+          },
+          {
+            "id": 101,
+            "tag": "x"
+          },
+          {
+            "id": 102,
+            "tag": "x"
+          },
+          {
+            "id": 103,
+            "tag": "x"
+          },
+          {
+            "id": 104,
+            "tag": "x"
+          },
+          {
+            "id": 105,
+            "tag": "x"
+          },
+          {
+            "id": 106,
+            "tag": "x"
+          },
+          {
+            "id": 107,
+            "tag": "x"
+          },
+          {
+            "id": 108,
+            "tag": "x"
+          },
+          {
+            "id": 109,
+            "tag": "x"
+          },
+          {
+            "id": 110,
+            "tag": "x"
+          },
+          {
+            "id": 111,
+            "tag": "x"
+          },
+          {
+            "id": 112,
+            "tag": "x"
+          },
+          {
+            "id": 113,
+            "tag": "x"
+          },
+          {
+            "id": 114,
+            "tag": "x"
+          },
+          {
+            "id": 115,
+            "tag": "x"
+          },
+          {
+            "id": 116,
+            "tag": "x"
+          },
+          {
+            "id": 117,
+            "tag": "x"
+          },
+          {
+            "id": 118,
+            "tag": "x"
+          },
+          {
+            "id": 119,
+            "tag": "x"
+          },
+          {
+            "id": 120,
+            "tag": "x"
+          },
+          {
+            "id": 121,
+            "tag": "x"
+          },
+          {
+            "id": 122,
+            "tag": "x"
+          },
+          {
+            "id": 123,
+            "tag": "x"
+          },
+          {
+            "id": 124,
+            "tag": "x"
+          },
+          {
+            "id": 125,
+            "tag": "x"
+          },
+          {
+            "id": 126,
+            "tag": "x"
+          },
+          {
+            "id": 127,
+            "tag": "x"
+          },
+          {
+            "id": 128,
+            "tag": "x"
+          },
+          {
+            "id": 129,
+            "tag": "x"
+          },
+          {
+            "id": 130,
+            "tag": "x"
+          },
+          {
+            "id": 131,
+            "tag": "x"
+          },
+          {
+            "id": 132,
+            "tag": "x"
+          },
+          {
+            "id": 133,
+            "tag": "x"
+          },
+          {
+            "id": 134,
+            "tag": "x"
+          },
+          {
+            "id": 135,
+            "tag": "x"
+          },
+          {
+            "id": 136,
+            "tag": "x"
+          },
+          {
+            "id": 137,
+            "tag": "x"
+          },
+          {
+            "id": 138,
+            "tag": "x"
+          },
+          {
+            "id": 139,
+            "tag": "x"
+          },
+          {
+            "id": 140,
+            "tag": "x"
+          },
+          {
+            "id": 141,
+            "tag": "x"
+          },
+          {
+            "id": 142,
+            "tag": "x"
+          },
+          {
+            "id": 143,
+            "tag": "x"
+          },
+          {
+            "id": 144,
+            "tag": "x"
+          },
+          {
+            "id": 145,
+            "tag": "x"
+          },
+          {
+            "id": 146,
+            "tag": "x"
+          },
+          {
+            "id": 147,
+            "tag": "x"
+          },
+          {
+            "id": 148,
+            "tag": "x"
+          },
+          {
+            "id": 149,
+            "tag": "x"
+          },
+          {
+            "id": 150,
+            "tag": "x"
+          },
+          {
+            "id": 151,
+            "tag": "x"
+          },
+          {
+            "id": 152,
+            "tag": "x"
+          },
+          {
+            "id": 153,
+            "tag": "x"
+          },
+          {
+            "id": 154,
+            "tag": "x"
+          },
+          {
+            "id": 155,
+            "tag": "x"
+          },
+          {
+            "id": 156,
+            "tag": "x"
+          },
+          {
+            "id": 157,
+            "tag": "x"
+          },
+          {
+            "id": 158,
+            "tag": "x"
+          },
+          {
+            "id": 159,
+            "tag": "x"
+          },
+          {
+            "id": 160,
+            "tag": "x"
+          },
+          {
+            "id": 161,
+            "tag": "x"
+          },
+          {
+            "id": 162,
+            "tag": "x"
+          },
+          {
+            "id": 163,
+            "tag": "x"
+          },
+          {
+            "id": 164,
+            "tag": "x"
+          },
+          {
+            "id": 165,
+            "tag": "x"
+          },
+          {
+            "id": 166,
+            "tag": "x"
+          },
+          {
+            "id": 167,
+            "tag": "x"
+          },
+          {
+            "id": 168,
+            "tag": "x"
+          },
+          {
+            "id": 169,
+            "tag": "x"
+          },
+          {
+            "id": 170,
+            "tag": "x"
+          },
+          {
+            "id": 171,
+            "tag": "x"
+          },
+          {
+            "id": 172,
+            "tag": "x"
+          },
+          {
+            "id": 173,
+            "tag": "x"
+          },
+          {
+            "id": 174,
+            "tag": "x"
+          },
+          {
+            "id": 175,
+            "tag": "x"
+          },
+          {
+            "id": 176,
+            "tag": "x"
+          },
+          {
+            "id": 177,
+            "tag": "x"
+          },
+          {
+            "id": 178,
+            "tag": "x"
+          },
+          {
+            "id": 179,
+            "tag": "x"
+          },
+          {
+            "id": 180,
+            "tag": "x"
+          },
+          {
+            "id": 181,
+            "tag": "x"
+          },
+          {
+            "id": 182,
+            "tag": "x"
+          },
+          {
+            "id": 183,
+            "tag": "x"
+          },
+          {
+            "id": 184,
+            "tag": "x"
+          },
+          {
+            "id": 185,
+            "tag": "x"
+          },
+          {
+            "id": 186,
+            "tag": "x"
+          },
+          {
+            "id": 187,
+            "tag": "x"
+          },
+          {
+            "id": 188,
+            "tag": "x"
+          },
+          {
+            "id": 189,
+            "tag": "x"
+          },
+          {
+            "id": 190,
+            "tag": "x"
+          },
+          {
+            "id": 191,
+            "tag": "x"
+          },
+          {
+            "id": 192,
+            "tag": "x"
+          },
+          {
+            "id": 193,
+            "tag": "x"
+          },
+          {
+            "id": 194,
+            "tag": "x"
+          },
+          {
+            "id": 195,
+            "tag": "x"
+          },
+          {
+            "id": 196,
+            "tag": "x"
+          },
+          {
+            "id": 197,
+            "tag": "x"
+          },
+          {
+            "id": 198,
+            "tag": "x"
+          },
+          {
+            "id": 199,
+            "tag": "x"
+          },
+          {
+            "id": 200,
+            "tag": "x"
+          },
+          {
+            "id": 201,
+            "tag": "x"
+          },
+          {
+            "id": 202,
+            "tag": "x"
+          },
+          {
+            "id": 203,
+            "tag": "x"
+          },
+          {
+            "id": 204,
+            "tag": "x"
+          },
+          {
+            "id": 205,
+            "tag": "x"
+          },
+          {
+            "id": 206,
+            "tag": "x"
+          },
+          {
+            "id": 207,
+            "tag": "x"
+          },
+          {
+            "id": 208,
+            "tag": "x"
+          },
+          {
+            "id": 209,
+            "tag": "x"
+          },
+          {
+            "id": 210,
+            "tag": "x"
+          },
+          {
+            "id": 211,
+            "tag": "x"
+          },
+          {
+            "id": 212,
+            "tag": "x"
+          },
+          {
+            "id": 213,
+            "tag": "x"
+          },
+          {
+            "id": 214,
+            "tag": "x"
+          },
+          {
+            "id": 215,
+            "tag": "x"
+          },
+          {
+            "id": 216,
+            "tag": "x"
+          },
+          {
+            "id": 217,
+            "tag": "x"
+          },
+          {
+            "id": 218,
+            "tag": "x"
+          },
+          {
+            "id": 219,
+            "tag": "x"
+          },
+          {
+            "id": 220,
+            "tag": "x"
+          },
+          {
+            "id": 221,
+            "tag": "x"
+          },
+          {
+            "id": 222,
+            "tag": "x"
+          },
+          {
+            "id": 223,
+            "tag": "x"
+          },
+          {
+            "id": 224,
+            "tag": "x"
+          },
+          {
+            "id": 225,
+            "tag": "x"
+          },
+          {
+            "id": 226,
+            "tag": "x"
+          },
+          {
+            "id": 227,
+            "tag": "x"
+          },
+          {
+            "id": 228,
+            "tag": "x"
+          },
+          {
+            "id": 229,
+            "tag": "x"
+          },
+          {
+            "id": 230,
+            "tag": "x"
+          },
+          {
+            "id": 231,
+            "tag": "x"
+          },
+          {
+            "id": 232,
+            "tag": "x"
+          },
+          {
+            "id": 233,
+            "tag": "x"
+          },
+          {
+            "id": 234,
+            "tag": "x"
+          },
+          {
+            "id": 235,
+            "tag": "x"
+          },
+          {
+            "id": 236,
+            "tag": "x"
+          },
+          {
+            "id": 237,
+            "tag": "x"
+          },
+          {
+            "id": 238,
+            "tag": "x"
+          },
+          {
+            "id": 239,
+            "tag": "x"
+          },
+          {
+            "id": 240,
+            "tag": "x"
+          },
+          {
+            "id": 241,
+            "tag": "x"
+          },
+          {
+            "id": 242,
+            "tag": "x"
+          },
+          {
+            "id": 243,
+            "tag": "x"
+          },
+          {
+            "id": 244,
+            "tag": "x"
+          },
+          {
+            "id": 245,
+            "tag": "x"
+          },
+          {
+            "id": 246,
+            "tag": "x"
+          },
+          {
+            "id": 247,
+            "tag": "x"
+          },
+          {
+            "id": 248,
+            "tag": "x"
+          },
+          {
+            "id": 249,
+            "tag": "x"
+          },
+          {
+            "id": 250,
+            "tag": "x"
+          },
+          {
+            "id": 251,
+            "tag": "x"
+          },
+          {
+            "id": 252,
+            "tag": "x"
+          },
+          {
+            "id": 253,
+            "tag": "x"
+          },
+          {
+            "id": 254,
+            "tag": "x"
+          },
+          {
+            "id": 255,
+            "tag": "x"
+          },
+          {
+            "id": 256,
+            "tag": "x"
+          },
+          {
+            "id": 257,
+            "tag": "x"
+          },
+          {
+            "id": 258,
+            "tag": "x"
+          },
+          {
+            "id": 259,
+            "tag": "x"
+          },
+          {
+            "id": 260,
+            "tag": "x"
+          },
+          {
+            "id": 261,
+            "tag": "x"
+          },
+          {
+            "id": 262,
+            "tag": "x"
+          },
+          {
+            "id": 263,
+            "tag": "x"
+          },
+          {
+            "id": 264,
+            "tag": "x"
+          },
+          {
+            "id": 265,
+            "tag": "x"
+          },
+          {
+            "id": 266,
+            "tag": "x"
+          },
+          {
+            "id": 267,
+            "tag": "x"
+          },
+          {
+            "id": 268,
+            "tag": "x"
+          },
+          {
+            "id": 269,
+            "tag": "x"
+          },
+          {
+            "id": 270,
+            "tag": "x"
+          },
+          {
+            "id": 271,
+            "tag": "x"
+          },
+          {
+            "id": 272,
+            "tag": "x"
+          },
+          {
+            "id": 273,
+            "tag": "x"
+          },
+          {
+            "id": 274,
+            "tag": "x"
+          },
+          {
+            "id": 275,
+            "tag": "x"
+          },
+          {
+            "id": 276,
+            "tag": "x"
+          },
+          {
+            "id": 277,
+            "tag": "x"
+          },
+          {
+            "id": 278,
+            "tag": "x"
+          },
+          {
+            "id": 279,
+            "tag": "x"
+          },
+          {
+            "id": 280,
+            "tag": "x"
+          },
+          {
+            "id": 281,
+            "tag": "x"
+          },
+          {
+            "id": 282,
+            "tag": "x"
+          },
+          {
+            "id": 283,
+            "tag": "x"
+          },
+          {
+            "id": 284,
+            "tag": "x"
+          },
+          {
+            "id": 285,
+            "tag": "x"
+          },
+          {
+            "id": 286,
+            "tag": "x"
+          },
+          {
+            "id": 287,
+            "tag": "x"
+          },
+          {
+            "id": 288,
+            "tag": "x"
+          },
+          {
+            "id": 289,
+            "tag": "x"
+          },
+          {
+            "id": 290,
+            "tag": "x"
+          },
+          {
+            "id": 291,
+            "tag": "x"
+          },
+          {
+            "id": 292,
+            "tag": "x"
+          },
+          {
+            "id": 293,
+            "tag": "x"
+          },
+          {
+            "id": 294,
+            "tag": "x"
+          },
+          {
+            "id": 295,
+            "tag": "x"
+          },
+          {
+            "id": 296,
+            "tag": "x"
+          },
+          {
+            "id": 297,
+            "tag": "x"
+          },
+          {
+            "id": 298,
+            "tag": "x"
+          },
+          {
+            "id": 299,
+            "tag": "x"
+          },
+          {
+            "id": 300,
+            "tag": "x"
+          },
+          {
+            "id": 301,
+            "tag": "x"
+          },
+          {
+            "id": 302,
+            "tag": "x"
+          },
+          {
+            "id": 303,
+            "tag": "x"
+          },
+          {
+            "id": 304,
+            "tag": "x"
+          },
+          {
+            "id": 305,
+            "tag": "x"
+          },
+          {
+            "id": 306,
+            "tag": "x"
+          },
+          {
+            "id": 307,
+            "tag": "x"
+          },
+          {
+            "id": 308,
+            "tag": "x"
+          },
+          {
+            "id": 309,
+            "tag": "x"
+          },
+          {
+            "id": 310,
+            "tag": "x"
+          },
+          {
+            "id": 311,
+            "tag": "x"
+          },
+          {
+            "id": 312,
+            "tag": "x"
+          },
+          {
+            "id": 313,
+            "tag": "x"
+          },
+          {
+            "id": 314,
+            "tag": "x"
+          },
+          {
+            "id": 315,
+            "tag": "x"
+          },
+          {
+            "id": 316,
+            "tag": "x"
+          },
+          {
+            "id": 317,
+            "tag": "x"
+          },
+          {
+            "id": 318,
+            "tag": "x"
+          },
+          {
+            "id": 319,
+            "tag": "x"
+          },
+          {
+            "id": 320,
+            "tag": "x"
+          },
+          {
+            "id": 321,
+            "tag": "x"
+          },
+          {
+            "id": 322,
+            "tag": "x"
+          },
+          {
+            "id": 323,
+            "tag": "x"
+          },
+          {
+            "id": 324,
+            "tag": "x"
+          },
+          {
+            "id": 325,
+            "tag": "x"
+          },
+          {
+            "id": 326,
+            "tag": "x"
+          },
+          {
+            "id": 327,
+            "tag": "x"
+          },
+          {
+            "id": 328,
+            "tag": "x"
+          },
+          {
+            "id": 329,
+            "tag": "x"
+          },
+          {
+            "id": 330,
+            "tag": "x"
+          },
+          {
+            "id": 331,
+            "tag": "x"
+          },
+          {
+            "id": 332,
+            "tag": "x"
+          },
+          {
+            "id": 333,
+            "tag": "x"
+          },
+          {
+            "id": 334,
+            "tag": "x"
+          },
+          {
+            "id": 335,
+            "tag": "x"
+          },
+          {
+            "id": 336,
+            "tag": "x"
+          },
+          {
+            "id": 337,
+            "tag": "x"
+          },
+          {
+            "id": 338,
+            "tag": "x"
+          },
+          {
+            "id": 339,
+            "tag": "x"
+          },
+          {
+            "id": 340,
+            "tag": "x"
+          },
+          {
+            "id": 341,
+            "tag": "x"
+          },
+          {
+            "id": 342,
+            "tag": "x"
+          },
+          {
+            "id": 343,
+            "tag": "x"
+          },
+          {
+            "id": 344,
+            "tag": "x"
+          },
+          {
+            "id": 345,
+            "tag": "x"
+          },
+          {
+            "id": 346,
+            "tag": "x"
+          },
+          {
+            "id": 347,
+            "tag": "x"
+          },
+          {
+            "id": 348,
+            "tag": "x"
+          },
+          {
+            "id": 349,
+            "tag": "x"
+          },
+          {
+            "id": 350,
+            "tag": "x"
+          },
+          {
+            "id": 351,
+            "tag": "x"
+          },
+          {
+            "id": 352,
+            "tag": "x"
+          },
+          {
+            "id": 353,
+            "tag": "x"
+          },
+          {
+            "id": 354,
+            "tag": "x"
+          },
+          {
+            "id": 355,
+            "tag": "x"
+          },
+          {
+            "id": 356,
+            "tag": "x"
+          },
+          {
+            "id": 357,
+            "tag": "x"
+          },
+          {
+            "id": 358,
+            "tag": "x"
+          },
+          {
+            "id": 359,
+            "tag": "x"
+          },
+          {
+            "id": 360,
+            "tag": "x"
+          },
+          {
+            "id": 361,
+            "tag": "x"
+          },
+          {
+            "id": 362,
+            "tag": "x"
+          },
+          {
+            "id": 363,
+            "tag": "x"
+          },
+          {
+            "id": 364,
+            "tag": "x"
+          },
+          {
+            "id": 365,
+            "tag": "x"
+          },
+          {
+            "id": 366,
+            "tag": "x"
+          },
+          {
+            "id": 367,
+            "tag": "x"
+          },
+          {
+            "id": 368,
+            "tag": "x"
+          },
+          {
+            "id": 369,
+            "tag": "x"
+          },
+          {
+            "id": 370,
+            "tag": "x"
+          },
+          {
+            "id": 371,
+            "tag": "x"
+          },
+          {
+            "id": 372,
+            "tag": "x"
+          },
+          {
+            "id": 373,
+            "tag": "x"
+          },
+          {
+            "id": 374,
+            "tag": "x"
+          },
+          {
+            "id": 375,
+            "tag": "x"
+          },
+          {
+            "id": 376,
+            "tag": "x"
+          },
+          {
+            "id": 377,
+            "tag": "x"
+          },
+          {
+            "id": 378,
+            "tag": "x"
+          },
+          {
+            "id": 379,
+            "tag": "x"
+          },
+          {
+            "id": 380,
+            "tag": "x"
+          },
+          {
+            "id": 381,
+            "tag": "x"
+          },
+          {
+            "id": 382,
+            "tag": "x"
+          },
+          {
+            "id": 383,
+            "tag": "x"
+          },
+          {
+            "id": 384,
+            "tag": "x"
+          },
+          {
+            "id": 385,
+            "tag": "x"
+          },
+          {
+            "id": 386,
+            "tag": "x"
+          },
+          {
+            "id": 387,
+            "tag": "x"
+          },
+          {
+            "id": 388,
+            "tag": "x"
+          },
+          {
+            "id": 389,
+            "tag": "x"
+          },
+          {
+            "id": 390,
+            "tag": "x"
+          },
+          {
+            "id": 391,
+            "tag": "x"
+          },
+          {
+            "id": 392,
+            "tag": "x"
+          },
+          {
+            "id": 393,
+            "tag": "x"
+          },
+          {
+            "id": 394,
+            "tag": "x"
+          }
+        ]
+      },
+      "small": {
+        "result": {
+          "count": 3,
+          "ok": true
+        }
+      },
+      "str": {
+        "result": "<head lines=\"6\">\nNAMESPACE     APIVERSION   KIND   NAME                                                             READY   STATUS    RESTARTS   AGE    IP             NODE                                                  NOMINATED NODE   READINESS GATES   LABELS\nkube-system   v1           Pod    calico-node-kxw8s                                                1/1     Running   0          21h    10.1.0.31      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-2xv8   <none>           <none>            controller-revision-hash=75869d67,k8s-app=calico-node,pod-template-generation=2\nkube-system   v1           Pod    calico-node-qjjtd                                                1/1     Running   0          21h    10.1.0.30      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-m84i   <none>           <none>            controller-revision-hash=75869d67,k8s-app=calico-node,pod-template-generation=2\nkube-system   v1           Pod    calico-node-v5nmp                                                1/1     Running   0          2d2h   10.1.0.29      gke-galoy-agents-clust-sandbox-gvisor-87c7278e-q9ts   <none>           <none>            controller-revision-hash=75869d67,k8s-app=calico-node,pod-template-generation=2\nkube-system   v1           Pod    calico-node-vertical-autoscaler-bbb8bfb74-r76x7                  1/1     Running   0          21h    192.168.1.5    gke-galoy-agents-clu-galoy-agents-n2--46ac1569-m84i   <none>           <none>            k8s-app=calico-node-autoscaler,pod-template-hash=bbb8bfb74\nkube-system   v1           Pod    calico-typha-5d84858687-2zhk7                                    1/1     Running   0          21h    10.1.0.30      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-m84i   <none>           <none>            k8s-app=calico-typha,pod-template-hash=5d84858687\n</head>\n<bulk-elided lines=\"28\">\n28 lines elided\n</bulk-elided>\n<tail lines=\"7\">\nkube-system   v1           Pod    netd-k9w4z                                                       3/3     Running   0          21h    10.1.0.31      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-2xv8   <none>           <none>            controller-revision-hash=db7d5f7f8,k8s-app=netd,pod-template-generation=3\nkube-system   v1           Pod    netd-vgs2g                                                       3/3     Running   0          21h    10.1.0.30      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-m84i   <none>           <none>            controller-revision-hash=db7d5f7f8,k8s-app=netd,pod-template-generation=3\nkube-system   v1           Pod    netd-xxd4r                                                       3/3     Running   0          2d2h   10.1.0.29      gke-galoy-agents-clust-sandbox-gvisor-87c7278e-q9ts   <none>           <none>            controller-revision-hash=db7d5f7f8,k8s-app=netd,pod-template-generation=3\nkube-system   v1           Pod    pdcsi-node-5tr4q                                                 2/2     Running   0          21h    10.1.0.31      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-2xv8   <none>           <none>            controller-revision-hash=6b568d99d5,k8s-app=gcp-compute-persistent-disk-csi-driver,pod-template-generation=6\nkube-system   v1           Pod    pdcsi-node-7z9zs                                                 2/2     Running   0          21h    10.1.0.30      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-m84i   <none>           <none>            controller-revision-hash=6b568d99d5,k8s-app=gcp-compute-persistent-disk-csi-driver,pod-template-generation=6\nkube-system   v1           Pod    pdcsi-node-lcxtr                                                 2/2     Running   0          21h    10.1.0.29      gke-galoy-agents-clust-sandbox-gvisor-87c7278e-q9ts   <none>           <none>            controller-revision-hash=6b568d99d5,k8s-app=gcp-compute-persistent-disk-csi-driver,pod-template-generation=6\nkube-system   v1           Pod    runsc-metric-server-qr24t                                        1/1     Running   0          2d2h   10.1.0.29      gke-galoy-agents-clust-sandbox-gvisor-87c7278e-q9ts   <none>           <none>            controller-revision-hash=6b657887d,k8s-app=runsc-metric-server,pod-template-generation=2\n</tail>"
+      }
     },
-    {
-      "args_digest": "fake_upstream_arr-large-passthrough-items({})",
-      "invocation_id": "<uuid>",
-      "kind": "json_array_slice",
-      "raw_size_bytes": 10391,
-      "seq": 1,
-      "summary_size_bytes": 8566,
-      "tool_name": "fake_upstream_arr-large-passthrough-items"
-    }
-  ],
-  "tool_calls": 3
+    "sub_invocations": [
+      {
+        "args_digest": "fake_upstream_str-large-table({})",
+        "invocation_id": "<uuid>",
+        "kind": "lines",
+        "raw_size_bytes": 13051,
+        "tool_name": "fake_upstream_str-large-table"
+      },
+      {
+        "args_digest": "fake_upstream_arr-large-passthrough-items({})",
+        "invocation_id": "<uuid>",
+        "kind": "json_array_slice",
+        "raw_size_bytes": 10391,
+        "tool_name": "fake_upstream_arr-large-passthrough-items"
+      }
+    ],
+    "tool_calls": 3
+  }
 }
