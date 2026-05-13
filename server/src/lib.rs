@@ -161,6 +161,7 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
         github_app: github_app_config,
         library: config.library.clone(),
         git_proxy: config.git_proxy.clone(),
+        auto_bootstrap_personal_project: config.auto_bootstrap_personal_project,
     };
 
     let app = domain::App::init(&pool, app_config).await?;

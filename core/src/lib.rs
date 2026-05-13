@@ -74,12 +74,14 @@ pub struct App {
     search: Arc<AuthedSearch>,
     notes: Arc<Notes>,
     jobs: Arc<job::Jobs>,
+    auto_bootstrap_personal_project: bool,
     /// Held so the executor's worker task lives as long as `App`.
     _prompt_executor: Arc<PromptExecutor>,
 }
 
 impl App {
     pub async fn init(pool: &sqlx::PgPool, config: AppConfig) -> Result<Self, AppError> {
+        let auto_bootstrap_personal_project = config.auto_bootstrap_personal_project;
         // Fail loudly at startup rather than on first project-create.
         config.agents.validate()?;
         config
@@ -401,8 +403,13 @@ impl App {
             search,
             notes,
             jobs,
+            auto_bootstrap_personal_project,
             _prompt_executor: prompt_executor,
         })
+    }
+
+    pub fn auto_bootstrap_personal_project(&self) -> bool {
+        self.auto_bootstrap_personal_project
     }
 
     pub fn users(&self) -> &Users {

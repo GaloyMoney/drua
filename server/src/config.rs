@@ -13,7 +13,7 @@ use drua_core::sandbox::SandboxConfig;
 use drua_core::toolset::ToolSetsConfig;
 use drua_core::GitProxyAppConfig;
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
@@ -36,10 +36,36 @@ pub struct Config {
     pub library: LibraryConfig,
     #[serde(default)]
     pub git_proxy: GitProxyAppConfig,
+    #[serde(default = "default_auto_bootstrap_personal_project")]
+    pub auto_bootstrap_personal_project: bool,
     #[serde(skip)]
     pub anthropic_api_key: String,
     #[serde(skip)]
     pub openai_api_key: String,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            server: Default::default(),
+            oauth: Default::default(),
+            db: Default::default(),
+            providers: Default::default(),
+            agents: Default::default(),
+            toolsets: Default::default(),
+            sandbox: Default::default(),
+            github_app: Default::default(),
+            library: Default::default(),
+            git_proxy: Default::default(),
+            auto_bootstrap_personal_project: default_auto_bootstrap_personal_project(),
+            anthropic_api_key: Default::default(),
+            openai_api_key: Default::default(),
+        }
+    }
+}
+
+fn default_auto_bootstrap_personal_project() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

@@ -23,7 +23,7 @@ use crate::primitives::*;
 use crate::project_secret::ProjectSecrets;
 use crate::sandbox::Sandboxes;
 use crate::skill::Skills;
-use crate::user::Users;
+use crate::user::{User, Users};
 use crate::workflow::Workflows;
 
 #[derive(Clone)]
@@ -100,18 +100,40 @@ impl Projects {
         sub.can(AuthVerb::Create, AuthResource::Project(None))?;
         Audit::record_action_if_unset("project.create");
         let name = name.into();
-        let lead_agent_id = AgentId::new();
-        let new_project = build_new_project(lead_agent_id, &name, description);
-        let project_id = new_project.id;
 
         let mut op = self.repo.begin_op().await?;
-        let project = self.repo.create_in_op(&mut op, new_project).await?;
+        let project = self.create_in_op(&mut op, &name, description).await?;
+        op.commit().await?;
+
+        tracing::info!(
+            project.id = %project.id,
+            sub = ?sub,
+            "project created"
+        );
+
+        Ok(project)
+    }
+
+    /// Atomic body of [`Self::create`] — caller owns the transaction.
+    /// Creates the project row, lead agent, and library scaffold.
+    #[instrument(name = "domain.project.create_in_op", skip(self, op))]
+    pub async fn create_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        name: &str,
+        description: Option<String>,
+    ) -> Result<Project, ProjectError> {
+        let lead_agent_id = AgentId::new();
+        let new_project = build_new_project(lead_agent_id, name, description);
+        let project_id = new_project.id;
+
+        let project = self.repo.create_in_op(&mut *op, new_project).await?;
 
         Audit::record_project_id(project_id);
         Audit::record_agent_id(lead_agent_id);
 
         self.agents
-            .create_project_lead_in_op(&mut op, lead_agent_id, project_id, "lead", &name)
+            .create_project_lead_in_op(op, lead_agent_id, project_id, "lead", name)
             .await?;
 
         let scaffold = ["notes", "skills", "workflows"]
@@ -126,7 +148,7 @@ impl Projects {
         let attribution = self.users.commit_attribution().await;
         self.library
             .enqueue_write_in_op(
-                &mut op,
+                op,
                 WriteOp::Batch {
                     changes: scaffold,
                     message: format!("project: init {name}"),
@@ -135,15 +157,46 @@ impl Projects {
             )
             .await?;
 
-        op.commit().await?;
-
-        tracing::info!(
-            project.id = %project.id,
-            sub = ?sub,
-            "project created"
-        );
-
         Ok(project)
+    }
+
+    /// Idempotent: returns the global project named after `user`'s GitHub
+    /// login, creating one if it doesn't exist. Used by the TUI's
+    /// `bootstrapPersonalProject` mutation on first launch. Projects are
+    /// global-scoped — the name is the idempotency key.
+    #[instrument(name = "domain.project.find_or_create_personal", skip_all)]
+    pub async fn find_or_create_personal(
+        &self,
+        user: &User,
+    ) -> Result<(Project, bool), ProjectError> {
+        let mut op = self.repo.begin_op().await?;
+        let res = self.find_or_create_personal_in_op(&mut op, user).await?;
+        op.commit().await?;
+        Ok(res)
+    }
+
+    #[instrument(name = "domain.project.find_or_create_personal_in_op", skip_all)]
+    pub async fn find_or_create_personal_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        user: &User,
+    ) -> Result<(Project, bool), ProjectError> {
+        Audit::record_action_if_unset("project.bootstrap_personal");
+        let target_name = personal_project_name(user);
+
+        if let Some(existing) = self
+            .repo
+            .maybe_find_by_name_in_op(&mut *op, &target_name)
+            .await?
+        {
+            Audit::record_project_id(existing.id);
+            return Ok((existing, false));
+        }
+
+        let project = self
+            .create_in_op(op, &target_name, Some("Personal workspace".into()))
+            .await?;
+        Ok((project, true))
     }
 
     #[instrument(name = "domain.project.find_by_id", skip(self, sub))]
@@ -541,4 +594,71 @@ fn build_new_project(
         builder.description(desc);
     }
     builder.build().expect("Could not build new project")
+}
+
+/// Fallback chain: github_username → name → personal-<short-id>.
+pub(crate) fn personal_project_name(user: &User) -> String {
+    if let Some(uname) = user.github_username.as_deref() {
+        if !uname.is_empty() {
+            return uname.to_string();
+        }
+    }
+    if let Some(name) = user.name.as_deref() {
+        if !name.is_empty() {
+            return name.to_string();
+        }
+    }
+    let id = user.id.to_string();
+    let short = id.split_once('-').map(|(p, _)| p).unwrap_or(&id);
+    format!("personal-{short}")
+}
+
+#[cfg(test)]
+mod tests {
+    use es_entity::{IntoEvents as _, TryFromEvents as _};
+
+    use super::personal_project_name;
+    use crate::primitives::UserId;
+    use crate::user::{NewUser, User};
+
+    fn build_user(name: Option<&str>, github_username: Option<&str>) -> User {
+        let id = UserId::new();
+        let mut b = NewUser::builder();
+        b.id(id).github_id("gh-test".to_string());
+        if let Some(n) = name {
+            b.name(n.to_string());
+        }
+        if let Some(g) = github_username {
+            b.github_username(g.to_string());
+        }
+        User::try_from_events(b.build().unwrap().into_events()).unwrap()
+    }
+
+    #[test]
+    fn name_prefers_github_username() {
+        let u = build_user(Some("Alice"), Some("vindard"));
+        assert_eq!(personal_project_name(&u), "vindard");
+    }
+
+    #[test]
+    fn name_falls_back_to_display_name() {
+        let u = build_user(Some("Alice"), None);
+        assert_eq!(personal_project_name(&u), "Alice");
+    }
+
+    #[test]
+    fn name_falls_back_to_short_id() {
+        let u = build_user(None, None);
+        let n = personal_project_name(&u);
+        assert!(n.starts_with("personal-"));
+        let suffix = n.strip_prefix("personal-").unwrap();
+        assert_eq!(suffix.len(), 8);
+        assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn name_skips_empty_github_username() {
+        let u = build_user(Some("Alice"), Some(""));
+        assert_eq!(personal_project_name(&u), "Alice");
+    }
 }

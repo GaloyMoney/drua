@@ -129,3 +129,11 @@ pub struct ProjectUpdateModelChainInput {
 }
 
 mutation_payload! { ProjectUpdateModelChainPayload, project: Project }
+
+#[derive(SimpleObject)]
+pub struct BootstrapPersonalProjectPayload {
+    pub project: Project,
+    /// `true` if this call created the project; `false` if a project with
+    /// the same name already existed and was returned as-is.
+    pub created: bool,
+}
