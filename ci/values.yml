@@ -42,5 +42,5 @@ tunnel_deployments_public_keys: ((tunnel-deployments.public_keys))
 #! and only fires on this pipeline's own `check-code` failures. To rotate:
 #! edit this file and update the workflow's secret in the drua dashboard.
 drua_url: https://dashboard.agents.galoy.io
-drua_heal_check_code_workflow_id: 019df441-55cd-79a3-bdba-d025a33a5447
-drua_heal_check_code_secret: whsec_b62d25027995aa923e34a5f19e2f8d11
+drua_heal_check_code_workflow_id: 019e21b5-4557-7720-aa05-18984ece8aee
+drua_heal_check_code_secret: whsec_2ac753b454a989681fdb50cd1de18d54
