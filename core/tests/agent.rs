@@ -879,8 +879,8 @@ async fn detach_conflicting_writer_is_noop_when_unattached() {
 #[tokio::test]
 async fn update_session_chain_rejects_workflow_agents() {
     let pool = pool().await;
-    let (agents, _sandboxes) = build_agents(&pool).await;
-    let project_id = insert_project(&pool).await;
+    let (agents, _sandboxes, _sandbox_id, project_id) =
+        fixture_for_detach_test(&pool, "sb-update-chain-wf").await;
     let (workflow_id, run_id) = seed_workflow_run(&pool, project_id).await;
 
     let mut op = agents.begin_op().await.expect("begin op");
