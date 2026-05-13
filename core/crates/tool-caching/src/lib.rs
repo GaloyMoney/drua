@@ -110,8 +110,7 @@ impl ToolCaching {
             let mut passthrough = result;
             passthrough.structured_content = match mode {
                 WrapMode::Elide | WrapMode::Persist => {
-                    let t = original_structured
-                        .unwrap_or_else(|| query_structure.root.clone());
+                    let t = original_structured.unwrap_or_else(|| query_structure.root.clone());
                     Some(serde_json::json!({ "result": t }))
                 }
                 WrapMode::TextOnly => original_structured,
