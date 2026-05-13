@@ -53,7 +53,7 @@ impl TopLevelTool for GlobTool {
         &GLOB_SCHEMA
     }
 
-    fn output_schema(&self) -> Option<&serde_json::Value> {
+    fn inner_output_schema(&self) -> Option<&serde_json::Value> {
         Some(GLOB_OUTPUT.schema())
     }
 

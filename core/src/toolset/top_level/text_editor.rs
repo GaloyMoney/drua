@@ -80,7 +80,7 @@ impl TopLevelTool for TextEditor {
         &TEXT_EDITOR_SCHEMA
     }
 
-    fn output_schema(&self) -> Option<&serde_json::Value> {
+    fn inner_output_schema(&self) -> Option<&serde_json::Value> {
         Some(TEXT_EDITOR_OUTPUT.schema())
     }
 

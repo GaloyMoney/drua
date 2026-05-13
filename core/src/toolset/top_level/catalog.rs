@@ -20,6 +20,7 @@ use crate::auth::AuthSubject;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::{SearchableToolSet, TopLevelTool};
+use super::super::wrap::{wrap_output_schema, wrap_output_ts};
 use super::schema_for;
 
 pub struct CatalogEntry {
@@ -185,7 +186,7 @@ impl TopLevelTool for SearchCatalog {
     fn input_schema(&self) -> &serde_json::Value {
         &SEARCH_SCHEMA
     }
-    fn output_schema(&self) -> Option<&serde_json::Value> {
+    fn inner_output_schema(&self) -> Option<&serde_json::Value> {
         Some(&SEARCH_OUTPUT_SCHEMA)
     }
 
@@ -279,7 +280,7 @@ impl DescribeCatalogTool {
             .unwrap_or_else(|| "any".to_string());
         // Catalog tools always go through tool-caching, so the wire shape
         // is `DruaToolResult<UpstreamT>` — compose scripts unwrap `.result`.
-        let output_ts = format!("{{ result: {inner_ts} }}");
+        let output_ts = wrap_output_ts(&inner_ts);
         let ts_signature = format!(
             "\n\n### TypeScript signature (for use in `compose`)\n```ts\nfunction {tool}(args: {{ {input_ts} }}): Promise<{output_ts}>;\n```",
             tool = entry.tool_name,
@@ -297,48 +298,6 @@ impl DescribeCatalogTool {
             entry.prefixed_name,
         )
     }
-}
-
-/// Advertise the `DruaToolResult<T>` wrapper as the tool's outputSchema —
-/// the wire shape `cache(WrapMode::Elide)` emits on the structured channel.
-/// MCP clients that validate `structuredContent` against `outputSchema` see
-/// the actual shape (otherwise they reject the wrapped envelope as a
-/// schema mismatch).
-fn wrap_output_schema(upstream: &serde_json::Value) -> serde_json::Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "result": upstream,
-            "_elided": {
-                "type": "object",
-                "description": "Present only when something was elided. Mirror of the text-channel <recovery> section.",
-                "properties": {
-                    "invocation_id": { "type": "string" },
-                    "paths": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "path": { "type": "string" },
-                                "bytes": { "type": "integer" },
-                                "lines": { "type": "integer" },
-                                "length": { "type": "integer" },
-                                "head_count": { "type": "integer" },
-                                "tail_count": { "type": "integer" },
-                                "recover": {
-                                    "type": "object",
-                                    "description": "tool_output_fetch call template"
-                                }
-                            },
-                            "required": ["path", "bytes", "recover"]
-                        }
-                    }
-                },
-                "required": ["invocation_id", "paths"]
-            }
-        },
-        "required": ["result"]
-    })
 }
 
 static DESCRIBE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
@@ -366,7 +325,7 @@ impl TopLevelTool for DescribeCatalogTool {
     fn input_schema(&self) -> &serde_json::Value {
         &DESCRIBE_SCHEMA
     }
-    fn output_schema(&self) -> Option<&serde_json::Value> {
+    fn inner_output_schema(&self) -> Option<&serde_json::Value> {
         Some(&DESCRIBE_OUTPUT_SCHEMA)
     }
 

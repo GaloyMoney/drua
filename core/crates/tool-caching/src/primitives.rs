@@ -60,38 +60,46 @@ pub struct ToolCallSummary {
 
 /// Which channel-wrapping strategy `cache()` should apply.
 ///
-/// Both modes persist the upstream result for `tool_output_fetch` recovery
-/// and emit a `DruaToolResult<T>`-shaped `structuredContent` (`{result, _elided?}`)
-/// so all wrapped tools share one outputSchema regardless of caller. The
-/// difference is whether elision is presented on the wire:
+/// All modes persist the upstream result for `tool_output_fetch` recovery.
+/// They differ in what reaches the wire:
 ///
-/// * `Elide` (top-level agent-facing): walk and elide in place; `_elided`
-///   carries the recovery metadata mirror of the text `<recovery>` block.
-/// * `Persist` (compose sub-dispatch): persist for recovery but emit the
-///   upstream value verbatim — the JS engine has its own size cap and we
-///   don't want sub-call results pre-summarised before scripts touch them.
+/// * [`WrapMode::Elide`] — top-level agent-facing. Walk and elide in place;
+///   structured channel becomes `{result: T-elided, _elided?: M}` and the
+///   text channel carries the `<summary>+<recovery>` envelope.
+/// * [`WrapMode::Persist`] — compose sub-dispatch. Persist for recovery but
+///   emit `{result: T verbatim}` on the structured channel — the JS engine
+///   has its own size cap and we don't want sub-call results pre-summarised
+///   before scripts touch them.
+/// * [`WrapMode::TextOnly`] — compose's own output (and other tools whose
+///   `default_tool_caching() == false`). Persist for recovery and emit the
+///   `<summary>+<recovery>` text envelope, but leave `structured_content`
+///   exactly as the upstream tool produced it. These tools own their own
+///   structured shape (e.g. `ComposeOutput`) so the `DruaToolResult<T>`
+///   wrapper would shadow their native fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WrapMode {
     Elide,
     Persist,
+    TextOnly,
 }
 
 impl ToolCallSummary {
     /// Build the wrapped `CallToolResult` the agent sees.
     ///
-    /// Text channel: the `<summary>` + `<recovery>` envelope. Tag style
-    /// mirrors the kebab-case convention used inside chain markers
-    /// (`<head bytes="…">` etc.) so the agent sees one consistent grammar.
+    /// Text channel: the `<summary>` + `<recovery>` envelope, identical for
+    /// every mode. Tag style mirrors the kebab-case convention used inside
+    /// chain markers (`<head bytes="…">` etc.) so the agent sees one
+    /// consistent grammar.
     ///
-    /// Structured channel: a `DruaToolResult<T>` wrapper —
-    /// `{result: T, _elided?: {invocation_id, paths}}` (Elide) or
-    /// `{result: T verbatim}` (Persist). `T` stays in upstream coordinate
-    /// space so `tool_output_fetch` and the wrapped outputSchema both
-    /// validate against the unwrapped value.
+    /// Structured channel varies by mode:
+    /// * `Elide` — `{result: T-elided, _elided?: {invocation_id, paths}}`
+    /// * `Persist` — `{result: T verbatim}` (no `_elided`)
+    /// * `TextOnly` — `original_structured` verbatim (no wrapper at all)
     pub fn into_call_tool_result(
         self,
         mode: WrapMode,
         invocation_id: Option<ToolInvocationId>,
+        original_structured: Option<serde_json::Value>,
         upstream_t: serde_json::Value,
     ) -> CallToolResult {
         let summary_text = match &self.summary {
@@ -128,13 +136,14 @@ impl ToolCallSummary {
                         }),
                     );
                 }
-                Value::Object(obj)
+                Some(Value::Object(obj))
             }
-            WrapMode::Persist => serde_json::json!({ "result": upstream_t }),
+            WrapMode::Persist => Some(serde_json::json!({ "result": upstream_t })),
+            WrapMode::TextOnly => original_structured,
         };
 
         let mut result = CallToolResult::success(vec![Content::text(envelope)]);
-        result.structured_content = Some(structured);
+        result.structured_content = structured;
         result
     }
 }
@@ -158,14 +167,10 @@ pub struct ElidedPath {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub length: Option<u32>,
     /// For array truncation: how many leading items survive in the wrapped
-    /// `result`. Combined with `tail_count` and `length` this tells the
-    /// agent exactly which indices are present and which were dropped.
+    /// `result` (head-only — items `[0..head_count)` are present, items
+    /// `[head_count..length)` are recoverable via `recover`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_count: Option<u32>,
-    /// For array truncation: how many trailing items survive in the wrapped
-    /// `result`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tail_count: Option<u32>,
     pub recover: Value,
 }
 
@@ -183,12 +188,8 @@ impl ElidedPath {
             .head_count
             .map(|n| format!(" head=\"{n}\""))
             .unwrap_or_default();
-        let tail_attr = self
-            .tail_count
-            .map(|n| format!(" tail=\"{n}\""))
-            .unwrap_or_default();
         format!(
-            "  <elided path=\"{}\" bytes=\"{}\"{lines_attr}{length_attr}{head_attr}{tail_attr}>\n    {}\n  </elided>\n",
+            "  <elided path=\"{}\" bytes=\"{}\"{lines_attr}{length_attr}{head_attr}>\n    {}\n  </elided>\n",
             self.path,
             self.bytes,
             render_recover_call(&self.recover),

@@ -77,7 +77,7 @@ impl TopLevelTool for ComposeTypes {
         &COMPOSE_TYPES_SCHEMA
     }
 
-    fn output_schema(&self) -> Option<&serde_json::Value> {
+    fn inner_output_schema(&self) -> Option<&serde_json::Value> {
         Some(&COMPOSE_TYPES_OUTPUT_SCHEMA)
     }
 
@@ -109,11 +109,11 @@ impl TopLevelTool for ComposeTypes {
             }
             let params_ts = json_schema_ts::schema_to_ts_params(tool.input_schema());
             let inner_ts = tool
-                .output_schema()
+                .inner_output_schema()
                 .map(json_schema_ts::schema_to_ts)
                 .unwrap_or_else(|| "any".to_string());
             let return_ts = if tool.default_tool_caching() {
-                format!("{{ result: {inner_ts} }}")
+                super::super::wrap::wrap_output_ts(&inner_ts)
             } else {
                 inner_ts
             };
@@ -148,7 +148,7 @@ impl TopLevelTool for ComposeTypes {
                     })
                     .unwrap_or_else(|| "any".to_string());
                 // Catalog tools always go through tool-caching → always wrap.
-                let return_ts = format!("{{ result: {inner_ts} }}");
+                let return_ts = super::super::wrap::wrap_output_ts(&inner_ts);
 
                 namespaces.entry(prefix.clone()).or_default().push((
                     entry.name.clone(),

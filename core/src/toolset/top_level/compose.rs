@@ -97,7 +97,7 @@ impl TopLevelTool for ComposeTool {
         &COMPOSE_SCHEMA
     }
 
-    fn output_schema(&self) -> Option<&serde_json::Value> {
+    fn inner_output_schema(&self) -> Option<&serde_json::Value> {
         Some(&COMPOSE_OUTPUT_SCHEMA)
     }
 
@@ -252,7 +252,12 @@ impl TopLevelTool for ComposeTool {
 
         let ctr = match self.tool_caching.as_ref() {
             Some(tc) => {
-                tc.cache(subject, "compose", &recorded_args, ctr, WrapMode::Elide)
+                // Compose's structured channel is `ComposeOutput`, not a
+                // `DruaToolResult<T>` wrapper (`default_tool_caching=false`).
+                // `TextOnly` persists for recovery + elides the multi-section
+                // text envelope while preserving `ComposeOutput` verbatim on
+                // the structured channel.
+                tc.cache(subject, "compose", &recorded_args, ctr, WrapMode::TextOnly)
                     .await?
                     .result
             }
@@ -627,12 +632,7 @@ fn result_to_value(result: &CallToolResult) -> serde_json::Value {
     }
 }
 
-/// Wrap a cached-tool result into the `DruaToolResult<T>` shape compose
-/// scripts unwrap with `.result`. Compose sub-dispatch is `WrapMode::Persist`,
-/// so `_elided` is always absent (the JS engine has its own size cap).
-fn wrap_compose_value(value: serde_json::Value) -> serde_json::Value {
-    serde_json::json!({ "result": value })
-}
+use super::super::wrap::wrap_value as wrap_compose_value;
 
 fn extract_text(result: &CallToolResult) -> String {
     result
@@ -644,14 +644,6 @@ fn extract_text(result: &CallToolResult) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
-}
-
-/// Wrap a tool's TS return type into the `DruaToolResult<T>` shape — what
-/// compose scripts see from every cached tool. Compose sub-dispatch is
-/// `WrapMode::Persist`, so `_elided` is always absent; the signature only
-/// declares `result`. Scripts unwrap with `.result`.
-fn wrap_return_ts(inner: &str) -> String {
-    format!("{{ result: {inner} }}")
 }
 
 /// Generate TypeScript declarations from the visible catalog entries and
@@ -684,11 +676,11 @@ pub(crate) fn generate_dts(
         }
         let params_ts = json_schema_ts::schema_to_ts_params(tool.input_schema());
         let inner_ts = tool
-            .output_schema()
+            .inner_output_schema()
             .map(json_schema_ts::schema_to_ts)
             .unwrap_or_else(|| "any".to_string());
         let return_ts = if tool.default_tool_caching() {
-            wrap_return_ts(&inner_ts)
+            super::super::wrap::wrap_output_ts(&inner_ts)
         } else {
             inner_ts
         };
@@ -717,7 +709,11 @@ pub(crate) fn generate_dts(
                 })
                 .unwrap_or_else(|| "any".to_string());
             // Catalog tools always go through tool-caching → always wrap.
-            tools_in_ns.push((entry.name.clone(), params_ts, wrap_return_ts(&inner_ts)));
+            tools_in_ns.push((
+                entry.name.clone(),
+                params_ts,
+                super::super::wrap::wrap_output_ts(&inner_ts),
+            ));
         }
     }
 

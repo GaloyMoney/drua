@@ -279,7 +279,7 @@ impl TopLevelTool for SpacesTool {
         &SPACES_SCHEMA
     }
 
-    fn output_schema(&self) -> Option<&serde_json::Value> {
+    fn inner_output_schema(&self) -> Option<&serde_json::Value> {
         Some(SPACES_OUTPUT.schema())
     }
 

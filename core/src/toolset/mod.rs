@@ -6,6 +6,7 @@ mod inspect;
 pub mod searchable;
 pub mod top_level;
 mod traits;
+pub(crate) mod wrap;
 
 pub use config::*;
 pub use error::*;
@@ -929,7 +930,7 @@ mod tests {
             static EMPTY: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
             EMPTY.get_or_init(|| serde_json::json!({ "type": "object" }))
         }
-        fn output_schema(&self) -> Option<&serde_json::Value> {
+        fn inner_output_schema(&self) -> Option<&serde_json::Value> {
             self.output_schema.as_ref()
         }
         fn composable(&self) -> bool {

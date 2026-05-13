@@ -122,15 +122,20 @@ impl ToolCaching {
             .await?;
 
         // `upstream_t` is what `{result: …}` carries on the wire in Persist
-        // mode (verbatim T) and is unused in Elide mode (the summary is
-        // already there). Prefer the upstream's structured channel when
-        // present so JS engines see the same JSON shape the upstream emits;
-        // otherwise fall back to the parsed text root.
+        // mode (verbatim T) and is unused in Elide / TextOnly. Prefer the
+        // upstream's structured channel when present so JS engines see the
+        // same JSON shape the upstream emits; otherwise fall back to the
+        // parsed text root.
         let upstream_t = original_structured
             .clone()
             .unwrap_or_else(|| query_structure.root.clone());
         let elided_paths = summary.elided_paths.clone();
-        let wrapped = summary.into_call_tool_result(mode, Some(invocation_id), upstream_t);
+        let wrapped = summary.into_call_tool_result(
+            mode,
+            Some(invocation_id),
+            original_structured,
+            upstream_t,
+        );
         Ok(ToolCacheResponse {
             result: wrapped,
             elided_paths,

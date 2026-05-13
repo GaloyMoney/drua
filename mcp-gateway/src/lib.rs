@@ -82,7 +82,7 @@ fn to_mcp_tool(tool: &(dyn TopLevelTool + '_)) -> Tool {
         // returns something else.
         _ => Map::new(),
     };
-    let output_schema = tool.output_schema().and_then(|v| match v {
+    let output_schema = tool.output_schema().and_then(|v| match &v {
         Value::Object(map) => Some(Arc::new(sanitized_mcp_schema(map))),
         _ => None,
     });

@@ -133,12 +133,12 @@ impl Walker {
         if n <= 1 {
             return walked_value;
         }
-        // Schema-conforming truncate: emit a shorter array (head ++ tail) of
-        // the same element type so the wrapped outputSchema's `result` stays
-        // valid. Truncation metadata moves into the ElidedPath, where the
-        // structured envelope's `_elided.paths[i]` carries it. Per-item
-        // elided_paths for kept items (e.g. $[0].body) survive; those for
-        // dropped middle indices get pruned.
+        // Schema-conforming truncate: emit a shorter (head-only) array of
+        // the same element type so the wrapped outputSchema's `result`
+        // stays valid. Truncation metadata moves into the ElidedPath,
+        // where the structured envelope's `_elided.paths[i]` carries it.
+        // Per-item elided_paths for kept items (e.g. $[0].body) survive;
+        // those for dropped tail indices get pruned.
         self.truncate_array(
             &walked,
             n,
@@ -232,7 +232,6 @@ impl Walker {
                 lines: Some(line_count(s)),
                 length: None,
                 head_count: None,
-                tail_count: None,
                 recover: make_full_recover(invocation_id, path),
             });
             return Value::String(prepared);
@@ -247,7 +246,6 @@ impl Walker {
                 lines: Some(line_count(s)),
                 length: None,
                 head_count: None,
-                tail_count: None,
                 recover: make_lines_recover(
                     invocation_id,
                     path,
@@ -269,7 +267,6 @@ impl Walker {
                 lines: None,
                 length: None,
                 head_count: None,
-                tail_count: None,
                 recover: make_full_recover(invocation_id, path),
             });
             return Value::String(prepared);
@@ -281,7 +278,6 @@ impl Walker {
                 lines: None,
                 length: None,
                 head_count: None,
-                tail_count: None,
                 recover: make_range_recover(invocation_id, path, elide.head_end, elide.missing_len),
             });
             return Value::String(elide.text);
@@ -300,46 +296,37 @@ impl Walker {
         paths_before: usize,
         elided_paths: &mut Vec<ElidedPath>,
     ) -> Value {
+        // Head-only truncate: emit `[item0..item(K-1)]` and record
+        // `_elided.paths[i]={length:N, head_count:K, recover:…}` so the
+        // agent can slice `[K..N)` via `tool_output_fetch` if they need
+        // more. Head+tail would be ambiguous on the wire — without a
+        // delimiter the agent can't tell where the gap lives.
         let budget = self.sentinel_budget();
         let n = walked.len();
-        let mut head_count = n / 2;
-        let mut tail_count = n - head_count;
-        if tail_count > 0 {
-            tail_count -= 1;
-        } else {
-            head_count = head_count.saturating_sub(1);
+        let mut head_count = n.saturating_sub(1);
+        let mut truncated = make_truncated_array(walked, head_count);
+        while (json_size(&truncated) as usize) > budget && head_count > 0 {
+            head_count -= 1;
+            truncated = make_truncated_array(walked, head_count);
         }
-        let mut truncated = make_truncated_array(walked, head_count, tail_count);
-        while (json_size(&truncated) as usize) > budget && (head_count > 0 || tail_count > 0) {
-            if tail_count > head_count {
-                tail_count -= 1;
-            } else {
-                head_count -= 1;
-            }
-            truncated = make_truncated_array(walked, head_count, tail_count);
-        }
-        // Surgical orphan cleanup: keep per-item elided_paths whose
-        // $[i] index landed in head [0..head_count) or tail
-        // [n-tail_count..n). Indices in between point at items that
-        // dropped out of the kept shape — drop their recovery handles.
-        let kept_low = head_count;
-        let kept_high = n - tail_count;
+        // Surgical orphan cleanup: keep per-item elided_paths for kept
+        // indices `[0..head_count)`. Indices `[head_count..n)` dropped
+        // out of the wrapped shape — their recovery handles go too.
         let after_walk: Vec<ElidedPath> = elided_paths.split_off(paths_before);
         for entry in after_walk {
             match parse_array_index(&entry.path, path) {
-                Some(i) if i < kept_low || i >= kept_high => elided_paths.push(entry),
+                Some(i) if i < head_count => elided_paths.push(entry),
                 None => elided_paths.push(entry),
-                _ => {} // drop: this index is in the missing middle
+                _ => {} // drop: this index is in the dropped tail
             }
         }
-        let missing_len = original_length.saturating_sub(head_count + tail_count);
+        let missing_len = original_length.saturating_sub(head_count);
         elided_paths.push(ElidedPath {
             path: path.to_string(),
             bytes: original_bytes,
             lines: None,
             length: Some(original_length as u32),
             head_count: Some(head_count as u32),
-            tail_count: Some(tail_count as u32),
             recover: make_array_slice_recover(invocation_id, path, head_count, missing_len),
         });
         truncated
@@ -609,8 +596,6 @@ fn make_array_slice_recover(
     })
 }
 
-fn make_truncated_array(walked: &[Value], head_count: usize, tail_count: usize) -> Value {
-    let mut out: Vec<Value> = walked.iter().take(head_count).cloned().collect();
-    out.extend(walked.iter().rev().take(tail_count).rev().cloned());
-    Value::Array(out)
+fn make_truncated_array(walked: &[Value], head_count: usize) -> Value {
+    Value::Array(walked.iter().take(head_count).cloned().collect())
 }
