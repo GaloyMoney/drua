@@ -278,18 +278,19 @@ fn is_simple_text_result(result: &CallToolResult) -> bool {
     result.content.len() == 1 && matches!(result.content[0].raw, RawContent::Text(_))
 }
 
-/// If the upstream carries a structured channel but no text content,
-/// fill the text channel with a pretty-printed JSON rendering of the
-/// structured payload. Lets callers (notably compose) pass an empty
-/// text channel and rely on `cache()` to produce the agent-facing
+/// If the upstream carries a structured channel and the content vec is
+/// empty, fill the text channel with a pretty-printed JSON rendering of
+/// the structured payload. Lets callers (notably compose) pass an empty
+/// content vec and rely on `cache()` to produce the agent-facing
 /// rendering — either as the passthrough text or, when walking elides
 /// something, replaced in place by the `<summary>+<recovery>` envelope.
+///
+/// Strictly `is_empty()`, not "no text content present": multi-part
+/// results (e.g. images alongside structured data) must keep their
+/// non-text parts intact and fall through to the
+/// `!is_simple_text_result` passthrough below.
 fn ensure_text_channel(mut result: CallToolResult) -> CallToolResult {
-    let has_text = result
-        .content
-        .iter()
-        .any(|c| matches!(&c.raw, RawContent::Text(_)));
-    if has_text {
+    if !result.content.is_empty() {
         return result;
     }
     let Some(structured) = result.structured_content.as_ref() else {
