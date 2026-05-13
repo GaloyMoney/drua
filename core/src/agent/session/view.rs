@@ -69,7 +69,7 @@ pub struct ToolResultsView {
 
 #[derive(Debug)]
 pub(super) struct MaterializedSession<'a> {
-    chain: &'a ModelChain,
+    model_chain: &'a ModelChain,
     system_blocks: Vec<&'a SystemBlock>,
     system_breakpoints: Vec<SystemBlockIndex>,
     /// Per kind, the index of its most-recent block. Resolves latest-for-kind
@@ -84,9 +84,9 @@ pub(super) struct MaterializedSession<'a> {
 }
 
 impl<'a> MaterializedSession<'a> {
-    pub fn init(chain: &'a ModelChain) -> Self {
+    pub fn init(model_chain: &'a ModelChain) -> Self {
         Self {
-            chain,
+            model_chain,
             system_blocks: Vec::new(),
             system_breakpoints: Vec::new(),
             latest_idx_by_kind: std::collections::HashMap::new(),
@@ -209,7 +209,7 @@ impl<'a> MaterializedSession<'a> {
         let tool_definitions_view = self.tools_since_last_breakpoint();
         let initial_user_messages = self.all_user_messages();
         PromptDefinition {
-            chain: self.chain.clone(),
+            model_chain: self.model_chain.clone(),
             system_view,
             tool_definitions_view,
             messages: vec![MessageView::User(initial_user_messages)],
@@ -234,7 +234,7 @@ pub enum MessageView {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptDefinition {
-    pub(super) chain: ModelChain,
+    pub(super) model_chain: ModelChain,
     pub(super) system_view: SystemView,
     pub(super) tool_definitions_view: ToolDefinitionsView,
     pub(super) messages: Vec<MessageView>,
@@ -244,13 +244,13 @@ pub struct PromptDefinition {
 
 impl PromptDefinition {
     pub(super) fn for_refreshed_thread(
-        chain: ModelChain,
+        model_chain: ModelChain,
         system_view: SystemView,
         tool_definitions_view: ToolDefinitionsView,
         inherited_messages: Vec<MessageView>,
     ) -> Self {
         Self {
-            chain,
+            model_chain,
             system_view,
             tool_definitions_view,
             messages: inherited_messages,
@@ -417,7 +417,7 @@ impl PromptDefinition {
 
         Ok(Prompt {
             target_thread,
-            chain: self.chain,
+            model_chain: self.model_chain,
             cache_key: None,
             system,
             tools,

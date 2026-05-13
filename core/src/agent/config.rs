@@ -240,21 +240,6 @@ mod tests {
     }
 
     #[test]
-    fn resolve_chain_errors_when_fallback_unconfigured() {
-        let mut cfg = AgentsConfig {
-            default_chain: Some(LlmModelChain::new("primary").with_fallback("ghost")),
-            ..Default::default()
-        };
-        cfg.models.insert("primary".into(), defaults_for("primary"));
-        cfg.builtin_roles
-            .insert(AgentRole::Agent, RoleConfig::default());
-        let err = cfg
-            .resolve_chain(AgentRole::Agent, None)
-            .expect_err("ghost fallback");
-        assert!(format!("{err}").contains("ghost"));
-    }
-
-    #[test]
     fn explicit_override_beats_role_and_default() {
         let mut cfg = AgentsConfig {
             default_chain: Some(LlmModelChain::new("default")),

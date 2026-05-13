@@ -33,7 +33,7 @@ pub struct CompactionMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Prompt {
     pub target_thread: TargetThread,
-    pub chain: ModelChain,
+    pub model_chain: ModelChain,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_key: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -190,9 +190,9 @@ pub enum StopReason {
 
 impl From<Prompt> for llm::Prompt {
     fn from(p: Prompt) -> Self {
-        let max_tokens = Some(p.chain.primary.max_tokens_per_response);
-        let mut chain = llm::ModelChain::new(p.chain.primary.model);
-        for fallback in p.chain.fallbacks {
+        let max_tokens = Some(p.model_chain.primary.max_tokens_per_response);
+        let mut chain = llm::ModelChain::new(p.model_chain.primary.model);
+        for fallback in p.model_chain.fallbacks {
             chain = chain.with_fallback(fallback.model);
         }
         llm::Prompt {
