@@ -1,46 +1,38 @@
-//! Tool-name-keyed preprocessors. Each one transforms the raw upstream
-//! text before the generic chain runs, returning both the transformed
-//! string and a per-output-line index pointing back to the raw line it
-//! came from. The mapping lets the walker translate chain-compacted
-//! line offsets all the way back to raw-text line space — necessary
-//! because `tool_output_fetch(mode: lines)` slices the persisted raw
-//! string, not the preprocessed one.
+//! Tool-name-keyed preprocessors. Each one owns its tool's canonical
+//! shape: given the upstream's structured root, it returns a new root
+//! with the text field(s) in place transformed, plus a json-path locating
+//! the transformed text and a line-mapping back to the raw bytes.
+//!
+//! Why structured-aware: a preprocessor like concourse's strips ANSI +
+//! timestamps + `\r`-progress reflow from the build log. The upstream
+//! schema is `{logs: <raw>}`, so the preprocessor knows to read+write
+//! the `logs` key. The walker just walks the (possibly preprocessed)
+//! root — it doesn't need per-leaf preprocessor matching.
 
-mod bash;
 mod concourse;
 
-/// Output of [`run`]: the preprocessed text plus a per-output-line
-/// index pointing back to the raw line each preprocessed line came
-/// from. `preprocessed_to_raw[i]` is the raw line index (0-based by
-/// `\n`) that contributed preprocessed line `i`.
-pub(crate) struct Preprocessed {
-    pub text: String,
+use serde_json::Value;
+
+/// Result of a preprocessor run — the transformed root, the json-path
+/// where the preprocessed text now lives (used as the `<summary>`
+/// `path` attribute), and a per-output-line index back to the raw
+/// bytes (used by line-mode recovery templates).
+pub(crate) struct PreprocessedRoot {
+    pub root: Value,
+    pub root_path: String,
     pub preprocessed_to_raw: Vec<u32>,
 }
 
-/// Run any registered preprocessor whose tool-name set matches. Falls
-/// through to the raw input with an identity line-mapping when nothing
-/// matches.
-pub(crate) fn run(tool_name: &str, raw: &str) -> Preprocessed {
-    if bash::TOOL_NAMES.contains(&tool_name) {
-        return bash::run(raw);
-    }
-    if concourse::TOOL_NAMES.contains(&tool_name) {
-        return concourse::run(raw);
-    }
-    // Some upstream-prefixed names look like `<server>_concourse_get_build_logs`;
-    // match by suffix so the catalog-prefix doesn't break detection.
-    if concourse::TOOL_NAMES.iter().any(|n| tool_name.ends_with(n)) {
-        return concourse::run(raw);
-    }
-    Preprocessed {
-        text: raw.to_string(),
-        preprocessed_to_raw: identity_mapping(raw),
-    }
+/// Run any registered preprocessor that claims `tool_name` AND finds
+/// its text inside `root`. Returns `None` when no preprocessor matches —
+/// the walker should walk `root` unchanged with identity line mapping.
+pub(crate) fn preprocess(tool_name: &str, root: &Value) -> Option<PreprocessedRoot> {
+    concourse::preprocess(tool_name, root)
+    // bash is currently identity-only; nothing to do here for it.
 }
 
-/// Per-line identity mapping for preprocessors that preserve line
-/// count. Returns one entry per `raw.lines()` line — `[0, 1, 2, …]`.
+/// Per-line identity mapping for non-matched paths. One entry per
+/// `raw.lines()` line — `[0, 1, 2, …]`.
 pub(crate) fn identity_mapping(raw: &str) -> Vec<u32> {
     (0..raw.lines().count() as u32).collect()
 }

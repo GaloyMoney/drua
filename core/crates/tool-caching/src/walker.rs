@@ -7,6 +7,22 @@ use crate::preprocessors;
 use crate::primitives::{ElidedPath, QueryStructure, ToolCallSummary, ToolInvocationId};
 use crate::string_summarizer::{SegmentedText, StringSummarizerChain};
 
+/// Per-call walk state. `primary_path` is where the preprocessor's
+/// cleaned text lives (e.g. `$.logs` for concourse). `primary_mapping`
+/// is the per-output-line index back to raw bytes; only the string leaf
+/// at `primary_path` uses it, every other leaf uses identity mapping.
+/// `primary_raw_bytes` is the size of the raw upstream text at
+/// `primary_path` — used as `total_bytes` on the primary leaf's
+/// `ElidedPath` so `<summary>` and `<elided>` at the same path agree
+/// on totals (without it, `s.len()` inside `summarize_string` would
+/// report the preprocessed length).
+struct WalkCtx<'a> {
+    invocation_id: ToolInvocationId,
+    primary_path: &'a str,
+    primary_mapping: Option<&'a [u32]>,
+    primary_raw_bytes: Option<u64>,
+}
+
 #[derive(Clone)]
 pub struct Walker {
     chain: Arc<StringSummarizerChain>,
@@ -36,38 +52,68 @@ impl Walker {
         invocation_id: ToolInvocationId,
         tool_name: &str,
     ) -> ToolCallSummary {
+        // Preprocessor (if registered for this tool) owns its shape: it
+        // returns a transformed root with text in-place cleaned, plus
+        // the json-path where the cleaned text lives and the per-line
+        // mapping back to raw bytes. Walker then walks that as-if it
+        // were the natural input. Non-matched tools walk the raw root
+        // with identity mapping.
+        let preprocessed = preprocessors::preprocess(tool_name, &query_structure.root);
+        let (root_for_walk, primary_path, primary_mapping): (&Value, &str, Option<&[u32]>) =
+            match &preprocessed {
+                Some(p) => (&p.root, p.root_path.as_str(), Some(&p.preprocessed_to_raw)),
+                None => (&query_structure.root, "$", None),
+            };
+        // Raw upstream size at the primary path — needed so the ElidedPath
+        // at that path reports raw byte size (matches what fetch returns),
+        // not the preprocessor-stripped size.
+        let primary_raw_bytes = if preprocessed.is_some() {
+            navigate_path(&query_structure.root, primary_path).map(byte_size)
+        } else {
+            None
+        };
+
         let mut elided_paths = Vec::new();
-        let root_path = "$";
-        // For string roots, count raw string bytes (matches what's persisted
-        // as `raw_text` and what the per-path `<elided>` tag reports for the
-        // same path). For arrays/objects, use the JSON-serialized size since
-        // there's no other natural representation. Otherwise `<summary>` and
-        // `<elided>` at the same `$` path would disagree on `total-bytes`.
-        let total_bytes = byte_size(&query_structure.root);
-        let summary = self.walk(
-            &query_structure.root,
-            root_path,
+        let ctx = WalkCtx {
             invocation_id,
+            primary_path,
+            primary_mapping,
+            primary_raw_bytes,
+        };
+        let wire_result = self.walk(
+            root_for_walk,
+            "$",
             self.threshold_bytes,
-            tool_name,
+            &ctx,
             &mut elided_paths,
         );
+
+        // `<summary>` body is the value at `primary_path` (an `$.logs`
+        // string for concourse, or the whole walked root when there's
+        // no preprocessor). For the non-matched case primary_path == "$"
+        // and this reduces to the wire result.
+        let summary_value = navigate_path(&wire_result, primary_path).unwrap_or(&wire_result);
+        let summary = summary_value.clone();
+        let summary_root_path = primary_path.to_string();
+
+        // `<summary>` total/shown describes whatever the body holds —
+        // the primary leaf for preprocessor-matched calls, the full
+        // walked root otherwise.
+        let raw_at_primary =
+            navigate_path(&query_structure.root, primary_path).unwrap_or(&query_structure.root);
+        let total_bytes = byte_size(raw_at_primary);
         let shown_bytes = byte_size(&summary);
 
-        // Root-shape dimensions: only emit when root is the corresponding
-        // kind. For an object root (with inner elisions) items/lines stay
-        // None and the agent reads dimensional totals off the per-path
-        // `<elided>` tags instead.
-        let (total_items, shown_items) = match (&query_structure.root, &summary) {
+        let (total_items, shown_items) = match (raw_at_primary, &summary) {
             (Value::Array(orig), Value::Array(walked)) => {
                 (Some(orig.len() as u32), Some(walked.len() as u32))
             }
             _ => (None, None),
         };
-        let (total_lines, shown_lines) = if matches!(query_structure.root, Value::String(_)) {
+        let (total_lines, shown_lines) = if matches!(summary, Value::String(_)) {
             elided_paths
                 .iter()
-                .find(|e| e.path == root_path)
+                .find(|e| e.path == summary_root_path)
                 .and_then(|e| Some((e.total_lines?, e.shown_lines?)))
                 .map(|(t, s)| (Some(t), Some(s)))
                 .unwrap_or((None, None))
@@ -77,8 +123,9 @@ impl Walker {
 
         ToolCallSummary {
             summary,
+            wire_result,
             elided_paths,
-            root_path: root_path.to_string(),
+            root_path: summary_root_path,
             total_bytes,
             shown_bytes,
             total_items,
@@ -92,9 +139,8 @@ impl Walker {
         &self,
         value: &Value,
         path: &str,
-        invocation_id: ToolInvocationId,
         budget: usize,
-        tool_name: &str,
+        ctx: &WalkCtx,
         elided_paths: &mut Vec<ElidedPath>,
     ) -> Value {
         let size = json_size(value) as usize;
@@ -109,20 +155,14 @@ impl Walker {
             // compile, …) even when the string is sub-budget — the
             // savings on long log payloads are worth the cheap pattern
             // scans, and the chain has its own no-op fast paths.
-            Value::String(s) => {
-                self.summarize_string(s, path, invocation_id, budget, tool_name, elided_paths)
-            }
+            Value::String(s) => self.summarize_string(s, path, budget, ctx, elided_paths),
             // Arrays / objects passthrough when sub-budget — their
             // children's chain passes can't help if the whole container
             // already fits.
             Value::Array(items) if size <= budget => Value::Array(items.clone()),
             Value::Object(map) if size <= budget => Value::Object(map.clone()),
-            Value::Array(items) => {
-                self.walk_array(items, path, invocation_id, budget, tool_name, elided_paths)
-            }
-            Value::Object(map) => {
-                self.walk_object(map, path, invocation_id, budget, tool_name, elided_paths)
-            }
+            Value::Array(items) => self.walk_array(items, path, budget, ctx, elided_paths),
+            Value::Object(map) => self.walk_object(map, path, budget, ctx, elided_paths),
             other => other.clone(),
         }
     }
@@ -131,9 +171,8 @@ impl Walker {
         &self,
         items: &[Value],
         path: &str,
-        invocation_id: ToolInvocationId,
         budget: usize,
-        tool_name: &str,
+        ctx: &WalkCtx,
         elided_paths: &mut Vec<ElidedPath>,
     ) -> Value {
         let n = items.len();
@@ -147,16 +186,7 @@ impl Walker {
         let walked: Vec<Value> = items
             .iter()
             .enumerate()
-            .map(|(i, v)| {
-                self.walk(
-                    v,
-                    &format!("{path}[{i}]"),
-                    invocation_id,
-                    per_item,
-                    tool_name,
-                    elided_paths,
-                )
-            })
+            .map(|(i, v)| self.walk(v, &format!("{path}[{i}]"), per_item, ctx, elided_paths))
             .collect();
         let walked_value = Value::Array(walked.clone());
         if (json_size(&walked_value) as usize) <= budget {
@@ -177,7 +207,7 @@ impl Walker {
             n,
             original_bytes,
             path,
-            invocation_id,
+            ctx.invocation_id,
             paths_before,
             elided_paths,
         )
@@ -187,9 +217,8 @@ impl Walker {
         &self,
         map: &serde_json::Map<String, Value>,
         path: &str,
-        invocation_id: ToolInvocationId,
         budget: usize,
-        tool_name: &str,
+        ctx: &WalkCtx,
         elided_paths: &mut Vec<ElidedPath>,
     ) -> Value {
         // Per-key budget proportional to original byte share, so a fat
@@ -204,14 +233,7 @@ impl Walker {
                 let per_key = (usable.saturating_mul(size) / total).max(1);
                 (
                     k.clone(),
-                    self.walk(
-                        v,
-                        &format!("{path}.{k}"),
-                        invocation_id,
-                        per_key,
-                        tool_name,
-                        elided_paths,
-                    ),
+                    self.walk(v, &format!("{path}.{k}"), per_key, ctx, elided_paths),
                 )
             })
             .collect();
@@ -222,33 +244,34 @@ impl Walker {
         &self,
         s: &str,
         path: &str,
-        invocation_id: ToolInvocationId,
         budget: usize,
-        tool_name: &str,
+        ctx: &WalkCtx,
         elided_paths: &mut Vec<ElidedPath>,
     ) -> Value {
-        // Tool-name preprocessor (concourse ANSI/timestamp strip, etc.)
-        // runs first so downstream passes see clean text. Only meaningful
-        // at the root — for nested strings we use the empty tool_name (no
-        // preprocessor matches), since e.g. only the root concourse log
-        // string benefits from ANSI stripping. The mapping flows back
-        // from chain-compacted lines all the way to raw text via
-        // `current_to_original_line` (compacted → preprocessed) plus
-        // `preprocessed_to_raw` (preprocessed → raw).
-        let preprocessed = if path == "$" {
-            preprocessors::run(tool_name, s)
-        } else {
-            preprocessors::Preprocessed {
-                text: s.to_string(),
-                preprocessed_to_raw: preprocessors::identity_mapping(s),
-            }
+        let invocation_id = ctx.invocation_id;
+        // Preprocessor already ran at the root (concourse strips ANSI,
+        // timestamps, reflows \r-progress); the walker only needs its
+        // line mapping at the preprocessor's primary path. For other
+        // paths the mapping is identity.
+        let is_primary = path == ctx.primary_path;
+        let preprocessed_to_raw: Vec<u32> = match (is_primary, ctx.primary_mapping) {
+            (true, Some(m)) => m.to_vec(),
+            _ => preprocessors::identity_mapping(s),
+        };
+        // At the primary path the raw upstream bytes lived in
+        // `ctx.primary_raw_bytes` (set by `summarize` before the walk).
+        // Anywhere else, `s.len()` is the raw size — no preprocessor
+        // touched it.
+        let total_bytes_at_path: u64 = match (is_primary, ctx.primary_raw_bytes) {
+            (true, Some(n)) => n,
+            _ => s.len() as u64,
         };
         // Pattern passes (nix-copy, cargo-compile, rsync, …) compact runs
         // of boring lines in place. Operates on a SegmentedText so order
         // and line indices stay accurate across passes.
-        let mut ctx = SegmentedText::from_initial(&preprocessed.text);
-        let _ = self.chain.run(&mut ctx);
-        let prepared = ctx.log().to_string();
+        let mut ctx_seg = SegmentedText::from_initial(s);
+        let _ = self.chain.run(&mut ctx_seg);
+        let prepared = ctx_seg.log().to_string();
         let modified = prepared != *s;
         // If the chain didn't change anything and we're already under
         // budget, passthrough verbatim.
@@ -261,7 +284,7 @@ impl Walker {
         if modified && prepared.len() <= budget {
             elided_paths.push(ElidedPath {
                 path: path.to_string(),
-                total_bytes: s.len() as u64,
+                total_bytes: total_bytes_at_path,
                 shown_bytes: prepared.len() as u64,
                 total_lines: Some(line_count(s)),
                 shown_lines: Some(line_count(&prepared)),
@@ -273,11 +296,11 @@ impl Walker {
         }
         // Try line-mode first if the string has enough lines to split.
         if let Some(elide) =
-            line_elide_string(&prepared, budget, &ctx, &preprocessed.preprocessed_to_raw)
+            line_elide_string(&prepared, budget, &ctx_seg, &preprocessed_to_raw)
         {
             elided_paths.push(ElidedPath {
                 path: path.to_string(),
-                total_bytes: s.len() as u64,
+                total_bytes: total_bytes_at_path,
                 shown_bytes: elide.text.len() as u64,
                 total_lines: Some(line_count(s)),
                 shown_lines: Some(elide.shown_lines),
@@ -300,7 +323,7 @@ impl Walker {
         if modified {
             elided_paths.push(ElidedPath {
                 path: path.to_string(),
-                total_bytes: s.len() as u64,
+                total_bytes: total_bytes_at_path,
                 shown_bytes: prepared.len() as u64,
                 total_lines: None,
                 shown_lines: None,
@@ -313,7 +336,7 @@ impl Walker {
         if let Some(elide) = byte_elide_string(&prepared, budget) {
             elided_paths.push(ElidedPath {
                 path: path.to_string(),
-                total_bytes: s.len() as u64,
+                total_bytes: total_bytes_at_path,
                 shown_bytes: elide.text.len() as u64,
                 total_lines: None,
                 shown_lines: None,
@@ -408,6 +431,57 @@ fn byte_size(value: &Value) -> u64 {
         Value::String(s) => s.len() as u64,
         other => json_size(other),
     }
+}
+
+/// Navigate `value` via a `$`-rooted json-path with only key / `[index]`
+/// segments. Returns the sub-value at that path, or `None` if any
+/// segment doesn't resolve. `$` returns `value` itself. Tolerant of
+/// missing/typed mismatches — the caller falls back when `None`.
+fn navigate_path<'a>(value: &'a Value, path: &str) -> Option<&'a Value> {
+    let rest = path.strip_prefix('$')?;
+    let mut cur = value;
+    let mut chars = rest.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '.' => {
+                // Key segment: until next `.` or `[` or end.
+                let start = i + 1;
+                let mut end = rest.len();
+                for (j, c2) in rest[start..].char_indices() {
+                    if c2 == '.' || c2 == '[' {
+                        end = start + j;
+                        break;
+                    }
+                }
+                let key = &rest[start..end];
+                cur = cur.as_object()?.get(key)?;
+                // Resume after `end`.
+                while let Some(&(p, _)) = chars.peek() {
+                    if p < end {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            '[' => {
+                // Array index: until `]`.
+                let start = i + 1;
+                let end = rest[start..].find(']').map(|j| start + j)?;
+                let idx: usize = rest[start..end].parse().ok()?;
+                cur = cur.as_array()?.get(idx)?;
+                while let Some(&(p, _)) = chars.peek() {
+                    if p <= end {
+                        chars.next();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(cur)
 }
 
 fn line_count(s: &str) -> u32 {
