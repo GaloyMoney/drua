@@ -329,19 +329,6 @@ impl TopLevelTool for DescribeCatalogTool {
         Some(&DESCRIBE_OUTPUT_SCHEMA)
     }
     fn default_tool_caching(&self) -> bool {
-        // describe_tool's whole purpose is to deliver a tool's complete
-        // schema (input_schema, output_schema, description) to an agent
-        // deciding how to call it. The structured payload IS the
-        // information — eliding `input_schema.properties.X.description`
-        // or truncating `examples[]` mangles the schema the agent needs.
-        // Unlike `search_tools`/`compose_types` which are filtered list
-        // queries (an agent can narrow the filter to shrink the
-        // response), `describe_tool` is one atomic schema per tool that
-        // can't be meaningfully trimmed. Opt out of tool-caching so the
-        // schema reaches the agent verbatim; if a single tool's schema
-        // exceeds the harness's own MCP output cap, that's an upstream-
-        // tool concision problem, not something drua's elision can fix
-        // without making the schema unusable.
         false
     }
 
