@@ -1,4 +1,4 @@
-<summary path="$" original-bytes="32994">
+<summary path="$" total-bytes="32994" shown-bytes="8443" total-lines="320" shown-lines="164">
 <head lines="82">
 INFO: found existing resource cache
 
@@ -83,7 +83,7 @@ OpenTofu will perform the following actions:
           ~ source                     = "https://www.googleapis.com/compute/v1/projects/galoy-agents/zones/us-east1-b/disks/galoy-agents-bastion" -> (known after apply)
             # (2 unchanged attributes hidden)
 </head>
-<bulk-elided original-lines="80">
+<bulk-elided lines="80">
 80 lines elided
 </bulk-elided>
 <tail lines="82">
@@ -172,7 +172,7 @@ INFO: found existing resource cache
 </tail>
 </summary>
 <recovery>
-  <elided path="$" bytes="32474" lines="320">
+  <elided path="$" total-bytes="32474" shown-bytes="8137" total-lines="320" shown-lines="164">
     tool_output_fetch(invocation_id="<uuid>", path="$", query={"len":80,"mode":"lines","offset":120})
   </elided>
 </recovery>

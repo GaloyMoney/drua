@@ -220,7 +220,12 @@ mod tests {
                 summary: Value::Null,
                 elided_paths: Vec::new(),
                 root_path: "$".to_string(),
-                original_bytes: 0,
+                total_bytes: 0,
+                shown_bytes: 0,
+                total_items: None,
+                shown_items: None,
+                total_lines: None,
+                shown_lines: None,
             },
             original_structured: None,
         }

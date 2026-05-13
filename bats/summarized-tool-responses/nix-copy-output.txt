@@ -1,4 +1,4 @@
-<summary path="$" original-bytes="1851">
+<summary path="$" total-bytes="1851" shown-bytes="209" total-lines="28" shown-lines="6">
 preparing to build
 building '/nix/store/aaa-foo.drv'
 <nix-copy original-lines="3-27" original-bytes="1700">
@@ -7,7 +7,7 @@ building '/nix/store/aaa-foo.drv'
 error: builder for '/nix/store/aaa-foo.drv' failed with exit code 1
 </summary>
 <recovery>
-  <elided path="$" bytes="1821" lines="28">
+  <elided path="$" total-bytes="1821" shown-bytes="197" total-lines="28" shown-lines="6">
     tool_output_fetch(invocation_id="<uuid>", path="$")
   </elided>
 </recovery>

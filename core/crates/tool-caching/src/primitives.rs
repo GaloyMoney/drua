@@ -50,12 +50,26 @@ fn unwrap_quoted_json(inner: String) -> Value {
 }
 
 /// Output of `Walker::summarize`.
+///
+/// `total_*` / `shown_*` describe the root summary shape — what the agent
+/// is looking at in the `<summary>` body. Per-elision specifics for nested
+/// paths live in `elided_paths` (each `ElidedPath` carries its own
+/// `total_*` / `shown_*`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallSummary {
     pub summary: serde_json::Value,
     pub elided_paths: Vec<ElidedPath>,
     pub root_path: String,
-    pub original_bytes: u64,
+    pub total_bytes: u64,
+    pub shown_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_items: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shown_items: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_lines: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shown_lines: Option<u32>,
 }
 
 /// Which channel-wrapping strategy `cache()` should apply.
@@ -107,10 +121,22 @@ impl ToolCallSummary {
             other => serde_json::to_string(other).unwrap_or_default(),
         };
         let mut envelope = String::new();
-        envelope.push_str(&format!(
-            "<summary path=\"{}\" original-bytes=\"{}\">\n",
-            self.root_path, self.original_bytes,
-        ));
+        let mut attrs = format!(
+            "<summary path=\"{}\" total-bytes=\"{}\" shown-bytes=\"{}\"",
+            self.root_path, self.total_bytes, self.shown_bytes,
+        );
+        if let (Some(total), Some(shown)) = (self.total_items, self.shown_items) {
+            attrs.push_str(&format!(
+                " total-items=\"{total}\" shown-items=\"{shown}\""
+            ));
+        }
+        if let (Some(total), Some(shown)) = (self.total_lines, self.shown_lines) {
+            attrs.push_str(&format!(
+                " total-lines=\"{total}\" shown-lines=\"{shown}\""
+            ));
+        }
+        envelope.push_str(&attrs);
+        envelope.push_str(">\n");
         envelope.push_str(&summary_text);
         if !summary_text.ends_with('\n') {
             envelope.push('\n');
@@ -149,49 +175,45 @@ impl ToolCallSummary {
 }
 
 /// Per-elision metadata surfaced inside `<recovery>` and persisted
-/// alongside the upstream payload. `recover` is the verbatim
-/// `tool_output_fetch` call template; `invocation_id` is the
-/// `<this-invocation>` placeholder until persistence stamps the real id.
-/// `lines` is `\n`-count of the original elided segment — agents reading
-/// the envelope use it to gauge what byte ranges mean in row terms.
+/// alongside the upstream payload. Each elision point is self-describing:
+/// `total_*` / `shown_*` for the dimensions that apply to the elided
+/// segment (bytes always; lines for line-mode string elisions; items for
+/// array truncations) plus `recover` — the verbatim `tool_output_fetch`
+/// call template that retrieves the withheld portion.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElidedPath {
     pub path: String,
-    pub bytes: u64,
-    /// `\n`-count of the original elided string. `None` for arrays /
-    /// objects — they use `length` instead.
+    pub total_bytes: u64,
+    pub shown_bytes: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lines: Option<u32>,
-    /// Item count for arrays / key count for objects. `None` for
-    /// strings.
+    pub total_lines: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub length: Option<u32>,
-    /// For array truncation: how many leading items survive in the wrapped
-    /// `result` (head-only — items `[0..head_count)` are present, items
-    /// `[head_count..length)` are recoverable via `recover`).
+    pub shown_lines: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub head_count: Option<u32>,
+    pub total_items: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shown_items: Option<u32>,
     pub recover: Value,
 }
 
 impl ElidedPath {
     pub(crate) fn render(&self) -> String {
-        let lines_attr = self
-            .lines
-            .map(|n| format!(" lines=\"{n}\""))
-            .unwrap_or_default();
-        let length_attr = self
-            .length
-            .map(|n| format!(" length=\"{n}\""))
-            .unwrap_or_default();
-        let head_attr = self
-            .head_count
-            .map(|n| format!(" head=\"{n}\""))
-            .unwrap_or_default();
+        let mut attrs = format!(
+            "  <elided path=\"{}\" total-bytes=\"{}\" shown-bytes=\"{}\"",
+            self.path, self.total_bytes, self.shown_bytes,
+        );
+        if let (Some(total), Some(shown)) = (self.total_lines, self.shown_lines) {
+            attrs.push_str(&format!(
+                " total-lines=\"{total}\" shown-lines=\"{shown}\""
+            ));
+        }
+        if let (Some(total), Some(shown)) = (self.total_items, self.shown_items) {
+            attrs.push_str(&format!(
+                " total-items=\"{total}\" shown-items=\"{shown}\""
+            ));
+        }
         format!(
-            "  <elided path=\"{}\" bytes=\"{}\"{lines_attr}{length_attr}{head_attr}>\n    {}\n  </elided>\n",
-            self.path,
-            self.bytes,
+            "{attrs}>\n    {}\n  </elided>\n",
             render_recover_call(&self.recover),
         )
     }

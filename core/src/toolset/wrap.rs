@@ -30,21 +30,21 @@ pub fn wrap_output_schema(upstream: &Value) -> Value {
                         "type": "array",
                         "items": {
                             "type": "object",
+                            "description": "One elision point. total_/shown_ dimensions describe what was elided here; recover is the tool_output_fetch template that retrieves the withheld portion.",
                             "properties": {
                                 "path": { "type": "string" },
-                                "bytes": { "type": "integer" },
-                                "lines": { "type": "integer" },
-                                "length": { "type": "integer" },
-                                "head_count": {
-                                    "type": "integer",
-                                    "description": "Number of leading items present in `result`. Items `[head_count..length)` are recoverable via `recover`."
-                                },
+                                "total_bytes": { "type": "integer" },
+                                "shown_bytes": { "type": "integer" },
+                                "total_lines": { "type": "integer" },
+                                "shown_lines": { "type": "integer" },
+                                "total_items": { "type": "integer" },
+                                "shown_items": { "type": "integer" },
                                 "recover": {
                                     "type": "object",
                                     "description": "tool_output_fetch call template"
                                 }
                             },
-                            "required": ["path", "bytes", "recover"]
+                            "required": ["path", "total_bytes", "shown_bytes", "recover"]
                         }
                     }
                 },

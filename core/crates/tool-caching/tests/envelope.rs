@@ -57,16 +57,24 @@ async fn root_string_over_threshold_yields_envelope_with_recovery_section() {
     let text = envelope_text(&response.result);
 
     assert!(
-        text.starts_with("<summary path=\"$\" original-bytes=\""),
-        "envelope must open with <summary path=\"$\" original-bytes=\"…\">; got: {text}",
+        text.starts_with("<summary path=\"$\" total-bytes=\""),
+        "envelope must open with <summary path=\"$\" total-bytes=\"…\">; got: {text}",
+    );
+    assert!(
+        text.contains("shown-bytes=\""),
+        "summary must declare shown-bytes; got: {text}",
     );
     assert!(text.contains("</summary>\n<recovery>\n"));
     assert!(text.trim_end().ends_with("</recovery>"));
 
     assert_eq!(
-        text.matches("<elided path=\"$\" bytes=\"1024\">").count(),
+        text.matches("<elided path=\"$\" total-bytes=\"1024\"").count(),
         1,
         "exactly one rendered <elided> per elided path (single-line input → byte-mode, no lines attr)",
+    );
+    assert!(
+        text.contains(" shown-bytes=\""),
+        "elided tag must declare shown-bytes; got: {text}",
     );
     assert!(text.contains("tool_output_fetch("));
     // The rendered call carries a real uuid id (36 chars with 4 dashes),
@@ -90,7 +98,7 @@ async fn root_string_over_threshold_yields_envelope_with_recovery_section() {
 
     assert!(text.contains("<head bytes=\""));
     assert!(text.contains("</head>"));
-    assert!(text.contains("<bulk-elided original-bytes=\""));
+    assert!(text.contains("<bulk-elided bytes=\""));
     assert!(text.contains("</bulk-elided>"));
     assert!(text.contains("<tail bytes=\""));
     assert!(text.contains("</tail>"));

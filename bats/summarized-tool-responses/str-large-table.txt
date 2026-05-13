@@ -1,4 +1,4 @@
-<summary path="$" original-bytes="13093">
+<summary path="$" total-bytes="13093" shown-bytes="7909" total-lines="41" shown-lines="25">
 <head lines="12">
 NAMESPACE     APIVERSION   KIND   NAME                                                             READY   STATUS    RESTARTS   AGE    IP             NODE                                                  NOMINATED NODE   READINESS GATES   LABELS
 kube-system   v1           Pod    calico-node-kxw8s                                                1/1     Running   0          21h    10.1.0.31      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-2xv8   <none>           <none>            controller-revision-hash=75869d67,k8s-app=calico-node,pod-template-generation=2
@@ -13,7 +13,7 @@ kube-system   v1           Pod    event-exporter-gke-6cf4cbbc8b-k4j4r           
 kube-system   v1           Pod    fluentbit-gke-64fp9                                              3/3     Running   0          2d2h   10.1.0.29      gke-galoy-agents-clust-sandbox-gvisor-87c7278e-q9ts   <none>           <none>            component=fluentbit-gke,controller-revision-hash=55dd6c6454,k8s-app=fluentbit-gke,kubernetes.io/cluster-service=true,pod-template-generation=3
 kube-system   v1           Pod    fluentbit-gke-bsn42                                              3/3     Running   0          21h    10.1.0.30      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-m84i   <none>           <none>            component=fluentbit-gke,controller-revision-hash=55dd6c6454,k8s-app=fluentbit-gke,kubernetes.io/cluster-service=true,pod-template-generation=3
 </head>
-<bulk-elided original-lines="16">
+<bulk-elided lines="16">
 16 lines elided
 </bulk-elided>
 <tail lines="13">
@@ -33,7 +33,7 @@ kube-system   v1           Pod    runsc-metric-server-qr24t                     
 </tail>
 </summary>
 <recovery>
-  <elided path="$" bytes="13051" lines="41">
+  <elided path="$" total-bytes="13051" shown-bytes="7870" total-lines="41" shown-lines="25">
     tool_output_fetch(invocation_id="<uuid>", path="$", query={"len":16,"mode":"lines","offset":12})
   </elided>
 </recovery>
