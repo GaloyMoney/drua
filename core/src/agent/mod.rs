@@ -566,6 +566,9 @@ impl Agents {
             AuthVerb::Update,
             AuthResource::Agent(agent.project_id, Some(agent.id)),
         )?;
+        if agent.is_workflow_agent() {
+            return Err(AgentError::WorkflowAgentChainImmutable);
+        }
         Audit::record_action_if_unset("agent.update_session_chain");
         Audit::record_project_id(agent.project_id);
         Audit::record_agent_id(agent.id);

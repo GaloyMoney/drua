@@ -962,13 +962,9 @@ impl AdminToolSet {
                 })?;
                 let chain =
                     resolve_model_chain_update(params.model_chain, params.clear_model_chain)?;
-                self.agents
-                    .update_session_chain(subject, agent_id, chain)
-                    .await
-                    .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
                 let session = self
                     .agents
-                    .find_session(subject, agent_id)
+                    .update_session_chain(subject, agent_id, chain)
                     .await
                     .map_err(|e| ToolSetsError::Agent(e.to_string()))?;
                 let chain_str = session
