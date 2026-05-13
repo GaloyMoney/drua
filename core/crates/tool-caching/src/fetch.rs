@@ -218,6 +218,7 @@ mod tests {
             query_structure: QueryStructure { root },
             summary: ToolCallSummary {
                 summary: Value::Null,
+                wire_result: Value::Null,
                 elided_paths: Vec::new(),
                 root_path: "$".to_string(),
                 total_bytes: 0,

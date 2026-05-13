@@ -94,7 +94,25 @@ impl ToolCaching {
         let original_structured = result.structured_content.clone();
         let original_text = extract_text(&result);
 
-        let query_structure = QueryStructure::new(&original_text);
+        // Walk the upstream's structured channel when present — that's
+        // the canonical `T` whose shape MCP clients validate against the
+        // advertised outputSchema. The walked summary becomes `result`
+        // in `{result: T-elided, _elided?: M}`; for the (text-only)
+        // tools that don't emit structured_content, fall back to the
+        // parsed-text Value (matches today's behaviour for bash, k8s
+        // logs, etc.).
+        //
+        // Why this matters for meta-tools: `search_tools`/`describe_tool`/
+        // `compose_types` emit human-readable markdown text PLUS a
+        // structured object of a different shape. Walking the text
+        // channel produced a `Value::String(elided_markdown)` for
+        // `result`, breaking schema validation. Walking structured
+        // yields the schema-conforming object.
+        let query_structure = QueryStructure {
+            root: original_structured
+                .clone()
+                .unwrap_or_else(|| QueryStructure::new(&original_text).root),
+        };
         // Mint the id up front so recover templates carry the real uuid;
         // persistence reuses the same value as the row's primary key.
         let invocation_id = ToolInvocationId::new();

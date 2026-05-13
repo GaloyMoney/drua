@@ -51,13 +51,19 @@ fn unwrap_quoted_json(inner: String) -> Value {
 
 /// Output of `Walker::summarize`.
 ///
-/// `total_*` / `shown_*` describe the root summary shape — what the agent
-/// is looking at in the `<summary>` body. Per-elision specifics for nested
-/// paths live in `elided_paths` (each `ElidedPath` carries its own
-/// `total_*` / `shown_*`).
+/// `summary` is the value rendered inside `<summary>...</summary>` — for
+/// concourse-style tools where a preprocessor advertises a primary text
+/// path, this is the value at that path (e.g. the elided `logs` string).
+/// `wire_result` is always the full walked structured tree — what goes
+/// on the structured channel as `result` so the upstream schema validates.
+///
+/// `total_*` / `shown_*` describe what's in `<summary>` (the primary
+/// view). Per-elision specifics for nested paths live in `elided_paths`
+/// (each `ElidedPath` carries its own `total_*` / `shown_*`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCallSummary {
     pub summary: serde_json::Value,
+    pub wire_result: serde_json::Value,
     pub elided_paths: Vec<ElidedPath>,
     pub root_path: String,
     pub total_bytes: u64,
@@ -147,7 +153,7 @@ impl ToolCallSummary {
         let structured = match mode {
             WrapMode::Elide => {
                 let mut obj = serde_json::Map::new();
-                obj.insert("result".to_string(), self.summary);
+                obj.insert("result".to_string(), self.wire_result);
                 if !self.elided_paths.is_empty() {
                     let inv = invocation_id.map(|id| id.to_string()).unwrap_or_default();
                     obj.insert(
