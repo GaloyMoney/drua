@@ -126,14 +126,10 @@ impl ToolCallSummary {
             self.root_path, self.total_bytes, self.shown_bytes,
         );
         if let (Some(total), Some(shown)) = (self.total_items, self.shown_items) {
-            attrs.push_str(&format!(
-                " total-items=\"{total}\" shown-items=\"{shown}\""
-            ));
+            attrs.push_str(&format!(" total-items=\"{total}\" shown-items=\"{shown}\""));
         }
         if let (Some(total), Some(shown)) = (self.total_lines, self.shown_lines) {
-            attrs.push_str(&format!(
-                " total-lines=\"{total}\" shown-lines=\"{shown}\""
-            ));
+            attrs.push_str(&format!(" total-lines=\"{total}\" shown-lines=\"{shown}\""));
         }
         envelope.push_str(&attrs);
         envelope.push_str(">\n");
@@ -203,14 +199,10 @@ impl ElidedPath {
             self.path, self.total_bytes, self.shown_bytes,
         );
         if let (Some(total), Some(shown)) = (self.total_lines, self.shown_lines) {
-            attrs.push_str(&format!(
-                " total-lines=\"{total}\" shown-lines=\"{shown}\""
-            ));
+            attrs.push_str(&format!(" total-lines=\"{total}\" shown-lines=\"{shown}\""));
         }
         if let (Some(total), Some(shown)) = (self.total_items, self.shown_items) {
-            attrs.push_str(&format!(
-                " total-items=\"{total}\" shown-items=\"{shown}\""
-            ));
+            attrs.push_str(&format!(" total-items=\"{total}\" shown-items=\"{shown}\""));
         }
         format!(
             "{attrs}>\n    {}\n  </elided>\n",
