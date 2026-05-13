@@ -767,7 +767,13 @@ impl ScreenState {
         self.agent_cursor = 0;
         self.loaded_agent_id = None;
         self.thread_view = None;
+        // `clear()` already resets `streaming` — set it again explicitly so
+        // the project-switch contract doesn't silently rot if clear's
+        // implementation ever changes. The reactive history-fetch in
+        // run_event_loop gates on `!streaming`, so a stale `true` here
+        // would leave the new project's chat permanently un-loaded.
         self.chat_view.assistant.clear();
+        self.chat_view.assistant.streaming = false;
         self.input_clear();
         self.chat_view.reset_scroll();
     }
@@ -905,5 +911,23 @@ mod tests {
         let mut state = make_state(vec![proj("a", "A")], None);
         state.enter_project_picker();
         assert_eq!(state.picker_input(), Some(""));
+    }
+
+    #[test]
+    fn switch_to_project_resets_streaming_flag() {
+        // Regression: a mid-stream project switch must clear
+        // `chat_view.assistant.streaming`. The reactive history-fetch in
+        // `run_event_loop` gates on `!streaming`, so a stale `true` would
+        // prevent the new project's chat history from ever loading — and
+        // the dropped `Done` event (filtered by the agent-id guard in
+        // `dispatch_stream_event`) can't unstick it.
+        let mut state = make_state(vec![proj("a", "Alpha"), proj("b", "Beta")], None);
+        state.chat_view.assistant.add_user_message("hi");
+        assert!(state.chat_view.assistant.streaming);
+
+        state.switch_to_project(1);
+
+        assert!(!state.chat_view.assistant.streaming);
+        assert!(state.chat_view.assistant.messages.is_empty());
     }
 }
