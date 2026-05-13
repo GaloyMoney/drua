@@ -58,11 +58,6 @@ impl Mutation {
         ctx: &Context<'_>,
     ) -> async_graphql::Result<BootstrapPersonalProjectPayload> {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
-        if !app.auto_bootstrap_personal_project() {
-            return Err(async_graphql::Error::new(
-                "bootstrapPersonalProject is disabled (auto_bootstrap_personal_project=false)",
-            ));
-        }
         let user_id = sub
             .originating_user_id()
             .ok_or_else(|| async_graphql::Error::new("Authentication required"))?;

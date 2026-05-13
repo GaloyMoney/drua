@@ -9,7 +9,7 @@ use crate::sandbox::SandboxConfig;
 use crate::toolset::ToolSetsConfig;
 use drua_git_proxy::AllowlistConfig;
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
     pub agents: AgentsConfig,
@@ -31,31 +31,6 @@ pub struct AppConfig {
     /// the server to apply edits (no live reload — memo `019dfebc` §7.2).
     #[serde(default)]
     pub git_proxy: GitProxyAppConfig,
-    /// Gates the `bootstrapPersonalProject` GraphQL mutation used by the
-    /// TUI on launch. Admins flip this to `false` to disable the
-    /// auto-create-on-first-login flow.
-    #[serde(default = "default_auto_bootstrap_personal_project")]
-    pub auto_bootstrap_personal_project: bool,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            agents: Default::default(),
-            prompt_executor: Default::default(),
-            toolsets: Default::default(),
-            encryption: Default::default(),
-            sandbox: Default::default(),
-            github_app: Default::default(),
-            library: Default::default(),
-            git_proxy: Default::default(),
-            auto_bootstrap_personal_project: default_auto_bootstrap_personal_project(),
-        }
-    }
-}
-
-fn default_auto_bootstrap_personal_project() -> bool {
-    true
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

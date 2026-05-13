@@ -52,5 +52,4 @@ git_proxy:
     entries: []
   mirror_root: null
   mirror_ttl_seconds: 0
-auto_bootstrap_personal_project: true
 

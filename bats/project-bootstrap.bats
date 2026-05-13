@@ -120,9 +120,3 @@ SQL
   [[ "$output" == *'"created":true'* ]]
 }
 
-# Scenario "disabled by config raises an error" lives in
-# `bats/project-bootstrap-disabled.bats` — it needs its own setup_file
-# so the server boots with `auto_bootstrap_personal_project: false`
-# from the start (an in-test stop/start cycle is racy in CI because
-# `cargo run`'s child can survive its parent kill and keep port 4200
-# bound while the replacement boots).
