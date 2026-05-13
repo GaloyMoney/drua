@@ -6,7 +6,7 @@ use axum::{
     routing::post,
     Json, Router,
 };
-use drua_core::tunnel::{wire::CallToolResult, InternalCallReq};
+use drua_tunnel::{wire::CallToolResult, InternalCallReq};
 use serde::Deserialize;
 use tracing::instrument;
 
@@ -59,7 +59,6 @@ fn internal_auth_status(
     }
 }
 
-/// Constant-time equality for internal bearer auth.
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;

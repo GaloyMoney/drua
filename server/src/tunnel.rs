@@ -17,9 +17,10 @@ use ed25519_dalek::{pkcs8::DecodePublicKey, Signature, Verifier, VerifyingKey};
 use tracing::instrument;
 
 use drua_core as domain;
+use drua_tunnel::{RegisteredToolSet, TunnelHandle, TunnelMessage, TunnelRegistrations};
 
 use domain::toolset::SearchableToolSet;
-use domain::tunnel::{OwnedTunnelToolSet, TunnelHandle, TunnelMessage};
+use domain::tunnel::OwnedTunnelToolSet;
 
 use crate::config::TunnelConfig;
 use crate::AppState;
@@ -396,7 +397,7 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
 }
 
 fn spawn_heartbeat(
-    regs: drua_core::tunnel::TunnelRegistrations,
+    regs: TunnelRegistrations,
     deployment_id: String,
     session_id: uuid::Uuid,
     heartbeat_every: std::time::Duration,
@@ -429,9 +430,7 @@ fn spawn_heartbeat(
 
 /// Read the register frame. The `deployment_id` in the payload is
 /// ignored; the authoritative identity comes from the handshake.
-async fn read_registration(
-    socket: &mut WebSocket,
-) -> Option<Vec<domain::tunnel::RegisteredToolSet>> {
+async fn read_registration(socket: &mut WebSocket) -> Option<Vec<RegisteredToolSet>> {
     let msg = match socket.recv().await {
         Some(Ok(Message::Text(text))) => text,
         _ => {

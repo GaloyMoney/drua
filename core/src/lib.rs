@@ -461,15 +461,15 @@ impl App {
         &self.git_proxies
     }
 
-    pub fn tunnels(&self) -> &tunnel::TunnelRegistry {
+    pub fn tunnels(&self) -> &drua_tunnel::TunnelRegistry {
         self.tunnel.registry()
     }
 
-    pub fn tunnel_registrations(&self) -> &tunnel::TunnelRegistrations {
+    pub fn tunnel_registrations(&self) -> &drua_tunnel::TunnelRegistrations {
         self.tunnel.registrations()
     }
 
-    pub fn tunnel_runtime(&self) -> &TunnelRuntimeConfig {
+    pub fn tunnel_runtime(&self) -> &drua_tunnel::TunnelRuntimeConfig {
         self.tunnel.runtime()
     }
 

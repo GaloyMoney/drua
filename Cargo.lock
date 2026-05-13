@@ -1602,6 +1602,7 @@ dependencies = [
  "drua-core",
  "drua-mcp-gateway",
  "drua-tracing-utils",
+ "drua-tunnel",
  "ed25519-dalek",
  "es-entity",
  "http-body-util",

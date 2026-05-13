@@ -5,7 +5,7 @@ use rmcp::model::{CallToolResult, JsonObject, Tool};
 use crate::auth::AuthSubject;
 use crate::toolset::{SearchableToolSet, ToolSetEntry, ToolSetScope, ToolSetsError, TunnelRoute};
 
-use super::{InternalAuth, InternalCallReq, RegisteredToolSet, TUNNEL_PROXY_CALL_TIMEOUT};
+use drua_tunnel::{InternalAuth, InternalCallReq, RegisteredToolSet, TUNNEL_PROXY_CALL_TIMEOUT};
 
 pub struct ProxyTunnelToolSet {
     name: String,

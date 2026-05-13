@@ -160,7 +160,7 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
         .ok()
         .filter(|s| !s.is_empty())
         .or_else(|| config.server.tunnel.internal_secret.clone());
-    let tunnel_runtime = domain::TunnelRuntimeConfig {
+    let tunnel_runtime = drua_tunnel::TunnelRuntimeConfig {
         self_pod_addr: self_pod_addr.clone(),
         heartbeat_secs: config.server.tunnel.heartbeat_secs,
         expires_after_secs: config.server.tunnel.expires_after_secs,

@@ -1,6 +1,11 @@
 use std::time::Duration;
 
-use drua_core::tunnel::{RegisteredToolSet, TunnelRegistrations};
+use drua_core::tunnel::CoreReconcileTarget;
+use drua_tunnel::{
+    reconcile_all as reconcile_all_deployments, reconcile_one as reconcile_one_deployment,
+    InternalAuth, ReconcileCtx, RegisteredToolSet, TunnelHandle, TunnelRegistrations,
+    TunnelRegistry,
+};
 
 const PG_CON: &str = "postgres://user:password@localhost:5432/drua";
 
@@ -183,11 +188,6 @@ fn try_test_client() -> Option<reqwest::Client> {
 
 #[tokio::test]
 async fn reconcile_one_installs_drops_and_defers_local_takeover() {
-    use drua_core::tunnel::{
-        reconcile_all_deployments, reconcile_one_deployment, CoreReconcileTarget, InternalAuth,
-        ReconcileCtx, TunnelRegistry,
-    };
-
     let pool = pool().await;
     let deployment_id = fresh_deployment(&pool).await;
     let sweep_deployment_id = fresh_deployment(&pool).await;
@@ -198,7 +198,7 @@ async fn reconcile_one_installs_drops_and_defers_local_takeover() {
         return;
     };
     let http = std::sync::Arc::new(http);
-    let tunnels = std::sync::Arc::new(drua_core::tunnel::TunnelRegistry::new());
+    let tunnels = std::sync::Arc::new(TunnelRegistry::new());
     let auth = std::sync::Arc::new(InternalAuth::SharedSecret {
         secret: "x".to_string(),
     });
@@ -273,7 +273,7 @@ async fn reconcile_one_installs_drops_and_defers_local_takeover() {
     let local_session = uuid::Uuid::new_v4();
     let (close_tx, mut close_rx) = tokio::sync::mpsc::channel::<()>(1);
     let (ws_tx, _ws_rx) = tokio::sync::mpsc::channel::<String>(8);
-    let local_handle = drua_core::tunnel::TunnelHandle::new(ws_tx);
+    let local_handle = TunnelHandle::new(ws_tx);
     tunnels
         .claim(&deployment_id, local_session, close_tx, local_handle)
         .await;
@@ -317,7 +317,7 @@ async fn reconcile_one_installs_drops_and_defers_local_takeover() {
     let sweep_local_session = uuid::Uuid::new_v4();
     let (close_tx, mut close_rx) = tokio::sync::mpsc::channel::<()>(1);
     let (ws_tx, _ws_rx) = tokio::sync::mpsc::channel::<String>(8);
-    let local_handle = drua_core::tunnel::TunnelHandle::new(ws_tx);
+    let local_handle = TunnelHandle::new(ws_tx);
     tunnels
         .claim(
             &sweep_deployment_id,

@@ -3,7 +3,7 @@ use rmcp::model::{CallToolResult, JsonObject, Tool};
 use crate::auth::AuthSubject;
 use crate::toolset::{SearchableToolSet, ToolSetEntry, ToolSetScope, ToolSetsError, TunnelRoute};
 
-use super::{RegisteredToolSet, TunnelHandle};
+use drua_tunnel::{RegisteredToolSet, TunnelHandle};
 
 pub struct OwnedTunnelToolSet {
     name: String,
