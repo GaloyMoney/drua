@@ -38,7 +38,12 @@ impl Walker {
     ) -> ToolCallSummary {
         let mut elided_paths = Vec::new();
         let root_path = "$";
-        let total_bytes = json_size(&query_structure.root);
+        // For string roots, count raw string bytes (matches what's persisted
+        // as `raw_text` and what the per-path `<elided>` tag reports for the
+        // same path). For arrays/objects, use the JSON-serialized size since
+        // there's no other natural representation. Otherwise `<summary>` and
+        // `<elided>` at the same `$` path would disagree on `total-bytes`.
+        let total_bytes = byte_size(&query_structure.root);
         let summary = self.walk(
             &query_structure.root,
             root_path,
@@ -47,7 +52,7 @@ impl Walker {
             tool_name,
             &mut elided_paths,
         );
-        let shown_bytes = json_size(&summary);
+        let shown_bytes = byte_size(&summary);
 
         // Root-shape dimensions: only emit when root is the corresponding
         // kind. For an object root (with inner elisions) items/lines stay
@@ -390,6 +395,19 @@ fn json_size(value: &Value) -> u64 {
     serde_json::to_string(value)
         .map(|s| s.len() as u64)
         .unwrap_or(0)
+}
+
+/// Type-aware byte size used for the root summary's `total-bytes` /
+/// `shown-bytes`. Strings report raw byte length (no JSON quoting /
+/// escape inflation), so the per-path `<elided>` tag — which also uses
+/// `s.len()` for strings — and the `<summary>` tag agree on the count
+/// for the same path. Arrays/objects fall back to JSON-serialized size
+/// (no "natural" alternative representation).
+fn byte_size(value: &Value) -> u64 {
+    match value {
+        Value::String(s) => s.len() as u64,
+        other => json_size(other),
+    }
 }
 
 fn line_count(s: &str) -> u32 {
