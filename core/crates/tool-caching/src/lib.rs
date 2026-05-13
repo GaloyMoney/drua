@@ -58,11 +58,16 @@ impl ToolCaching {
     ///   results would force every compose script to recover through fetch
     ///   instead of using the value directly.
     ///
-    /// Passthrough early-returns (no persistence, no wrapping):
+    /// Passthrough early-returns (no persistence, no wrap, raw CTR):
     ///   * no owner (workflow executor / anonymous) — nothing to attribute
     ///   * upstream marked the result `is_error` — error responses flow through
     ///   * non-text content (image, multi-part) — only single-text-content
     ///     results are summarisable today
+    ///
+    /// When the walker decides no elision is needed, the text channel
+    /// stays raw (no envelope) but the structured channel is still wrapped
+    /// per `mode` — otherwise sub-threshold results would emit `T` on the
+    /// wire while `outputSchema` / `compose_types` advertise `{result: T}`.
     pub async fn cache(
         &self,
         owner: impl Into<Option<ToolCallOwnerId>>,
@@ -97,12 +102,22 @@ impl ToolCaching {
             .walker
             .summarize(&query_structure, invocation_id, tool_name);
 
-        // Nothing was elided ⇒ upstream result is correct verbatim; skip
-        // both persistence and the envelope rebuild so byte-for-byte
-        // passthrough is preserved.
+        // Nothing was elided ⇒ skip persistence, keep the text channel
+        // raw. Structured channel is still wrapped to match what
+        // `output_schema()` and `compose_types` advertise so sub- and
+        // over-threshold responses share one wire shape.
         if summary.elided_paths.is_empty() {
+            let mut passthrough = result;
+            passthrough.structured_content = match mode {
+                WrapMode::Elide | WrapMode::Persist => {
+                    let t = original_structured
+                        .unwrap_or_else(|| query_structure.root.clone());
+                    Some(serde_json::json!({ "result": t }))
+                }
+                WrapMode::TextOnly => original_structured,
+            };
             return Ok(ToolCacheResponse {
-                result,
+                result: passthrough,
                 elided_paths: Vec::new(),
                 invocation_id: None,
             });

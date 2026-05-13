@@ -150,6 +150,23 @@ async fn sub_threshold_input_is_passthrough_with_no_envelope() {
     assert_eq!(text, small);
     assert!(!text.contains("<summary"));
     assert!(!text.contains("<recovery"));
+
+    // Sub-threshold structured channel is still wrapped in `{result: T}`
+    // so the wire shape matches the advertised outputSchema regardless
+    // of whether elision actually ran.
+    let structured = response
+        .result
+        .structured_content
+        .as_ref()
+        .expect("Elide passthrough still wraps structuredContent");
+    let result_field = structured
+        .get("result")
+        .expect("Elide passthrough emits {result: T}");
+    assert_eq!(result_field, &serde_json::Value::String(small.clone()));
+    assert!(
+        structured.get("_elided").is_none(),
+        "no elision → no `_elided` key",
+    );
 }
 
 #[tokio::test]
