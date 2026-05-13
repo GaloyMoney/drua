@@ -2694,6 +2694,45 @@ mod tests {
     }
 
     #[test]
+    fn workflow_update_parses_trigger_condition() {
+        let definition_id = uuid::Uuid::new_v4();
+        let p: WorkflowParams = parse_params(args(serde_json::json!({
+            "command": "update",
+            "definition_id": definition_id,
+            "update_trigger": true,
+            "manual": true,
+            "trigger_condition": "trigger.payload.env == \"staging\"",
+        })))
+        .expect("parse");
+        assert_eq!(
+            p.trigger_condition.as_deref(),
+            Some("trigger.payload.env == \"staging\"")
+        );
+        assert!(p.update_trigger);
+        assert!(p.manual);
+    }
+
+    #[test]
+    fn workflow_create_parses_trigger_condition() {
+        let project_id = uuid::Uuid::new_v4();
+        let p: WorkflowParams = parse_params(args(serde_json::json!({
+            "command": "create",
+            "project_id": project_id,
+            "name": "with-cond",
+            "manual": true,
+            "trigger_condition": "trigger.payload.action == 'opened'",
+            "steps": [
+                { "type": "agent_step", "name": "investigate", "skill": "auditor" }
+            ],
+        })))
+        .expect("parse");
+        assert_eq!(
+            p.trigger_condition.as_deref(),
+            Some("trigger.payload.action == 'opened'")
+        );
+    }
+
+    #[test]
     fn workflow_schema_includes_command_enum() {
         let s = serde_json::to_string(&*WORKFLOW_SCHEMA).unwrap();
         for v in ["create", "list", "get", "update"] {

@@ -529,6 +529,78 @@ mod tests {
         }
     }
 
+    /// Regression for the bats failure in PR #341 CI: after `update_content`
+    /// attaches a trigger with a CEL `condition:`, hydrating fresh from the
+    /// event log must reproduce the condition. Previously slipped through
+    /// `try_from_events` cleanly in isolation but failed end-to-end —
+    /// pinning the round-trip here narrows the search space if it breaks
+    /// again.
+    #[test]
+    fn update_content_preserves_trigger_condition_through_hydration() {
+        let mut def = build();
+        let res = def.update_content(
+            None,
+            None,
+            Some(WorkflowTrigger::Manual {
+                condition: Some("trigger.payload.env == 'staging'".to_string()),
+            }),
+            None,
+            None,
+            None,
+        );
+        assert!(matches!(res, Idempotent::Executed(())));
+        assert_eq!(
+            def.trigger.condition(),
+            Some("trigger.payload.env == 'staging'"),
+            "in-memory trigger should reflect the update"
+        );
+
+        let events = def.events.clone();
+        let hydrated = WorkflowDefinition::try_from_events(events).unwrap();
+        assert_eq!(
+            hydrated.trigger.condition(),
+            Some("trigger.payload.env == 'staging'"),
+            "hydrated trigger should carry the condition from the Updated event"
+        );
+    }
+
+    /// Serialize a definition's events to JSON and back, then hydrate.
+    /// Catches any event-shape regression where the new `condition` field
+    /// is dropped during persistence (the actual repo serializes events
+    /// via serde_json into a JSONB column).
+    #[test]
+    fn update_content_preserves_trigger_condition_through_json_roundtrip() {
+        let mut def = build();
+        let _ = def.update_content(
+            None,
+            None,
+            Some(WorkflowTrigger::Manual {
+                condition: Some("trigger.payload.env == 'staging'".to_string()),
+            }),
+            None,
+            None,
+            None,
+        );
+        let raw_events: Vec<serde_json::Value> = def
+            .events
+            .iter_all()
+            .map(|e| serde_json::to_value(e).unwrap())
+            .collect();
+        let updated = raw_events
+            .iter()
+            .find(|v| v.get("type").and_then(|t| t.as_str()) == Some("updated"))
+            .expect("updated event present");
+        let trigger = updated
+            .get("trigger")
+            .expect("updated event carries trigger field");
+        assert_eq!(trigger.get("type").and_then(|t| t.as_str()), Some("manual"));
+        assert_eq!(
+            trigger.get("condition").and_then(|c| c.as_str()),
+            Some("trigger.payload.env == 'staging'"),
+            "condition must round-trip through JSON"
+        );
+    }
+
     #[test]
     fn workflow_definition_hydrates_preexisting_sandbox_decl() {
         let new = NewWorkflowDefinition::builder()

@@ -776,6 +776,12 @@ impl Workflows {
         definition: WorkflowDefinition,
         trigger_context: serde_json::Value,
     ) -> Result<Option<WorkflowRun>, WorkflowError> {
+        tracing::warn!(
+            definition_id = %definition.id,
+            condition = ?definition.trigger.condition(),
+            trigger_kind = trigger_kind_label(&definition.trigger),
+            "spawn_run_static gate inspection"
+        );
         if let Some(body) = definition.trigger.condition() {
             match template::evaluate_trigger_condition(body, &trigger_context) {
                 Ok(template::ConditionOutcome::True) => {}
