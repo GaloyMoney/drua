@@ -128,32 +128,20 @@ impl StoredInvocation {
 
     /// Replay the curated `<summary>+<recovery>` envelope from the
     /// persisted `ToolCallSummary`. Output is byte-identical to what
-    /// `cache()` originally returned for this invocation — both text
-    /// channel (envelope) and structured channel
-    /// (`{result, _elided?: {invocation_id, paths}}`) are set on the
-    /// returned `CallToolResult`.
+    /// `cache()` originally returned — both share
+    /// `ToolCallSummary::build_wire`.
     fn summary_view(&self, max_bytes: usize) -> Result<FetchResult, ToolCachingError> {
-        let envelope = self.summary.build_envelope_text();
-        if envelope.len() > max_bytes {
+        let (result, structured) = self.summary.build_wire(self.id);
+        let envelope_len = match result.content.first().map(|c| &c.raw) {
+            Some(rmcp::model::RawContent::Text(t)) => t.text.len(),
+            _ => 0,
+        };
+        if envelope_len > max_bytes {
             return Err(ToolCachingError::FetchResponseTooLarge {
-                size: envelope.len(),
+                size: envelope_len,
                 max: max_bytes,
             });
         }
-        let mut obj = serde_json::Map::new();
-        obj.insert("result".to_string(), self.summary.wire_result.clone());
-        if !self.summary.elided_paths.is_empty() {
-            obj.insert(
-                "_elided".to_string(),
-                serde_json::json!({
-                    "invocation_id": self.id.to_string(),
-                    "paths": self.summary.elided_paths.clone(),
-                }),
-            );
-        }
-        let structured = Value::Object(obj);
-        let mut result = CallToolResult::success(vec![Content::text(envelope)]);
-        result.structured_content = Some(structured.clone());
         Ok(FetchResult { result, structured })
     }
 

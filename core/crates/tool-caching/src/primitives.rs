@@ -1,4 +1,4 @@
-use rmcp::model::CallToolResult;
+use rmcp::model::{CallToolResult, Content};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -79,6 +79,30 @@ pub struct ToolCallSummary {
 }
 
 impl ToolCallSummary {
+    /// Build the full agent-facing wire shape: text-channel envelope +
+    /// structured-channel `{result, _elided?: {invocation_id, paths}}`
+    /// payload. Both `cache()` (initial elision) and the `FetchQuery::Summary`
+    /// replay path go through this single helper so the byte-identical
+    /// guarantee between original-call and re-fetched summary can't drift.
+    pub fn build_wire(&self, invocation_id: ToolInvocationId) -> (CallToolResult, Value) {
+        let envelope = self.build_envelope_text();
+        let mut obj = serde_json::Map::new();
+        obj.insert("result".to_string(), self.wire_result.clone());
+        if !self.elided_paths.is_empty() {
+            obj.insert(
+                "_elided".to_string(),
+                serde_json::json!({
+                    "invocation_id": invocation_id.to_string(),
+                    "paths": self.elided_paths.clone(),
+                }),
+            );
+        }
+        let structured = Value::Object(obj);
+        let mut result = CallToolResult::success(vec![Content::text(envelope)]);
+        result.structured_content = Some(structured.clone());
+        (result, structured)
+    }
+
     /// Build the `<summary>…</summary><recovery>…</recovery>` text-channel
     /// envelope from the walked summary. The structured channel is built
     /// separately by the caller (lib.rs) since its shape varies between

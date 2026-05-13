@@ -255,25 +255,11 @@ fn passthrough_no_owner(result: CallToolResult) -> ToolCacheResponse {
     }
 }
 
-/// Build the agent-facing wrapped `CallToolResult`:
-///   * text channel: `<summary>+<recovery>` envelope from the walked summary
-///   * structured channel: `{result: walked, _elided?: {invocation_id, paths}}`
+/// Build the agent-facing wrapped `CallToolResult` — delegates to
+/// `ToolCallSummary::build_wire` so this and the `FetchQuery::Summary`
+/// replay path share one wire-shape construction site.
 fn build_elide_ctr(summary: ToolCallSummary, invocation_id: ToolInvocationId) -> CallToolResult {
-    let envelope = summary.build_envelope_text();
-    let mut obj = serde_json::Map::new();
-    obj.insert("result".to_string(), summary.wire_result.clone());
-    if !summary.elided_paths.is_empty() {
-        obj.insert(
-            "_elided".to_string(),
-            serde_json::json!({
-                "invocation_id": invocation_id.to_string(),
-                "paths": summary.elided_paths,
-            }),
-        );
-    }
-    let mut ctr = CallToolResult::success(vec![Content::text(envelope)]);
-    ctr.structured_content = Some(Value::Object(obj));
-    ctr
+    summary.build_wire(invocation_id).0
 }
 
 fn extract_text(result: &CallToolResult) -> String {
