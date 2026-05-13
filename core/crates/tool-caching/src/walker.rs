@@ -295,9 +295,7 @@ impl Walker {
             return Value::String(prepared);
         }
         // Try line-mode first if the string has enough lines to split.
-        if let Some(elide) =
-            line_elide_string(&prepared, budget, &ctx_seg, &preprocessed_to_raw)
-        {
+        if let Some(elide) = line_elide_string(&prepared, budget, &ctx_seg, &preprocessed_to_raw) {
             elided_paths.push(ElidedPath {
                 path: path.to_string(),
                 total_bytes: total_bytes_at_path,

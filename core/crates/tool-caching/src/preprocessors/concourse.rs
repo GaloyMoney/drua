@@ -149,10 +149,7 @@ mod tests {
         let root = json!({"logs": "[10:00:00] hello\n[10:00:01] world\n", "extra": "kept"});
         let out = preprocess("concourse-build-log", &root).expect("matched");
         assert_eq!(out.root_path, "$.logs");
-        assert_eq!(
-            out.root,
-            json!({"logs": "hello\nworld\n", "extra": "kept"}),
-        );
+        assert_eq!(out.root, json!({"logs": "hello\nworld\n", "extra": "kept"}),);
         assert_eq!(out.preprocessed_to_raw, vec![0, 1]);
     }
 }
