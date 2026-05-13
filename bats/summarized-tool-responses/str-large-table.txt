@@ -1,4 +1,4 @@
-<summary path="$" total-bytes="13093" shown-bytes="7909" total-lines="41" shown-lines="25">
+<summary path="$" total-bytes="13051" shown-bytes="7870" total-lines="41" shown-lines="25">
 <head lines="12">
 NAMESPACE     APIVERSION   KIND   NAME                                                             READY   STATUS    RESTARTS   AGE    IP             NODE                                                  NOMINATED NODE   READINESS GATES   LABELS
 kube-system   v1           Pod    calico-node-kxw8s                                                1/1     Running   0          21h    10.1.0.31      gke-galoy-agents-clu-galoy-agents-n2--46ac1569-2xv8   <none>           <none>            controller-revision-hash=75869d67,k8s-app=calico-node,pod-template-generation=2
