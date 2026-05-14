@@ -54,16 +54,6 @@ impl ZendutyClient {
         Self::handle_response(resp).await
     }
 
-    async fn get_with_query<T, Q>(&self, path: &str, query: &Q) -> Result<T, ZendutyError>
-    where
-        T: serde::de::DeserializeOwned,
-        Q: Serialize + ?Sized,
-    {
-        let url = self.api_url(path)?;
-        let resp = self.http.get(url).query(query).send().await?;
-        Self::handle_response(resp).await
-    }
-
     async fn post_json<T, B>(&self, path: &str, body: &B) -> Result<T, ZendutyError>
     where
         T: serde::de::DeserializeOwned,
@@ -71,6 +61,22 @@ impl ZendutyClient {
     {
         let url = self.api_url(path)?;
         let resp = self.http.post(url).json(body).send().await?;
+        Self::handle_response(resp).await
+    }
+
+    async fn post_json_with_query<T, B, Q>(
+        &self,
+        path: &str,
+        body: &B,
+        query: &Q,
+    ) -> Result<T, ZendutyError>
+    where
+        T: serde::de::DeserializeOwned,
+        B: Serialize + ?Sized,
+        Q: Serialize + ?Sized,
+    {
+        let url = self.api_url(path)?;
+        let resp = self.http.post(url).query(query).json(body).send().await?;
         Self::handle_response(resp).await
     }
 
@@ -89,7 +95,16 @@ impl ZendutyClient {
     ) -> Result<T, ZendutyError> {
         let status = resp.status();
         if status.is_success() {
-            return Ok(resp.json::<T>().await?);
+            let content_type = response_content_type(&resp);
+            let body = resp.text().await?;
+            if !is_json_content_type(&content_type) {
+                return Err(ZendutyError::UnexpectedResponse {
+                    status: status.as_u16(),
+                    content_type,
+                    body_preview: body_preview(&body),
+                });
+            }
+            return serde_json::from_str::<T>(&body).map_err(ZendutyError::Json);
         }
         Err(Self::error_for_status(resp).await)
     }
@@ -105,6 +120,7 @@ impl ZendutyClient {
     async fn error_for_status(resp: reqwest::Response) -> ZendutyError {
         let code = resp.status().as_u16();
         let body = resp.text().await.unwrap_or_default();
+        let body = body_preview(&body);
         match code {
             401 | 403 => ZendutyError::Unauthorized(body),
             404 => ZendutyError::NotFound(body),
@@ -122,24 +138,30 @@ impl ZendutyClient {
         params: &ListIncidentsParams<'_>,
     ) -> Result<Vec<Incident>, ZendutyError> {
         let mut q: Vec<(&str, String)> = Vec::new();
-        if let Some(statuses) = params.status {
-            for s in statuses {
-                q.push(("status", s.to_string()));
-            }
-        }
-        if let Some(team) = params.team_id {
-            q.push(("team", team.to_string()));
-        }
-        if let Some(service) = params.service_id {
-            q.push(("service", service.to_string()));
-        }
         if let Some(page) = params.page {
             q.push(("page", page.to_string()));
         }
         if let Some(page_size) = params.page_size {
             q.push(("page_size", page_size.to_string()));
         }
-        let page: Page<Incident> = self.get_with_query("/api/incidents/", &q).await?;
+        let body = IncidentFilter {
+            status: incident_filter_status(params.status),
+            team_ids: params.team_id.into_iter().collect(),
+            all_teams: 1,
+            service_ids: params.service_id.into_iter().collect(),
+            user_ids: Vec::new(),
+            priority_name: "",
+            priority_ids: Vec::new(),
+            tag_ids: Vec::new(),
+            sla_ids: Vec::new(),
+            from_date: Vec::new(),
+            to_date: Vec::new(),
+            postmortem_filter: -1,
+            escalation_policy_ids: Vec::new(),
+        };
+        let page: Page<Incident> = self
+            .post_json_with_query("/api/incidents/filter/", &body, &q)
+            .await?;
         Ok(page.into_results())
     }
 
@@ -207,7 +229,7 @@ impl ZendutyClient {
     #[tracing::instrument(name = "zenduty_client.list_schedules", skip_all)]
     pub async fn list_schedules(&self, team_id: &str) -> Result<Vec<Schedule>, ZendutyError> {
         let page: Page<Schedule> = self
-            .get(&format!("/api/account/teams/{team_id}/schedules/"))
+            .get(&format!("/api/account/teams/{team_id}/schedule/"))
             .await?;
         Ok(page.into_results())
     }
@@ -222,5 +244,58 @@ impl ZendutyClient {
             "/api/account/teams/{team_id}/schedules/{schedule_id}/"
         ))
         .await
+    }
+}
+
+fn response_content_type(resp: &reqwest::Response) -> String {
+    resp.headers()
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("<missing>")
+        .to_string()
+}
+
+fn is_json_content_type(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .map(str::trim)
+        .is_some_and(|mime| mime.eq_ignore_ascii_case("application/json"))
+}
+
+fn body_preview(body: &str) -> String {
+    const MAX_CHARS: usize = 500;
+    let mut preview: String = body.chars().take(MAX_CHARS).collect();
+    if body.chars().count() > MAX_CHARS {
+        preview.push_str("...");
+    }
+    preview
+}
+
+fn incident_filter_status(statuses: Option<&[u8]>) -> i8 {
+    let mut statuses = statuses.unwrap_or(&[]).to_vec();
+    statuses.sort_unstable();
+    statuses.dedup();
+
+    match statuses.as_slice() {
+        [] | [1, 2] => -1,
+        [1, 2, 3] => 0,
+        [status @ 1..=3] => *status as i8,
+        _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::incident_filter_status;
+
+    #[test]
+    fn incident_filter_status_maps_zenduty_filter_codes() {
+        assert_eq!(incident_filter_status(None), -1);
+        assert_eq!(incident_filter_status(Some(&[1, 2])), -1);
+        assert_eq!(incident_filter_status(Some(&[1, 2, 3])), 0);
+        assert_eq!(incident_filter_status(Some(&[1])), 1);
+        assert_eq!(incident_filter_status(Some(&[2])), 2);
+        assert_eq!(incident_filter_status(Some(&[3])), 3);
     }
 }
