@@ -293,8 +293,8 @@ type Mutation {
 	agentCreate(input: AgentCreateInput!): AgentCreatePayload!
 	agentDelete(input: AgentDeleteInput!): AgentDeletePayload!
 	agentDetachSandbox(input: AgentDetachSandboxInput!): AgentDetachSandboxPayload!
-	bootstrapPersonalProject: BootstrapPersonalProjectPayload!
 	agentUpdateSessionChain(input: AgentUpdateSessionChainInput!): AgentUpdateSessionChainPayload!
+	bootstrapPersonalProject: BootstrapPersonalProjectPayload!
 	mcpCredentialsCreate(input: McpCredentialsCreateInput!): McpCredentialsCreatePayload!
 	mcpCredentialsRevoke(input: McpCredentialsRevokeInput!): McpCredentialsRevokePayload!
 	noteDelete(input: NoteDeleteInput!): NoteDeletePayload!
