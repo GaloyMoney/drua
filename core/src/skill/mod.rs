@@ -4,6 +4,7 @@ pub mod file;
 pub mod importer;
 pub(crate) mod repo;
 
+use file::slugify;
 pub use file::{default_skill_path, name_from_filename, parse_skill_markdown, ParsedSkill};
 pub use importer::SkillsImporter;
 
@@ -730,7 +731,8 @@ impl Skills {
         sub.can(AuthVerb::Create, AuthResource::Skill(project_id, None))?;
         Audit::record_action_if_unset("skill.create");
         Audit::record_project_id(project_id);
-        if name.trim().is_empty() {
+        let name = slugify(&name);
+        if name.is_empty() {
             return Err(SkillError::BuildEntity("skill name required".into()));
         }
 
@@ -780,6 +782,16 @@ impl Skills {
                 resource: AuthResource::Skill(project_id, Some(id)),
             }));
         }
+        let name = match name {
+            Some(raw) => {
+                let slug = slugify(&raw);
+                if slug.is_empty() {
+                    return Err(SkillError::BuildEntity("skill name required".into()));
+                }
+                Some(slug)
+            }
+            None => None,
+        };
         if skill.update_content(name, description, body).did_execute() {
             self.populate_attribution().await;
             self.repo.update_in_op(&mut op, &mut skill).await?;
