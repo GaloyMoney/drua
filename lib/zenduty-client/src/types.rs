@@ -130,6 +130,23 @@ pub struct ListIncidentsParams<'a> {
     pub page_size: Option<u32>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct IncidentFilter<'a> {
+    pub status: i8,
+    pub team_ids: Vec<&'a str>,
+    pub all_teams: u8,
+    pub service_ids: Vec<&'a str>,
+    pub user_ids: Vec<&'a str>,
+    pub priority_name: &'a str,
+    pub priority_ids: Vec<&'a str>,
+    pub tag_ids: Vec<&'a str>,
+    pub sla_ids: Vec<&'a str>,
+    pub from_date: Vec<&'a str>,
+    pub to_date: Vec<&'a str>,
+    pub postmortem_filter: i8,
+    pub escalation_policy_ids: Vec<&'a str>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Schedule {
     #[serde(default)]
