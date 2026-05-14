@@ -59,8 +59,10 @@ struct ComposeOutput {
     /// The JS script's return value, verbatim. If oversize, the outer
     /// `cache()` call walks the full ComposeOutput tree and elides this
     /// field in place; the agent recovers via `tool_output_fetch` with
-    /// `path: "$.result.result"` (outer `DruaToolResult` wrap + this
-    /// field) or `query: {mode: "summary"}` for the full envelope.
+    /// `path: "$.result"` (compose opts out of the `DruaToolResult`
+    /// wrap, so there's no outer `result` key — the persisted root IS
+    /// `ComposeOutput`) or `query: {mode: "summary"}` for the full
+    /// envelope.
     #[schemars(schema_with = "crate::toolset::any_json_schema")]
     result: serde_json::Value,
     /// Recoverable sub-tool calls; excludes passthrough, errored, and bypass-marked calls.

@@ -151,10 +151,16 @@ impl StoredInvocation {
         for seg in &segments {
             cur = match seg {
                 PathSegment::Key(k) => cur.get(k).ok_or_else(|| {
-                    ToolCachingError::InvalidPath(format!("path {path}: no `{k}`"))
+                    ToolCachingError::InvalidPath(format!(
+                        "path {path}: no `{k}` — {hint}",
+                        hint = describe_available(cur)
+                    ))
                 })?,
                 PathSegment::Index(i) => cur.get(*i).ok_or_else(|| {
-                    ToolCachingError::InvalidPath(format!("path {path}: no [{i}]"))
+                    ToolCachingError::InvalidPath(format!(
+                        "path {path}: no [{i}] — {hint}",
+                        hint = describe_available(cur)
+                    ))
                 })?,
             };
         }
@@ -244,6 +250,26 @@ enum PathSegment {
     Index(usize),
 }
 
+/// Describe what's actually at `cur` so the agent can correct a missing
+/// path segment without round-tripping `mode:'summary'`. Lists keys for
+/// objects, length for arrays, and the value type otherwise.
+fn describe_available(cur: &Value) -> String {
+    match cur {
+        Value::Object(map) => {
+            let mut keys: Vec<&str> = map.keys().map(|s| s.as_str()).collect();
+            keys.sort();
+            if keys.is_empty() {
+                "available keys: (none)".into()
+            } else {
+                format!("available keys: {keys:?}")
+            }
+        }
+        Value::Array(arr) => format!("array length: {}", arr.len()),
+        Value::String(_) => "value is a string (use `query` to slice it)".into(),
+        Value::Number(_) | Value::Bool(_) | Value::Null => "value is a scalar".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,5 +345,32 @@ mod tests {
             q.apply(Value::String("0123456789".into())).unwrap(),
             Value::String("3456".into()),
         );
+    }
+
+    #[test]
+    fn navigate_missing_key_error_lists_available_keys() {
+        let inv = stored(serde_json::json!({"logs": "x", "extra": 1}));
+        let err = inv.navigate("$.result").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no `result`"), "got: {msg}");
+        assert!(msg.contains("logs"), "got: {msg}");
+        assert!(msg.contains("extra"), "got: {msg}");
+    }
+
+    #[test]
+    fn navigate_missing_index_error_lists_array_length() {
+        let inv = stored(serde_json::json!([1, 2, 3]));
+        let err = inv.navigate("$[7]").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no [7]"), "got: {msg}");
+        assert!(msg.contains("array length: 3"), "got: {msg}");
+    }
+
+    #[test]
+    fn navigate_missing_key_on_scalar_says_scalar() {
+        let inv = stored(serde_json::json!("hello"));
+        let err = inv.navigate("$.foo").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("value is a string"), "got: {msg}");
     }
 }
