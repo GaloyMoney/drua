@@ -345,7 +345,8 @@ impl AgentSession {
         // the user turn that triggered this prompt; otherwise hydration would
         // set its turn to User and reject the upcoming assistant response.
         let (thread_id, prompt_definition) = if matches!(target, TargetThread::Main)
-            && self.thread_has_stale_system_view(thread_id)
+            && (self.thread_has_stale_system_view(thread_id)
+                || self.thread_has_stale_model_chain(thread_id))
         {
             let (new_id, new_pd) =
                 self.spawn_context_refreshed_thread(thread_id, prompt_definition.messages.clone());
@@ -486,6 +487,14 @@ impl AgentSession {
         view.indexes() != refreshed.indexes()
     }
 
+    /// Stale when session.model_chain has diverged from the thread's snapshot.
+    fn thread_has_stale_model_chain(&self, thread_id: SessionThreadId) -> bool {
+        let Some(thread) = self.threads.get_persisted(&thread_id) else {
+            return false;
+        };
+        thread.prompt_definition().model_chain() != &self.model_chain
+    }
+
     /// Latest-per-kind ordered by `SystemBlockKind::ORDER`; skips unset kinds.
     fn canonical_refreshed_view(&self) -> SystemView {
         let materialized = self.materialize();
@@ -496,10 +505,11 @@ impl AgentSession {
         SystemView::from_indexes(indexes)
     }
 
-    /// Inherits supplied `messages` verbatim and refreshes system blocks.
+    /// Inherits supplied `messages` verbatim and refreshes system blocks + model_chain.
     /// Returns id + prompt definition so caller doesn't re-fetch (new thread
     /// lives in `new_entities`, not visible to `get_persisted`).
-    /// Caller must verify staleness via `thread_has_stale_system_view`.
+    /// Caller must verify staleness via `thread_has_stale_system_view` or
+    /// `thread_has_stale_model_chain`.
     fn spawn_context_refreshed_thread(
         &mut self,
         from_thread: SessionThreadId,

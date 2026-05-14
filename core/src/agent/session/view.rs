@@ -258,6 +258,10 @@ impl PromptDefinition {
         }
     }
 
+    pub fn model_chain(&self) -> &ModelChain {
+        &self.model_chain
+    }
+
     pub fn system_view(&self) -> &SystemView {
         &self.system_view
     }
