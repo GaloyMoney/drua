@@ -18,7 +18,10 @@ use crate::types::{
 /// these as a passthrough field.
 const ANTHROPIC_MODEL_PREFIX: &str = "anthropic/";
 
-pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> OpenAiRequest {
+pub(crate) fn prompt_to_request(
+    prompt: &llm::Prompt,
+    spec: &llm::ModelSpec,
+) -> OpenAiRequest {
     let mut messages: Vec<OpenAiMessage> = Vec::new();
 
     for block in &prompt.system {
@@ -47,10 +50,10 @@ pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> OpenAiRequest {
     let tool_choice = prompt.tool_choice.as_ref().map(convert_tool_choice);
 
     let mut request = OpenAiRequest {
-        model: prompt.chain.primary.name.clone(),
+        model: spec.name.clone(),
         messages,
         prompt_cache_key: prompt.cache_key.clone(),
-        max_completion_tokens: prompt.max_tokens,
+        max_completion_tokens: spec.max_tokens,
         temperature: None,
         tools,
         tool_choice,
@@ -444,15 +447,18 @@ mod tests {
                 strict: false,
             }],
             tool_choice: None,
-            max_tokens: Some(1024),
             cache_key: None,
         }
+    }
+
+    fn sample_spec() -> llm::ModelSpec {
+        llm::ModelSpec::new("gpt-4o").with_max_tokens(1024)
     }
 
     #[test]
     fn prompt_to_request_basic() {
         let prompt = sample_prompt();
-        let req = prompt_to_request(&prompt);
+        let req = prompt_to_request(&prompt, &sample_spec());
 
         assert_eq!(req.model, "gpt-4o");
         assert!(req.stream);
@@ -471,7 +477,7 @@ mod tests {
         let mut prompt = sample_prompt();
         prompt.cache_key = Some("agent-session:test".to_string());
 
-        let req = prompt_to_request(&prompt);
+        let req = prompt_to_request(&prompt, &sample_spec());
         assert_eq!(req.prompt_cache_key.as_deref(), Some("agent-session:test"));
     }
 
@@ -500,11 +506,10 @@ mod tests {
             ],
             tools: vec![],
             tool_choice: None,
-            max_tokens: None,
             cache_key: None,
         };
 
-        let req = prompt_to_request(&prompt);
+        let req = prompt_to_request(&prompt, &sample_spec());
         assert_eq!(req.messages.len(), 2);
         assert_eq!(req.messages[0].role, "assistant");
         assert!(req.messages[0].tool_calls.is_some());
@@ -531,11 +536,10 @@ mod tests {
             }],
             tools: vec![],
             tool_choice: None,
-            max_tokens: None,
             cache_key: None,
         };
 
-        let req = prompt_to_request(&prompt);
+        let req = prompt_to_request(&prompt, &sample_spec());
         assert_eq!(req.messages.len(), 1);
         assert_eq!(
             content_text(&req.messages[0]),
@@ -855,14 +859,20 @@ mod tests {
                 strict: false,
             }],
             tool_choice: None,
-            max_tokens: Some(1024),
             cache_key: None,
         }
     }
 
+    fn anthropic_via_openrouter_spec() -> llm::ModelSpec {
+        llm::ModelSpec::new("anthropic/claude-sonnet-4.6").with_max_tokens(1024)
+    }
+
     #[test]
     fn anthropic_via_openrouter_marks_last_user_text_block() {
-        let req = prompt_to_request(&anthropic_via_openrouter_prompt());
+        let req = prompt_to_request(
+            &anthropic_via_openrouter_prompt(),
+            &anthropic_via_openrouter_spec(),
+        );
 
         let last = req.messages.last().expect("messages present");
         assert_eq!(last.role, "user");
@@ -893,10 +903,10 @@ mod tests {
 
     #[test]
     fn non_anthropic_model_emits_plain_string_content() {
-        let mut prompt = anthropic_via_openrouter_prompt();
-        prompt.chain = llm::ModelChain::new("openai/gpt-5-mini");
+        let prompt = anthropic_via_openrouter_prompt();
+        let spec = llm::ModelSpec::new("openai/gpt-5-mini").with_max_tokens(1024);
 
-        let req = prompt_to_request(&prompt);
+        let req = prompt_to_request(&prompt, &spec);
 
         for msg in &req.messages {
             assert!(
@@ -924,7 +934,7 @@ mod tests {
         prompt.messages.clear();
         prompt.system.clear();
 
-        let req = prompt_to_request(&prompt);
+        let req = prompt_to_request(&prompt, &anthropic_via_openrouter_spec());
 
         let tool = req
             .tools
@@ -937,7 +947,10 @@ mod tests {
 
     #[test]
     fn anthropic_serialised_request_has_cache_control_inside_content_block() {
-        let req = prompt_to_request(&anthropic_via_openrouter_prompt());
+        let req = prompt_to_request(
+            &anthropic_via_openrouter_prompt(),
+            &anthropic_via_openrouter_spec(),
+        );
         let json = serde_json::to_value(&req).unwrap();
 
         // Wire-format check: the marker is nested inside a content block on

@@ -7,21 +7,18 @@ use std::sync::Arc;
 use crate::provider::LlmProvider;
 use crate::request::PromptError;
 use crate::response::Usage;
-use crate::{Prompt, StreamHandle};
+use crate::{ModelSpec, Prompt, StreamHandle};
 
 #[derive(Clone)]
 pub struct ChainEntry {
-    pub model_id: String,
-    /// Today only `max_tokens` is plumbed through per-attempt.
-    pub max_tokens: Option<u32>,
+    pub spec: ModelSpec,
     pub provider: Arc<dyn LlmProvider>,
 }
 
 impl std::fmt::Debug for ChainEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ChainEntry")
-            .field("model_id", &self.model_id)
-            .field("max_tokens", &self.max_tokens)
+            .field("spec", &self.spec)
             .field("provider", &self.provider.name())
             .finish()
     }
@@ -78,40 +75,35 @@ pub async fn walk(chain: &[ChainEntry], base: &Prompt) -> Result<WalkOutcome, Pr
     let mut last_err: Option<PromptError> = None;
 
     for entry in chain {
-        let mut prompt = base.clone();
-        if let Some(mt) = entry.max_tokens {
-            prompt.max_tokens = Some(mt);
-        }
-
-        match entry.provider.send_prompt_streaming(&prompt).await {
+        match entry.provider.send_prompt_streaming(base, &entry.spec).await {
             Ok(rx) => {
                 attempts.push(AttemptRecord {
-                    model_id: entry.model_id.clone(),
+                    model_id: entry.spec.name.clone(),
                     provider_name: entry.provider.name().to_string(),
                     outcome: AttemptOutcome::Succeeded,
                     usage: None,
                 });
                 tracing::info!(
-                    model = %entry.model_id,
+                    model = %entry.spec.name,
                     provider = entry.provider.name(),
                     attempts = attempts.len(),
                     "router.walk: stream opened",
                 );
                 return Ok(WalkOutcome {
                     stream: StreamHandle { rx },
-                    model_used: entry.model_id.clone(),
+                    model_used: entry.spec.name.clone(),
                     attempts,
                 });
             }
             Err(e) if e.is_terminal() => {
                 attempts.push(AttemptRecord {
-                    model_id: entry.model_id.clone(),
+                    model_id: entry.spec.name.clone(),
                     provider_name: entry.provider.name().to_string(),
                     outcome: AttemptOutcome::Terminal(e.to_string()),
                     usage: None,
                 });
                 tracing::error!(
-                    model = %entry.model_id,
+                    model = %entry.spec.name,
                     provider = entry.provider.name(),
                     error = %e,
                     "router.walk: terminal error, aborting chain",
@@ -120,13 +112,13 @@ pub async fn walk(chain: &[ChainEntry], base: &Prompt) -> Result<WalkOutcome, Pr
             }
             Err(e) => {
                 tracing::warn!(
-                    model = %entry.model_id,
+                    model = %entry.spec.name,
                     provider = entry.provider.name(),
                     error = %e,
                     "router.walk: transient error, trying next",
                 );
                 attempts.push(AttemptRecord {
-                    model_id: entry.model_id.clone(),
+                    model_id: entry.spec.name.clone(),
                     provider_name: entry.provider.name().to_string(),
                     outcome: AttemptOutcome::Transient(e.to_string()),
                     usage: None,
@@ -160,6 +152,7 @@ mod tests {
         async fn send_prompt_streaming(
             &self,
             _prompt: &Prompt,
+            _spec: &ModelSpec,
         ) -> Result<mpsc::Receiver<Result<StreamDelta, PromptError>>, PromptError> {
             let (_tx, rx) = mpsc::channel(1);
             Ok(rx)
@@ -188,6 +181,7 @@ mod tests {
         async fn send_prompt_streaming(
             &self,
             _prompt: &Prompt,
+            _spec: &ModelSpec,
         ) -> Result<mpsc::Receiver<Result<StreamDelta, PromptError>>, PromptError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Err(self.err.clone())
@@ -196,8 +190,7 @@ mod tests {
 
     fn entry(model_id: &str, provider: Arc<dyn LlmProvider>) -> ChainEntry {
         ChainEntry {
-            model_id: model_id.to_string(),
-            max_tokens: None,
+            spec: ModelSpec::new(model_id),
             provider,
         }
     }

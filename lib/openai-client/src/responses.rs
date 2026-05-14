@@ -7,7 +7,7 @@ use llm::prompt::{
 };
 use llm::provider::LlmProvider;
 use llm::stream::StreamDelta;
-use llm::{Prompt, PromptError};
+use llm::{ModelSpec, Prompt, PromptError};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -99,11 +99,12 @@ impl OpenAiResponsesClient {
     async fn send_prompt_streaming_internal(
         &self,
         prompt: &Prompt,
+        spec: &ModelSpec,
     ) -> Result<
         tokio::sync::mpsc::Receiver<Result<StreamDelta, OpenAiResponsesError>>,
         OpenAiResponsesError,
     > {
-        let request_body = prompt_to_responses_request(prompt, &self.auth);
+        let request_body = prompt_to_responses_request(prompt, spec, &self.auth);
         let mut request = self
             .http
             .post(&self.api_url)
@@ -231,9 +232,10 @@ impl LlmProvider for OpenAiResponsesClient {
     async fn send_prompt_streaming(
         &self,
         prompt: &Prompt,
+        spec: &ModelSpec,
     ) -> Result<tokio::sync::mpsc::Receiver<Result<StreamDelta, PromptError>>, PromptError> {
         let rx = self
-            .send_prompt_streaming_internal(prompt)
+            .send_prompt_streaming_internal(prompt, spec)
             .await
             .map_err(classify)?;
 
@@ -320,7 +322,11 @@ struct ResponsesReasoningConfig {
     summary: &'static str,
 }
 
-fn prompt_to_responses_request(prompt: &Prompt, auth: &OpenAiResponsesAuth) -> ResponsesRequest {
+fn prompt_to_responses_request(
+    prompt: &Prompt,
+    spec: &ModelSpec,
+    auth: &OpenAiResponsesAuth,
+) -> ResponsesRequest {
     let mut input = Vec::new();
 
     for message in &prompt.messages {
@@ -343,13 +349,13 @@ fn prompt_to_responses_request(prompt: &Prompt, auth: &OpenAiResponsesAuth) -> R
         .join("\n");
 
     ResponsesRequest {
-        model: prompt.chain.primary.name.clone(),
+        model: spec.name.clone(),
         input,
         instructions: (!instructions.is_empty()).then_some(instructions),
         prompt_cache_key: prompt.cache_key.clone(),
         max_output_tokens: match auth {
             OpenAiResponsesAuth::ApiKey { .. } => {
-                prompt.max_tokens.or(Some(DEFAULT_MAX_OUTPUT_TOKENS))
+                spec.max_tokens.or(Some(DEFAULT_MAX_OUTPUT_TOKENS))
             }
             OpenAiResponsesAuth::Subscription => None,
         },
@@ -1058,9 +1064,12 @@ mod tests {
             system: Vec::new(),
             tools: Vec::new(),
             tool_choice: None,
-            max_tokens: Some(1234),
             cache_key: None,
         }
+    }
+
+    fn sample_spec() -> ModelSpec {
+        ModelSpec::new("gpt-5.4-mini").with_max_tokens(1234)
     }
 
     fn build_test_jwt(account_id: &str) -> String {
@@ -1155,6 +1164,7 @@ mod tests {
     fn api_key_requests_include_max_output_tokens() {
         let request = prompt_to_responses_request(
             &sample_prompt(),
+            &sample_spec(),
             &OpenAiResponsesAuth::ApiKey {
                 api_key: "sk-test".to_string(),
             },
@@ -1166,8 +1176,11 @@ mod tests {
 
     #[test]
     fn subscription_requests_omit_max_output_tokens() {
-        let request =
-            prompt_to_responses_request(&sample_prompt(), &OpenAiResponsesAuth::Subscription);
+        let request = prompt_to_responses_request(
+            &sample_prompt(),
+            &sample_spec(),
+            &OpenAiResponsesAuth::Subscription,
+        );
 
         let value = serde_json::to_value(request).expect("request serializes");
         assert!(
@@ -1183,6 +1196,7 @@ mod tests {
 
         let request = prompt_to_responses_request(
             &prompt,
+            &sample_spec(),
             &OpenAiResponsesAuth::ApiKey {
                 api_key: "sk-test".to_string(),
             },

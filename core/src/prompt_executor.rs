@@ -257,8 +257,10 @@ impl ExecutorState {
         for spec in prompt.chain.iter() {
             match self.find(&spec.name) {
                 Some(model) => entries.push(ChainEntry {
-                    model_id: spec.name.clone(),
-                    max_tokens: spec.max_tokens.or(model.default_max_tokens),
+                    spec: llm::ModelSpec {
+                        name: spec.name.clone(),
+                        max_tokens: spec.max_tokens.or(model.default_max_tokens),
+                    },
                     provider: model.client.clone(),
                 }),
                 None => {

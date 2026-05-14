@@ -54,24 +54,34 @@ impl ModelChain {
         policy: &LlmModelChain,
         models: &HashMap<String, ModelDefaults>,
     ) -> Result<Self, AgentError> {
-        let primary = lookup(policy.primary.name.as_str(), models)?;
+        let primary = resolve_spec(&policy.primary, models)?;
         let fallbacks = policy
             .fallbacks
             .iter()
-            .map(|spec| lookup(spec.name.as_str(), models))
+            .map(|spec| resolve_spec(spec, models))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self { primary, fallbacks })
     }
 }
 
-fn lookup(
-    name: &str,
+/// Pins `.model` to the lookup key (so downstream code can never see the YAML
+/// `model:` field diverge from the registry key), then applies the policy's
+/// `max_tokens` override on top of the registry default.
+fn resolve_spec(
+    spec: &llm::ModelSpec,
     models: &HashMap<String, ModelDefaults>,
 ) -> Result<ModelDefaults, AgentError> {
-    models
-        .get(name)
+    let defaults = models
+        .get(spec.name.as_str())
         .cloned()
-        .ok_or_else(|| AgentError::ModelNotConfigured(name.to_string()))
+        .ok_or_else(|| AgentError::ModelNotConfigured(spec.name.clone()))?;
+    Ok(ModelDefaults {
+        model: spec.name.clone(),
+        max_tokens_per_response: spec
+            .max_tokens
+            .unwrap_or(defaults.max_tokens_per_response),
+        context_window_tokens: defaults.context_window_tokens,
+    })
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -237,6 +247,44 @@ mod tests {
         assert_eq!(chain.fallbacks[0].model, "backup");
         assert_eq!(chain.fallbacks[0].max_tokens_per_response, 4096);
         assert_eq!(chain.fallbacks[0].context_window_tokens, 128_000);
+    }
+
+    #[test]
+    fn policy_max_tokens_overrides_registry_else_registry_wins() {
+        use llm::ModelSpec;
+
+        let mut cfg = AgentsConfig::default();
+        cfg.models.insert(
+            "model-a".into(),
+            ModelDefaults {
+                model: "model-a".into(),
+                max_tokens_per_response: 4096,
+                context_window_tokens: 128_000,
+            },
+        );
+        cfg.models.insert(
+            "model-b".into(),
+            ModelDefaults {
+                model: "model-b".into(),
+                max_tokens_per_response: 8192,
+                context_window_tokens: 200_000,
+            },
+        );
+        cfg.builtin_roles
+            .insert(AgentRole::Agent, RoleConfig::default());
+
+        // Primary specifies an override, fallback omits it.
+        let policy = LlmModelChain::new(ModelSpec::new("model-a").with_max_tokens(2048))
+            .with_fallback(ModelSpec::new("model-b"));
+        let chain = ModelChain::from_policy(&policy, &cfg.models).unwrap();
+
+        assert_eq!(chain.primary.max_tokens_per_response, 2048);
+        assert_eq!(chain.fallbacks[0].max_tokens_per_response, 8192);
+        // Context window is always from the registry; not overridable per-call.
+        assert_eq!(chain.primary.context_window_tokens, 128_000);
+        // `.model` is pinned to the lookup key, never the registry's `model` field.
+        assert_eq!(chain.primary.model, "model-a");
+        assert_eq!(chain.fallbacks[0].model, "model-b");
     }
 
     #[test]
