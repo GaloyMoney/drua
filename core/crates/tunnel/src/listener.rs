@@ -5,6 +5,7 @@ use sqlx::PgPool;
 
 use crate::registrations::{TunnelRegistrationRow, TunnelRegistrations, TUNNEL_NOTIFY_CHANNEL};
 
+/// Applies registry reconciliation effects in the embedding crate.
 #[async_trait::async_trait]
 pub trait ReconcileTarget: Send + Sync {
     fn install_proxy_toolsets(&self, row: &TunnelRegistrationRow);
@@ -19,6 +20,7 @@ pub struct ReconcileCtx<'a, T: ReconcileTarget + ?Sized> {
     pub target: &'a T,
 }
 
+/// Starts the registry LISTEN/NOTIFY loop and sweeps on every reconnect.
 pub fn spawn_registry_listener<T>(pool: PgPool, self_pod_addr: Option<String>, target: Arc<T>)
 where
     T: ReconcileTarget + 'static,
@@ -90,6 +92,7 @@ where
     Ok(())
 }
 
+/// Full sweep used after listener reconnects: remove stale proxies, then mirror active peer rows.
 pub async fn reconcile_all<T>(ctx: &ReconcileCtx<'_, T>) -> Result<(), sqlx::Error>
 where
     T: ReconcileTarget + ?Sized,

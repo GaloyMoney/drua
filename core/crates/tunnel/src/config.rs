@@ -2,14 +2,19 @@ use serde::Deserialize;
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct TunnelRuntimeConfig {
+    /// Peer-reachable address for this runtime; `None` keeps tunnels single-replica.
     #[serde(default)]
     pub self_pod_addr: Option<String>,
+    /// How often the owning runtime extends its registry row.
     #[serde(default = "default_tunnel_heartbeat_secs")]
     pub heartbeat_secs: u64,
+    /// How long peers trust a registry row without a fresh heartbeat.
     #[serde(default = "default_tunnel_expires_after_secs")]
     pub expires_after_secs: u64,
+    /// How often expired registry rows are deleted and peers are notified.
     #[serde(default = "default_tunnel_reaper_interval_secs")]
     pub reaper_interval_secs: u64,
+    /// Shared bearer secret for pod-to-pod proxy calls.
     #[serde(default)]
     pub internal_secret: Option<String>,
 }
@@ -42,7 +47,7 @@ pub fn default_tunnel_reaper_interval_secs() -> u64 {
 pub enum TunnelConfigError {
     #[error("tunnel_runtime.heartbeat_secs must be > 0")]
     ZeroHeartbeat,
-    #[error("tunnel_runtime.expires_after_secs ({expires_after_secs}) must be >= 2x heartbeat_secs ({heartbeat_secs})")]
+    #[error("tunnel_runtime.expires_after_secs ({expires_after_secs}) must be >= 2x heartbeat_secs ({heartbeat_secs}) so one delayed heartbeat does not expire ownership")]
     TtlTooLow {
         heartbeat_secs: u64,
         expires_after_secs: u64,

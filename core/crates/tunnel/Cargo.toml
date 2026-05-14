@@ -4,13 +4,13 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-async-trait = "0.1"
-chrono = { version = "0.4", features = ["clock", "serde"], default-features = false }
+async-trait = { workspace = true }
+chrono = { workspace = true }
 rmcp = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json", "macros"] }
+sqlx = { workspace = true, features = ["macros"] }
 thiserror = { workspace = true }
-tokio = { version = "1", features = ["rt", "sync", "time"] }
+tokio = { workspace = true }
 tracing = { workspace = true }
-uuid = { version = "1", features = ["serde", "v4"] }
+uuid = { workspace = true, features = ["serde"] }

@@ -142,6 +142,7 @@ impl TunnelRegistry {
         }
     }
 
+    /// Returns the session and handle for the connector WebSocket owned by this process.
     pub fn local_session(&self, deployment_id: &str) -> Option<(uuid::Uuid, TunnelHandle)> {
         let map = self.inner.lock().expect("tunnel registry lock poisoned");
         map.get(deployment_id)
