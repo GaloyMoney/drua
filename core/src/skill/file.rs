@@ -247,17 +247,26 @@ pub fn slugify(title: &str) -> String {
 /// DB-driven service surface (`Skills::create` / `create_in_space`).
 /// The importer does NOT use this — paths it sees are whatever the
 /// author wrote.
+///
+/// `name` is slugified before being embedded so non-kebab-case input
+/// (e.g. "Deploy Prod") produces a clean filename
+/// (`deploy-prod.md`). The reverse-sync importer reads the name back
+/// via [`name_from_filename`] which is itself a slugify — keeping
+/// both ends symmetric. `Skills::create` slugifies the same input
+/// before persisting `name` to the DB so round-trip matches without
+/// a reverse-sync reconcile rename.
 pub fn default_skill_path(
     name: &str,
     project_name: Option<&str>,
     space_slug: Option<&str>,
 ) -> String {
+    let slug = slugify(name);
     if let Some(space) = space_slug {
-        format!("spaces/{space}/skills/{name}.md")
+        format!("spaces/{space}/skills/{slug}.md")
     } else if let Some(project) = project_name {
-        format!("runtime/projects/{project}/skills/{name}.md")
+        format!("runtime/projects/{project}/skills/{slug}.md")
     } else {
-        format!("runtime/skills/{name}.md")
+        format!("runtime/skills/{slug}.md")
     }
 }
 
@@ -317,6 +326,25 @@ mod path_tests {
         assert_eq!(
             default_skill_path("deploy", Some("alpha"), Some("team")),
             "spaces/team/skills/deploy.md"
+        );
+    }
+
+    #[test]
+    fn default_path_slugifies_name() {
+        // Spaces / mixed-case / punctuation must not leak into the
+        // path. Symmetric with name_from_filename (which slugifies on
+        // the inverse direction).
+        assert_eq!(
+            default_skill_path("Deploy Prod", Some("alpha"), None),
+            "runtime/projects/alpha/skills/deploy-prod.md"
+        );
+        assert_eq!(
+            default_skill_path("Hello, World!", None, Some("team")),
+            "spaces/team/skills/hello-world.md"
+        );
+        assert_eq!(
+            default_skill_path("path/traversal/../etc", None, None),
+            "runtime/skills/path-traversal-etc.md"
         );
     }
 }

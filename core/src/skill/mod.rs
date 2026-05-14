@@ -4,6 +4,7 @@ pub mod file;
 pub mod importer;
 pub(crate) mod repo;
 
+use file::slugify;
 pub use file::{default_skill_path, name_from_filename, parse_skill_markdown, ParsedSkill};
 pub use importer::SkillsImporter;
 
@@ -730,7 +731,14 @@ impl Skills {
         sub.can(AuthVerb::Create, AuthResource::Skill(project_id, None))?;
         Audit::record_action_if_unset("skill.create");
         Audit::record_project_id(project_id);
-        if name.trim().is_empty() {
+        // Slugify before the empty-check — "Deploy Prod" must succeed,
+        // "   " (all whitespace) must reject. The slug is the
+        // canonical name: reverse-sync derives DB.name from
+        // `name_from_filename` (itself a slugify), so persisting the
+        // slug at create time keeps both ends symmetric and avoids a
+        // first-tick rename event.
+        let name = slugify(&name);
+        if name.is_empty() {
             return Err(SkillError::BuildEntity("skill name required".into()));
         }
 
@@ -780,6 +788,19 @@ impl Skills {
                 resource: AuthResource::Skill(project_id, Some(id)),
             }));
         }
+        // Slugify rename input — same reasoning as `Skills::create`. An
+        // empty-or-whitespace rename is rejected; an unchanged name is
+        // a no-op via `update_content`'s field-by-field idempotency.
+        let name = match name {
+            Some(raw) => {
+                let slug = slugify(&raw);
+                if slug.is_empty() {
+                    return Err(SkillError::BuildEntity("skill name required".into()));
+                }
+                Some(slug)
+            }
+            None => None,
+        };
         if skill.update_content(name, description, body).did_execute() {
             self.populate_attribution().await;
             self.repo.update_in_op(&mut op, &mut skill).await?;
