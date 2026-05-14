@@ -731,12 +731,6 @@ impl Skills {
         sub.can(AuthVerb::Create, AuthResource::Skill(project_id, None))?;
         Audit::record_action_if_unset("skill.create");
         Audit::record_project_id(project_id);
-        // Slugify before the empty-check — "Deploy Prod" must succeed,
-        // "   " (all whitespace) must reject. The slug is the
-        // canonical name: reverse-sync derives DB.name from
-        // `name_from_filename` (itself a slugify), so persisting the
-        // slug at create time keeps both ends symmetric and avoids a
-        // first-tick rename event.
         let name = slugify(&name);
         if name.is_empty() {
             return Err(SkillError::BuildEntity("skill name required".into()));
@@ -788,9 +782,6 @@ impl Skills {
                 resource: AuthResource::Skill(project_id, Some(id)),
             }));
         }
-        // Slugify rename input — same reasoning as `Skills::create`. An
-        // empty-or-whitespace rename is rejected; an unchanged name is
-        // a no-op via `update_content`'s field-by-field idempotency.
         let name = match name {
             Some(raw) => {
                 let slug = slugify(&raw);
