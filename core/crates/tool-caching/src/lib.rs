@@ -260,7 +260,7 @@ fn build_elide_ctr(summary: ToolCallSummary, invocation_id: ToolInvocationId) ->
     summary.build_wire(invocation_id).0
 }
 
-fn extract_text(result: &CallToolResult) -> String {
+pub fn extract_text(result: &CallToolResult) -> String {
     result
         .content
         .iter()

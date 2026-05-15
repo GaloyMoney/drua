@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use drua_tool_caching::extract_text;
 use github_app::GitHubAppTokenProvider;
 use http::{HeaderName, HeaderValue};
 use rmcp::{
-    model::{CallToolRequestParams, CallToolResult, JsonObject, RawContent},
+    model::{CallToolRequestParams, CallToolResult, JsonObject},
     service::RunningService,
     transport::streamable_http_client::{
         StreamableHttpClientTransportConfig, StreamableHttpClientWorker,
@@ -247,18 +248,6 @@ fn looks_like_textual_upstream_error(result: &CallToolResult) -> bool {
     }
     let lower = extract_text(result).to_ascii_lowercase();
     lower.contains("resource not accessible by integration")
-}
-
-fn extract_text(result: &CallToolResult) -> String {
-    result
-        .content
-        .iter()
-        .filter_map(|c| match &c.raw {
-            RawContent::Text(t) => Some(t.text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 #[cfg(test)]

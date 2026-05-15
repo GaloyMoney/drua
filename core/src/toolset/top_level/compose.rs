@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Duration;
 
-use drua_tool_caching::ToolCaching;
+use drua_tool_caching::{extract_text, ToolCaching};
 use es_entity::context::{EventContext, WithEventContext};
 use rmcp::model::{CallToolResult, JsonObject};
 use serde::Deserialize;
@@ -562,18 +562,6 @@ fn format_tool_error(tool_name: &str, result: &CallToolResult) -> String {
         format!("{tool_name} returned an error: {text}")
     }
 }
-fn extract_text(result: &CallToolResult) -> String {
-    result
-        .content
-        .iter()
-        .filter_map(|c| match &c.raw {
-            rmcp::model::RawContent::Text(t) => Some(t.text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// Generate TypeScript declarations from the visible catalog entries and
 /// top-level tools, grouped by server prefix. Output looks like:
 ///
