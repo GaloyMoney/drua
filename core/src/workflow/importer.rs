@@ -91,14 +91,6 @@ impl LibraryImporter for WorkflowsImporter {
         Ok(None)
     }
 
-    /// Reverse-sync delete: the YAML at `path` was removed in git.
-    /// Resolve `(project_name, canonical-path)` from the path, look
-    /// up the live workflow under that project, soft-delete it +
-    /// wipe its search row. Paths that don't parse into the
-    /// `runtime/projects/{name}/workflows/{slug}.yml` shape, or that
-    /// reference an unknown project, are silently skipped (mirrors
-    /// `upsert_in_op`'s unknown-project behaviour and the skill
-    /// importer's hand-authored-path policy).
     async fn delete_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,

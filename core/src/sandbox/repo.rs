@@ -12,7 +12,7 @@ use super::entity::*;
     columns(
         project_id(ty = "ProjectId", list_for(by(created_at))),
         name(ty = "String", list_for(by(created_at))),
-        workflow_id(ty = "Option<WorkflowDefinitionId>"),
+        workflow_id(ty = "Option<WorkflowDefinitionId>", list_for(by(created_at))),
     ),
     delete = "soft_without_queries"
 )]
@@ -38,6 +38,18 @@ impl SandboxRepo {
     ) -> Result<(), sqlx::Error> {
         sqlx::query("UPDATE sandboxes SET deleted = TRUE WHERE project_id = $1")
             .bind(project_id)
+            .execute(op.as_executor())
+            .await?;
+        Ok(())
+    }
+
+    pub async fn cascade_delete_for_workflow_id_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        workflow_id: WorkflowDefinitionId,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE sandboxes SET deleted = TRUE WHERE workflow_id = $1")
+            .bind(workflow_id)
             .execute(op.as_executor())
             .await?;
         Ok(())

@@ -319,9 +319,6 @@ enum WorkflowCommand {
     List,
     Get,
     Update,
-    /// Soft-delete the definition. Cascades runs to soft-deleted and
-    /// queues a `DeleteFile` write on the canonical YAML. Cron jobs
-    /// self-terminate on next fire.
     Delete,
     /// Spawn a run with the given trigger payload. Returns the run id.
     Trigger,

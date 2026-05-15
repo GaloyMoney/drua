@@ -906,6 +906,72 @@ impl Sandboxes {
         Ok(())
     }
 
+    #[instrument(
+        name = "domain.sandbox.cascade_delete_for_workflow_id_in_op",
+        skip(self, op)
+    )]
+    pub async fn cascade_delete_for_workflow_id_in_op(
+        &self,
+        op: &mut DbOp<'_>,
+        workflow_id: WorkflowDefinitionId,
+    ) -> Result<(), SandboxError> {
+        for sandbox in self.list_all_for_workflow_id_in_op(op, workflow_id).await? {
+            let resource_name = sandbox.resource_name();
+            if sandbox.state != SandboxState::Suspended {
+                if let Err(e) = self.admin.delete_sandbox(&resource_name).await {
+                    tracing::warn!(
+                        sandbox_id = %sandbox.id,
+                        sandbox = %resource_name,
+                        error = %e,
+                        "admin delete_sandbox failed during workflow cascade"
+                    );
+                }
+            }
+            if let Err(e) = self.admin.delete_pvcs(&resource_name).await {
+                tracing::warn!(
+                    sandbox_id = %sandbox.id,
+                    sandbox = %resource_name,
+                    error = %e,
+                    "admin delete_pvcs failed during workflow cascade"
+                );
+            }
+        }
+        self.repo
+            .cascade_delete_for_workflow_id_in_op(op, workflow_id)
+            .await?;
+        Ok(())
+    }
+
+    async fn list_all_for_workflow_id_in_op(
+        &self,
+        op: &mut DbOp<'_>,
+        workflow_id: WorkflowDefinitionId,
+    ) -> Result<Vec<Sandbox>, SandboxError> {
+        const PAGE_SIZE: usize = 100;
+        let mut all = Vec::new();
+        let mut query = PaginatedQueryArgs {
+            first: PAGE_SIZE,
+            after: None,
+        };
+        loop {
+            let mut result = self
+                .repo
+                .list_for_workflow_id_by_created_at_in_op(
+                    &mut *op,
+                    Some(workflow_id),
+                    query,
+                    ListDirection::Descending,
+                )
+                .await?;
+            all.append(&mut result.entities);
+            match result.into_next_query() {
+                Some(next) => query = next,
+                None => break,
+            }
+        }
+        Ok(all)
+    }
+
     /// Drains every page of `list_for_project_id_by_created_at_in_op`
     /// — used by the cascade variants that *must not* miss rows.
     async fn list_all_for_project_in_op(

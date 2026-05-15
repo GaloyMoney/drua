@@ -49,10 +49,6 @@ impl WorkflowDefinitionRepo {
         Ok(())
     }
 
-    /// Whether a row with this id exists with `deleted = TRUE`.
-    /// `soft_without_queries` doesn't auto-generate `_include_deleted`
-    /// query variants, so reverse-sync needs a direct probe to avoid
-    /// resurrecting an entity an operator just removed.
     pub async fn is_soft_deleted_in_op(
         &self,
         op: &mut impl AtomicOperation,
@@ -66,34 +62,38 @@ impl WorkflowDefinitionRepo {
         Ok(row.map(|(d,)| d).unwrap_or(false))
     }
 
-    /// Resolve a canonical-path string back to the live workflow row.
-    /// Reverse-sync uses this when an external git delete removes the
-    /// YAML — the importer has only the path string to identify the
-    /// entity. Matches on `(project_id, canonical_workflow_path(name,
-    /// project_name))` exactly so a slug collision in two different
-    /// projects can't cross-link.
     pub async fn maybe_find_by_canonical_path_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
         project_id: ProjectId,
         path: &str,
     ) -> Result<Option<WorkflowDefinition>, super::WorkflowError> {
-        let query = es_entity::PaginatedQueryArgs {
+        let mut query = es_entity::PaginatedQueryArgs {
             first: 100,
             after: None,
         };
-        let result = self
-            .list_for_project_id_by_created_at_in_op(
-                op,
-                project_id,
-                query,
-                es_entity::ListDirection::Ascending,
-            )
-            .await?;
-        Ok(result
-            .entities
-            .into_iter()
-            .find(|w| canonical_workflow_path(&w.name, w.project_name.as_deref()) == path))
+        loop {
+            let mut result = self
+                .list_for_project_id_by_created_at_in_op(
+                    &mut *op,
+                    project_id,
+                    query,
+                    es_entity::ListDirection::Ascending,
+                )
+                .await?;
+            let entities = std::mem::take(&mut result.entities);
+            let next = result.into_next_query();
+            if let Some(found) = entities
+                .into_iter()
+                .find(|w| canonical_workflow_path(&w.name, w.project_name.as_deref()) == path)
+            {
+                return Ok(Some(found));
+            }
+            match next {
+                Some(q) => query = q,
+                None => return Ok(None),
+            }
+        }
     }
 
     async fn sync_to_library<OP: es_entity::AtomicOperation>(

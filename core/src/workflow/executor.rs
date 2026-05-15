@@ -539,32 +539,27 @@ impl Executor {
                     crate::skill::SkillBody::new(templated_body).interpolate(Some(&arguments));
 
                 let agent_name = format!("workflow-{}-{name}", run_id.short());
-                let mut op = self
-                    .agents
-                    .begin_op()
-                    .await
-                    .map_err(|e| WorkflowError::Agent(e.to_string()))?;
+                let mut op = self.agents.begin_op().await?;
 
                 let existing = self
                     .agents
                     .find_for_workflow_step_in_op(&mut op, run_id, &agent_name)
-                    .await
-                    .map_err(|e| WorkflowError::Agent(e.to_string()))?;
+                    .await?;
 
                 let (agent, detached_agents) = if let Some(agent) = existing {
                     (agent, Vec::new())
                 } else {
                     let detached_agents = match attach_sandbox {
-                        Some((sandbox_id, mode)) => self
-                            .agents
-                            .detach_conflicting_writer_in_op(
-                                &mut op,
-                                sandbox_id,
-                                mode,
-                                Some(workflow_id),
-                            )
-                            .await
-                            .map_err(|e| WorkflowError::Agent(e.to_string()))?,
+                        Some((sandbox_id, mode)) => {
+                            self.agents
+                                .detach_conflicting_writer_in_op(
+                                    &mut op,
+                                    sandbox_id,
+                                    mode,
+                                    Some(workflow_id),
+                                )
+                                .await?
+                        }
                         None => Vec::new(),
                     };
                     let chain_override = definition.resolve_step_chain(step);
@@ -580,13 +575,10 @@ impl Executor {
                             chain_override,
                             output_schema.as_ref().clone(),
                         )
-                        .await
-                        .map_err(|e| WorkflowError::Agent(e.to_string()))?;
+                        .await?;
                     (agent, detached_agents)
                 };
-                op.commit()
-                    .await
-                    .map_err(|e| WorkflowError::Agent(e.to_string()))?;
+                op.commit().await?;
 
                 if let Some((sandbox_id, _)) = attach_sandbox {
                     if preexisting_ids.contains(&sandbox_id) {
@@ -711,16 +703,15 @@ impl Executor {
         let mut rx = match self
             .agents
             .resume_message(agent_subject.clone(), agent.id)
-            .await
-            .map_err(|e| WorkflowError::Agent(e.to_string()))?
+            .await?
         {
             Some(rx) => rx,
             None => match user_prompt {
-                Some(prompt) => self
-                    .agents
-                    .send_message_with_choice(agent_subject, agent.id, prompt, tool_choice)
-                    .await
-                    .map_err(|e| WorkflowError::Agent(e.to_string()))?,
+                Some(prompt) => {
+                    self.agents
+                        .send_message_with_choice(agent_subject, agent.id, prompt, tool_choice)
+                        .await?
+                }
                 None => return Ok(None),
             },
         };
@@ -759,10 +750,7 @@ impl Executor {
         // pushed `OutputSubmitted` and returned `Done` when the agent
         // called `submit_output`, which broke the agent loop and
         // emitted `AssistantDone`. Read it back here.
-        self.agents
-            .submitted_output(agent.id)
-            .await
-            .map_err(|e| WorkflowError::Agent(e.to_string()))
+        Ok(self.agents.submitted_output(agent.id).await?)
     }
 
     /// Dispatch a single top-level MCP tool with `${{ … }}`-substituted

@@ -37,10 +37,6 @@ impl WorkflowRunRepo {
         Ok(())
     }
 
-    /// Bulk soft-delete every run for `definition_id`. In-flight
-    /// `ExecuteRunConfig` jobs continue against the soft-deleted row
-    /// — the runner already tolerates this and the run reaches a
-    /// terminal state on its own.
     pub async fn cascade_delete_for_definition_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
