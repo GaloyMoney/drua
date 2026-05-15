@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::state::{Focus, Mode, ScreenState};
+use super::state::{Focus, Mode, RunDetailPanel, ScreenState, WorkflowView};
 
 /// Async side-effects returned from key handlers for the event loop to execute.
 pub enum Action {
@@ -8,10 +8,34 @@ pub enum Action {
     Quit,
     Suspend,
     Refresh,
-    CreateProject { name: String, description: String },
-    SendChat { agent_id: String, prompt: String },
+    CreateProject {
+        name: String,
+        description: String,
+    },
+    SendChat {
+        agent_id: String,
+        prompt: String,
+    },
     ToggleThreads,
-    ExportThread { agent_id: String, path: String },
+    OpenWorkflows,
+    RefreshWorkflows,
+    FetchWorkflowDefinition {
+        definition_id: String,
+    },
+    FetchWorkflowRuns {
+        definition_id: String,
+    },
+    FetchWorkflowRun {
+        run_id: String,
+    },
+    TriggerWorkflow {
+        definition_id: String,
+        payload: serde_json::Value,
+    },
+    ExportThread {
+        agent_id: String,
+        path: String,
+    },
 }
 
 pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
@@ -48,6 +72,9 @@ pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
                     return Action::None;
                 }
                 KeyCode::Char('t') => return Action::ToggleThreads,
+                KeyCode::Char('w') if state.focus != Focus::Chat || state.chat_input.is_empty() => {
+                    return Action::OpenWorkflows;
+                }
                 _ => {}
             }
         }
@@ -58,10 +85,161 @@ pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             Focus::Agents => handle_agents_key(state, key),
             Focus::Chat => handle_chat_key(state, key),
             Focus::Threads => handle_threads_key(state, key),
+            Focus::Workflows => handle_workflows_key(state, key),
         },
         Mode::CreateProject => handle_create_key(state, key),
         Mode::ExportThread => handle_export_key(state, key),
         Mode::ProjectPicker { .. } => handle_picker_key(state, key),
+        Mode::TriggerWorkflow { .. } => handle_trigger_workflow_key(state, key),
+    }
+}
+
+fn handle_workflows_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    state.status_message = None;
+    match &state.workflows.view {
+        WorkflowView::Catalog => handle_workflow_catalog_key(state, key),
+        WorkflowView::Definition { .. } => handle_workflow_definition_key(state, key),
+        WorkflowView::Runs { .. } => handle_workflow_runs_key(state, key),
+        WorkflowView::RunDetail { .. } => handle_workflow_run_detail_key(state, key),
+    }
+}
+
+fn handle_workflow_catalog_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.workflow_cursor_down();
+            Action::None
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.workflow_cursor_up();
+            Action::None
+        }
+        KeyCode::Enter => match state.selected_workflow_definition_id() {
+            Some(definition_id) => {
+                state.open_workflow_definition(definition_id.clone());
+                Action::FetchWorkflowDefinition { definition_id }
+            }
+            None => Action::None,
+        },
+        KeyCode::Char('T') => enter_trigger_for_selected_workflow(state),
+        KeyCode::Char('r') => Action::RefreshWorkflows,
+        KeyCode::Esc => {
+            state.workflow_back();
+            Action::None
+        }
+        _ => Action::None,
+    }
+}
+
+fn handle_workflow_definition_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.workflow_scroll_yaml_down();
+            Action::None
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.workflow_scroll_yaml_up();
+            Action::None
+        }
+        KeyCode::Char('T') => enter_trigger_for_selected_workflow(state),
+        KeyCode::Char('R') => match state.selected_workflow_definition_id() {
+            Some(definition_id) => {
+                state.open_workflow_runs(definition_id.clone());
+                Action::FetchWorkflowRuns { definition_id }
+            }
+            None => Action::None,
+        },
+        KeyCode::Char('r') => match state.selected_workflow_definition_id() {
+            Some(definition_id) => Action::FetchWorkflowDefinition { definition_id },
+            None => Action::None,
+        },
+        KeyCode::Esc => {
+            state.workflow_back();
+            Action::None
+        }
+        _ => Action::None,
+    }
+}
+
+fn handle_workflow_runs_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.workflow_runs_cursor_down();
+            Action::None
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.workflow_runs_cursor_up();
+            Action::None
+        }
+        KeyCode::Enter => match state.selected_workflow_run_id() {
+            Some(run_id) => {
+                state.open_workflow_run_detail(run_id.clone());
+                Action::FetchWorkflowRun { run_id }
+            }
+            None => Action::None,
+        },
+        KeyCode::Char('r') => match state.selected_workflow_definition_id() {
+            Some(definition_id) => Action::FetchWorkflowRuns { definition_id },
+            None => Action::None,
+        },
+        KeyCode::Esc => {
+            state.workflow_back();
+            Action::None
+        }
+        _ => Action::None,
+    }
+}
+
+fn handle_workflow_run_detail_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.workflow_step_cursor_down();
+            Action::None
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.workflow_step_cursor_up();
+            Action::None
+        }
+        KeyCode::Enter => {
+            state.workflow_toggle_expanded();
+            Action::None
+        }
+        KeyCode::Char('p') => {
+            state.workflow_set_panel(RunDetailPanel::Trigger);
+            Action::None
+        }
+        KeyCode::Char('a') => {
+            state.workflow_set_panel(RunDetailPanel::Agents);
+            Action::None
+        }
+        KeyCode::Char('s') => {
+            state.workflow_set_panel(RunDetailPanel::Sandboxes);
+            Action::None
+        }
+        KeyCode::Char('d') => {
+            state.workflow_set_panel(RunDetailPanel::Step);
+            Action::None
+        }
+        KeyCode::Char('r') => match state.selected_workflow_run_id() {
+            Some(run_id) => Action::FetchWorkflowRun { run_id },
+            None => Action::None,
+        },
+        KeyCode::Esc => {
+            state.workflow_back();
+            Action::None
+        }
+        _ => Action::None,
+    }
+}
+
+fn enter_trigger_for_selected_workflow(state: &mut ScreenState) -> Action {
+    match state.selected_workflow_definition_id() {
+        Some(definition_id) => {
+            let name = state.selected_workflow_name();
+            state.enter_trigger_workflow(definition_id, name);
+            Action::None
+        }
+        None => Action::None,
     }
 }
 
@@ -293,6 +471,68 @@ fn handle_export_key(state: &mut ScreenState, key: KeyEvent) -> Action {
     }
 }
 
+fn handle_trigger_workflow_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Esc => {
+            state.exit_trigger_workflow();
+            Action::None
+        }
+        KeyCode::Backspace => {
+            if let Mode::TriggerWorkflow { payload, error, .. } = &mut state.mode {
+                payload.pop();
+                *error = None;
+            }
+            Action::None
+        }
+        KeyCode::Char('u') if ctrl => {
+            if let Mode::TriggerWorkflow { payload, error, .. } = &mut state.mode {
+                payload.clear();
+                *error = None;
+            }
+            Action::None
+        }
+        KeyCode::Char(c) if !ctrl => {
+            if let Mode::TriggerWorkflow { payload, error, .. } = &mut state.mode {
+                payload.push(c);
+                *error = None;
+            }
+            Action::None
+        }
+        KeyCode::Enter => {
+            let (definition_id, payload_text) = match &state.mode {
+                Mode::TriggerWorkflow {
+                    definition_id,
+                    payload,
+                    ..
+                } => (definition_id.clone(), payload.trim().to_string()),
+                _ => return Action::None,
+            };
+            let payload_text = if payload_text.is_empty() {
+                "{}".to_string()
+            } else {
+                payload_text
+            };
+            match serde_json::from_str(&payload_text) {
+                Ok(payload) => {
+                    state.exit_trigger_workflow();
+                    Action::TriggerWorkflow {
+                        definition_id,
+                        payload,
+                    }
+                }
+                Err(e) => {
+                    if let Mode::TriggerWorkflow { error, .. } = &mut state.mode {
+                        *error = Some(format!("Invalid JSON: {e}"));
+                    }
+                    Action::None
+                }
+            }
+        }
+        _ => Action::None,
+    }
+}
+
 fn send_chat_to_selected_agent(state: &mut ScreenState, input: String) -> Action {
     match state.selected_agent_id() {
         Some(agent_id) => {
@@ -308,5 +548,102 @@ fn send_chat_to_selected_agent(state: &mut ScreenState, input: String) -> Action
             state.status_message = Some("No agent selected".to_string());
             Action::None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::*;
+    use crate::tui::state::{AgentItem, ProjectItem};
+
+    fn project() -> ProjectItem {
+        ProjectItem {
+            id: "p-1".into(),
+            name: "Project".into(),
+            description: None,
+            created_at: None,
+            lead: None,
+            agents: vec![AgentItem {
+                id: "a-1".into(),
+                name: "lead".into(),
+                role: "PROJECT_LEAD".into(),
+                model: "test".into(),
+                sandbox: None,
+            }],
+        }
+    }
+
+    fn state() -> ScreenState {
+        ScreenState::new(vec![project()], "http://s".into(), "u".into(), None)
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::empty())
+    }
+
+    #[test]
+    fn ctrl_w_opens_workflows() {
+        let mut state = state();
+        let action = handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+        );
+        assert!(matches!(action, Action::OpenWorkflows));
+    }
+
+    #[test]
+    fn ctrl_w_still_deletes_chat_word_when_input_has_text() {
+        let mut state = state();
+        state.chat_input = "hello world".into();
+        state.input_cursor = state.chat_input.len();
+
+        let action = handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+        );
+
+        assert!(matches!(action, Action::None));
+        assert_eq!(state.chat_input, "hello ");
+    }
+
+    #[test]
+    fn trigger_modal_empty_payload_submits_empty_object() {
+        let mut state = state();
+        state.enter_trigger_workflow("wf-1".into(), "wf".into());
+        if let Mode::TriggerWorkflow { payload, .. } = &mut state.mode {
+            payload.clear();
+        }
+
+        let action = handle_key(&mut state, key(KeyCode::Enter));
+
+        match action {
+            Action::TriggerWorkflow {
+                definition_id,
+                payload,
+            } => {
+                assert_eq!(definition_id, "wf-1");
+                assert_eq!(payload, serde_json::json!({}));
+            }
+            _ => panic!("expected trigger action"),
+        }
+    }
+
+    #[test]
+    fn trigger_modal_invalid_json_stays_open_with_error() {
+        let mut state = state();
+        state.enter_trigger_workflow("wf-1".into(), "wf".into());
+        if let Mode::TriggerWorkflow { payload, .. } = &mut state.mode {
+            *payload = "{".into();
+        }
+
+        let action = handle_key(&mut state, key(KeyCode::Enter));
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            state.mode,
+            Mode::TriggerWorkflow { error: Some(_), .. }
+        ));
     }
 }
