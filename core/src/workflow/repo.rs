@@ -5,6 +5,7 @@ use es_entity::*;
 use crate::primitives::*;
 
 use super::entity::*;
+use super::yaml::canonical_workflow_path;
 
 #[derive(EsRepo, Clone)]
 #[es_repo(
@@ -46,6 +47,53 @@ impl WorkflowDefinitionRepo {
             .execute(op.as_executor())
             .await?;
         Ok(())
+    }
+
+    pub async fn is_soft_deleted_in_op(
+        &self,
+        op: &mut impl AtomicOperation,
+        id: WorkflowDefinitionId,
+    ) -> Result<bool, sqlx::Error> {
+        let row: Option<(bool,)> =
+            sqlx::query_as("SELECT deleted FROM workflow_definitions WHERE id = $1")
+                .bind(id)
+                .fetch_optional(op.as_executor())
+                .await?;
+        Ok(row.map(|(d,)| d).unwrap_or(false))
+    }
+
+    pub async fn maybe_find_by_canonical_path_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        project_id: ProjectId,
+        path: &str,
+    ) -> Result<Option<WorkflowDefinition>, super::WorkflowError> {
+        let mut query = es_entity::PaginatedQueryArgs {
+            first: 100,
+            after: None,
+        };
+        loop {
+            let mut result = self
+                .list_for_project_id_by_created_at_in_op(
+                    &mut *op,
+                    project_id,
+                    query,
+                    es_entity::ListDirection::Ascending,
+                )
+                .await?;
+            let entities = std::mem::take(&mut result.entities);
+            let next = result.into_next_query();
+            if let Some(found) = entities
+                .into_iter()
+                .find(|w| canonical_workflow_path(&w.name, w.project_name.as_deref()) == path)
+            {
+                return Ok(Some(found));
+            }
+            match next {
+                Some(q) => query = q,
+                None => return Ok(None),
+            }
+        }
     }
 
     async fn sync_to_library<OP: es_entity::AtomicOperation>(

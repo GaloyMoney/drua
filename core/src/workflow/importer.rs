@@ -90,4 +90,37 @@ impl LibraryImporter for WorkflowsImporter {
 
         Ok(None)
     }
+
+    async fn delete_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        path: &str,
+    ) -> Result<Option<uuid::Uuid>, UpsertError> {
+        let Some(project_name) = crate::workflow::yaml::project_name_from_workflow_path(path)
+        else {
+            return Ok(None);
+        };
+        let project = match self.projects.find_by_name(&project_name).await {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                tracing::debug!(
+                    project_name,
+                    path,
+                    "workflow delete references unknown project; skipping"
+                );
+                return Ok(None);
+            }
+            Err(e) => {
+                return Err(UpsertError::Other(format!(
+                    "project lookup failed for {project_name}: {e}"
+                )))
+            }
+        };
+        let deleted = self
+            .workflows
+            .delete_by_path_in_op(op, project.id, path)
+            .await
+            .map_err(|e| UpsertError::Other(format!("workflow reverse-delete: {e}")))?;
+        Ok(deleted.map(uuid::Uuid::from))
+    }
 }

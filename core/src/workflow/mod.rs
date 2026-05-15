@@ -14,6 +14,7 @@ pub use importer::WorkflowsImporter;
 
 use std::sync::Arc;
 
+use drua_library::{CommitAttribution, WriteOp};
 use rand::RngCore;
 use tracing::instrument;
 
@@ -21,9 +22,11 @@ use crate::agent::Agents;
 use crate::audit::{Audit, InteractionOutcome};
 use crate::primitives::*;
 use crate::sandbox::Sandboxes;
+use crate::skill::file::slugify;
 use crate::skill::Skills;
 use crate::toolset::ToolSets;
 use crate::user::Users;
+use yaml::canonical_workflow_path;
 
 pub const WORKFLOW_DOC_TYPE: drua_library::DocType = drua_library::DocType::new("workflow");
 
@@ -161,6 +164,9 @@ pub struct Workflows {
     /// `tool_step.params` — looks up the called tool's
     /// `output_schema()` + `composable()` flag.
     toolsets: Arc<ToolSets>,
+    library: drua_library::Library,
+    agents: Arc<Agents>,
+    sandboxes: Arc<Sandboxes>,
     execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
     cron_spawner: ::job::JobSpawner<TriggerCronConfig>,
     /// Cloned `Jobs` handle so `await_run_completion` can block on the
@@ -187,9 +193,9 @@ impl Workflows {
         let execute_run_spawner = jobs.add_initializer(ExecuteRunJobInitializer::new(
             WorkflowRunRepo::new(pool),
             WorkflowDefinitionRepo::new_without_library(pool),
-            agents,
+            Arc::clone(&agents),
             Arc::clone(&skills),
-            sandboxes,
+            Arc::clone(&sandboxes),
             Arc::clone(&toolsets),
         ));
         let cron_spawner = jobs.add_initializer(TriggerCronJobInitializer::new(
@@ -198,11 +204,14 @@ impl Workflows {
             execute_run_spawner.clone(),
         ));
         Self {
-            repo: WorkflowDefinitionRepo::new(pool, library),
+            repo: WorkflowDefinitionRepo::new(pool, library.clone()),
             run_repo: WorkflowRunRepo::new(pool),
             skills,
             users,
             toolsets,
+            library,
+            agents,
+            sandboxes,
             execute_run_spawner,
             cron_spawner,
             jobs: jobs.clone(),
@@ -236,6 +245,14 @@ impl Workflows {
         } = parsed;
 
         Self::validate_trigger(&trigger)?;
+
+        if self.repo.is_soft_deleted_in_op(op, workflow_id).await? {
+            tracing::info!(
+                %workflow_id,
+                "skipping reverse-sync import for soft-deleted workflow"
+            );
+            return Ok(None);
+        }
 
         let file_hash = drua_library::GitFileHash::new(rendered);
 
@@ -566,7 +583,7 @@ impl Workflows {
             .map_err(|e| WorkflowError::BuildEntity(e.to_string()))?;
 
         let mut op = self.repo.begin_op().await?;
-        self.users.commit_attribution().await;
+        self.populate_attribution().await;
         let workflow = self.repo.create_in_op(&mut op, new).await?;
         self.register_cron_in_op(&mut op, &workflow).await?;
         op.commit().await?;
@@ -623,7 +640,7 @@ impl Workflows {
             .did_execute()
         {
             let mut op = self.repo.begin_op().await?;
-            self.users.commit_attribution().await;
+            self.populate_attribution().await;
             self.repo.update_in_op(&mut op, &mut definition).await?;
             let is_cron = matches!(definition.trigger, WorkflowTrigger::Cron { .. });
             if !was_cron && is_cron {
@@ -632,6 +649,35 @@ impl Workflows {
             op.commit().await?;
         }
         Ok(definition)
+    }
+
+    async fn populate_attribution(&self) -> CommitAttribution {
+        self.users.commit_attribution().await
+    }
+
+    async fn enqueue_workflow_delete_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        workflow: &WorkflowDefinition,
+        attribution: CommitAttribution,
+    ) -> Result<(), WorkflowError> {
+        let path = canonical_workflow_path(&workflow.name, workflow.project_name.as_deref());
+        let id_uuid: uuid::Uuid = workflow.id.into();
+        let message = format!(
+            "workflow: delete {}-{}",
+            slugify(&workflow.name),
+            &id_uuid.to_string()[..8]
+        );
+        self.library
+            .enqueue_full_in_op(
+                op,
+                None,
+                vec![(id_uuid, WORKFLOW_DOC_TYPE)],
+                Some(WriteOp::DeleteFile { path, message }),
+                attribution,
+            )
+            .await?;
+        Ok(())
     }
 
     /// Spawn the next cron fire in the same atomic op as the
@@ -914,6 +960,70 @@ impl Workflows {
             .cascade_delete_for_project_in_op(op, project_id)
             .await?;
         Ok(())
+    }
+
+    #[instrument(name = "core.workflow.delete", skip_all)]
+    pub async fn delete(
+        &self,
+        sub: &AuthSubject,
+        id: WorkflowDefinitionId,
+    ) -> Result<(), WorkflowError> {
+        let workflow = self.repo.find_by_id(id).await?;
+        sub.can(
+            AuthVerb::Delete,
+            AuthResource::Workflow(workflow.project_id, Some(workflow.id)),
+        )?;
+        Audit::record_action_if_unset("workflow.delete");
+        Audit::record_project_id(workflow.project_id);
+        Audit::record_workflow_id(workflow.id);
+
+        let mut op = self.repo.begin_op().await?;
+        let attribution = self.populate_attribution().await;
+        self.enqueue_workflow_delete_in_op(&mut op, &workflow, attribution)
+            .await?;
+        self.agents
+            .cascade_delete_for_workflow_id_in_op(&mut op, id)
+            .await?;
+        self.sandboxes
+            .cascade_delete_for_workflow_id_in_op(&mut op, id)
+            .await?;
+        self.run_repo
+            .cascade_delete_for_definition_in_op(&mut op, id)
+            .await?;
+        self.repo.delete_in_op(&mut op, workflow).await?;
+        op.commit().await?;
+        Ok(())
+    }
+
+    pub(crate) async fn delete_by_path_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        project_id: ProjectId,
+        path: &str,
+    ) -> Result<Option<WorkflowDefinitionId>, WorkflowError> {
+        let Some(workflow) = self
+            .repo
+            .maybe_find_by_canonical_path_in_op(op, project_id, path)
+            .await?
+        else {
+            return Ok(None);
+        };
+        let id = workflow.id;
+        self.library
+            .search()
+            .delete_in_op(op, id.into(), WORKFLOW_DOC_TYPE)
+            .await?;
+        self.agents
+            .cascade_delete_for_workflow_id_in_op(op, id)
+            .await?;
+        self.sandboxes
+            .cascade_delete_for_workflow_id_in_op(op, id)
+            .await?;
+        self.run_repo
+            .cascade_delete_for_definition_in_op(op, id)
+            .await?;
+        self.repo.delete_in_op(op, workflow).await?;
+        Ok(Some(id))
     }
 }
 

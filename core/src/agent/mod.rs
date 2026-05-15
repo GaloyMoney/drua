@@ -799,6 +799,39 @@ impl Agents {
         Ok(())
     }
 
+    #[instrument(
+        name = "domain.agent.cascade_delete_for_workflow_id_in_op",
+        skip(self, op)
+    )]
+    pub async fn cascade_delete_for_workflow_id_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        workflow_id: WorkflowDefinitionId,
+    ) -> Result<(), AgentError> {
+        const PAGE_SIZE: usize = 100;
+        loop {
+            let result = self
+                .repo
+                .list_for_workflow_id_by_created_at_in_op(
+                    &mut *op,
+                    Some(workflow_id),
+                    es_entity::PaginatedQueryArgs {
+                        first: PAGE_SIZE,
+                        after: None,
+                    },
+                    es_entity::ListDirection::Ascending,
+                )
+                .await?;
+            if result.entities.is_empty() {
+                break;
+            }
+            for agent in result.entities {
+                self.delete_in_op(op, agent.id).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Re-attach with a different mode: downgrade unconditional; upgrade to
     /// Write only if no other agent holds Write. The matching
     /// `SandboxRead`/`SandboxWrite` scope replaces any stale opposite-mode

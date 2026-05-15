@@ -36,4 +36,16 @@ impl WorkflowRunRepo {
             .await?;
         Ok(())
     }
+
+    pub async fn cascade_delete_for_definition_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        definition_id: WorkflowDefinitionId,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE workflow_runs SET deleted = TRUE WHERE definition_id = $1")
+            .bind(definition_id)
+            .execute(op.as_executor())
+            .await?;
+        Ok(())
+    }
 }

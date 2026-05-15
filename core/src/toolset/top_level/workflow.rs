@@ -118,6 +118,9 @@ enum WorkflowParams {
         #[serde(default)]
         clear_model_chain: bool,
     },
+    Delete {
+        definition_id: WorkflowDefinitionId,
+    },
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -312,6 +315,7 @@ impl WorkflowParams {
             Self::Runs { .. } => "workflow.runs",
             Self::Run { .. } => "workflow.run",
             Self::Update { .. } => "workflow.update",
+            Self::Delete { .. } => "workflow.delete",
         }
     }
 }
@@ -474,7 +478,7 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
         "properties": {
             "command": {
                 "type": "string",
-                "enum": ["create", "list", "get", "trigger", "await_run", "runs", "run", "update"],
+                "enum": ["create", "list", "get", "trigger", "await_run", "runs", "run", "update", "delete"],
                 "description": "Which workflow operation to perform. `trigger` returns immediately with the freshly-spawned run; pair with `await_run` to block until terminal. `runs` lists runs (truncated outputs); `run` returns a single run with full per-step output."
             },
             "name": {
@@ -619,7 +623,9 @@ impl TopLevelTool for WorkflowTool {
          `update` (requires `definition_id`; optional `name`, \
          `description`+`clear_description`, `steps`+`update_steps`, \
          `sandboxes`+`update_sandboxes`, `provider`/`manual`+`update_trigger`, \
-         `model_chain`+`clear_model_chain`)."
+         `model_chain`+`clear_model_chain`), \
+         `delete` (requires `definition_id`; cascades to runs and queues \
+         a `DeleteFile` on the canonical YAML)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -924,6 +930,19 @@ impl TopLevelTool for WorkflowTool {
                 let out = WorkflowOutput {
                     command: "update".to_string(),
                     definition: Some(definition_to_output(&definition)),
+                    ..Default::default()
+                };
+                (text, out)
+            }
+
+            WorkflowParams::Delete { definition_id } => {
+                self.workflows
+                    .delete(subject, definition_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                let text = format!("Workflow deleted (id {definition_id}).");
+                let out = WorkflowOutput {
+                    command: "delete".to_string(),
                     ..Default::default()
                 };
                 (text, out)

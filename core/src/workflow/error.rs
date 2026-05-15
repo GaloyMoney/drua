@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+use crate::agent::error::AgentError;
 use crate::auth::error::AuthorizationError;
 use crate::sandbox::SandboxError;
 
@@ -75,13 +76,15 @@ pub enum WorkflowError {
     #[error("WorkflowError - StepErrored: {step}: {reason}")]
     StepErrored { step: String, reason: String },
     #[error("WorkflowError - Agent: {0}")]
-    Agent(String),
+    Agent(#[from] AgentError),
     #[error("WorkflowError - Skill: {0}")]
     Skill(String),
     #[error("WorkflowError - Sandbox: {0}")]
     Sandbox(#[from] SandboxError),
     #[error("WorkflowError - Job: {0}")]
     Job(String),
+    #[error("WorkflowError - Library: {0}")]
+    Library(#[from] drua_library::LibraryError),
     #[error("WorkflowError - Authorization: {0}")]
     Authorization(#[from] AuthorizationError),
     /// Cooperative cancellation. The runner observes the job's shutdown
