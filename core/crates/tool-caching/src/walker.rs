@@ -588,10 +588,7 @@ fn line_elide_string(
         (head, tail)
     } else {
         let head = n / 2;
-        let mut tail = n - head;
-        if tail > 0 {
-            tail -= 1;
-        }
+        let tail = (n - head).saturating_sub(1);
         (head, tail)
     };
     let mut elide = make_line_elide(&lines, head, tail, ctx, preprocessed_to_raw);
