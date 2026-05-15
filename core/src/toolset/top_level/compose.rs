@@ -62,6 +62,8 @@ struct ComposeOutput {
     /// of source order. The drill-down nudge reaches the agent through `fetch_hint`.
     sub_invocations: Vec<SubInvocation>,
     fetch_hint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    normal_fetch_limit_bytes: Option<u64>,
     tool_calls: usize,
     execution_time_ms: u64,
     console: Vec<String>,
@@ -71,7 +73,8 @@ struct ComposeOutput {
     /// `path: "$.result"` (compose opts out of the `DruaToolResult`
     /// wrap, so there's no outer `result` key — the persisted root IS
     /// `ComposeOutput`) or `query: {mode: "summary"}` for the full
-    /// envelope.
+    /// envelope, which bypasses the normal fetch cap. Per-subcall
+    /// `summary_envelope_bytes` exposes the size before fetching.
     #[schemars(schema_with = "crate::toolset::any_json_schema")]
     result: serde_json::Value,
 }
@@ -179,10 +182,16 @@ impl TopLevelTool for ComposeTool {
         // Compose opts out of the `DruaToolResult` wrap, so the
         // persisted root IS `ComposeOutput`: agents recover via
         // `path: "$.result"` (not `$.result.result`) or
-        // `query: {mode: "summary"}` for the full curated envelope.
+        // `query: {mode: "summary"}` for the full curated envelope,
+        // which bypasses the normal fetch cap. The sub-invocation
+        // metadata exposes summary size before the agent fetches it.
         let out = ComposeOutput {
             sub_invocations: collected_sub_invocations,
             fetch_hint: COMPOSE_FETCH_HINT.to_string(),
+            normal_fetch_limit_bytes: self
+                .tool_caching
+                .as_ref()
+                .map(|tc| tc.max_fetch_response_bytes()),
             tool_calls: result.tool_calls_made,
             execution_time_ms: result.execution_time.as_millis() as u64,
             console: result.console_output.clone(),
@@ -212,7 +221,9 @@ impl TopLevelTool for ComposeTool {
 const COMPOSE_FETCH_HINT: &str =
     "Use any `sub_invocations[].invocation_id` with `tool_output_fetch` to fetch a \
      sub-call's persisted output; `query: {mode: \"summary\"}` returns the curated \
-     `<summary>+<recovery>` envelope you'd have seen calling that tool directly.";
+     `<summary>+<recovery>` envelope you'd have seen calling that tool directly. \
+     Compose includes `normal_fetch_limit_bytes`, and each sub_invocation includes \
+     `summary_envelope_bytes`, so you can size summary fetches before calling them.";
 
 /// Recovery metadata for one sub-tool dispatch inside a compose script.
 /// Array order is completion order (0-based).
@@ -228,6 +239,9 @@ pub struct SubInvocation {
     /// would naturally slice this sub-call's output.
     pub kind: String,
     pub raw_size_bytes: u64,
+    /// Size of `tool_output_fetch(query:{mode:"summary"})` for this
+    /// sub-call's curated `<summary>+<recovery>` envelope.
+    pub summary_envelope_bytes: u64,
 }
 
 struct CatalogDispatcher {
@@ -426,6 +440,9 @@ impl CatalogDispatcherShared {
         let Some(invocation_id) = resp.invocation_id else {
             return;
         };
+        let Some(summary_fetch_info) = resp.summary_fetch_info else {
+            return;
+        };
         let kind = sub_invocation_kind(&resp.elided_paths);
         if let Ok(mut guard) = self.sub_invocations.lock() {
             guard.push(SubInvocation {
@@ -434,6 +451,7 @@ impl CatalogDispatcherShared {
                 invocation_id: uuid::Uuid::from(invocation_id),
                 kind,
                 raw_size_bytes: raw_size,
+                summary_envelope_bytes: summary_fetch_info.summary_envelope_bytes,
             });
         }
     }

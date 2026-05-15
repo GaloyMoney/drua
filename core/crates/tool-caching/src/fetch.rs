@@ -39,7 +39,9 @@ pub enum FetchQuery {
     /// sub-invocation's curated form (JS scripts see verbatim T; the
     /// agent reading `sub_invocations[i].invocation_id` post-hoc can
     /// fetch the summary view here). `path` is ignored — the summary
-    /// is always the root view.
+    /// is always the root view. Summary recovery bypasses the normal
+    /// fetch response cap; callers that advertise summary recovery
+    /// should expose the envelope size before this fetch is attempted.
     Summary,
 }
 
@@ -162,7 +164,7 @@ impl StoredInvocation {
             return Err(ToolCachingError::FetchResponseTooLarge {
                 size: text.len(),
                 max: max_bytes,
-                hint: self.too_large_hint(path),
+                hint: self.too_large_hint(path, max_bytes),
             });
         }
         Ok(FetchResult {
@@ -172,22 +174,10 @@ impl StoredInvocation {
     }
 
     /// Replay the curated `<summary>+<recovery>` envelope from the
-    /// persisted `ToolCallSummary`. Output is byte-identical to what
-    /// `cache()` originally returned — both share
-    /// `ToolCallSummary::build_wire`.
-    fn summary_view(&self, max_bytes: usize) -> Result<FetchResult, ToolCachingError> {
+    /// persisted `ToolCallSummary`. Summary mode is the recovery escape
+    /// hatch, so it bypasses the normal fetch-size cap.
+    fn summary_view(&self, _max_bytes: usize) -> Result<FetchResult, ToolCachingError> {
         let (result, structured) = self.summary.build_wire(self.id);
-        let envelope_len = match result.content.first().map(|c| &c.raw) {
-            Some(rmcp::model::RawContent::Text(t)) => t.text.len(),
-            _ => 0,
-        };
-        if envelope_len > max_bytes {
-            return Err(ToolCachingError::FetchResponseTooLarge {
-                size: envelope_len,
-                max: max_bytes,
-                hint: String::new(),
-            });
-        }
         Ok(FetchResult { result, structured })
     }
 
@@ -195,9 +185,13 @@ impl StoredInvocation {
     /// `mode:'summary'`; on a compose root (`sub_invocations` array at
     /// `$`), names up to three drill-down invocation_ids the agent can
     /// fetch directly instead of re-slicing the aggregate body.
-    fn too_large_hint(&self, path: &str) -> String {
-        let mut parts =
-            vec![". Try `query: {mode: \"summary\"}` for the curated envelope".to_string()];
+    fn too_large_hint(&self, path: &str, max_bytes: usize) -> String {
+        let summary_envelope_bytes = self.summary.build_envelope_text().len();
+        let mut parts = vec![format!(
+            ". Try `query: {{mode: \"summary\"}}` for the curated envelope \
+             (summary_envelope_bytes: {summary_envelope_bytes}, \
+             normal_fetch_limit_bytes: {max_bytes}; summary mode bypasses that cap)"
+        )];
         let touches_result = path == "$" || path == "$.result" || path.starts_with("$.result.");
         if touches_result {
             if let Some(arr) = self
@@ -528,8 +522,42 @@ mod tests {
     #[test]
     fn too_large_hint_always_suggests_summary_mode() {
         let inv = stored(serde_json::json!({"result": "x"}));
-        let hint = inv.too_large_hint("$.result");
+        let hint = inv.too_large_hint("$.result", 64);
         assert!(hint.contains("mode: \"summary\""), "got: {hint}");
+        assert!(hint.contains("summary_envelope_bytes:"), "got: {hint}");
+        assert!(hint.contains("normal_fetch_limit_bytes: 64"), "got: {hint}");
+    }
+
+    #[test]
+    fn summary_query_bypasses_fetch_cap_without_late_annotation() {
+        let mut inv = stored(serde_json::json!("full"));
+        inv.summary = ToolCallSummary {
+            summary: Value::String("x".repeat(200)),
+            wire_result: Value::String("<summary>".into()),
+            elided_paths: Vec::new(),
+            root_path: "$".to_string(),
+            total_bytes: 200,
+            shown_bytes: 200,
+            total_items: None,
+            shown_items: None,
+            total_lines: None,
+            shown_lines: None,
+        };
+
+        let fetched = inv
+            .query("$", Some(&FetchQuery::Summary), 64)
+            .expect("summary mode bypasses the normal fetch cap");
+        let text = match fetched.result.content.first().map(|c| &c.raw) {
+            Some(rmcp::model::RawContent::Text(t)) => t.text.as_str(),
+            _ => "",
+        };
+        assert!(!text.contains("<summary-fetch"), "got: {text}");
+        assert!(fetched.structured.get("_fetch").is_none());
+        assert_eq!(
+            fetched.result.structured_content.as_ref(),
+            Some(&fetched.structured),
+            "FetchResult result.structured_content must stay in sync with structured"
+        );
     }
 
     #[test]
@@ -541,7 +569,7 @@ mod tests {
                 {"invocation_id": "bbb", "tool_name": "honeycomb_query"},
             ],
         }));
-        let hint = inv.too_large_hint("$.result");
+        let hint = inv.too_large_hint("$.result", 1024);
         assert!(hint.contains("github_list_prs=aaa"), "got: {hint}");
         assert!(hint.contains("honeycomb_query=bbb"), "got: {hint}");
     }
@@ -558,7 +586,7 @@ mod tests {
                 {"invocation_id": "i4", "tool_name": "t4"},
             ],
         }));
-        let hint = inv.too_large_hint("$.result");
+        let hint = inv.too_large_hint("$.result", 1024);
         assert!(hint.contains("t0=i0"), "got: {hint}");
         assert!(hint.contains("t2=i2"), "got: {hint}");
         assert!(!hint.contains("t3=i3"), "should cap at 3; got: {hint}");
@@ -573,7 +601,7 @@ mod tests {
                 {"invocation_id": "aaa", "tool_name": "github_list_prs"},
             ],
         }));
-        let hint = inv.too_large_hint("$.sub_invocations");
+        let hint = inv.too_large_hint("$.sub_invocations", 1024);
         assert!(!hint.contains("github_list_prs"), "got: {hint}");
         assert!(hint.contains("mode: \"summary\""), "got: {hint}");
     }

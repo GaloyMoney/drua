@@ -2,7 +2,8 @@
   "result": {
     "console": [],
     "execution_time_ms": "<ms>",
-    "fetch_hint": "Use any `sub_invocations[].invocation_id` with `tool_output_fetch` to fetch a sub-call's persisted output; `query: {mode: \"summary\"}` returns the curated `<summary>+<recovery>` envelope you'd have seen calling that tool directly.",
+    "fetch_hint": "Use any `sub_invocations[].invocation_id` with `tool_output_fetch` to fetch a sub-call's persisted output; `query: {mode: \"summary\"}` returns the curated `<summary>+<recovery>` envelope you'd have seen calling that tool directly. Compose includes `normal_fetch_limit_bytes`, and each sub_invocation includes `summary_envelope_bytes`, so you can size summary fetches before calling them.",
+    "normal_fetch_limit_bytes": 16384,
     "result": {
       "arr_slice": [
         {
