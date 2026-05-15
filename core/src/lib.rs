@@ -265,6 +265,10 @@ impl App {
             Arc::clone(&space_mounts),
         ));
 
+        if let Err(e) = agents.reconcile_inherited_session_chains().await {
+            tracing::error!(error = %e, "reconcile_inherited_session_chains failed at boot");
+        }
+
         toolsets.register_top_level(ProjectAgent::new(Arc::clone(&agents)));
         toolsets.register_top_level(SubmitOutputTool::new(Arc::clone(&agents)));
 

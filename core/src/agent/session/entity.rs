@@ -38,6 +38,8 @@ pub enum AgentSessionEvent {
     Initialized {
         id: AgentSessionId,
         agent_id: AgentId,
+        #[serde(default)]
+        chain_override: Option<llm::ModelChain>,
         model_chain: ModelChain,
         compaction_config: CompactionConfig,
         system_blocks: Vec<SystemBlock>,
@@ -104,6 +106,7 @@ pub enum AgentSessionEvent {
         submitted_at: chrono::DateTime<chrono::Utc>,
     },
     ModelChainUpdated {
+        chain_override: Option<llm::ModelChain>,
         model_chain: ModelChain,
     },
 }
@@ -123,6 +126,8 @@ pub struct AgentSession {
     #[builder(default)]
     current_main_thread: Option<SessionThreadId>,
 
+    #[builder(default)]
+    chain_override: Option<llm::ModelChain>,
     model_chain: ModelChain,
 
     #[builder(default)]
@@ -164,6 +169,10 @@ impl AgentSession {
         &self.model_chain
     }
 
+    pub fn is_chain_inherited(&self) -> bool {
+        self.chain_override.is_none()
+    }
+
     pub fn exportable_thread(
         &self,
         target: TargetThread,
@@ -184,18 +193,26 @@ impl AgentSession {
         ))
     }
 
-    pub(super) fn update_model_chain(&mut self, new_chain: ModelChain) -> Idempotent<()> {
+    pub(super) fn update_model_chain(
+        &mut self,
+        new_override: Option<llm::ModelChain>,
+        new_chain: ModelChain,
+    ) -> Idempotent<()> {
         idempotency_guard!(
             self.events.iter_all().rev(),
             already_applied:
-                AgentSessionEvent::ModelChainUpdated { model_chain } if *model_chain == new_chain,
+                AgentSessionEvent::ModelChainUpdated { chain_override, model_chain }
+                    if *chain_override == new_override && *model_chain == new_chain,
             already_applied:
-                AgentSessionEvent::Initialized { model_chain, .. } if *model_chain == new_chain,
+                AgentSessionEvent::Initialized { chain_override, model_chain, .. }
+                    if *chain_override == new_override && *model_chain == new_chain,
             resets_on:
                 AgentSessionEvent::ModelChainUpdated { .. } | AgentSessionEvent::Initialized { .. }
         );
+        self.chain_override = new_override.clone();
         self.model_chain = new_chain.clone();
         self.events.push(AgentSessionEvent::ModelChainUpdated {
+            chain_override: new_override,
             model_chain: new_chain,
         });
         Idempotent::Executed(())
@@ -885,6 +902,7 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                 AgentSessionEvent::Initialized {
                     id,
                     agent_id,
+                    chain_override,
                     model_chain,
                     compaction_config,
                     ..
@@ -892,6 +910,7 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                     builder = builder
                         .id(*id)
                         .agent_id(*agent_id)
+                        .chain_override(chain_override.clone())
                         .model_chain(model_chain.clone())
                         .compaction_config(compaction_config.clone());
                 }
@@ -908,8 +927,13 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                 AgentSessionEvent::ToolResultsMasked { .. } => {}
                 AgentSessionEvent::CompactionApplied { .. } => {}
                 AgentSessionEvent::OutputSubmitted { .. } => {}
-                AgentSessionEvent::ModelChainUpdated { model_chain } => {
-                    builder = builder.model_chain(model_chain.clone());
+                AgentSessionEvent::ModelChainUpdated {
+                    chain_override,
+                    model_chain,
+                } => {
+                    builder = builder
+                        .chain_override(chain_override.clone())
+                        .model_chain(model_chain.clone());
                 }
             }
         }
@@ -923,6 +947,8 @@ pub struct NewAgentSession {
     #[builder(setter(into))]
     pub(super) id: AgentSessionId,
     pub(super) agent_id: AgentId,
+    #[builder(default)]
+    pub(super) chain_override: Option<llm::ModelChain>,
     pub(super) model_chain: ModelChain,
     #[builder(default)]
     pub(super) compaction_config: CompactionConfig,
@@ -936,6 +962,10 @@ impl NewAgentSession {
         builder.id(AgentSessionId::new());
         builder
     }
+
+    pub fn is_chain_inherited(&self) -> bool {
+        self.chain_override.is_none()
+    }
 }
 
 impl IntoEvents<AgentSessionEvent> for NewAgentSession {
@@ -945,6 +975,7 @@ impl IntoEvents<AgentSessionEvent> for NewAgentSession {
             [AgentSessionEvent::Initialized {
                 id: self.id,
                 agent_id: self.agent_id,
+                chain_override: self.chain_override,
                 model_chain: self.model_chain,
                 compaction_config: self.compaction_config,
                 system_blocks: self.system_blocks,

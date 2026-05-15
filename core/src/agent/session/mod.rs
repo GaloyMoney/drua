@@ -13,10 +13,7 @@ mod view;
 use tracing::instrument;
 
 use crate::{
-    agent::{
-        config::{AgentsConfig, ModelChain},
-        AgentRole,
-    },
+    agent::{config::AgentsConfig, AgentRole},
     primitives::{AgentId, UserMessageSource},
 };
 pub use entity::*;
@@ -44,21 +41,28 @@ impl Sessions {
         }
     }
 
+    pub fn repo(&self) -> &AgentSessionRepo {
+        &self.repo
+    }
+
     #[instrument(name = "domain.agent_session.update_chain_for_agent", skip(self))]
     pub async fn update_chain_for_agent(
         &self,
         agent_role: AgentRole,
         agent_id: AgentId,
-        model_chain: Option<llm::ModelChain>,
+        chain_override: Option<llm::ModelChain>,
     ) -> Result<AgentSession, AgentSessionError> {
-        let new_chain = self
+        let resolved = self
             .config
-            .resolve_chain(agent_role, model_chain)
+            .resolve_chain(agent_role, chain_override.clone())
             .map_err(|e| AgentSessionError::ModelChainInvalid(e.to_string()))?;
 
         let mut op = self.repo.begin_op().await?;
         let mut session = self.repo.find_by_agent_id_in_op(&mut op, agent_id).await?;
-        if session.update_model_chain(new_chain).did_execute() {
+        if session
+            .update_model_chain(chain_override, resolved)
+            .did_execute()
+        {
             self.repo.update_in_op(&mut op, &mut session).await?;
         }
         op.commit().await?;
@@ -73,13 +77,19 @@ impl Sessions {
         &self,
         op: &mut es_entity::DbOp<'_>,
         agent_id: AgentId,
-        model_chain: ModelChain,
+        agent_role: AgentRole,
+        chain_override: Option<llm::ModelChain>,
         compaction_config: CompactionConfig,
         system_blocks: Vec<SystemBlock>,
         tool_defs: Vec<ToolDefinition>,
     ) -> Result<AgentSession, AgentSessionError> {
+        let model_chain = self
+            .config
+            .resolve_chain(agent_role, chain_override.clone())
+            .map_err(|e| AgentSessionError::ModelChainInvalid(e.to_string()))?;
         let new_session = NewAgentSession::builder()
             .agent_id(agent_id)
+            .chain_override(chain_override)
             .model_chain(model_chain)
             .compaction_config(compaction_config)
             .system_blocks(system_blocks)

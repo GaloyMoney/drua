@@ -398,8 +398,6 @@ impl Agents {
             .ok_or(AgentError::RoleNotConfigured(agent_role))?
             .clone();
 
-        let session_chain = self.config.resolve_chain(agent_role, chain_override)?;
-
         let authz_scopes = default_authz_scopes(agent_role, project_id);
 
         let mut new_agent_builder = NewAgent::builder();
@@ -503,7 +501,8 @@ impl Agents {
             .create_in_op(
                 op,
                 agent.id,
-                session_chain,
+                agent_role,
+                chain_override,
                 role_config.compaction.clone(),
                 system_blocks,
                 tool_defs,
@@ -552,6 +551,39 @@ impl Agents {
         Audit::record_project_id(agent.project_id);
         Audit::record_agent_id(agent.id);
         Ok(agent)
+    }
+
+    #[instrument(name = "domain.agent.reconcile_inherited_session_chains", skip(self))]
+    pub async fn reconcile_inherited_session_chains(&self) -> Result<(), AgentError> {
+        let mut query = es_entity::PaginatedQueryArgs {
+            first: 100,
+            after: None,
+        };
+        loop {
+            let result = self
+                .sessions
+                .repo()
+                .list_for_is_chain_inherited_by_created_at(
+                    true,
+                    query,
+                    es_entity::ListDirection::Ascending,
+                )
+                .await?;
+            for session in &result.entities {
+                let agent = match self.repo.find_by_id(session.agent_id).await {
+                    Ok(a) => a,
+                    Err(_) => continue,
+                };
+                self.sessions
+                    .update_chain_for_agent(agent.agent_role, agent.id, None)
+                    .await?;
+            }
+            match result.into_next_query() {
+                Some(next) => query = next,
+                None => break,
+            }
+        }
+        Ok(())
     }
 
     #[instrument(name = "domain.agent.update_session_chain", skip(self, sub))]

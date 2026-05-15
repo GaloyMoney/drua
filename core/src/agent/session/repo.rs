@@ -8,7 +8,15 @@ use super::{entity::*, thread::*, AgentSessionId};
 #[derive(EsRepo, Clone)]
 #[es_repo(
     entity = "AgentSession",
-    columns(agent_id(ty = "AgentId")),
+    columns(
+        agent_id(ty = "AgentId"),
+        is_chain_inherited(
+            ty = "bool",
+            create(accessor = "is_chain_inherited()"),
+            update(accessor = "is_chain_inherited()"),
+            list_for(by(created_at)),
+        ),
+    ),
     delete = "soft_without_queries"
 )]
 pub struct AgentSessionRepo {
