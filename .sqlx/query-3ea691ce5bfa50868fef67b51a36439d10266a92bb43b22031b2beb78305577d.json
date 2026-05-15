@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "WITH entities AS (SELECT parent_job_id, id FROM jobs WHERE ((parent_job_id IS NOT DISTINCT FROM $1) AND (COALESCE(id < $3, true))) ORDER BY id DESC LIMIT $2) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $4 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN job_events e ON i.id = e.id ORDER BY i.id desc, i.id, e.sequence",
+  "query": "WITH entities AS (SELECT created_at, id FROM agent_sessions WHERE COALESCE(is_chain_inherited = $1, $1 IS NULL) AND (COALESCE((created_at, id) > ($4, $3), $3 IS NULL)) AND deleted = FALSE ORDER BY created_at ASC, id ASC LIMIT $2) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $5 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN agent_session_events e ON i.id = e.id ORDER BY i.created_at asc, i.id asc, i.id, e.sequence",
   "describe": {
     "columns": [
       {
@@ -31,9 +31,10 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid",
+        "Bool",
         "Int8",
         "Uuid",
+        "Timestamptz",
         "Bool"
       ]
     },
@@ -45,5 +46,5 @@
       false
     ]
   },
-  "hash": "485ae108b79620f33b6ee77ed238e2b1d3911d07a380de7cc8b8f196b109aa44"
+  "hash": "3ea691ce5bfa50868fef67b51a36439d10266a92bb43b22031b2beb78305577d"
 }

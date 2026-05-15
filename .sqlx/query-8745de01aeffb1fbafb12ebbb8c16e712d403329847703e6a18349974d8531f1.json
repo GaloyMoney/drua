@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE agent_sessions SET agent_id = $2, is_chain_inherited = $3 WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8745de01aeffb1fbafb12ebbb8c16e712d403329847703e6a18349974d8531f1"
+}
