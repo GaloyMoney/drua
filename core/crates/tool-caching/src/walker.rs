@@ -21,6 +21,10 @@ struct WalkCtx<'a> {
     primary_path: &'a str,
     primary_mapping: Option<&'a [u32]>,
     primary_raw_bytes: Option<u64>,
+    /// True when the preprocessor knows the interesting payload is at
+    /// the END of the primary text (CI build logs: failure trace lives
+    /// in the last lines). Only takes effect at `primary_path`.
+    primary_prefer_tail: bool,
 }
 
 #[derive(Clone)]
@@ -74,6 +78,7 @@ impl Walker {
         } else {
             None
         };
+        let primary_prefer_tail = preprocessed.as_ref().is_some_and(|p| p.prefer_tail);
 
         let mut elided_paths = Vec::new();
         let ctx = WalkCtx {
@@ -81,6 +86,7 @@ impl Walker {
             primary_path,
             primary_mapping,
             primary_raw_bytes,
+            primary_prefer_tail,
         };
         let wire_result = self.walk(
             root_for_walk,
@@ -300,7 +306,10 @@ impl Walker {
             return Value::String(prepared);
         }
         // Try line-mode first if the string has enough lines to split.
-        if let Some(elide) = line_elide_string(&prepared, budget, &ctx_seg, &preprocessed_to_raw) {
+        let prefer_tail = is_primary && ctx.primary_prefer_tail;
+        if let Some(elide) =
+            line_elide_string(&prepared, budget, &ctx_seg, &preprocessed_to_raw, prefer_tail)
+        {
             elided_paths.push(ElidedPath {
                 path: path.to_string(),
                 total_bytes: total_bytes_at_path,
@@ -561,22 +570,38 @@ fn line_elide_string(
     budget: usize,
     ctx: &SegmentedText,
     preprocessed_to_raw: &[u32],
+    prefer_tail: bool,
 ) -> Option<LineElide> {
     let lines: Vec<&str> = s.lines().collect();
     let n = lines.len();
     if n < 3 {
         return None;
     }
-    let mut head = n / 2;
-    let mut tail = n - head;
-    if tail > 0 {
-        tail -= 1;
+    let (mut head, mut tail) = if prefer_tail {
+        // CI-log shape: bias 1:4 head:tail so failures at the end stay
+        // visible. The shrink loop below preserves the bias by trimming
+        // head first when prefer_tail is set.
+        let tail = (n * 4 / 5).max(1);
+        let head = n.saturating_sub(tail + 1);
+        (head, tail)
     } else {
-        head = head.saturating_sub(1);
-    }
+        let head = n / 2;
+        let mut tail = n - head;
+        if tail > 0 {
+            tail -= 1;
+        }
+        (head, tail)
+    };
     let mut elide = make_line_elide(&lines, head, tail, ctx, preprocessed_to_raw);
     while elide.text.len() > budget && (head > 0 || tail > 0) {
-        if tail > head {
+        if prefer_tail {
+            // Drain head first; only trim tail once head is exhausted.
+            if head > 0 {
+                head -= 1;
+            } else {
+                tail -= 1;
+            }
+        } else if tail > head {
             tail -= 1;
         } else {
             head -= 1;
@@ -885,5 +910,96 @@ mod tests {
             .and_then(Value::as_str)
             .expect("recover has query.mode");
         assert_eq!(mode, "json_array_slice");
+    }
+
+    fn walker_for_line_split() -> Walker {
+        // Threshold so 100 short numbered lines (~700-800 bytes) clearly
+        // overflow and trigger line_elide_string.
+        let config = ToolCachingConfig {
+            generic_threshold_bytes: 200,
+            sentinel_min_bytes: 200,
+            sentinel_hard_cap_bytes: 200,
+            max_fetch_response_bytes: 16 * 1024,
+        };
+        Walker::new(Arc::new(StringSummarizerChain::new()), &config)
+    }
+
+    fn numbered_lines(n: u32) -> String {
+        (0..n)
+            .map(|i| format!("line_{i:03}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Concourse preprocessor sets `prefer_tail: true` — the walker's
+    /// head/tail split must skew toward the tail so failure traces at
+    /// the end of a build log stay visible.
+    #[test]
+    fn concourse_log_summary_is_tail_biased() {
+        let logs = numbered_lines(100);
+        let qs = QueryStructure {
+            root: serde_json::json!({ "logs": logs }),
+        };
+        let walker = walker_for_line_split();
+        let summary = walker.summarize(&qs, ToolInvocationId::new(), "concourse-build-log");
+        let body = summary.summary.as_str().expect("logs summary is string");
+        let head_count = body
+            .lines()
+            .filter(|l| l.starts_with("line_0") || l.starts_with("line_00"))
+            .filter(|l| {
+                let n: u32 = l.trim_start_matches("line_").parse().unwrap_or(u32::MAX);
+                n < 50
+            })
+            .count();
+        let tail_count = body
+            .lines()
+            .filter(|l| l.starts_with("line_"))
+            .filter(|l| {
+                let n: u32 = l.trim_start_matches("line_").parse().unwrap_or(u32::MAX);
+                n >= 50
+            })
+            .count();
+        assert!(
+            tail_count > head_count,
+            "tail-biased split should retain more tail than head lines; got head={head_count}, tail={tail_count}"
+        );
+        assert!(
+            body.contains("line_099"),
+            "last log line should survive tail-biased split"
+        );
+    }
+
+    /// Non-concourse, non-preprocessed tools keep the symmetric ~50/50
+    /// head/tail split (no regression on generic text).
+    #[test]
+    fn generic_string_summary_keeps_balanced_split() {
+        let logs = numbered_lines(100);
+        let qs = QueryStructure {
+            root: Value::String(logs),
+        };
+        let walker = walker_for_line_split();
+        let summary = walker.summarize(&qs, ToolInvocationId::new(), "unknown_tool");
+        let body = summary.summary.as_str().expect("summary is string");
+        let head_count = body
+            .lines()
+            .filter(|l| l.starts_with("line_"))
+            .filter(|l| {
+                let n: u32 = l.trim_start_matches("line_").parse().unwrap_or(u32::MAX);
+                n < 50
+            })
+            .count();
+        let tail_count = body
+            .lines()
+            .filter(|l| l.starts_with("line_"))
+            .filter(|l| {
+                let n: u32 = l.trim_start_matches("line_").parse().unwrap_or(u32::MAX);
+                n >= 50
+            })
+            .count();
+        let diff = head_count.abs_diff(tail_count);
+        assert!(
+            diff <= 1,
+            "generic split should be ~symmetric; got head={head_count}, tail={tail_count}"
+        );
     }
 }

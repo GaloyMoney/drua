@@ -21,6 +21,10 @@ pub(crate) struct PreprocessedRoot {
     pub root: Value,
     pub root_path: String,
     pub preprocessed_to_raw: Vec<u32>,
+    /// True when the interesting payload is at the END of the text
+    /// (e.g. CI build logs: failure trace lives in the last lines).
+    /// Walker biases the head/tail split toward the tail when set.
+    pub prefer_tail: bool,
 }
 
 /// Run any registered preprocessor that claims `tool_name` AND finds

@@ -45,6 +45,7 @@ pub(super) fn preprocess(tool_name: &str, root: &Value) -> Option<PreprocessedRo
         root: Value::Object(new_map),
         root_path: "$.logs".to_string(),
         preprocessed_to_raw,
+        prefer_tail: true,
     })
 }
 
@@ -151,5 +152,6 @@ mod tests {
         assert_eq!(out.root_path, "$.logs");
         assert_eq!(out.root, json!({"logs": "hello\nworld\n", "extra": "kept"}),);
         assert_eq!(out.preprocessed_to_raw, vec![0, 1]);
+        assert!(out.prefer_tail, "CI logs should bias to tail");
     }
 }
