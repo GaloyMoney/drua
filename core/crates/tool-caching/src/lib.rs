@@ -115,10 +115,10 @@ impl ToolCaching {
     }
 
     /// Compose sub-dispatch call path. The JS engine has its own size
-    /// cap and scripts use the sub-tool's return directly — pre-elided
-    /// data would force every script to recover through
-    /// `tool_output_fetch`. So the wire shape is `{result: T verbatim}`
-    /// even when the value is over threshold.
+    /// cap and scripts use the sub-tool's return directly as upstream `T`
+    /// — pre-elided data would force every script to recover through
+    /// `tool_output_fetch`. So the wire shape is `T verbatim` even when
+    /// the value is over threshold.
     ///
     /// Walker still runs, summary is still persisted: the agent (out of
     /// the JS sandbox, reading `compose_response.sub_invocations[i].invocation_id`)
@@ -145,9 +145,7 @@ impl ToolCaching {
         // For compose JS engine: always emit T verbatim, regardless of
         // whether the walker found anything elision-worthy.
         let mut wrapped = result;
-        wrapped.structured_content = Some(serde_json::json!({
-            "result": processed.upstream_t,
-        }));
+        wrapped.structured_content = Some(processed.upstream_t);
 
         if !processed.persisted {
             return Ok(ToolCacheResponse {

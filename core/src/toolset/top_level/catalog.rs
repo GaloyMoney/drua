@@ -20,7 +20,7 @@ use crate::auth::AuthSubject;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::{SearchableToolSet, TopLevelTool};
-use super::super::wrap::{wrap_output_schema, wrap_output_ts};
+use super::super::wrap::wrap_output_schema;
 use super::schema_for;
 
 pub struct CatalogEntry {
@@ -278,11 +278,8 @@ impl DescribeCatalogTool {
                 json_schema_ts::schema_to_ts(&v)
             })
             .unwrap_or_else(|| "any".to_string());
-        // Catalog tools always go through tool-caching, so the wire shape
-        // is `DruaToolResult<UpstreamT>` — compose scripts unwrap `.result`.
-        let output_ts = wrap_output_ts(&inner_ts);
         let ts_signature = format!(
-            "\n\n### TypeScript signature (for use in `compose`)\n```ts\nfunction {tool}(args: {{ {input_ts} }}): Promise<{output_ts}>;\n```",
+            "\n\n### TypeScript signature (for use in `compose`)\n```ts\nfunction {tool}(args: {{ {input_ts} }}): Promise<{inner_ts}>;\n```",
             tool = entry.tool_name,
         );
 

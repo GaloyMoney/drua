@@ -221,8 +221,7 @@ async fn all_success_path_records_success_on_both_rows() {
     let mut args = JsonObject::new();
     args.insert(
         "script".to_string(),
-        // Catalog tools always wrap in `DruaToolResult<T>` — unwrap `.result`.
-        json!("const r = await tools.stub.list_items({}); return r.result.items.length;"),
+        json!("const r = await tools.stub.list_items({}); return r.items.length;"),
     );
 
     let result = toolsets

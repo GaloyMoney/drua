@@ -6,7 +6,7 @@
 //! own their own envelope shape and opt out of the wrapper. Everything
 //! else, including every catalog tool, is wrapped. The text envelope is
 //! built by `ToolCaching::cache`; this module covers the structured
-//! channel, outputSchema advertising, and the inline JS-engine wrap.
+//! channel and outputSchema advertising.
 //!
 //! See clat memory `019e1dbf` for the design write-up.
 
@@ -53,17 +53,4 @@ pub fn wrap_output_schema(upstream: &Value) -> Value {
         },
         "required": ["result"]
     })
-}
-
-/// Wrap a TS type into `{ result: T }` — the compose-script-visible shape.
-/// Compose sub-dispatch uses `persist_for_compose`, so `_elided` is always
-/// absent; the TS signature stays a single field.
-pub fn wrap_output_ts(inner_ts: &str) -> String {
-    format!("{{ result: {inner_ts} }}")
-}
-
-/// Wrap a `serde_json::Value` for the JS engine's view of a cached
-/// sub-call result.
-pub fn wrap_value(value: Value) -> Value {
-    json!({ "result": value })
 }
