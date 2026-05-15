@@ -498,6 +498,9 @@ async fn run_searchable_call(
         .call(subject, tool_name, inner_args)
         .await
         .map_err(|e| e.to_string())?;
+    if result.is_error == Some(true) {
+        return Err(format_tool_error(tool_name, &result));
+    }
 
     let value = result_to_value(&result);
     Ok((result, value))
@@ -527,6 +530,9 @@ async fn run_top_level_call(
         .call(subject, inner_args)
         .await
         .map_err(|e| e.to_string())?;
+    if result.is_error == Some(true) {
+        return Err(format_tool_error(tool.name(), &result));
+    }
 
     let value = result_to_value(&result);
     Ok((result, value))
@@ -556,7 +562,6 @@ fn format_tool_error(tool_name: &str, result: &CallToolResult) -> String {
         format!("{tool_name} returned an error: {text}")
     }
 }
-
 fn extract_text(result: &CallToolResult) -> String {
     result
         .content

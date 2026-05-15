@@ -5,7 +5,7 @@ use std::time::Duration;
 use github_app::GitHubAppTokenProvider;
 use http::{HeaderName, HeaderValue};
 use rmcp::{
-    model::{CallToolRequestParams, CallToolResult, JsonObject},
+    model::{CallToolRequestParams, CallToolResult, JsonObject, RawContent},
     service::RunningService,
     transport::streamable_http_client::{
         StreamableHttpClientTransportConfig, StreamableHttpClientWorker,
@@ -212,7 +212,7 @@ impl SearchableToolSet for UpstreamToolSet {
         }
         let client = self.client.read().await;
         let result = client.peer().call_tool(params).await?;
-        Ok(result)
+        Ok(normalize_upstream_result(&self.name, tool_name, result))
     }
 }
 
@@ -220,10 +220,55 @@ fn has_required_scopes(required: &[AuthScope], subject: &AuthSubject) -> bool {
     required.iter().all(|scope| subject.has_scope(scope))
 }
 
+fn normalize_upstream_result(
+    upstream_name: &str,
+    tool_name: &str,
+    result: CallToolResult,
+) -> CallToolResult {
+    if result.is_error == Some(true) || looks_like_textual_upstream_error(&result) {
+        let message = extract_text(&result);
+        let mut out = CallToolResult::error(result.content);
+        out.structured_content = Some(serde_json::json!({
+            "ok": false,
+            "error": {
+                "upstream": upstream_name,
+                "tool": tool_name,
+                "message": message,
+            }
+        }));
+        return out;
+    }
+    result
+}
+
+fn looks_like_textual_upstream_error(result: &CallToolResult) -> bool {
+    if result.structured_content.is_some() || result.content.len() != 1 {
+        return false;
+    }
+    let text = extract_text(result);
+    let lower = text.to_ascii_lowercase();
+    lower.starts_with("failed to ")
+        || lower.starts_with("error: ")
+        || lower.contains(" resource not accessible by integration")
+}
+
+fn extract_text(result: &CallToolResult) -> String {
+    result
+        .content
+        .iter()
+        .filter_map(|c| match &c.raw {
+            RawContent::Text(t) => Some(t.text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::primitives::{AgentId, McpCredsId, ProjectId, UserId};
+    use rmcp::model::Content;
 
     fn user_subject() -> AuthSubject {
         AuthSubject::User(UserId::new())
@@ -266,5 +311,37 @@ mod tests {
     #[test]
     fn internal_only_unset_visible_to_user() {
         assert!(visible(false, &user_subject()));
+    }
+
+    #[test]
+    fn textual_upstream_failure_becomes_structured_tool_error() {
+        let result = CallToolResult::success(vec![Content::text(
+            "failed to list workflow runs: 403 Resource not accessible by integration",
+        )]);
+
+        let normalized = normalize_upstream_result("github_actions", "actions_list", result);
+
+        assert_eq!(normalized.is_error, Some(true));
+        let structured = normalized
+            .structured_content
+            .expect("normalized errors carry structured metadata");
+        assert_eq!(
+            structured["error"]["upstream"],
+            serde_json::json!("github_actions")
+        );
+        assert_eq!(
+            structured["error"]["tool"],
+            serde_json::json!("actions_list")
+        );
+    }
+
+    #[test]
+    fn structured_success_is_not_reclassified_by_text() {
+        let mut result = CallToolResult::success(vec![Content::text("failed to parse: example")]);
+        result.structured_content = Some(serde_json::json!({"value": "failed to parse: example"}));
+
+        let normalized = normalize_upstream_result("demo", "tool", result);
+
+        assert_ne!(normalized.is_error, Some(true));
     }
 }
