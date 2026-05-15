@@ -11,17 +11,25 @@ use crate::repo::StoredInvocation;
 /// Slice operation applied at the resolved json-path. When absent, the
 /// whole value at the path is returned. Mirrors the recovery template
 /// the walker emits.
+///
+/// `offset` is signed so callers can use Python/JS slice semantics:
+/// a negative offset counts from the end of the value (`-N` ⇒ last N).
+/// Out-of-range offsets clamp to 0 / total rather than erroring.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum FetchQuery {
-    /// Byte range on a string-typed value at `path`.
-    Range { offset: usize, len: usize },
+    /// Byte range on a string-typed value at `path`. `offset` may be
+    /// negative to count from the end of the string.
+    Range { offset: i64, len: usize },
     /// Line range on a string-typed value at `path`. `offset` is the
     /// zero-indexed first line to return; `len` is the line count.
-    Lines { offset: usize, len: usize },
+    /// `offset` may be negative to count from the end (e.g.
+    /// `offset:-80, len:80` returns the last 80 lines).
+    Lines { offset: i64, len: usize },
     /// Item range on an array-typed value at `path`. Returns the slice
-    /// `arr[offset..offset+len]` as a `Value::Array`.
-    JsonArraySlice { offset: usize, len: usize },
+    /// `arr[offset..offset+len]` as a `Value::Array`. `offset` may be
+    /// negative to count from the end of the array.
+    JsonArraySlice { offset: i64, len: usize },
     /// Return the persisted curated `<summary>+<recovery>` envelope —
     /// the same view the agent would have seen from a top-level
     /// `call_tool` invocation. Useful for inspecting a compose
@@ -30,6 +38,18 @@ pub enum FetchQuery {
     /// fetch the summary view here). `path` is ignored — the summary
     /// is always the root view.
     Summary,
+}
+
+/// Translate a possibly-negative offset to a clamped `[0, total]` index.
+/// Negative offsets count from the end (Python/JS slice semantics):
+/// `-N` resolves to `total - N` (clamped to 0 when `N > total`).
+fn resolve_offset(offset: i64, total: usize) -> usize {
+    if offset >= 0 {
+        (offset as usize).min(total)
+    } else {
+        let abs = offset.unsigned_abs() as usize;
+        total.saturating_sub(abs)
+    }
 }
 
 impl FetchQuery {
@@ -41,8 +61,8 @@ impl FetchQuery {
                         "range query requires a string at the resolved path".into(),
                     )
                 })?;
-                let end = offset.saturating_add(*len).min(s.len());
-                let start = (*offset).min(s.len());
+                let start = resolve_offset(*offset, s.len());
+                let end = start.saturating_add(*len).min(s.len());
                 let slice = s.get(start..end).ok_or_else(|| {
                     ToolCachingError::InvalidPath("range cuts a non-char-boundary".into())
                 })?;
@@ -55,8 +75,8 @@ impl FetchQuery {
                     )
                 })?;
                 let all: Vec<&str> = s.lines().collect();
-                let start = (*offset).min(all.len());
-                let end = offset.saturating_add(*len).min(all.len());
+                let start = resolve_offset(*offset, all.len());
+                let end = start.saturating_add(*len).min(all.len());
                 Ok(Value::String(all[start..end].join("\n")))
             }
             FetchQuery::JsonArraySlice { offset, len } => {
@@ -65,8 +85,8 @@ impl FetchQuery {
                         "json_array_slice query requires an array at the resolved path".into(),
                     )
                 })?;
-                let start = (*offset).min(arr.len());
-                let end = offset.saturating_add(*len).min(arr.len());
+                let start = resolve_offset(*offset, arr.len());
+                let end = start.saturating_add(*len).min(arr.len());
                 Ok(Value::Array(arr[start..end].to_vec()))
             }
             // Summary is short-circuited in `StoredInvocation::query` —
@@ -118,6 +138,7 @@ impl StoredInvocation {
             return Err(ToolCachingError::FetchResponseTooLarge {
                 size: text.len(),
                 max: max_bytes,
+                hint: self.too_large_hint(path),
             });
         }
         Ok(FetchResult {
@@ -140,9 +161,51 @@ impl StoredInvocation {
             return Err(ToolCachingError::FetchResponseTooLarge {
                 size: envelope_len,
                 max: max_bytes,
+                hint: String::new(),
             });
         }
         Ok(FetchResult { result, structured })
+    }
+
+    /// Tail-appended hint for `FetchResponseTooLarge`. Always nudges
+    /// `mode:'summary'`; on a compose root (`sub_invocations` array at
+    /// `$`), names up to three drill-down invocation_ids the agent can
+    /// fetch directly instead of re-slicing the aggregate body.
+    fn too_large_hint(&self, path: &str) -> String {
+        let mut parts =
+            vec![". Try `query: {mode: \"summary\"}` for the curated envelope".to_string()];
+        let touches_result = path == "$" || path == "$.result" || path.starts_with("$.result.");
+        if touches_result {
+            if let Some(arr) = self
+                .query_structure
+                .root
+                .get("sub_invocations")
+                .and_then(Value::as_array)
+            {
+                let ids: Vec<String> = arr
+                    .iter()
+                    .take(3)
+                    .filter_map(|s| {
+                        let id = s.get("invocation_id").and_then(Value::as_str)?;
+                        let tool = s.get("tool_name").and_then(Value::as_str).unwrap_or("?");
+                        Some(format!("{tool}={id}"))
+                    })
+                    .collect();
+                if !ids.is_empty() {
+                    let more = if arr.len() > ids.len() {
+                        format!(" (+{} more in `$.sub_invocations`)", arr.len() - ids.len())
+                    } else {
+                        String::new()
+                    };
+                    parts.push(format!(
+                        ". Or drill into a sub-invocation directly via tool_output_fetch: {}{}",
+                        ids.join(", "),
+                        more,
+                    ));
+                }
+            }
+        }
+        parts.join("")
     }
 
     fn navigate(&self, path: &str) -> Result<&Value, ToolCachingError> {
@@ -151,10 +214,16 @@ impl StoredInvocation {
         for seg in &segments {
             cur = match seg {
                 PathSegment::Key(k) => cur.get(k).ok_or_else(|| {
-                    ToolCachingError::InvalidPath(format!("path {path}: no `{k}`"))
+                    ToolCachingError::InvalidPath(format!(
+                        "path {path}: no `{k}` — {hint}",
+                        hint = describe_available(cur)
+                    ))
                 })?,
                 PathSegment::Index(i) => cur.get(*i).ok_or_else(|| {
-                    ToolCachingError::InvalidPath(format!("path {path}: no [{i}]"))
+                    ToolCachingError::InvalidPath(format!(
+                        "path {path}: no [{i}] — {hint}",
+                        hint = describe_available(cur)
+                    ))
                 })?,
             };
         }
@@ -244,6 +313,26 @@ enum PathSegment {
     Index(usize),
 }
 
+/// Describe what's actually at `cur` so the agent can correct a missing
+/// path segment without round-tripping `mode:'summary'`. Lists keys for
+/// objects, length for arrays, and the value type otherwise.
+fn describe_available(cur: &Value) -> String {
+    match cur {
+        Value::Object(map) => {
+            let mut keys: Vec<&str> = map.keys().map(|s| s.as_str()).collect();
+            keys.sort();
+            if keys.is_empty() {
+                "available keys: (none)".into()
+            } else {
+                format!("available keys: {keys:?}")
+            }
+        }
+        Value::Array(arr) => format!("array length: {}", arr.len()),
+        Value::String(_) => "value is a string (use `query` to slice it)".into(),
+        Value::Number(_) | Value::Bool(_) | Value::Null => "value is a scalar".into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -319,5 +408,131 @@ mod tests {
             q.apply(Value::String("0123456789".into())).unwrap(),
             Value::String("3456".into()),
         );
+    }
+
+    #[test]
+    fn fetch_query_range_negative_offset_counts_from_end() {
+        let q = FetchQuery::Range { offset: -4, len: 4 };
+        assert_eq!(
+            q.apply(Value::String("0123456789".into())).unwrap(),
+            Value::String("6789".into()),
+        );
+    }
+
+    #[test]
+    fn fetch_query_lines_negative_offset_returns_tail() {
+        let q = FetchQuery::Lines { offset: -2, len: 2 };
+        assert_eq!(
+            q.apply(Value::String("a\nb\nc\nd\ne".into())).unwrap(),
+            Value::String("d\ne".into()),
+        );
+    }
+
+    #[test]
+    fn fetch_query_array_slice_negative_offset_returns_tail() {
+        let q = FetchQuery::JsonArraySlice { offset: -2, len: 5 };
+        let arr = serde_json::json!([1, 2, 3, 4, 5]);
+        assert_eq!(q.apply(arr).unwrap(), serde_json::json!([4, 5]));
+    }
+
+    #[test]
+    fn fetch_query_negative_offset_larger_than_total_clamps_to_zero() {
+        let q = FetchQuery::Lines {
+            offset: -999,
+            len: 3,
+        };
+        assert_eq!(
+            q.apply(Value::String("a\nb\nc\nd".into())).unwrap(),
+            Value::String("a\nb\nc".into()),
+        );
+    }
+
+    #[test]
+    fn fetch_query_lines_accepts_negative_offset_via_json() {
+        let q: FetchQuery = serde_json::from_value(serde_json::json!({
+            "mode": "lines", "offset": -3, "len": 3
+        }))
+        .expect("negative offset deserializes");
+        assert!(matches!(q, FetchQuery::Lines { offset: -3, len: 3 }));
+    }
+
+    #[test]
+    fn navigate_missing_key_error_lists_available_keys() {
+        let inv = stored(serde_json::json!({"logs": "x", "extra": 1}));
+        let err = inv.navigate("$.result").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no `result`"), "got: {msg}");
+        assert!(msg.contains("logs"), "got: {msg}");
+        assert!(msg.contains("extra"), "got: {msg}");
+    }
+
+    #[test]
+    fn navigate_missing_index_error_lists_array_length() {
+        let inv = stored(serde_json::json!([1, 2, 3]));
+        let err = inv.navigate("$[7]").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no [7]"), "got: {msg}");
+        assert!(msg.contains("array length: 3"), "got: {msg}");
+    }
+
+    #[test]
+    fn navigate_missing_key_on_scalar_says_scalar() {
+        let inv = stored(serde_json::json!("hello"));
+        let err = inv.navigate("$.foo").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("value is a string"), "got: {msg}");
+    }
+
+    #[test]
+    fn too_large_hint_always_suggests_summary_mode() {
+        let inv = stored(serde_json::json!({"result": "x"}));
+        let hint = inv.too_large_hint("$.result");
+        assert!(hint.contains("mode: \"summary\""), "got: {hint}");
+    }
+
+    #[test]
+    fn too_large_hint_lists_sub_invocations_when_root_has_them() {
+        let inv = stored(serde_json::json!({
+            "result": "x",
+            "sub_invocations": [
+                {"invocation_id": "aaa", "tool_name": "github_list_prs"},
+                {"invocation_id": "bbb", "tool_name": "honeycomb_query"},
+            ],
+        }));
+        let hint = inv.too_large_hint("$.result");
+        assert!(hint.contains("github_list_prs=aaa"), "got: {hint}");
+        assert!(hint.contains("honeycomb_query=bbb"), "got: {hint}");
+    }
+
+    #[test]
+    fn too_large_hint_caps_to_three_and_mentions_overflow() {
+        let inv = stored(serde_json::json!({
+            "result": "x",
+            "sub_invocations": [
+                {"invocation_id": "i0", "tool_name": "t0"},
+                {"invocation_id": "i1", "tool_name": "t1"},
+                {"invocation_id": "i2", "tool_name": "t2"},
+                {"invocation_id": "i3", "tool_name": "t3"},
+                {"invocation_id": "i4", "tool_name": "t4"},
+            ],
+        }));
+        let hint = inv.too_large_hint("$.result");
+        assert!(hint.contains("t0=i0"), "got: {hint}");
+        assert!(hint.contains("t2=i2"), "got: {hint}");
+        assert!(!hint.contains("t3=i3"), "should cap at 3; got: {hint}");
+        assert!(hint.contains("+2 more"), "got: {hint}");
+    }
+
+    #[test]
+    fn too_large_hint_skips_sub_invocations_when_path_is_unrelated() {
+        let inv = stored(serde_json::json!({
+            "result": "x",
+            "sub_invocations": [
+                {"invocation_id": "aaa", "tool_name": "github_list_prs"},
+            ],
+        }));
+        let hint = inv.too_large_hint("$.sub_invocations");
+        assert!(!hint.contains("github_list_prs"), "got: {hint}");
+        assert!(hint.contains("mode: \"summary\""), "got: {hint}");
     }
 }
