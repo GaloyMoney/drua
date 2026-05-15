@@ -247,8 +247,8 @@ async fn persist_mode_emits_verbatim_t_without_elided_block() {
     let caching = ToolCaching::new(&pool().await, config);
 
     // Pick a value the walker WOULD elide so we hit the persist path —
-    // Persist mode persists to DB but emits {result: T verbatim} on the
-    // wire (no `_elided`); the JS engine in compose has its own size cap.
+    // Persist mode persists to DB but emits T verbatim on the wire (no
+    // wrapper and no `_elided`); the JS engine in compose has its own size cap.
     let big = "x".repeat(1024);
     let upstream = CallToolResult::success(vec![Content::text(big.clone())]);
 
@@ -272,17 +272,72 @@ async fn persist_mode_emits_verbatim_t_without_elided_block() {
         .structured_content
         .as_ref()
         .expect("Persist mode emits structuredContent");
-    let result_field = structured
-        .get("result")
-        .expect("Persist wire shape is {result: T}");
     assert_eq!(
-        result_field,
+        structured,
         &serde_json::Value::String(big.clone()),
         "Persist mode emits T verbatim on the wire",
     );
+}
+
+#[tokio::test]
+async fn direct_and_compose_persistence_share_fetch_root_but_not_wire_wrapper() {
+    let config = ToolCachingConfig {
+        generic_threshold_bytes: 512,
+        ..ToolCachingConfig::default()
+    };
+    let caching = ToolCaching::new(&pool().await, config);
+    let owner = ToolCallOwnerId::new();
+    let upstream_t = serde_json::json!({
+        "items": (0..200).map(|i| format!("item-{i}")).collect::<Vec<_>>()
+    });
+    let mut upstream = CallToolResult::success(Vec::new());
+    upstream.structured_content = Some(upstream_t.clone());
+
+    let direct = caching
+        .cache(owner, "contract", &serde_json::json!({}), upstream.clone())
+        .await
+        .expect("direct cache succeeds");
+    let compose = caching
+        .persist_for_compose(owner, "contract", &serde_json::json!({}), upstream)
+        .await
+        .expect("compose persist succeeds");
+
+    let direct_structured = direct
+        .result
+        .structured_content
+        .as_ref()
+        .expect("direct cache has structured wrapper");
     assert!(
-        structured.get("_elided").is_none(),
-        "Persist mode never emits `_elided`",
+        direct_structured.get("result").is_some(),
+        "direct MCP wire keeps DruaToolResult wrapper",
+    );
+    assert!(
+        direct_structured.get("_recovery").is_some(),
+        "direct MCP wire has typed recovery manifest",
+    );
+
+    let compose_structured = compose
+        .result
+        .structured_content
+        .as_ref()
+        .expect("compose persist has structured content");
+    assert_eq!(
+        compose_structured, &upstream_t,
+        "compose persistence emits upstream T directly",
+    );
+
+    let fetched = caching
+        .fetch(
+            owner,
+            compose.invocation_id.expect("compose persisted invocation"),
+            "$.items",
+            Some(&drua_tool_caching::FetchQuery::JsonArraySlice { offset: -2, len: 2 }),
+        )
+        .await
+        .expect("compose persisted root is upstream T");
+    assert_eq!(
+        fetched.structured,
+        serde_json::json!({"items": ["item-198", "item-199"]})
     );
 }
 
