@@ -505,13 +505,17 @@ impl Executor {
 
                 let sandbox_id = attach_sandbox.map(|(id, _)| id);
 
-                // Two-pass interpolation — order matters for security:
+                // Two-pass interpolation, ORDER MATTERS for security:
+                //
                 //   1. Resolve `${{ trigger.X }}` / `${{ steps.<n>.outputs.Y }}`
-                //      against the raw skill body.
-                //   2. Splice in the trigger payload as opaque text. Any
-                //      `${{ … }}` smuggled through user-controlled payload
-                //      content survives but is not re-evaluated, so an
-                //      attacker cannot leak prior step outputs.
+                //      against the raw skill body. The skill author's
+                //      template references resolve here.
+                //   2. Then splice in the JSON-serialised trigger payload as
+                //      OPAQUE text. A literal `${{ … }}` in user-controlled
+                //      payload content (a commit message, a webhook field, …)
+                //      survives this expansion but is no longer re-evaluated,
+                //      so an attacker cannot leak prior step outputs into the
+                //      prompt by smuggling templates through the trigger.
                 // The append-vs-interpolate split avoids exposing the body
                 // to bare `$N` substitution unless the skill opts in.
                 let raw_body: String = self

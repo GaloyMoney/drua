@@ -230,9 +230,8 @@ impl SkillBody {
     }
 
     /// `$ARGUMENTS` → full argument string; `$0`, `$1`, … → positional
-    /// (shell-split). The `ARGUMENTS:` append fires whenever the body
-    /// lacks a literal `$ARGUMENTS` — incidental `$N` matches (e.g. awk
-    /// `$1`) must not suppress it, or the agent loses the payload.
+    /// (shell-split, quotes respected). If the body lacks `$ARGUMENTS` and
+    /// args are non-empty, appends `ARGUMENTS: <value>`.
     pub fn interpolate(self, arguments: Option<&str>) -> String {
         let args = arguments.unwrap_or_default();
         let positional = shell_split(args);
@@ -250,8 +249,7 @@ impl SkillBody {
                 tracing::warn!(
                     target: "skill.interpolate",
                     placeholder = %placeholder,
-                    "positional argument substitution fired in skill body — \
-                     usually unintentional unless the skill explicitly uses $N"
+                    "positional substitution fired in skill body"
                 );
                 result = result.replace(&placeholder, &positional[i]);
             }
@@ -430,8 +428,6 @@ mod tests {
         assert_eq!(result, "a b k\n\nARGUMENTS: a b c d e f g h i j k");
     }
 
-    // Regression: incidental `$1`/`$2` in an awk one-liner used to suppress
-    // the ARGUMENTS append, hiding the trigger payload from the agent.
     #[test]
     fn interpolate_still_appends_when_positional_only_matched_in_awk_like_context() {
         let body = SkillBody::new(
