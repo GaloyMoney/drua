@@ -29,6 +29,7 @@ pub struct Walker {
     threshold_bytes: usize,
     sentinel_min_bytes: usize,
     sentinel_hard_cap_bytes: usize,
+    max_fetch_response_bytes: usize,
 }
 
 impl Walker {
@@ -38,6 +39,7 @@ impl Walker {
             threshold_bytes: config.generic_threshold_bytes,
             sentinel_min_bytes: config.sentinel_min_bytes,
             sentinel_hard_cap_bytes: config.sentinel_hard_cap_bytes,
+            max_fetch_response_bytes: config.max_fetch_response_bytes,
         }
     }
 
@@ -201,9 +203,12 @@ impl Walker {
         // stays valid. Truncation metadata moves into the ElidedPath,
         // where the structured envelope's `_elided.paths[i]` carries it.
         // Per-item elided_paths for kept items (e.g. $[0].body) survive;
-        // those for dropped tail indices get pruned.
+        // those for dropped tail indices get pruned (or kept, if the
+        // recovery slice wouldn't fit max_fetch_response_bytes — see
+        // truncate_array).
         self.truncate_array(
             &walked,
+            items,
             n,
             original_bytes,
             path,
@@ -351,6 +356,7 @@ impl Walker {
     fn truncate_array(
         &self,
         walked: &[Value],
+        originals: &[Value],
         original_length: usize,
         original_bytes: u64,
         path: &str,
@@ -371,19 +377,41 @@ impl Walker {
             head_count -= 1;
             truncated = make_truncated_array(walked, head_count);
         }
-        // Surgical orphan cleanup: keep per-item elided_paths for kept
-        // indices `[0..head_count)`. Indices `[head_count..n)` dropped
-        // out of the wrapped shape — their recovery handles go too.
+
+        // Validate the slice-mode recovery template against the FETCH
+        // cap by sizing the *original* tail items (what
+        // `tool_output_fetch` would actually return — it reads from the
+        // persisted root, not the walked tree). If the slice would
+        // exceed the cap, we'd be advertising a recovery call that's
+        // guaranteed to fail with `FetchResponseTooLarge`. Switch to
+        // per-index elided paths + summary-mode aggregate recover
+        // instead — both are bounded by construction.
+        let tail_originals_size =
+            json_size(&Value::Array(originals[head_count..].to_vec())) as usize;
+        let slice_fits_fetch_cap = tail_originals_size <= self.max_fetch_response_bytes;
+
+        // Per-item elided_paths emitted during walk:
+        //   - kept indices `[0..head_count)`: keep (still in wire shape)
+        //   - dropped indices `[head_count..n)`: KEEP when slice
+        //     wouldn't fit fetch cap (the agent needs them as per-index
+        //     drill-downs); DROP otherwise (slice recovery covers the
+        //     whole tail in one call).
         let after_walk: Vec<ElidedPath> = elided_paths.split_off(paths_before);
         for entry in after_walk {
             match parse_array_index(&entry.path, path) {
                 Some(i) if i < head_count => elided_paths.push(entry),
                 None => elided_paths.push(entry),
-                _ => {} // drop: this index is in the dropped tail
+                Some(_) if !slice_fits_fetch_cap => elided_paths.push(entry),
+                _ => {} // drop: this index is in the slice-recovered tail
             }
         }
         let missing_len = original_length.saturating_sub(head_count);
         let shown_bytes = json_size(&truncated);
+        let recover = if slice_fits_fetch_cap {
+            make_array_slice_recover(invocation_id, path, head_count, missing_len)
+        } else {
+            make_summary_recover(invocation_id)
+        };
         elided_paths.push(ElidedPath {
             path: path.to_string(),
             total_bytes: original_bytes,
@@ -392,7 +420,7 @@ impl Walker {
             shown_lines: None,
             total_items: Some(original_length as u32),
             shown_items: Some(head_count as u32),
-            recover: make_array_slice_recover(invocation_id, path, head_count, missing_len),
+            recover,
         });
         truncated
     }
@@ -729,6 +757,133 @@ fn make_array_slice_recover(
     })
 }
 
+/// Bounded-by-construction fallback recover for elisions whose direct
+/// slice would exceed `max_fetch_response_bytes`. Returns the persisted
+/// `<summary>+<recovery>` envelope (capped by `sentinel_budget`), from
+/// which the agent reads per-index `<elided>` pointers and drills down
+/// individually.
+fn make_summary_recover(invocation_id: ToolInvocationId) -> Value {
+    serde_json::json!({
+        "tool": "tool_output_fetch",
+        "args_template": {
+            "invocation_id": invocation_id.to_string(),
+            "query": { "mode": "summary" },
+        }
+    })
+}
+
 fn make_truncated_array(walked: &[Value], head_count: usize) -> Value {
     Value::Array(walked.iter().take(head_count).cloned().collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::primitives::QueryStructure;
+
+    fn walker_with_fetch_cap(max_fetch: usize) -> Walker {
+        let config = ToolCachingConfig {
+            // Force array-truncation by making the array budget small.
+            generic_threshold_bytes: 512,
+            sentinel_min_bytes: 512,
+            sentinel_hard_cap_bytes: 1024,
+            max_fetch_response_bytes: max_fetch,
+        };
+        Walker::new(Arc::new(StringSummarizerChain::new()), &config)
+    }
+
+    /// Build an item built from many small number fields — large enough
+    /// to make the array exceed budget (forcing truncate_array), but
+    /// with no compressible strings so each item passes through walk
+    /// at its original byte size.
+    fn incompressible_item(seed: u32, n_fields: u32) -> Value {
+        let mut obj = serde_json::Map::new();
+        for k in 0..n_fields {
+            obj.insert(format!("field_{seed}_{k}"), serde_json::json!(k as i64));
+        }
+        Value::Object(obj)
+    }
+
+    /// Tail of originals exceeds max_fetch_response_bytes → aggregate
+    /// recover must switch to summary mode (slice would have produced
+    /// a "fetch response too large" error).
+    #[test]
+    fn fat_tail_array_emits_summary_recover_not_slice() {
+        // 5 items × ~600 bytes each = ~3KB array; walker budget 512
+        // forces head_count=0 (or 1) so the tail covers all/most items.
+        // Each item is ~600 bytes of incompressible numeric data — tail
+        // size as fetched from persisted root would be ~3KB, well above
+        // the 1KB fetch cap below.
+        let items: Vec<Value> = (0..5).map(|i| incompressible_item(i, 40)).collect();
+        let qs = QueryStructure {
+            root: Value::Array(items),
+        };
+        let walker = walker_with_fetch_cap(1024);
+        let summary = walker.summarize(&qs, ToolInvocationId::new(), "test_tool");
+
+        // Find the aggregate `$` elided path (the truncation marker).
+        let agg = summary
+            .elided_paths
+            .iter()
+            .find(|e| e.path == "$")
+            .unwrap_or_else(|| {
+                panic!(
+                    "aggregate elided path at $ missing; got paths: {:?}",
+                    summary
+                        .elided_paths
+                        .iter()
+                        .map(|e| &e.path)
+                        .collect::<Vec<_>>()
+                )
+            });
+        let mode = agg
+            .recover
+            .get("args_template")
+            .and_then(|t| t.get("query"))
+            .and_then(|q| q.get("mode"))
+            .and_then(Value::as_str)
+            .expect("recover has query.mode");
+        assert_eq!(
+            mode, "summary",
+            "fat tail should switch aggregate recover to summary mode; got {mode}"
+        );
+    }
+
+    /// When the tail slice does fit the fetch cap, existing slice-mode
+    /// recover stays in place (no regression).
+    #[test]
+    fn slim_tail_array_still_uses_slice_recover() {
+        // 20 small items (~30 bytes each) → array ~700 bytes, > budget
+        // 512, triggering truncate_array. Tail (any subset) easily fits
+        // the generous 16KB fetch cap.
+        let items: Vec<Value> = (0..20).map(|i| incompressible_item(i, 2)).collect();
+        let qs = QueryStructure {
+            root: Value::Array(items),
+        };
+        let walker = walker_with_fetch_cap(16 * 1024);
+        let summary = walker.summarize(&qs, ToolInvocationId::new(), "test_tool");
+
+        let agg = summary
+            .elided_paths
+            .iter()
+            .find(|e| e.path == "$")
+            .unwrap_or_else(|| {
+                panic!(
+                    "aggregate elided path at $ missing; got paths: {:?}",
+                    summary
+                        .elided_paths
+                        .iter()
+                        .map(|e| &e.path)
+                        .collect::<Vec<_>>()
+                )
+            });
+        let mode = agg
+            .recover
+            .get("args_template")
+            .and_then(|t| t.get("query"))
+            .and_then(|q| q.get("mode"))
+            .and_then(Value::as_str)
+            .expect("recover has query.mode");
+        assert_eq!(mode, "json_array_slice");
+    }
 }
