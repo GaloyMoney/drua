@@ -21,9 +21,7 @@ struct WalkCtx<'a> {
     primary_path: &'a str,
     primary_mapping: Option<&'a [u32]>,
     primary_raw_bytes: Option<u64>,
-    /// True when the preprocessor knows the interesting payload is at
-    /// the END of the primary text (CI build logs: failure trace lives
-    /// in the last lines). Only takes effect at `primary_path`.
+    /// Mirror of the preprocessor's `prefer_tail`; only honored at `primary_path`.
     primary_prefer_tail: bool,
 }
 
@@ -817,10 +815,8 @@ mod tests {
         Walker::new(Arc::new(StringSummarizerChain::new()), &config)
     }
 
-    /// Build an item built from many small number fields — large enough
-    /// to make the array exceed budget (forcing truncate_array), but
-    /// with no compressible strings so each item passes through walk
-    /// at its original byte size.
+    /// Object of `n_fields` numeric fields — exceeds the array budget
+    /// but stays incompressible so the walker keeps full per-item size.
     fn incompressible_item(seed: u32, n_fields: u32) -> Value {
         let mut obj = serde_json::Map::new();
         for k in 0..n_fields {
