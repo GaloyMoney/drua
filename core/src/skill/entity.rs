@@ -230,30 +230,34 @@ impl SkillBody {
     }
 
     /// `$ARGUMENTS` → full argument string; `$0`, `$1`, … → positional
-    /// (shell-split, quotes respected). If neither placeholder matches and
-    /// args are non-empty, appends `ARGUMENTS: <value>`.
+    /// (shell-split). The `ARGUMENTS:` append fires whenever the body
+    /// lacks a literal `$ARGUMENTS` — incidental `$N` matches (e.g. awk
+    /// `$1`) must not suppress it, or the agent loses the payload.
     pub fn interpolate(self, arguments: Option<&str>) -> String {
         let args = arguments.unwrap_or_default();
         let positional = shell_split(args);
+        let body_uses_arguments = self.0.contains("$ARGUMENTS");
 
         let mut result = self.0;
-        let mut had_substitution = false;
-
-        if result.contains("$ARGUMENTS") {
+        if body_uses_arguments {
             result = result.replace("$ARGUMENTS", args);
-            had_substitution = true;
         }
 
         // Highest index first so $10 isn't eaten by $1.
         for i in (0..positional.len()).rev() {
             let placeholder = format!("${i}");
             if result.contains(&placeholder) {
+                tracing::warn!(
+                    target: "skill.interpolate",
+                    placeholder = %placeholder,
+                    "positional argument substitution fired in skill body — \
+                     usually unintentional unless the skill explicitly uses $N"
+                );
                 result = result.replace(&placeholder, &positional[i]);
-                had_substitution = true;
             }
         }
 
-        if !had_substitution && !args.is_empty() {
+        if !body_uses_arguments && !args.is_empty() {
             format!("{result}\n\nARGUMENTS: {args}")
         } else {
             result
@@ -388,7 +392,7 @@ mod tests {
         let body = SkillBody::new("Deploy $0 to $1.".into());
         assert_eq!(
             body.interpolate(Some("myapp production")),
-            "Deploy myapp to production."
+            "Deploy myapp to production.\n\nARGUMENTS: myapp production"
         );
     }
 
@@ -397,7 +401,7 @@ mod tests {
         let body = SkillBody::new("Say $0 to $1.".into());
         assert_eq!(
             body.interpolate(Some(r#""hello world" bob"#)),
-            "Say hello world to bob."
+            "Say hello world to bob.\n\nARGUMENTS: \"hello world\" bob"
         );
     }
 
@@ -415,7 +419,7 @@ mod tests {
         let body = SkillBody::new("$0 and $1 and $2.".into());
         assert_eq!(
             body.interpolate(Some("only-one")),
-            "only-one and $1 and $2."
+            "only-one and $1 and $2.\n\nARGUMENTS: only-one"
         );
     }
 
@@ -423,7 +427,27 @@ mod tests {
     fn interpolate_high_positional_index() {
         let args = "a b c d e f g h i j k";
         let result = SkillBody::new("$0 $1 $10".into()).interpolate(Some(args));
-        assert_eq!(result, "a b k");
+        assert_eq!(result, "a b k\n\nARGUMENTS: a b c d e f g h i j k");
+    }
+
+    // Regression: incidental `$1`/`$2` in an awk one-liner used to suppress
+    // the ARGUMENTS append, hiding the trigger payload from the agent.
+    #[test]
+    fn interpolate_still_appends_when_positional_only_matched_in_awk_like_context() {
+        let body = SkillBody::new(
+            "Run this verifier:\n\
+             ```bash\n\
+             git diff --numstat | awk '{ins+=$1; del+=$2}'\n\
+             ```\n\
+             Then continue."
+                .into(),
+        );
+        let args = r#"{"job":"check-code","build":"648.1"}"#;
+        let rendered = body.interpolate(Some(args));
+        assert!(
+            rendered.ends_with(&format!("\n\nARGUMENTS: {args}")),
+            "expected trailing ARGUMENTS append; got: {rendered:?}"
+        );
     }
 }
 

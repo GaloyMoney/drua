@@ -503,24 +503,17 @@ impl Executor {
                     None => None,
                 };
 
-                let arguments = serde_json::to_string_pretty(trigger_context)
-                    .unwrap_or_else(|_| trigger_context.to_string());
                 let sandbox_id = attach_sandbox.map(|(id, _)| id);
 
-                // Two-pass interpolation, ORDER MATTERS for security:
-                //
+                // Two-pass interpolation — order matters for security:
                 //   1. Resolve `${{ trigger.X }}` / `${{ steps.<n>.outputs.Y }}`
-                //      against the raw skill body. The skill author's
-                //      template references resolve here.
-                //   2. Then expand `$ARGUMENTS` / `$N` — the JSON-
-                //      serialised trigger payload is spliced in as
-                //      OPAQUE text. A literal `${{ … }}` in user-
-                //      controlled payload content (a commit message,
-                //      a webhook field, …) survives this expansion
-                //      but is no longer re-evaluated, so an attacker
-                //      cannot leak prior step outputs into the
-                //      prompt by smuggling templates through the
-                //      trigger.
+                //      against the raw skill body.
+                //   2. Splice in the trigger payload as opaque text. Any
+                //      `${{ … }}` smuggled through user-controlled payload
+                //      content survives but is not re-evaluated, so an
+                //      attacker cannot leak prior step outputs.
+                // The append-vs-interpolate split avoids exposing the body
+                // to bare `$N` substitution unless the skill opts in.
                 let raw_body: String = self
                     .skills
                     .find_by_name(skill, Some(project_id), sandbox_id)
@@ -535,8 +528,13 @@ impl Executor {
                 let templated_body = template_ctx
                     .substitute_in_string(&raw_body)
                     .map_err(|e| WorkflowError::Skill(e.to_string()))?;
-                let prompt =
-                    crate::skill::SkillBody::new(templated_body).interpolate(Some(&arguments));
+                let pretty = serde_json::to_string_pretty(trigger_context)
+                    .unwrap_or_else(|_| trigger_context.to_string());
+                let prompt = if templated_body.contains("$ARGUMENTS") {
+                    crate::skill::SkillBody::new(templated_body).interpolate(Some(&pretty))
+                } else {
+                    format!("{templated_body}\n\nTRIGGER_CONTEXT:\n```json\n{pretty}\n```")
+                };
 
                 let agent_name = format!("workflow-{}-{name}", run_id.short());
                 let mut op = self
