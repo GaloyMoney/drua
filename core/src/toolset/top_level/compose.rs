@@ -56,6 +56,13 @@ static COMPOSE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct ComposeOutput {
+    /// Recoverable sub-tool calls; excludes passthrough, errored, and bypass-marked calls.
+    /// Emitted first so agents see drill-down handles before scanning a possibly-elided `result`.
+    sub_invocations: Vec<SubInvocation>,
+    fetch_hint: String,
+    tool_calls: usize,
+    execution_time_ms: u64,
+    console: Vec<String>,
     /// The JS script's return value, verbatim. If oversize, the outer
     /// `cache()` call walks the full ComposeOutput tree and elides this
     /// field in place; the agent recovers via `tool_output_fetch` with
@@ -65,12 +72,6 @@ struct ComposeOutput {
     /// envelope.
     #[schemars(schema_with = "crate::toolset::any_json_schema")]
     result: serde_json::Value,
-    /// Recoverable sub-tool calls; excludes passthrough, errored, and bypass-marked calls.
-    sub_invocations: Vec<SubInvocation>,
-    fetch_hint: String,
-    console: Vec<String>,
-    tool_calls: usize,
-    execution_time_ms: u64,
 }
 
 static COMPOSE_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
@@ -173,20 +174,17 @@ impl TopLevelTool for ComposeTool {
             .map(|guard| guard.clone())
             .unwrap_or_default();
 
-        // The JS return value goes into `ComposeOutput.result` verbatim.
-        // The outer `cache()` below walks the full ComposeOutput on the
-        // structured channel — if `.result` is oversize the walker
-        // elides it in place + records the path in `_elided.paths`.
-        // Agents can recover via `tool_output_fetch(invocation_id, path:
-        // "$.result.result")` (outer wrap + ComposeOutput.result field)
-        // or `query: {mode: "summary"}` for the full curated envelope.
+        // Compose opts out of the `DruaToolResult` wrap, so the
+        // persisted root IS `ComposeOutput`: agents recover via
+        // `path: "$.result"` (not `$.result.result`) or
+        // `query: {mode: "summary"}` for the full curated envelope.
         let out = ComposeOutput {
-            result: result.value.clone(),
             sub_invocations: collected_sub_invocations,
             fetch_hint: COMPOSE_FETCH_HINT.to_string(),
-            console: result.console_output.clone(),
             tool_calls: result.tool_calls_made,
             execution_time_ms: result.execution_time.as_millis() as u64,
+            console: result.console_output.clone(),
+            result: result.value.clone(),
         };
 
         let structured = serde_json::to_value(&out).expect("ComposeOutput serialization");

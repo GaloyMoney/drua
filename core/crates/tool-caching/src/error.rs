@@ -10,7 +10,11 @@ pub enum ToolCachingError {
     InvalidPath(String),
     #[error(
         "fetch response too large: {size} bytes (max {max}); narrow the query \
-         with a smaller `len`, a deeper `path`, or by switching mode"
+         with a smaller `len`, a deeper `path`, or by switching mode{hint}"
     )]
-    FetchResponseTooLarge { size: usize, max: usize },
+    FetchResponseTooLarge {
+        size: usize,
+        max: usize,
+        hint: String,
+    },
 }

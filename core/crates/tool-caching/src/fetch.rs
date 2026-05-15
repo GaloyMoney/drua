@@ -138,6 +138,7 @@ impl StoredInvocation {
             return Err(ToolCachingError::FetchResponseTooLarge {
                 size: text.len(),
                 max: max_bytes,
+                hint: self.too_large_hint(path),
             });
         }
         Ok(FetchResult {
@@ -160,9 +161,50 @@ impl StoredInvocation {
             return Err(ToolCachingError::FetchResponseTooLarge {
                 size: envelope_len,
                 max: max_bytes,
+                hint: String::new(),
             });
         }
         Ok(FetchResult { result, structured })
+    }
+
+    /// Tail-appended hint for `FetchResponseTooLarge`. Always nudges
+    /// `mode:'summary'`; on a compose root (`sub_invocations` array at
+    /// `$`), names up to three drill-down invocation_ids the agent can
+    /// fetch directly instead of re-slicing the aggregate body.
+    fn too_large_hint(&self, path: &str) -> String {
+        let mut parts = vec![". Try `query: {mode: \"summary\"}` for the curated envelope".to_string()];
+        let touches_result = path == "$" || path == "$.result" || path.starts_with("$.result.");
+        if touches_result {
+            if let Some(arr) = self
+                .query_structure
+                .root
+                .get("sub_invocations")
+                .and_then(Value::as_array)
+            {
+                let ids: Vec<String> = arr
+                    .iter()
+                    .take(3)
+                    .filter_map(|s| {
+                        let id = s.get("invocation_id").and_then(Value::as_str)?;
+                        let tool = s.get("tool_name").and_then(Value::as_str).unwrap_or("?");
+                        Some(format!("{tool}={id}"))
+                    })
+                    .collect();
+                if !ids.is_empty() {
+                    let more = if arr.len() > ids.len() {
+                        format!(" (+{} more in `$.sub_invocations`)", arr.len() - ids.len())
+                    } else {
+                        String::new()
+                    };
+                    parts.push(format!(
+                        ". Or drill into a sub-invocation directly via tool_output_fetch: {}{}",
+                        ids.join(", "),
+                        more,
+                    ));
+                }
+            }
+        }
+        parts.join("")
     }
 
     fn navigate(&self, path: &str) -> Result<&Value, ToolCachingError> {
@@ -444,5 +486,58 @@ mod tests {
         let err = inv.navigate("$.foo").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("value is a string"), "got: {msg}");
+    }
+
+    #[test]
+    fn too_large_hint_always_suggests_summary_mode() {
+        let inv = stored(serde_json::json!({"result": "x"}));
+        let hint = inv.too_large_hint("$.result");
+        assert!(hint.contains("mode: \"summary\""), "got: {hint}");
+    }
+
+    #[test]
+    fn too_large_hint_lists_sub_invocations_when_root_has_them() {
+        let inv = stored(serde_json::json!({
+            "result": "x",
+            "sub_invocations": [
+                {"invocation_id": "aaa", "tool_name": "github_list_prs"},
+                {"invocation_id": "bbb", "tool_name": "honeycomb_query"},
+            ],
+        }));
+        let hint = inv.too_large_hint("$.result");
+        assert!(hint.contains("github_list_prs=aaa"), "got: {hint}");
+        assert!(hint.contains("honeycomb_query=bbb"), "got: {hint}");
+    }
+
+    #[test]
+    fn too_large_hint_caps_to_three_and_mentions_overflow() {
+        let inv = stored(serde_json::json!({
+            "result": "x",
+            "sub_invocations": [
+                {"invocation_id": "i0", "tool_name": "t0"},
+                {"invocation_id": "i1", "tool_name": "t1"},
+                {"invocation_id": "i2", "tool_name": "t2"},
+                {"invocation_id": "i3", "tool_name": "t3"},
+                {"invocation_id": "i4", "tool_name": "t4"},
+            ],
+        }));
+        let hint = inv.too_large_hint("$.result");
+        assert!(hint.contains("t0=i0"), "got: {hint}");
+        assert!(hint.contains("t2=i2"), "got: {hint}");
+        assert!(!hint.contains("t3=i3"), "should cap at 3; got: {hint}");
+        assert!(hint.contains("+2 more"), "got: {hint}");
+    }
+
+    #[test]
+    fn too_large_hint_skips_sub_invocations_when_path_is_unrelated() {
+        let inv = stored(serde_json::json!({
+            "result": "x",
+            "sub_invocations": [
+                {"invocation_id": "aaa", "tool_name": "github_list_prs"},
+            ],
+        }));
+        let hint = inv.too_large_hint("$.sub_invocations");
+        assert!(!hint.contains("github_list_prs"), "got: {hint}");
+        assert!(hint.contains("mode: \"summary\""), "got: {hint}");
     }
 }
