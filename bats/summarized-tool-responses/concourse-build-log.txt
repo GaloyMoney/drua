@@ -1,92 +1,83 @@
-<summary path="$.logs" total-bytes="39177" shown-bytes="8137" total-lines="320" shown-lines="164">
-<head lines="82">
+<summary path="$.logs" total-bytes="39177" shown-bytes="8049" total-lines="320" shown-lines="157">
+<bulk-elided lines="125">
+125 lines elided
+</bulk-elided>
+<tail lines="157">
+              ~ labels                      = {} -> (known after apply)
+              ~ provisioned_iops            = 0 -> (known after apply)
+              ~ provisioned_throughput      = 0 -> (known after apply)
+              - resource_manager_tags       = {} -> null
+              ~ resource_policies           = [] -> (known after apply)
+              ~ size                        = 0 -> (known after apply)
+              + snapshot                    = (known after apply)
+              + type                        = (known after apply)
+            }
+        }
+
+      ~ network_interface {
+          + igmp_query                  = (known after apply)
+          ~ internal_ipv6_prefix_length = 0 -> (known after apply)
+          + ipv6_access_type            = (known after apply)
+          + ipv6_address                = (known after apply)
+          ~ name                        = "nic0" -> (known after apply)
+          ~ network                     = "https://www.googleapis.com/compute/v1/projects/galoy-agents/global/networks/galoy-agents-vpc" -> (known after apply)
+          + network_attachment          = (known after apply)
+          ~ network_ip                  = "10.0.0.7" -> (known after apply)
+          + parent_nic_name             = (known after apply)
+          - queue_count                 = 0 -> null
+          ~ stack_type                  = "IPV4_ONLY" -> (known after apply)
+          ~ subnetwork_project          = "galoy-agents" -> (known after apply)
+          - vlan                        = 0 -> null
+            # (1 unchanged attribute hidden)
+        }
+
+      - scheduling {
+          - automatic_restart   = true -> null
+          - availability_domain = 0 -> null
+          - min_node_cpus       = 0 -> null
+          - on_host_maintenance = "MIGRATE" -> null
+          - preemptible         = false -> null
+          - provisioning_model  = "STANDARD" -> null
+        }
+
+      - shielded_instance_config {
+          - enable_integrity_monitoring = true -> null
+          - enable_secure_boot          = false -> null
+          - enable_vtpm                 = true -> null
+        }
+
+        # (1 unchanged block hidden)
+    }
+
+Plan: 1 to add, 0 to change, 1 to destroy.
+module.inception.google_compute_instance.bastion: Destroying... [id=projects/galoy-agents/zones/us-east1-b/instances/galoy-agents-bastion]
+module.inception.google_compute_instance.bastion: Still destroying... [id=projects/galoy-agents/zones/us-east1-b/instances/galoy-agents-bastion, 10s elapsed]
+module.inception.google_compute_instance.bastion: Still destroying... [id=projects/galoy-agents/zones/us-east1-b/instances/galoy-agents-bastion, 20s elapsed]
+module.inception.google_compute_instance.bastion: Still destroying... [id=projects/galoy-agents/zones/us-east1-b/instances/galoy-agents-bastion, 30s elapsed]
+module.inception.google_compute_instance.bastion: Still destroying... [id=projects/galoy-agents/zones/us-east1-b/instances/galoy-agents-bastion, 40s elapsed]
+module.inception.google_compute_instance.bastion: Still destroying... [id=projects/galoy-agents/zones/us-east1-b/instances/galoy-agents-bastion, 50s elapsed]
+module.inception.google_compute_instance.bastion: Destruction complete after 51s
+module.inception.google_compute_instance.bastion: Creating...
+module.inception.google_compute_instance.bastion: Still creating... [10s elapsed]
+module.inception.google_compute_instance.bastion: Creation complete after 16s [id=projects/galoy-agents/zones/us-east1-b/instances/galoy-agents-bastion]
+
+Apply complete! Resources: 1 added, 0 changed, 1 destroyed.
+
+Outputs:
+
+backups_bucket_name = "galoy-agents-backups"
+backups_sa = "galoy-agents-backups@galoy-agents.iam.gserviceaccount.com"
+bastion_name = "galoy-agents-bastion"
+bastion_zone = "us-east1-b"
+cluster_sa = "galoy-agents-cluster@galoy-agents.iam.gserviceaccount.com"
+gcp_project = "galoy-agents"
+▲ ▲ ▲ ▲ ▲ ▲ ▲ ▲ ▲ ▲ Terraform Apply ▲ ▲ ▲ ▲ ▲ ▲ ▲ ▲ ▲ ▲
+Successfully Ran Terraform Apply!
 INFO: found existing resource cache
 
-Preparing resource - cepler v0.7.15
-Cloning repo to '/tmp/build/get'
-HEAD of branch 'main' is now at: [7ad5774] - chore(deps): bump galoy-infra gcp modules to 'd267652'
-Checking if we can prepare deployment at trigger '7ad57744a9672278351235007ee020d2118b6045'
-File modules/infra/vendor/git-ref/ref changed
-File modules/infra/vendor/tf/platform/gcp/variables.tf changed
-Preparing the workspace
 INFO: found existing resource cache
 
 ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼ Terraform Apply ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼ ▼
-<terraform-refresh original-lines="13-22" original-bytes="1582">
-10 resources refreshed
-</terraform-refresh>
-module.inception.data.google_compute_image.bastion: Reading...
-<terraform-refresh original-lines="24-27" original-bytes="476">
-4 resources refreshed
-</terraform-refresh>
-module.inception.data.google_iam_policy.bastion: Reading...
-module.inception.data.google_iam_policy.bastion: Read complete after 0s [id=37916628]
-<terraform-refresh original-lines="30-34" original-bytes="939">
-5 resources refreshed
-</terraform-refresh>
-module.inception.data.google_compute_image.bastion: Read complete after 0s [id=projects/ubuntu-os-cloud/global/images/ubuntu-2404-noble-amd64-v20260503]
-module.inception.data.google_iam_policy.backups_access: Reading...
-module.inception.data.google_iam_policy.backups_access: Read complete after 0s [id=2744962742]
-<terraform-refresh original-lines="38-65" original-bytes="6585">
-28 resources refreshed
-</terraform-refresh>
-module.inception.data.google_iam_policy.tf_state_access: Reading...
-module.inception.data.google_iam_policy.tf_state_access: Read complete after 0s [id=3234025061]
-<terraform-refresh original-lines="68-73" original-bytes="866">
-6 resources refreshed
-</terraform-refresh>
-
-OpenTofu used the selected providers to generate the following execution
-plan. Resource actions are indicated with the following symbols:
--/+ destroy and then create replacement
-
-OpenTofu will perform the following actions:
-
-  # module.inception.google_compute_instance.bastion must be replaced
--/+ resource "google_compute_instance" "bastion" {
-      ~ cpu_platform            = "Intel Broadwell" -> (known after apply)
-      ~ creation_timestamp      = "2026-04-23T02:04:40.289-07:00" -> (known after apply)
-      ~ current_status          = "RUNNING" -> (known after apply)
-      - enable_display          = false -> null
-      ~ id                      = "projects/galoy-agents/zones/us-east1-b/instances/galoy-agents-bastion" -> (known after apply)
-      ~ instance_id             = "900593102459526727" -> (known after apply)
-      ~ label_fingerprint       = "vezUS-42LLM=" -> (known after apply)
-      - labels                  = {} -> null
-      ~ metadata_fingerprint    = "vpaZKV-HM7E=" -> (known after apply)
-      + min_cpu_platform        = (known after apply)
-        name                    = "galoy-agents-bastion"
-      - resource_policies       = [] -> null
-      ~ self_link               = "https://www.googleapis.com/compute/v1/projects/galoy-agents/zones/us-east1-b/instances/galoy-agents-bastion" -> (known after apply)
-        tags                    = [
-            "galoy-agents-bastion",
-        ]
-      ~ tags_fingerprint        = "_CrzLDVZ3Bg=" -> (known after apply)
-        # (9 unchanged attributes hidden)
-
-      ~ boot_disk {
-          ~ device_name                = "persistent-disk-0" -> (known after apply)
-          + disk_encryption_key_sha256 = (known after apply)
-          - force_attach               = false -> null
-          ~ guest_os_features          = [
-              - "VIRTIO_SCSI_MULTIQUEUE",
-              - "SEV_CAPABLE",
-              - "SEV_SNP_CAPABLE",
-              - "SEV_LIVE_MIGRATABLE",
-              - "SEV_LIVE_MIGRATABLE_V2",
-              - "SNP_SVSM_CAPABLE",
-              - "IDPF",
-              - "TDX_CAPABLE",
-              - "UEFI_COMPATIBLE",
-              - "GVNIC",
-            ] -> (known after apply)
-          + kms_key_self_link          = (known after apply)
-          ~ source                     = "https://www.googleapis.com/compute/v1/projects/galoy-agents/zones/us-east1-b/disks/galoy-agents-bastion" -> (known after apply)
-            # (2 unchanged attributes hidden)
-</head>
-<bulk-elided lines="80">
-80 lines elided
-</bulk-elided>
-<tail lines="82">
 module.inception.data.google_compute_image.bastion: Reading...
 module.inception.data.google_iam_policy.bastion: Reading...
 <terraform-refresh original-lines="203-208" original-bytes="1020">
@@ -172,7 +163,7 @@ INFO: found existing resource cache
 </tail>
 </summary>
 <recovery>
-  <elided path="$.logs" total-bytes="39177" shown-bytes="8137" total-lines="320" shown-lines="164">
-    tool_output_fetch(invocation_id="<uuid>", path="$.logs", query={"len":80,"mode":"lines","offset":120})
+  <elided path="$.logs" total-bytes="39177" shown-bytes="8049" total-lines="320" shown-lines="157">
+    tool_output_fetch(invocation_id="<uuid>", path="$.logs", query={"len":125,"mode":"lines","offset":0})
   </elided>
 </recovery>

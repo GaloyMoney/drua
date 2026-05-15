@@ -305,9 +305,13 @@ impl Walker {
         }
         // Try line-mode first if the string has enough lines to split.
         let prefer_tail = is_primary && ctx.primary_prefer_tail;
-        if let Some(elide) =
-            line_elide_string(&prepared, budget, &ctx_seg, &preprocessed_to_raw, prefer_tail)
-        {
+        if let Some(elide) = line_elide_string(
+            &prepared,
+            budget,
+            &ctx_seg,
+            &preprocessed_to_raw,
+            prefer_tail,
+        ) {
             elided_paths.push(ElidedPath {
                 path: path.to_string(),
                 total_bytes: total_bytes_at_path,
@@ -997,5 +1001,62 @@ mod tests {
             diff <= 1,
             "generic split should be ~symmetric; got head={head_count}, tail={tail_count}"
         );
+    }
+
+    /// Off-by-default helper: regenerates the bats `<summary>+<recovery>`
+    /// golden files for fixtures the walker touches, by driving it over
+    /// the raw input. Run with `REGEN_GOLDEN=1 cargo test -p
+    /// drua-tool-caching --lib walker::tests::regen_bats_goldens --
+    /// --nocapture`.
+    #[test]
+    fn regen_bats_goldens() {
+        if std::env::var("REGEN_GOLDEN").is_err() {
+            return;
+        }
+        for (fixture_name, tool_name) in [
+            ("concourse-build-log", "fake_upstream_concourse-build-log"),
+            ("arr-large-fat-items", "fake_upstream_arr-large-fat-items"),
+        ] {
+            regen_one(fixture_name, tool_name);
+        }
+    }
+
+    fn regen_one(fixture_name: &str, tool_name: &str) {
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let fixture_path = manifest.join(format!(
+            "../../../lib/fake-mcp-upstream/fixtures/{fixture_name}.json"
+        ));
+        let fixture: Value =
+            serde_json::from_str(&std::fs::read_to_string(&fixture_path).expect("read fixture"))
+                .expect("parse fixture");
+        let root = match fixture["upstream"]["structured_content"].clone() {
+            Value::Null => {
+                // Fall back to parsing content[0].text the same way
+                // ToolCaching::process() does for text-only upstreams.
+                let text = fixture["upstream"]["content"][0]["text"]
+                    .as_str()
+                    .expect("content[0].text missing");
+                QueryStructure::new(text).root
+            }
+            other => other,
+        };
+        let chain = Arc::new(crate::summarizer_passes::default_chain());
+        let walker = Walker::new(chain, &crate::config::ToolCachingConfig::default());
+        let qs = QueryStructure { root };
+        let summary = walker.summarize(&qs, ToolInvocationId::new(), tool_name);
+        let envelope = summary.build_envelope_text();
+        let uuid_re = regex::Regex::new(
+            r#"invocation_id="[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}""#,
+        )
+        .unwrap();
+        let normalized = uuid_re
+            .replace_all(&envelope, r#"invocation_id="<uuid>""#)
+            .into_owned();
+        let golden = manifest.join(format!(
+            "../../../bats/summarized-tool-responses/{fixture_name}.txt"
+        ));
+        let trimmed = normalized.trim_end_matches('\n');
+        std::fs::write(&golden, trimmed).expect("write golden");
+        eprintln!("wrote {}", golden.display());
     }
 }

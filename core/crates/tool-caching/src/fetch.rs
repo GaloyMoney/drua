@@ -172,7 +172,8 @@ impl StoredInvocation {
     /// `$`), names up to three drill-down invocation_ids the agent can
     /// fetch directly instead of re-slicing the aggregate body.
     fn too_large_hint(&self, path: &str) -> String {
-        let mut parts = vec![". Try `query: {mode: \"summary\"}` for the curated envelope".to_string()];
+        let mut parts =
+            vec![". Try `query: {mode: \"summary\"}` for the curated envelope".to_string()];
         let touches_result = path == "$" || path == "$.result" || path.starts_with("$.result.");
         if touches_result {
             if let Some(arr) = self
@@ -420,10 +421,7 @@ mod tests {
 
     #[test]
     fn fetch_query_lines_negative_offset_returns_tail() {
-        let q = FetchQuery::Lines {
-            offset: -2,
-            len: 2,
-        };
+        let q = FetchQuery::Lines { offset: -2, len: 2 };
         assert_eq!(
             q.apply(Value::String("a\nb\nc\nd\ne".into())).unwrap(),
             Value::String("d\ne".into()),
@@ -432,10 +430,7 @@ mod tests {
 
     #[test]
     fn fetch_query_array_slice_negative_offset_returns_tail() {
-        let q = FetchQuery::JsonArraySlice {
-            offset: -2,
-            len: 5,
-        };
+        let q = FetchQuery::JsonArraySlice { offset: -2, len: 5 };
         let arr = serde_json::json!([1, 2, 3, 4, 5]);
         assert_eq!(q.apply(arr).unwrap(), serde_json::json!([4, 5]));
     }

@@ -57,7 +57,9 @@ static COMPOSE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct ComposeOutput {
     /// Recoverable sub-tool calls; excludes passthrough, errored, and bypass-marked calls.
-    /// Emitted first so agents see drill-down handles before scanning a possibly-elided `result`.
+    /// Note: serde_json without `preserve_order` emits object fields alphabetically,
+    /// so the agent sees `fetch_hint` before `result` before `sub_invocations` regardless
+    /// of source order. The drill-down nudge reaches the agent through `fetch_hint`.
     sub_invocations: Vec<SubInvocation>,
     fetch_hint: String,
     tool_calls: usize,
