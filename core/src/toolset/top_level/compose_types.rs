@@ -112,12 +112,7 @@ impl TopLevelTool for ComposeTypes {
                 .inner_output_schema()
                 .map(json_schema_ts::schema_to_ts)
                 .unwrap_or_else(|| "any".to_string());
-            let return_ts = if tool.default_tool_caching() {
-                super::super::wrap::wrap_output_ts(&inner_ts)
-            } else {
-                inner_ts
-            };
-            top_fns.push((name.clone(), params_ts, return_ts));
+            top_fns.push((name.clone(), params_ts, inner_ts));
             matched.push(name.clone());
         }
         top_fns.sort_by(|a, b| a.0.cmp(&b.0));
@@ -147,13 +142,10 @@ impl TopLevelTool for ComposeTypes {
                         json_schema_ts::schema_to_ts(&schema_val)
                     })
                     .unwrap_or_else(|| "any".to_string());
-                // Catalog tools always go through tool-caching → always wrap.
-                let return_ts = super::super::wrap::wrap_output_ts(&inner_ts);
-
                 namespaces.entry(prefix.clone()).or_default().push((
                     entry.name.clone(),
                     params_ts,
-                    return_ts,
+                    inner_ts,
                 ));
                 matched.push(prefixed_name);
             }

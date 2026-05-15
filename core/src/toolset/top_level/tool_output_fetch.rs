@@ -39,7 +39,8 @@ const DESCRIPTION: &str = "Recover a slice of a previously-summarised tool outpu
     holds the JS return). When in doubt, copy `path` verbatim from the response's \
     `<recovery>` block. \
     `query` (optional) further slices the resolved value: \
-    `{mode:\"range\", offset, len}` returns bytes `[offset..offset+len]` of a string at the path; \
+    `{mode:\"range\", offset, len}` returns a UTF-8 safe byte window of a string at the path \
+    (boundaries inside a codepoint are moved inward to valid character boundaries); \
     `{mode:\"lines\", offset, len}` returns line range `[offset..offset+len]` of a string at the path; \
     `{mode:\"json_array_slice\", offset, len}` returns item range `arr[offset..offset+len]` of an array at the path; \
     `offset` accepts negatives — `-N` counts from the end (Python/JS slice semantics), \

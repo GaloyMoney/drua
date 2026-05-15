@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Duration;
 
-use drua_tool_caching::ToolCaching;
+use drua_tool_caching::{extract_text, ToolCaching};
 use es_entity::context::{EventContext, WithEventContext};
 use rmcp::model::{CallToolResult, JsonObject};
 use serde::Deserialize;
@@ -284,10 +284,7 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
                             )
                             .await;
                         Audit::record_success();
-                        // Catalog tools always go through tool-caching, so
-                        // wrap into the `DruaToolResult<T>` shape the JS
-                        // engine should see for every cached tool.
-                        Ok(wrap_compose_value(value))
+                        Ok(value)
                     }
                     Err(msg) => {
                         Audit::record_error(msg.clone());
@@ -339,7 +336,7 @@ impl CatalogDispatcher {
         let parent_seed = EventContext::current().data();
         let started_at = chrono::Utc::now();
         let dispatcher = self.clone_for_persistence();
-        let bypass = !tool.default_tool_caching();
+        let should_persist = tool.default_tool_caching();
 
         async move {
             Audit::record_action(action);
@@ -359,7 +356,7 @@ impl CatalogDispatcher {
             let result = match dispatch_result {
                 Ok((raw, value)) => {
                     Audit::record_tokens(super::super::estimate_tokens(&raw));
-                    if !bypass {
+                    if should_persist {
                         dispatcher
                             .maybe_persist_sub_invocation(
                                 &name_owned,
@@ -371,16 +368,6 @@ impl CatalogDispatcher {
                             .await;
                     }
                     Audit::record_success();
-                    // Top-level tools opt in to caching via
-                    // `default_tool_caching`; only wrap into
-                    // `DruaToolResult<T>` for the ones that opt in, so
-                    // bypass tools (bash, read, etc.) keep their native
-                    // shape in JS.
-                    let value = if bypass {
-                        value
-                    } else {
-                        wrap_compose_value(value)
-                    };
                     Ok(value)
                 }
                 Err(msg) => {
@@ -511,6 +498,9 @@ async fn run_searchable_call(
         .call(subject, tool_name, inner_args)
         .await
         .map_err(|e| e.to_string())?;
+    if result.is_error == Some(true) {
+        return Err(format_tool_error(tool_name, &result));
+    }
 
     let value = result_to_value(&result);
     Ok((result, value))
@@ -540,6 +530,9 @@ async fn run_top_level_call(
         .call(subject, inner_args)
         .await
         .map_err(|e| e.to_string())?;
+    if result.is_error == Some(true) {
+        return Err(format_tool_error(tool.name(), &result));
+    }
 
     let value = result_to_value(&result);
     Ok((result, value))
@@ -561,20 +554,14 @@ fn result_to_value(result: &CallToolResult) -> serde_json::Value {
     }
 }
 
-use super::super::wrap::wrap_value as wrap_compose_value;
-
-fn extract_text(result: &CallToolResult) -> String {
-    result
-        .content
-        .iter()
-        .filter_map(|c| match &c.raw {
-            rmcp::model::RawContent::Text(t) => Some(t.text.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+fn format_tool_error(tool_name: &str, result: &CallToolResult) -> String {
+    let text = extract_text(result);
+    if text.is_empty() {
+        format!("{tool_name} returned an error")
+    } else {
+        format!("{tool_name} returned an error: {text}")
+    }
 }
-
 /// Generate TypeScript declarations from the visible catalog entries and
 /// top-level tools, grouped by server prefix. Output looks like:
 ///
@@ -583,16 +570,15 @@ fn extract_text(result: &CallToolResult) -> String {
 ///   function bash(args: { command: string; ... }): Promise<any>;
 ///   function read(args: { file_path: string; ... }): Promise<any>;
 ///   namespace honeycomb {
-///     function list_environments(args: { ... }): Promise<{ result: { env_id: string } }>;
+///     function list_environments(args: { ... }): Promise<{ env_id: string }>;
 ///   }
 /// }
 /// ```
 ///
 /// When a tool has an `output_schema`, the return type is derived from that
-/// schema instead of the default `any`. Cached tools (catalog tools and
-/// top-level tools with `default_tool_caching() == true`) wrap the return
-/// type in `{ result: … }`; bypass tools (bash, read, …) keep their native
-/// shape.
+/// schema instead of the default `any`. Compose scripts see upstream `T`
+/// directly; recovery metadata for cached sub-calls is exposed through
+/// `ComposeOutput.sub_invocations`, not by wrapping each JS return value.
 pub(crate) fn generate_dts(
     subject: &AuthSubject,
     sets: &[Arc<dyn SearchableToolSet>],
@@ -608,12 +594,7 @@ pub(crate) fn generate_dts(
             .inner_output_schema()
             .map(json_schema_ts::schema_to_ts)
             .unwrap_or_else(|| "any".to_string());
-        let return_ts = if tool.default_tool_caching() {
-            super::super::wrap::wrap_output_ts(&inner_ts)
-        } else {
-            inner_ts
-        };
-        top_fns.push((name.clone(), params_ts, return_ts));
+        top_fns.push((name.clone(), params_ts, inner_ts));
     }
     top_fns.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -637,12 +618,7 @@ pub(crate) fn generate_dts(
                     json_schema_ts::schema_to_ts(&schema_val)
                 })
                 .unwrap_or_else(|| "any".to_string());
-            // Catalog tools always go through tool-caching → always wrap.
-            tools_in_ns.push((
-                entry.name.clone(),
-                params_ts,
-                super::super::wrap::wrap_output_ts(&inner_ts),
-            ));
+            tools_in_ns.push((entry.name.clone(), params_ts, inner_ts));
         }
     }
 

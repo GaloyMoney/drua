@@ -18,8 +18,11 @@ use crate::repo::StoredInvocation;
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum FetchQuery {
-    /// Byte range on a string-typed value at `path`. `offset` may be
-    /// negative to count from the end of the string.
+    /// UTF-8 safe byte window on a string-typed value at `path`. `offset`
+    /// may be negative to count from the end of the string. If the
+    /// requested byte boundaries land inside a UTF-8 codepoint, they are
+    /// moved inward to the nearest valid character boundaries instead of
+    /// failing the recovery request.
     Range { offset: i64, len: usize },
     /// Line range on a string-typed value at `path`. `offset` is the
     /// zero-indexed first line to return; `len` is the line count.
@@ -61,11 +64,8 @@ impl FetchQuery {
                         "range query requires a string at the resolved path".into(),
                     )
                 })?;
-                let start = resolve_offset(*offset, s.len());
-                let end = start.saturating_add(*len).min(s.len());
-                let slice = s.get(start..end).ok_or_else(|| {
-                    ToolCachingError::InvalidPath("range cuts a non-char-boundary".into())
-                })?;
+                let (start, end) = resolve_utf8_byte_window(s, *offset, *len);
+                let slice = &s[start..end];
                 Ok(Value::String(slice.to_string()))
             }
             FetchQuery::Lines { offset, len } => {
@@ -96,6 +96,30 @@ impl FetchQuery {
             )),
         }
     }
+}
+
+fn resolve_utf8_byte_window(s: &str, offset: i64, len: usize) -> (usize, usize) {
+    let requested_start = resolve_offset(offset, s.len());
+    let requested_end = requested_start.saturating_add(len).min(s.len());
+    let start = ceil_char_boundary(s, requested_start);
+    let end = floor_char_boundary(s, requested_end).max(start);
+    (start, end)
+}
+
+fn floor_char_boundary(s: &str, idx: usize) -> usize {
+    let mut i = idx.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn ceil_char_boundary(s: &str, idx: usize) -> usize {
+    let mut i = idx.min(s.len());
+    while i < s.len() && !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
 }
 
 /// What `ToolCaching::fetch` hands back to the caller. `result` is the
@@ -416,6 +440,24 @@ mod tests {
         assert_eq!(
             q.apply(Value::String("0123456789".into())).unwrap(),
             Value::String("6789".into()),
+        );
+    }
+
+    #[test]
+    fn fetch_query_range_snaps_to_utf8_boundaries() {
+        let q = FetchQuery::Range { offset: 1, len: 3 };
+        assert_eq!(
+            q.apply(Value::String("a▲b".into())).unwrap(),
+            Value::String("▲".into()),
+        );
+    }
+
+    #[test]
+    fn fetch_query_range_inside_one_codepoint_returns_empty_string() {
+        let q = FetchQuery::Range { offset: 2, len: 1 };
+        assert_eq!(
+            q.apply(Value::String("a▲b".into())).unwrap(),
+            Value::String(String::new()),
         );
     }
 
