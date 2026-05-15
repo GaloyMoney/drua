@@ -49,6 +49,20 @@ pub fn wrap_output_schema(upstream: &Value) -> Value {
                     }
                 },
                 "required": ["invocation_id", "paths"]
+            },
+            "_recovery": {
+                "type": "object",
+                "description": "Typed recovery manifest for this cached invocation. Includes persisted-root semantics, recoverable paths, and compose sub-invocation handles when present.",
+                "properties": {
+                    "invocation_id": { "type": "string" },
+                    "root_kind": { "type": "string" },
+                    "root_path": { "type": "string" },
+                    "persisted_root": { "type": "string" },
+                    "paths": { "type": "array" },
+                    "recommended_queries": { "type": "array" },
+                    "sub_invocations": { "type": "array" }
+                },
+                "required": ["invocation_id", "root_kind", "root_path", "persisted_root", "paths", "recommended_queries"]
             }
         },
         "required": ["result"]

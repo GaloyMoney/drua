@@ -87,7 +87,11 @@ impl ToolCallSummary {
     pub fn build_wire(&self, invocation_id: ToolInvocationId) -> (CallToolResult, Value) {
         let envelope = self.build_envelope_text();
         let mut obj = serde_json::Map::new();
-        obj.insert("result".to_string(), self.wire_result.clone());
+        let recovery = self.recovery_manifest(invocation_id);
+        obj.insert(
+            "_recovery".to_string(),
+            serde_json::to_value(&recovery).unwrap(),
+        );
         if !self.elided_paths.is_empty() {
             obj.insert(
                 "_elided".to_string(),
@@ -97,10 +101,28 @@ impl ToolCallSummary {
                 }),
             );
         }
+        obj.insert("result".to_string(), self.wire_result.clone());
         let structured = Value::Object(obj);
         let mut result = CallToolResult::success(vec![Content::text(envelope)]);
         result.structured_content = Some(structured.clone());
         (result, structured)
+    }
+
+    fn recovery_manifest(&self, invocation_id: ToolInvocationId) -> RecoveryManifest {
+        RecoveryManifest {
+            invocation_id: invocation_id.to_string(),
+            root_kind: value_kind(&self.wire_result).to_string(),
+            root_path: self.root_path.clone(),
+            persisted_root: "upstream T directly; not the outer {result: ...} wire wrapper"
+                .to_string(),
+            paths: self.elided_paths.clone(),
+            recommended_queries: self
+                .elided_paths
+                .iter()
+                .map(|p| p.recover.clone())
+                .collect(),
+            sub_invocations: extract_sub_invocations(&self.wire_result),
+        }
     }
 
     /// Build the `<summary>…</summary><recovery>…</recovery>` text-channel
@@ -161,6 +183,18 @@ pub struct ElidedPath {
     pub recover: Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryManifest {
+    pub invocation_id: String,
+    pub root_kind: String,
+    pub root_path: String,
+    pub persisted_root: String,
+    pub paths: Vec<ElidedPath>,
+    pub recommended_queries: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sub_invocations: Vec<Value>,
+}
+
 impl ElidedPath {
     pub(crate) fn render(&self) -> String {
         let mut attrs = format!(
@@ -194,6 +228,24 @@ fn render_recover_call(recover: &Value) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("{tool}({kwargs})")
+}
+
+fn value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+fn extract_sub_invocations(root: &Value) -> Vec<Value> {
+    root.get("sub_invocations")
+        .and_then(Value::as_array)
+        .map(|arr| arr.to_vec())
+        .unwrap_or_default()
 }
 
 /// Returned by `ToolCaching::cache`. `elided_paths`

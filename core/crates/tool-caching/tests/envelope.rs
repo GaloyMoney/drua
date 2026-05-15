@@ -128,6 +128,28 @@ async fn root_string_over_threshold_yields_envelope_with_recovery_section() {
         .and_then(|v| v.as_array())
         .expect("`_elided.paths` is an array");
     assert_eq!(paths.len(), 1, "one elided path: {paths:?}");
+
+    let recovery = structured
+        .get("_recovery")
+        .expect("typed `_recovery` manifest present when something was elided");
+    assert_eq!(
+        recovery.get("invocation_id").and_then(|v| v.as_str()),
+        Some(inv_id),
+        "manifest and _elided share invocation id",
+    );
+    assert_eq!(
+        recovery.get("root_kind").and_then(|v| v.as_str()),
+        Some("string")
+    );
+    assert_eq!(
+        recovery.get("persisted_root").and_then(|v| v.as_str()),
+        Some("upstream T directly; not the outer {result: ...} wire wrapper")
+    );
+    let recommended = recovery
+        .get("recommended_queries")
+        .and_then(|v| v.as_array())
+        .expect("manifest exposes typed fetch templates");
+    assert_eq!(recommended.len(), 1);
 }
 
 #[tokio::test]
