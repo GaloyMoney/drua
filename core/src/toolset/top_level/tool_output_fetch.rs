@@ -42,6 +42,8 @@ const DESCRIPTION: &str = "Recover a slice of a previously-summarised tool outpu
     `{mode:\"range\", offset, len}` returns bytes `[offset..offset+len]` of a string at the path; \
     `{mode:\"lines\", offset, len}` returns line range `[offset..offset+len]` of a string at the path; \
     `{mode:\"json_array_slice\", offset, len}` returns item range `arr[offset..offset+len]` of an array at the path; \
+    `offset` accepts negatives — `-N` counts from the end (Python/JS slice semantics), \
+    so `{mode:\"lines\", offset:-80, len:80}` returns the last 80 lines. Out-of-range offsets clamp. \
     `{mode:\"summary\"}` replays the original curated `<summary>+<recovery>` envelope (ignores `path`). \
     The response is the resolved (and optionally sliced) value, wrapped back at `path`.";
 

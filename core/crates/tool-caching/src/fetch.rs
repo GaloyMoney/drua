@@ -11,17 +11,25 @@ use crate::repo::StoredInvocation;
 /// Slice operation applied at the resolved json-path. When absent, the
 /// whole value at the path is returned. Mirrors the recovery template
 /// the walker emits.
+///
+/// `offset` is signed so callers can use Python/JS slice semantics:
+/// a negative offset counts from the end of the value (`-N` ⇒ last N).
+/// Out-of-range offsets clamp to 0 / total rather than erroring.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum FetchQuery {
-    /// Byte range on a string-typed value at `path`.
-    Range { offset: usize, len: usize },
+    /// Byte range on a string-typed value at `path`. `offset` may be
+    /// negative to count from the end of the string.
+    Range { offset: i64, len: usize },
     /// Line range on a string-typed value at `path`. `offset` is the
     /// zero-indexed first line to return; `len` is the line count.
-    Lines { offset: usize, len: usize },
+    /// `offset` may be negative to count from the end (e.g.
+    /// `offset:-80, len:80` returns the last 80 lines).
+    Lines { offset: i64, len: usize },
     /// Item range on an array-typed value at `path`. Returns the slice
-    /// `arr[offset..offset+len]` as a `Value::Array`.
-    JsonArraySlice { offset: usize, len: usize },
+    /// `arr[offset..offset+len]` as a `Value::Array`. `offset` may be
+    /// negative to count from the end of the array.
+    JsonArraySlice { offset: i64, len: usize },
     /// Return the persisted curated `<summary>+<recovery>` envelope —
     /// the same view the agent would have seen from a top-level
     /// `call_tool` invocation. Useful for inspecting a compose
@@ -30,6 +38,18 @@ pub enum FetchQuery {
     /// fetch the summary view here). `path` is ignored — the summary
     /// is always the root view.
     Summary,
+}
+
+/// Translate a possibly-negative offset to a clamped `[0, total]` index.
+/// Negative offsets count from the end (Python/JS slice semantics):
+/// `-N` resolves to `total - N` (clamped to 0 when `N > total`).
+fn resolve_offset(offset: i64, total: usize) -> usize {
+    if offset >= 0 {
+        (offset as usize).min(total)
+    } else {
+        let abs = offset.unsigned_abs() as usize;
+        total.saturating_sub(abs)
+    }
 }
 
 impl FetchQuery {
@@ -41,8 +61,8 @@ impl FetchQuery {
                         "range query requires a string at the resolved path".into(),
                     )
                 })?;
-                let end = offset.saturating_add(*len).min(s.len());
-                let start = (*offset).min(s.len());
+                let start = resolve_offset(*offset, s.len());
+                let end = start.saturating_add(*len).min(s.len());
                 let slice = s.get(start..end).ok_or_else(|| {
                     ToolCachingError::InvalidPath("range cuts a non-char-boundary".into())
                 })?;
@@ -55,8 +75,8 @@ impl FetchQuery {
                     )
                 })?;
                 let all: Vec<&str> = s.lines().collect();
-                let start = (*offset).min(all.len());
-                let end = offset.saturating_add(*len).min(all.len());
+                let start = resolve_offset(*offset, all.len());
+                let end = start.saturating_add(*len).min(all.len());
                 Ok(Value::String(all[start..end].join("\n")))
             }
             FetchQuery::JsonArraySlice { offset, len } => {
@@ -65,8 +85,8 @@ impl FetchQuery {
                         "json_array_slice query requires an array at the resolved path".into(),
                     )
                 })?;
-                let start = (*offset).min(arr.len());
-                let end = offset.saturating_add(*len).min(arr.len());
+                let start = resolve_offset(*offset, arr.len());
+                let end = start.saturating_add(*len).min(arr.len());
                 Ok(Value::Array(arr[start..end].to_vec()))
             }
             // Summary is short-circuited in `StoredInvocation::query` —
@@ -345,6 +365,58 @@ mod tests {
             q.apply(Value::String("0123456789".into())).unwrap(),
             Value::String("3456".into()),
         );
+    }
+
+    #[test]
+    fn fetch_query_range_negative_offset_counts_from_end() {
+        let q = FetchQuery::Range { offset: -4, len: 4 };
+        assert_eq!(
+            q.apply(Value::String("0123456789".into())).unwrap(),
+            Value::String("6789".into()),
+        );
+    }
+
+    #[test]
+    fn fetch_query_lines_negative_offset_returns_tail() {
+        let q = FetchQuery::Lines {
+            offset: -2,
+            len: 2,
+        };
+        assert_eq!(
+            q.apply(Value::String("a\nb\nc\nd\ne".into())).unwrap(),
+            Value::String("d\ne".into()),
+        );
+    }
+
+    #[test]
+    fn fetch_query_array_slice_negative_offset_returns_tail() {
+        let q = FetchQuery::JsonArraySlice {
+            offset: -2,
+            len: 5,
+        };
+        let arr = serde_json::json!([1, 2, 3, 4, 5]);
+        assert_eq!(q.apply(arr).unwrap(), serde_json::json!([4, 5]));
+    }
+
+    #[test]
+    fn fetch_query_negative_offset_larger_than_total_clamps_to_zero() {
+        let q = FetchQuery::Lines {
+            offset: -999,
+            len: 3,
+        };
+        assert_eq!(
+            q.apply(Value::String("a\nb\nc\nd".into())).unwrap(),
+            Value::String("a\nb\nc".into()),
+        );
+    }
+
+    #[test]
+    fn fetch_query_lines_accepts_negative_offset_via_json() {
+        let q: FetchQuery = serde_json::from_value(serde_json::json!({
+            "mode": "lines", "offset": -3, "len": 3
+        }))
+        .expect("negative offset deserializes");
+        assert!(matches!(q, FetchQuery::Lines { offset: -3, len: 3 }));
     }
 
     #[test]
