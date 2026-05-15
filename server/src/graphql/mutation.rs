@@ -5,6 +5,7 @@ use super::mcp_creds::*;
 use super::sandbox::*;
 
 use super::note::*;
+use super::primitives::JsonValue;
 use super::project::*;
 use super::project_secret::*;
 use super::skill::*;
@@ -29,6 +30,26 @@ impl Mutation {
             .create(sub, input.name, input.description)
             .await?;
         Ok(ProjectCreatePayload::from(Project::from(project)))
+    }
+
+    async fn workflow_trigger(
+        &self,
+        ctx: &Context<'_>,
+        input: WorkflowTriggerInput,
+    ) -> async_graphql::Result<WorkflowTriggerPayload> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        let payload = input
+            .payload
+            .map(JsonValue::into_inner)
+            .unwrap_or_else(|| serde_json::json!({}));
+        let run = app
+            .workflows()
+            .trigger_run(sub, input.definition_id, payload)
+            .await?;
+        Ok(WorkflowTriggerPayload {
+            filtered: run.is_none(),
+            run: run.map(WorkflowRun::from),
+        })
     }
 
     async fn project_update(

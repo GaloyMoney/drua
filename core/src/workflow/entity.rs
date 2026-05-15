@@ -86,6 +86,10 @@ impl WorkflowDefinition {
             .expect("entity should have at least one persisted timestamp")
     }
 
+    pub fn canonical_yaml(&self) -> String {
+        self.rendered()
+    }
+
     /// Canonical on-disk content (YAML).
     pub(crate) fn rendered(&self) -> String {
         render_workflow_yaml(

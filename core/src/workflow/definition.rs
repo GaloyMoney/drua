@@ -112,6 +112,32 @@ impl WorkflowTrigger {
             | Self::Cron { condition, .. } => condition.as_deref(),
         }
     }
+
+    pub fn kind_label(&self) -> &'static str {
+        match self {
+            Self::Manual { .. } => "manual",
+            Self::Webhook { .. } => "webhook",
+            Self::Cron { .. } => "cron",
+        }
+    }
+
+    /// `None` when this is not a cron trigger, or when the cron
+    /// schedule has no future fire after the supplied instant.
+    pub fn next_fire_at(&self, after: DateTime<Utc>) -> Result<Option<DateTime<Utc>>, String> {
+        match self {
+            Self::Cron {
+                schedule, timezone, ..
+            } => {
+                let sched = parse_cron_schedule(schedule)?;
+                let tz = parse_timezone(timezone.as_deref())?;
+                Ok(sched
+                    .after(&after.with_timezone(&tz))
+                    .next()
+                    .map(|dt| dt.with_timezone(&Utc)))
+            }
+            _ => Ok(None),
+        }
+    }
 }
 
 /// IANA name parses through `chrono_tz`; `None` → `UTC`. Surfaces a
@@ -128,21 +154,6 @@ pub fn parse_timezone(tz: Option<&str>) -> Result<chrono_tz::Tz, String> {
 
 pub fn parse_cron_schedule(expr: &str) -> Result<cron::Schedule, String> {
     cron::Schedule::from_str(expr).map_err(|e| format!("invalid cron expression '{expr}': {e}"))
-}
-
-/// `None` when the schedule has no future fire (e.g. a one-shot
-/// expression whose only date already passed).
-pub fn next_cron_fire_at(
-    schedule: &str,
-    timezone: Option<&str>,
-    after: DateTime<Utc>,
-) -> Result<Option<DateTime<Utc>>, String> {
-    let sched = parse_cron_schedule(schedule)?;
-    let tz = parse_timezone(timezone)?;
-    Ok(sched
-        .after(&after.with_timezone(&tz))
-        .next()
-        .map(|dt| dt.with_timezone(&Utc)))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -527,18 +538,28 @@ mod tests {
     }
 
     #[test]
-    fn next_cron_fire_at_returns_future_time() {
+    fn cron_trigger_next_fire_at_returns_future_time() {
         let now = chrono::Utc::now();
-        let next = next_cron_fire_at("0 0 */6 * * *", None, now)
+        let trigger = WorkflowTrigger::Cron {
+            schedule: "0 0 */6 * * *".to_string(),
+            timezone: None,
+            condition: None,
+        };
+        let next = trigger
+            .next_fire_at(now)
             .unwrap()
             .expect("expression always has a next fire");
         assert!(next > now);
     }
 
     #[test]
-    fn next_cron_fire_at_propagates_timezone_errors() {
-        let err =
-            next_cron_fire_at("0 0 */6 * * *", Some("Not/AZone"), chrono::Utc::now()).unwrap_err();
+    fn cron_trigger_next_fire_at_propagates_timezone_errors() {
+        let trigger = WorkflowTrigger::Cron {
+            schedule: "0 0 */6 * * *".to_string(),
+            timezone: Some("Not/AZone".to_string()),
+            condition: None,
+        };
+        let err = trigger.next_fire_at(chrono::Utc::now()).unwrap_err();
         assert!(err.contains("invalid timezone"));
     }
 

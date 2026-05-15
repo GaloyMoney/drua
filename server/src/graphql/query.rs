@@ -9,6 +9,7 @@ use super::library::{LibrarySearchHit, LibrarySearchInput};
 use super::primitives::*;
 use super::project::Project;
 use super::sandbox::Sandbox;
+use super::workflow::{limit, WorkflowDefinition, WorkflowRun};
 use super::AppConfigYaml;
 
 use drua_core::project::ProjectByCreatedAtCursor;
@@ -67,6 +68,59 @@ impl Query {
         match app.projects().find_by_id(sub, id).await {
             Ok(project) => Ok(Some(Project::from(project))),
             Err(drua_core::project::ProjectError::Find(_)) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn workflow_definitions(
+        &self,
+        ctx: &Context<'_>,
+        project_id: ProjectId,
+    ) -> async_graphql::Result<Vec<WorkflowDefinition>> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        let definitions = app.workflows().list_for_project(sub, project_id).await?;
+        Ok(definitions
+            .into_iter()
+            .map(WorkflowDefinition::from)
+            .collect())
+    }
+
+    async fn workflow_definition(
+        &self,
+        ctx: &Context<'_>,
+        id: WorkflowDefinitionId,
+    ) -> async_graphql::Result<Option<WorkflowDefinition>> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        match app.workflows().find_by_id(sub, id).await {
+            Ok(definition) => Ok(Some(WorkflowDefinition::from(definition))),
+            Err(drua_core::workflow::WorkflowError::DefinitionFind(_)) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    async fn workflow_runs(
+        &self,
+        ctx: &Context<'_>,
+        definition_id: WorkflowDefinitionId,
+        #[graphql(default = 50)] first: i32,
+    ) -> async_graphql::Result<Vec<WorkflowRun>> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        let runs = app.workflows().list_runs(sub, definition_id).await?;
+        Ok(limit(runs, first)
+            .into_iter()
+            .map(WorkflowRun::from)
+            .collect())
+    }
+
+    async fn workflow_run(
+        &self,
+        ctx: &Context<'_>,
+        id: WorkflowRunId,
+    ) -> async_graphql::Result<Option<WorkflowRun>> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        match app.workflows().find_run_by_id(sub, id).await {
+            Ok(run) => Ok(Some(WorkflowRun::from(run))),
+            Err(drua_core::workflow::WorkflowError::RunFind(_)) => Ok(None),
             Err(e) => Err(e.into()),
         }
     }

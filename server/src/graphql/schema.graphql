@@ -171,6 +171,11 @@ type ErrorEvent {
 }
 
 """
+Arbitrary JSON value.
+"""
+scalar Json
+
+"""
 Workflow files are git-synced to the library repo but not exposed
 here — `AuthedSearch::search` filters them out at the boundary.
 """
@@ -302,6 +307,7 @@ type Mutation {
 	sandboxSuspend(input: SandboxSuspendInput!): SandboxSuspendPayload!
 	skillDelete(input: SkillDeleteInput!): SkillDeletePayload!
 	workflowDelete(input: WorkflowDeleteInput!): WorkflowDeletePayload!
+	workflowTrigger(input: WorkflowTriggerInput!): WorkflowTriggerPayload!
 }
 
 input NoteDeleteInput {
@@ -480,6 +486,10 @@ type Query {
 	project(id: ProjectId!): Project
 	projects(after: String, first: Int!): ProjectConnection!
 	sandbox(id: SandboxId!): Sandbox
+	workflowDefinition(id: WorkflowDefinitionId!): WorkflowDefinition
+	workflowDefinitions(projectId: ProjectId!): [WorkflowDefinition!]!
+	workflowRun(id: WorkflowRunId!): WorkflowRun
+	workflowRuns(definitionId: WorkflowDefinitionId!, first: Int! = 50): [WorkflowRun!]!
 }
 
 type Sandbox {
@@ -759,6 +769,21 @@ type UserMessageEvent {
 	text: String!
 }
 
+type WorkflowDefinition {
+	createdAt: Timestamp!
+	description: String
+	id: WorkflowDefinitionId!
+	modelChain: ModelChain
+	name: String!
+	projectId: ProjectId!
+	recentRuns(first: Int! = 10): [WorkflowRun!]!
+	sandboxes: [WorkflowSandbox!]!
+	steps: [WorkflowStep!]!
+	trigger: WorkflowTrigger!
+	updatedAt: Timestamp!
+	yaml: String!
+}
+
 scalar WorkflowDefinitionId
 
 input WorkflowDeleteInput {
@@ -767,6 +792,105 @@ input WorkflowDeleteInput {
 
 type WorkflowDeletePayload {
 	deletedId: WorkflowDefinitionId!
+}
+
+type WorkflowRun {
+	agents: [Agent!]!
+	completedAt: Timestamp
+	definitionId: WorkflowDefinitionId!
+	id: WorkflowRunId!
+	projectId: ProjectId!
+	startedAt: Timestamp!
+	state: WorkflowRunState!
+	stepResults: [WorkflowStepResult!]!
+	stepsSnapshot: [WorkflowStep!]!
+	triggerContext: Json!
+}
+
+scalar WorkflowRunId
+
+enum WorkflowRunState {
+	ERRORED
+	FAILED
+	PENDING
+	RUNNING
+	SUCCEEDED
+}
+
+type WorkflowSandbox {
+	branch: String
+	cpu: String
+	diskSize: String
+	kind: WorkflowSandboxKind!
+	memory: String
+	name: String!
+	repoUrl: String
+}
+
+enum WorkflowSandboxKind {
+	PREEXISTING
+	REPO
+	SCRATCH
+}
+
+type WorkflowStep {
+	condition: String
+	name: String!
+	outputSchema: Json
+	sandbox: String
+	sandboxMode: SandboxAttachmentMode
+	skill: String
+	stepType: WorkflowStepType!
+	timeoutSeconds: Int
+	tool: String
+}
+
+type WorkflowStepResult {
+	completedAt: Timestamp
+	error: String
+	name: String!
+	output: Json
+	skipped: String
+	state: WorkflowStepState!
+}
+
+enum WorkflowStepState {
+	ERRORED
+	FAILED
+	PENDING
+	SKIPPED
+	SUCCEEDED
+}
+
+enum WorkflowStepType {
+	AGENT_STEP
+	TOOL_STEP
+}
+
+type WorkflowTrigger {
+	condition: String
+	cronSchedule: String
+	cronTimezone: String
+	kind: WorkflowTriggerKind!
+	nextRunAt: Timestamp
+	provider: String
+	webhookUrl: String
+}
+
+input WorkflowTriggerInput {
+	definitionId: WorkflowDefinitionId!
+	payload: Json
+}
+
+enum WorkflowTriggerKind {
+	CRON
+	MANUAL
+	WEBHOOK
+}
+
+type WorkflowTriggerPayload {
+	filtered: Boolean!
+	run: WorkflowRun
 }
 
 scalar Yaml

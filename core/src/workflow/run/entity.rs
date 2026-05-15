@@ -39,6 +39,46 @@ pub struct StepResult {
     pub skipped: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowStepState {
+    Pending,
+    Succeeded,
+    Failed,
+    Errored,
+    Skipped,
+}
+
+impl StepResult {
+    pub fn step_state(&self) -> WorkflowStepState {
+        if self.skipped.is_some() {
+            WorkflowStepState::Skipped
+        } else if self.error.is_some() {
+            WorkflowStepState::Errored
+        } else if self.step_reported_agent_failure() {
+            WorkflowStepState::Failed
+        } else if self.output.is_some() {
+            WorkflowStepState::Succeeded
+        } else {
+            WorkflowStepState::Pending
+        }
+    }
+
+    fn step_reported_agent_failure(&self) -> bool {
+        if self.error.is_some() || self.skipped.is_some() {
+            return false;
+        }
+        let reported_success = self
+            .output
+            .as_ref()
+            .and_then(|v| v.as_object())
+            .and_then(|o| o.get("success"))
+            .and_then(|s| s.as_bool())
+            .unwrap_or(true);
+        !reported_success
+    }
+}
+
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[es_event(id = "WorkflowRunId")]
@@ -114,7 +154,9 @@ impl WorkflowRun {
     }
 
     fn any_step_reported_failure(&self) -> bool {
-        self.step_results.iter().any(step_reported_agent_failure)
+        self.step_results
+            .iter()
+            .any(StepResult::step_reported_agent_failure)
     }
 
     pub fn step_already_terminal(&self, step_name: &str) -> bool {
@@ -317,26 +359,6 @@ impl WorkflowRun {
         });
         Idempotent::Executed(())
     }
-}
-
-/// True when a cleanly-completed step's structured output carries
-/// `success: false` (top-level boolean). Infrastructure-errored and
-/// condition-skipped steps return false here — they're classified
-/// as `Errored` and Succeeded respectively, never `Failed`.
-/// Missing or non-boolean `success` defaults to "no agent-reported
-/// failure" (back-compat for non-default-schema steps).
-fn step_reported_agent_failure(step: &StepResult) -> bool {
-    if step.error.is_some() || step.skipped.is_some() {
-        return false;
-    }
-    let reported_success = step
-        .output
-        .as_ref()
-        .and_then(|v| v.as_object())
-        .and_then(|o| o.get("success"))
-        .and_then(|s| s.as_bool())
-        .unwrap_or(true);
-    !reported_success
 }
 
 impl core::fmt::Display for WorkflowRun {

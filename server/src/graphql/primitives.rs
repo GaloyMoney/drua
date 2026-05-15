@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 #[allow(unused_imports)]
 pub use drua_core::primitives::{
     AgentId, McpCredsId, NoteId, ProjectId, ProjectSecretId, SandboxId, SkillId, UserId,
-    WorkflowDefinitionId,
+    WorkflowDefinitionId, WorkflowRunId,
 };
 
 #[allow(unused_imports)]
@@ -13,6 +13,23 @@ pub use drua_core::agent::session::SessionThreadId;
 pub use drua_core::auth::AuthSubject;
 
 pub use es_entity::graphql::UUID;
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct JsonValue(serde_json::Value);
+async_graphql::scalar!(JsonValue, "Json", "Arbitrary JSON value.");
+
+impl From<serde_json::Value> for JsonValue {
+    fn from(value: serde_json::Value) -> Self {
+        Self(value)
+    }
+}
+
+impl JsonValue {
+    pub fn into_inner(self) -> serde_json::Value {
+        self.0
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 #[serde(transparent)]

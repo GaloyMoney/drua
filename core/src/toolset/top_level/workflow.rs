@@ -968,14 +968,12 @@ fn definition_to_output(d: &WorkflowDefinition) -> WorkflowDefinitionOutput {
         } => {
             cron_schedule = Some(schedule.clone());
             cron_timezone = timezone.clone();
-            next_run_at = crate::workflow::next_cron_fire_at(
-                schedule,
-                timezone.as_deref(),
-                chrono::Utc::now(),
-            )
-            .ok()
-            .flatten()
-            .map(|t| t.to_rfc3339());
+            next_run_at = d
+                .trigger
+                .next_fire_at(chrono::Utc::now())
+                .ok()
+                .flatten()
+                .map(|t| t.to_rfc3339());
             ("cron".to_string(), None)
         }
     };
@@ -1204,17 +1202,13 @@ fn format_get_text(d: &WorkflowDefinition) -> String {
             };
             format!("{label}\n  webhook_secret: {secret}")
         }
-        WorkflowTrigger::Cron {
+        trigger @ WorkflowTrigger::Cron {
             schedule, timezone, ..
         } => {
             let mut s = format!("cron\n  schedule:    {schedule}");
             let tz_label = timezone.as_deref().unwrap_or("UTC");
             s.push_str(&format!("\n  timezone:    {tz_label}"));
-            if let Ok(Some(next)) = crate::workflow::next_cron_fire_at(
-                schedule,
-                timezone.as_deref(),
-                chrono::Utc::now(),
-            ) {
+            if let Ok(Some(next)) = trigger.next_fire_at(chrono::Utc::now()) {
                 s.push_str(&format!("\n  next_run_at: {}", next.to_rfc3339()));
             }
             s

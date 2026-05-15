@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::primitives::WorkflowDefinitionId;
 
-use super::definition::{next_cron_fire_at, WorkflowTrigger};
+use super::definition::WorkflowTrigger;
 use super::repo::WorkflowDefinitionRepo;
 use super::run::WorkflowRunRepo;
 
@@ -120,6 +120,7 @@ impl JobRunner for TriggerCronRunner {
 
         let definition_id = definition.id;
         let fired_at = chrono::Utc::now();
+        let next_fire = definition.trigger.next_fire_at(fired_at);
         let trigger_context = serde_json::json!({
             "triggered_by": "cron",
             "fired_at": fired_at.to_rfc3339(),
@@ -148,7 +149,7 @@ impl JobRunner for TriggerCronRunner {
             }
         }
 
-        let next_at = match next_cron_fire_at(&schedule, timezone.as_deref(), fired_at) {
+        let next_at = match next_fire {
             Ok(Some(t)) => t,
             Ok(None) => {
                 tracing::info!("cron expression yields no future fire; schedule terminating");
