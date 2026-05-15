@@ -229,7 +229,7 @@ impl ZendutyClient {
     #[tracing::instrument(name = "zenduty_client.list_schedules", skip_all)]
     pub async fn list_schedules(&self, team_id: &str) -> Result<Vec<Schedule>, ZendutyError> {
         let page: Page<Schedule> = self
-            .get(&format!("/api/account/teams/{team_id}/schedule/"))
+            .get(&format!("/api/account/teams/{team_id}/schedules/"))
             .await?;
         Ok(page.into_results())
     }
