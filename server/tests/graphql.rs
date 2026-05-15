@@ -27,12 +27,13 @@ fn scratch_bare_repo() -> std::path::PathBuf {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::env::temp_dir().join("drua-server-tests"));
     let stamp = format!(
-        "{}-{}",
+        "{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos(),
+        uuid::Uuid::new_v4(),
     );
     let upstream = scratch.join(format!("graphql-upstream-{stamp}.git"));
     std::fs::create_dir_all(&upstream).expect("mkdir upstream");
@@ -101,7 +102,7 @@ async fn test_app(pool: &sqlx::PgPool) -> drua_core::App {
     let upstream = scratch_bare_repo();
     let library_data_dir = upstream
         .parent()
-        .map(|p| p.join(format!("library-{}", std::process::id())))
+        .map(|p| p.join(format!("library-{}", uuid::Uuid::new_v4())))
         .map(|p| p.to_string_lossy().into_owned());
     let library = drua_core::library::LibraryConfig {
         data_dir: library_data_dir,
@@ -486,6 +487,210 @@ async fn sandbox_query_returns_null_for_missing() {
     assert!(data["sandbox"].is_null());
 }
 
+// ─── Workflow query / mutation tests ──────────────────────────────────────
+
+#[tokio::test]
+async fn workflow_definitions_query_exposes_yaml_and_structured_fields() {
+    let pool = pool().await;
+    let app = test_app(&pool).await;
+    let schema = drua_server::graphql::schema(Some(app.clone()));
+    let sub = test_sub();
+
+    let project_name = format!("workflow-query-project-{}", uuid::Uuid::new_v4());
+    let project = app
+        .projects()
+        .create(&sub, project_name, None)
+        .await
+        .expect("create project");
+    let skill = app
+        .skills()
+        .create(
+            &sub,
+            project.id,
+            &project.name,
+            "workflow-query-skill".to_string(),
+            "GraphQL workflow test skill".to_string(),
+            "Return a short test result.".to_string(),
+        )
+        .await
+        .expect("create skill");
+    let workflow = app
+        .workflows()
+        .create(
+            &sub,
+            project.id,
+            &project.name,
+            "graphql-workflow-query".to_string(),
+            Some("GraphQL workflow query test".to_string()),
+            drua_core::workflow::WorkflowTrigger::Manual { condition: None },
+            vec![drua_core::workflow::WorkflowStepDef::AgentStep {
+                name: "investigate".to_string(),
+                skill: skill.name.clone(),
+                sandbox: None,
+                sandbox_mode: None,
+                timeout_seconds: Some(60),
+                model_chain: None,
+                output_schema: Box::new(drua_core::workflow::default_output_schema()),
+                condition: None,
+            }],
+            Vec::new(),
+            None,
+        )
+        .await
+        .expect("create workflow");
+
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"query($projectId: ProjectId!) {
+            workflowDefinitions(projectId: $projectId) {
+                id
+                name
+                description
+                yaml
+                trigger { kind condition }
+                steps { name stepType skill timeoutSeconds outputSchema }
+                recentRuns(first: 5) { id }
+            }
+        }"#,
+        serde_json::json!({ "projectId": project.id.to_string() }),
+    )
+    .await;
+    let data = assert_no_errors(&result);
+    let definitions = data["workflowDefinitions"].as_array().unwrap();
+    let found = definitions
+        .iter()
+        .find(|d| d["id"] == workflow.id.to_string())
+        .expect("workflow returned");
+    assert_eq!(found["name"], "graphql-workflow-query");
+    assert_eq!(found["description"], "GraphQL workflow query test");
+    assert_eq!(found["trigger"]["kind"], "MANUAL");
+    assert!(found["yaml"]
+        .as_str()
+        .unwrap()
+        .contains("name: graphql-workflow-query"));
+    assert_eq!(found["steps"][0]["name"], "investigate");
+    assert_eq!(found["steps"][0]["stepType"], "AGENT_STEP");
+    assert_eq!(found["steps"][0]["skill"], skill.name);
+    assert!(found["steps"][0]["outputSchema"].is_object());
+}
+
+#[tokio::test]
+async fn workflow_trigger_mutation_returns_run_or_filtered() {
+    let pool = pool().await;
+    let app = test_app(&pool).await;
+    let schema = drua_server::graphql::schema(Some(app.clone()));
+    let sub = test_sub();
+
+    let project_name = format!("workflow-trigger-project-{}", uuid::Uuid::new_v4());
+    let project = app
+        .projects()
+        .create(&sub, project_name, None)
+        .await
+        .expect("create project");
+    let skill = app
+        .skills()
+        .create(
+            &sub,
+            project.id,
+            &project.name,
+            "workflow-trigger-skill".to_string(),
+            "GraphQL workflow trigger skill".to_string(),
+            "Return a short test result.".to_string(),
+        )
+        .await
+        .expect("create skill");
+
+    let steps = || {
+        vec![drua_core::workflow::WorkflowStepDef::AgentStep {
+            name: "act".to_string(),
+            skill: skill.name.clone(),
+            sandbox: None,
+            sandbox_mode: None,
+            timeout_seconds: Some(60),
+            model_chain: None,
+            output_schema: Box::new(drua_core::workflow::default_output_schema()),
+            condition: None,
+        }]
+    };
+    let runnable = app
+        .workflows()
+        .create(
+            &sub,
+            project.id,
+            &project.name,
+            "graphql-workflow-trigger".to_string(),
+            None,
+            drua_core::workflow::WorkflowTrigger::Manual { condition: None },
+            steps(),
+            Vec::new(),
+            None,
+        )
+        .await
+        .expect("create runnable workflow");
+    let filtered = app
+        .workflows()
+        .create(
+            &sub,
+            project.id,
+            &project.name,
+            "graphql-workflow-filtered".to_string(),
+            None,
+            drua_core::workflow::WorkflowTrigger::Manual {
+                condition: Some("false".to_string()),
+            },
+            steps(),
+            Vec::new(),
+            None,
+        )
+        .await
+        .expect("create filtered workflow");
+
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"mutation($input: WorkflowTriggerInput!) {
+            workflowTrigger(input: $input) {
+                filtered
+                run { id definitionId projectId state triggerContext }
+            }
+        }"#,
+        serde_json::json!({
+            "input": {
+                "definitionId": runnable.id.to_string(),
+                "payload": { "source": "graphql-test" }
+            }
+        }),
+    )
+    .await;
+    let data = assert_no_errors(&result);
+    assert_eq!(data["workflowTrigger"]["filtered"], false);
+    assert_eq!(
+        data["workflowTrigger"]["run"]["definitionId"],
+        runnable.id.to_string()
+    );
+    assert_eq!(
+        data["workflowTrigger"]["run"]["triggerContext"]["source"],
+        "graphql-test"
+    );
+
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"mutation($input: WorkflowTriggerInput!) {
+            workflowTrigger(input: $input) { filtered run { id } }
+        }"#,
+        serde_json::json!({ "input": { "definitionId": filtered.id.to_string() } }),
+    )
+    .await;
+    let data = assert_no_errors(&result);
+    assert_eq!(data["workflowTrigger"]["filtered"], true);
+    assert!(data["workflowTrigger"]["run"].is_null());
+}
+
 // ─── Library search query tests ────────────────────────────────────────────
 
 #[tokio::test]
@@ -653,6 +858,7 @@ async fn schema_has_expected_mutations() {
         "projectSecretDelete",
         "mcpCredentialsCreate",
         "mcpCredentialsRevoke",
+        "workflowTrigger",
         "projectCreate",
         "projectUpdate",
         "projectDelete",
@@ -689,6 +895,10 @@ async fn schema_has_expected_queries() {
         "project",
         "projects",
         "librarySearch",
+        "workflowDefinitions",
+        "workflowDefinition",
+        "workflowRuns",
+        "workflowRun",
     ];
     for name in expected {
         assert!(
@@ -756,6 +966,85 @@ async fn schema_sandbox_type_has_expected_fields() {
         assert!(
             fields.contains(&name.to_string()),
             "Missing sandbox field: {name}. Available: {fields:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn schema_workflow_types_have_expected_fields() {
+    let schema = drua_server::graphql::schema(None);
+    let response = schema
+        .execute(async_graphql::Request::new(
+            r#"
+            {
+                definition: __type(name: "WorkflowDefinition") { fields { name } }
+                run: __type(name: "WorkflowRun") { fields { name } }
+                triggerInput: __type(name: "WorkflowTriggerInput") { inputFields { name } }
+            }
+            "#,
+        ))
+        .await;
+    let json = serde_json::to_value(&response).unwrap();
+    let definition_fields: Vec<String> = json["data"]["definition"]["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap().to_string())
+        .collect();
+    for name in [
+        "id",
+        "projectId",
+        "name",
+        "description",
+        "trigger",
+        "steps",
+        "sandboxes",
+        "modelChain",
+        "createdAt",
+        "updatedAt",
+        "recentRuns",
+        "yaml",
+    ] {
+        assert!(
+            definition_fields.contains(&name.to_string()),
+            "Missing workflow definition field: {name}. Available: {definition_fields:?}"
+        );
+    }
+
+    let run_fields: Vec<String> = json["data"]["run"]["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap().to_string())
+        .collect();
+    for name in [
+        "id",
+        "definitionId",
+        "projectId",
+        "state",
+        "startedAt",
+        "completedAt",
+        "triggerContext",
+        "stepResults",
+        "stepsSnapshot",
+        "agents",
+    ] {
+        assert!(
+            run_fields.contains(&name.to_string()),
+            "Missing workflow run field: {name}. Available: {run_fields:?}"
+        );
+    }
+
+    let trigger_input_fields: Vec<String> = json["data"]["triggerInput"]["inputFields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap().to_string())
+        .collect();
+    for name in ["definitionId", "payload"] {
+        assert!(
+            trigger_input_fields.contains(&name.to_string()),
+            "Missing workflow trigger input field: {name}. Available: {trigger_input_fields:?}"
         );
     }
 }

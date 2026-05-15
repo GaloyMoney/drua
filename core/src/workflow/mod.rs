@@ -31,12 +31,12 @@ use yaml::canonical_workflow_path;
 pub const WORKFLOW_DOC_TYPE: drua_library::DocType = drua_library::DocType::new("workflow");
 
 pub use definition::{
-    default_output_schema, next_cron_fire_at, parse_cron_schedule, parse_timezone, OutputSchema,
-    OutputSchemaError, WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger,
+    default_output_schema, parse_cron_schedule, parse_timezone, OutputSchema, OutputSchemaError,
+    WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger,
 };
 pub use entity::*;
 pub use error::*;
-pub use run::{StepResult, WorkflowRun, WorkflowRunRepo, WorkflowRunState};
+pub use run::{StepResult, WorkflowRun, WorkflowRunRepo, WorkflowRunState, WorkflowStepState};
 
 use cron_job::{cron_queue_id, TriggerCronConfig, TriggerCronJobInitializer};
 use job::{ExecuteRunConfig, ExecuteRunJobInitializer};
@@ -75,7 +75,7 @@ fn record_trigger_filtered_audit(
     Audit::record_workflow_id(definition.id);
     Audit::record_metadata(serde_json::json!({
         "definition_id": definition.id.to_string(),
-        "trigger_kind": trigger_kind_label(&definition.trigger),
+        "trigger_kind": definition.trigger.kind_label(),
         "condition_body": condition_body,
         "payload_digest": payload_digest(trigger_context),
     }));
@@ -98,7 +98,7 @@ fn record_trigger_condition_errored_audit(
     Audit::record_workflow_id(definition.id);
     Audit::record_metadata(serde_json::json!({
         "definition_id": definition.id.to_string(),
-        "trigger_kind": trigger_kind_label(&definition.trigger),
+        "trigger_kind": definition.trigger.kind_label(),
         "condition_body": condition_body,
         "payload_digest": payload_digest(trigger_context),
         "error": reason,
@@ -110,14 +110,6 @@ fn record_trigger_condition_errored_audit(
         error = reason,
         "trigger condition errored; run not created"
     );
-}
-
-fn trigger_kind_label(trigger: &WorkflowTrigger) -> &'static str {
-    match trigger {
-        WorkflowTrigger::Manual { .. } => "manual",
-        WorkflowTrigger::Webhook { .. } => "webhook",
-        WorkflowTrigger::Cron { .. } => "cron",
-    }
 }
 
 /// CEL identifier shape — `[A-Za-z_][A-Za-z0-9_]*`. Step names
@@ -690,13 +682,12 @@ impl Workflows {
         op: &mut OP,
         workflow: &WorkflowDefinition,
     ) -> Result<(), WorkflowError> {
-        let WorkflowTrigger::Cron {
-            schedule, timezone, ..
-        } = &workflow.trigger
-        else {
+        let WorkflowTrigger::Cron { schedule, .. } = &workflow.trigger else {
             return Ok(());
         };
-        let next_at = match next_cron_fire_at(schedule, timezone.as_deref(), chrono::Utc::now())
+        let next_at = match workflow
+            .trigger
+            .next_fire_at(chrono::Utc::now())
             .map_err(WorkflowError::InvalidCronExpression)?
         {
             Some(t) => t,
