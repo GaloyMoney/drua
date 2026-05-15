@@ -245,11 +245,8 @@ fn looks_like_textual_upstream_error(result: &CallToolResult) -> bool {
     if result.structured_content.is_some() || result.content.len() != 1 {
         return false;
     }
-    let text = extract_text(result);
-    let lower = text.to_ascii_lowercase();
-    lower.starts_with("failed to ")
-        || lower.starts_with("error: ")
-        || lower.contains(" resource not accessible by integration")
+    let lower = extract_text(result).to_ascii_lowercase();
+    lower.contains("resource not accessible by integration")
 }
 
 fn extract_text(result: &CallToolResult) -> String {
@@ -333,6 +330,26 @@ mod tests {
             structured["error"]["tool"],
             serde_json::json!("actions_list")
         );
+    }
+
+    #[test]
+    fn benign_failed_to_text_is_not_reclassified() {
+        let result = CallToolResult::success(vec![Content::text(
+            "Failed to find any matching results for query",
+        )]);
+
+        let normalized = normalize_upstream_result("demo", "search", result);
+
+        assert_ne!(normalized.is_error, Some(true));
+    }
+
+    #[test]
+    fn benign_error_prefix_text_is_not_reclassified() {
+        let result = CallToolResult::success(vec![Content::text("Error: 0 issues remaining")]);
+
+        let normalized = normalize_upstream_result("demo", "count", result);
+
+        assert_ne!(normalized.is_error, Some(true));
     }
 
     #[test]
