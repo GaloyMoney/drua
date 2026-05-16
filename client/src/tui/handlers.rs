@@ -72,7 +72,10 @@ pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
                     return Action::None;
                 }
                 KeyCode::Char('t') => return Action::ToggleThreads,
-                KeyCode::Char('w') if state.focus != Focus::Chat || state.chat_input.is_empty() => {
+                KeyCode::Char('w')
+                    if state.focus != Focus::Workflows
+                        && (state.focus != Focus::Chat || state.chat_input.is_empty()) =>
+                {
                     return Action::OpenWorkflows;
                 }
                 _ => {}
@@ -591,6 +594,24 @@ mod tests {
             KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
         );
         assert!(matches!(action, Action::OpenWorkflows));
+    }
+
+    #[test]
+    fn ctrl_w_is_noop_when_already_focused_on_workflows() {
+        let mut state = state();
+        state.enter_workflows();
+        state.open_workflow_run_detail("run-1".into());
+
+        let action = handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+        );
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            state.workflows.view,
+            crate::tui::state::WorkflowView::RunDetail { .. }
+        ));
     }
 
     #[test]
