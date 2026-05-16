@@ -544,6 +544,9 @@ fn brief_description(s: &str) -> String {
     if compact.chars().count() <= MAX_BRIEF_DESCRIPTION_CHARS {
         return compact;
     }
+    if compact.chars().count() <= MAX_BRIEF_DESCRIPTION_CHARS + 3 {
+        return compact;
+    }
 
     let mut end = 0;
     for (idx, _) in compact.char_indices() {
@@ -799,6 +802,14 @@ mod tests {
         assert!(brief.ends_with("..."), "{brief}");
         assert!(brief.chars().count() <= MAX_BRIEF_DESCRIPTION_CHARS + 3);
         assert!(!brief.contains("tail"));
+    }
+
+    #[test]
+    fn brief_description_does_not_truncate_to_longer_output() {
+        let input = "x".repeat(MAX_BRIEF_DESCRIPTION_CHARS + 1);
+        let brief = brief_description(&input);
+
+        assert_eq!(brief, input);
     }
 
     #[test]
