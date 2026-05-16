@@ -118,7 +118,7 @@
         "args_digest": "fake_upstream_str-large-table({})",
         "invocation_id": "<uuid>",
         "kind": "lines",
-        "raw_size_bytes": 13051,
+        "raw_size_bytes": 13093,
         "summary_envelope_bytes": 8233,
         "tool_name": "fake_upstream_str-large-table"
       },
@@ -1731,7 +1731,7 @@
         "args_digest": "fake_upstream_str-large-table({})",
         "invocation_id": "<uuid>",
         "kind": "lines",
-        "raw_size_bytes": 13051,
+        "raw_size_bytes": 13093,
         "summary_envelope_bytes": 8233,
         "tool_name": "fake_upstream_str-large-table"
       },
