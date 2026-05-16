@@ -541,10 +541,8 @@ fn brief_description(s: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    if compact.chars().count() <= MAX_BRIEF_DESCRIPTION_CHARS {
-        return compact;
-    }
-    if compact.chars().count() <= MAX_BRIEF_DESCRIPTION_CHARS + 3 {
+    let compact_chars = compact.chars().count();
+    if compact_chars <= MAX_BRIEF_DESCRIPTION_CHARS + 3 {
         return compact;
     }
 
