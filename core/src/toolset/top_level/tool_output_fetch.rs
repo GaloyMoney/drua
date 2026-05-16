@@ -45,8 +45,11 @@ const DESCRIPTION: &str = "Recover a slice of a previously-summarised tool outpu
     `{mode:\"json_array_slice\", offset, len}` returns item range `arr[offset..offset+len]` of an array at the path; \
     `offset` accepts negatives — `-N` counts from the end (Python/JS slice semantics), \
     so `{mode:\"lines\", offset:-80, len:80}` returns the last 80 lines. Out-of-range offsets clamp. \
-    `{mode:\"summary\"}` replays the original curated `<summary>+<recovery>` envelope (ignores `path`). \
-    The response is the resolved (and optionally sliced) value, wrapped back at `path`.";
+    `{mode:\"summary\"}` returns the curated `<summary>+<recovery>` envelope (ignores `path`), \
+    bypassing the normal fetch response cap; compose advertises `normal_fetch_limit_bytes` \
+    and each sub_invocation's `summary_envelope_bytes` before you fetch. \
+    The response is the resolved (and optionally sliced) value, wrapped back at `path`; \
+    `structuredContent` carries the same dynamic value for clients that consume structured output.";
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 struct ToolOutputFetchArgs {
@@ -78,6 +81,13 @@ impl TopLevelTool for ToolOutputFetch {
     fn input_schema(&self) -> &serde_json::Value {
         &SCHEMA
     }
+    fn inner_output_schema(&self) -> Option<&serde_json::Value> {
+        // Intentionally dynamic: recovery can return any JSON shape
+        // depending on `path` and `query`, while MCP outputSchema must be
+        // a single root object schema. The result still populates
+        // structuredContent for clients that consume recovered JSON.
+        None
+    }
     fn default_tool_caching(&self) -> bool {
         // Recovery is the *output* of caching — re-caching it would loop.
         false
@@ -103,6 +113,8 @@ impl TopLevelTool for ToolOutputFetch {
             .tool_caching
             .fetch(owner_id, invocation_id, &args.path, args.query.as_ref())
             .await?;
-        Ok(fetched.result)
+        let mut result = fetched.result;
+        result.structured_content = Some(fetched.structured);
+        Ok(result)
     }
 }

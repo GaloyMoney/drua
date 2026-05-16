@@ -18,6 +18,7 @@
     tool_output_fetch(invocation_id="<uuid>", path="$[4].body", query={"len":80,"mode":"lines","offset":9})
   </elided>
   <elided path="$" total-bytes="65221" shown-bytes="7048" total-items="5" shown-items="3">
+    note: Direct recovery for this aggregate would exceed the fetch response cap; use the narrower recovery paths listed in this envelope. Summary mode only replays this overview.
     tool_output_fetch(invocation_id="<uuid>", query={"mode":"summary"})
   </elided>
 </recovery>

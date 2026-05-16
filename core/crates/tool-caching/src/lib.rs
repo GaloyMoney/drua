@@ -12,8 +12,8 @@ pub use config::ToolCachingConfig;
 pub use error::ToolCachingError;
 pub use fetch::{FetchQuery, FetchResult};
 pub use primitives::{
-    ElidedPath, QueryStructure, ToolCacheResponse, ToolCallOwnerId, ToolCallSummary,
-    ToolInvocationId,
+    ElidedPath, QueryStructure, SummaryFetchInfo, ToolCacheResponse, ToolCallOwnerId,
+    ToolCallSummary, ToolInvocationId,
 };
 pub use repo::StoredInvocation;
 pub use string_summarizer::StringSummarizerChain;
@@ -102,15 +102,18 @@ impl ToolCaching {
                 result: passthrough,
                 elided_paths: Vec::new(),
                 invocation_id: None,
+                summary_fetch_info: None,
             });
         }
 
         let elided_paths = processed.summary.elided_paths.clone();
+        let summary_fetch_info = self.summary_fetch_info(&processed.summary);
         let wrapped = build_elide_ctr(processed.summary, processed.invocation_id);
         Ok(ToolCacheResponse {
             result: wrapped,
             elided_paths,
             invocation_id: Some(processed.invocation_id),
+            summary_fetch_info: Some(summary_fetch_info),
         })
     }
 
@@ -152,13 +155,16 @@ impl ToolCaching {
                 result: wrapped,
                 elided_paths: Vec::new(),
                 invocation_id: None,
+                summary_fetch_info: None,
             });
         }
 
+        let summary_fetch_info = self.summary_fetch_info(&processed.summary);
         Ok(ToolCacheResponse {
             result: wrapped,
             elided_paths: processed.summary.elided_paths,
             invocation_id: Some(processed.invocation_id),
+            summary_fetch_info: Some(summary_fetch_info),
         })
     }
 
@@ -177,6 +183,19 @@ impl ToolCaching {
     ) -> Result<FetchResult, ToolCachingError> {
         let stored = self.repo.find_by_id(id, owner_id).await?;
         stored.query(path, query, self.config.max_fetch_response_bytes)
+    }
+
+    pub fn max_fetch_response_bytes(&self) -> u64 {
+        self.config.max_fetch_response_bytes as u64
+    }
+
+    fn summary_fetch_info(&self, summary: &ToolCallSummary) -> SummaryFetchInfo {
+        let summary_envelope_bytes = summary.build_envelope_text().len() as u64;
+        let normal_fetch_limit_bytes = self.max_fetch_response_bytes();
+        SummaryFetchInfo {
+            summary_envelope_bytes,
+            normal_fetch_limit_bytes,
+        }
     }
 
     /// Shared walk + persist. Both public entry points feed into this:
@@ -250,6 +269,7 @@ fn passthrough_no_owner(result: CallToolResult) -> ToolCacheResponse {
         result,
         elided_paths: Vec::new(),
         invocation_id: None,
+        summary_fetch_info: None,
     }
 }
 

@@ -195,6 +195,12 @@ pub struct RecoveryManifest {
     pub sub_invocations: Vec<Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SummaryFetchInfo {
+    pub summary_envelope_bytes: u64,
+    pub normal_fetch_limit_bytes: u64,
+}
+
 impl ElidedPath {
     pub(crate) fn render(&self) -> String {
         let mut attrs = format!(
@@ -207,8 +213,14 @@ impl ElidedPath {
         if let (Some(total), Some(shown)) = (self.total_items, self.shown_items) {
             attrs.push_str(&format!(" total-items=\"{total}\" shown-items=\"{shown}\""));
         }
+        let note = self
+            .recover
+            .get("note")
+            .and_then(Value::as_str)
+            .map(|note| format!("    note: {note}\n"))
+            .unwrap_or_default();
         format!(
-            "{attrs}>\n    {}\n  </elided>\n",
+            "{attrs}>\n{note}    {}\n  </elided>\n",
             render_recover_call(&self.recover),
         )
     }
@@ -258,4 +270,5 @@ pub struct ToolCacheResponse {
     pub result: CallToolResult,
     pub elided_paths: Vec<ElidedPath>,
     pub invocation_id: Option<ToolInvocationId>,
+    pub summary_fetch_info: Option<SummaryFetchInfo>,
 }
