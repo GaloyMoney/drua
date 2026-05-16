@@ -250,7 +250,7 @@ galoyAgents:
     openaiApiKey: ""
     annotations:
   codeAssistant:
-    indexHash: "05f4b58eeb691759130af8d97fe0b0e1ccbf6ff65978ea1fdb104423214a96df"
+    indexHash: "010b7adfd577d513ce5f13dd1d09f52cd3b653b7472bddb5cae84346223fb129"
     embedderHash: "569359897109da21014e728cd4d618843766f7f5a52f95c0c35e57250c117d06"
     gcsBucket: galoy-agents-models
     gcsCreds: ""
