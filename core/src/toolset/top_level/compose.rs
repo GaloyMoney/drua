@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Duration;
 
-use drua_tool_caching::{extract_text, ToolCaching};
+use drua_tool_caching::{extract_text, tool_result_value, ToolCaching};
 use es_entity::context::{EventContext, WithEventContext};
 use rmcp::model::{CallToolResult, JsonObject};
 use serde::Deserialize;
@@ -427,7 +427,9 @@ impl CatalogDispatcherShared {
         let Some(tc) = self.tool_caching.as_ref() else {
             return;
         };
-        let raw_size = extract_text(raw).len() as u64;
+        let raw_size = serde_json::to_vec(&tool_result_value(raw))
+            .map(|bytes| bytes.len() as u64)
+            .unwrap_or_else(|_| extract_text(raw).len() as u64);
         let Ok(resp) = tc
             .persist_for_compose(&self.subject, tool_name, args, raw.clone())
             .await
@@ -557,19 +559,10 @@ async fn run_top_level_call(
 }
 
 /// JS-engine view of a sub-call's result. Returns the upstream's actual
-/// shape: a record from `structured_content` when set, otherwise the
-/// upstream's text content parsed as JSON (or as a bare `Value::String` if
-/// the text isn't JSON). No `{value|items, _shape}` envelope ever leaks
-/// into JS.
+/// structured shape when present, otherwise the same canonical content value
+/// used by tool caching. No `{value|items, _shape}` envelope ever leaks into JS.
 fn result_to_value(result: &CallToolResult) -> serde_json::Value {
-    if let Some(structured) = &result.structured_content {
-        return structured.clone();
-    }
-    let text = extract_text(result);
-    match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(v) => v,
-        Err(_) => serde_json::Value::String(text),
-    }
+    tool_result_value(result)
 }
 
 fn format_tool_error(tool_name: &str, result: &CallToolResult) -> String {

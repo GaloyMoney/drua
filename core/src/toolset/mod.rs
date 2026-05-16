@@ -568,14 +568,9 @@ impl ToolSets {
 
 /// Estimate tokens from text content (~4 chars per token).
 pub fn estimate_tokens(result: &CallToolResult) -> u64 {
-    let total_chars: usize = result
-        .content
-        .iter()
-        .map(|c| match &c.raw {
-            rmcp::model::RawContent::Text(t) => t.text.len(),
-            _ => 0,
-        })
-        .sum();
+    let total_chars = drua_tool_caching::tool_result_value(result)
+        .to_string()
+        .len();
     (total_chars / 4).max(1) as u64
 }
 
