@@ -119,8 +119,10 @@ pub struct WorkflowRunDetail {
 }
 
 impl WorkflowRunDetail {
+    // Treat any non-pending/non-running state as terminal so unknown
+    // future states (e.g. CANCELLED) stop polling instead of looping.
     pub fn is_terminal(&self) -> bool {
-        matches!(self.state.as_str(), "SUCCEEDED" | "FAILED" | "ERRORED")
+        !matches!(self.state.as_str(), "PENDING" | "RUNNING")
     }
 }
 
