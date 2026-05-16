@@ -677,11 +677,19 @@ impl ScreenState {
                 definition_id: definition_id.clone(),
                 yaml_scroll: 0,
             },
-            WorkflowView::RunDetail { .. } => match self.workflows.selected_run.as_ref() {
-                Some(run) => WorkflowView::Runs {
-                    definition_id: run.definition_id.clone(),
-                    cursor: 0,
-                },
+            WorkflowView::RunDetail { run_id, .. } => match self.workflows.selected_run.as_ref() {
+                Some(run) => {
+                    let cursor = self
+                        .workflows
+                        .runs
+                        .iter()
+                        .position(|r| r.id == *run_id)
+                        .unwrap_or(0);
+                    WorkflowView::Runs {
+                        definition_id: run.definition_id.clone(),
+                        cursor,
+                    }
+                }
                 None => WorkflowView::Catalog,
             },
         };
