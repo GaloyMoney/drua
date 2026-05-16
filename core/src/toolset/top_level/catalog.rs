@@ -515,7 +515,7 @@ fn visible_entries(
             let brief = desc
                 .description
                 .as_ref()
-                .map(|d| first_sentence(d))
+                .map(|d| brief_description(d))
                 .unwrap_or_default();
             out.push(CatalogEntry {
                 prefixed_name: format!("{}_{}", set.prefix(), desc.name),
@@ -530,11 +530,38 @@ fn visible_entries(
     out
 }
 
-fn first_sentence(s: &str) -> String {
-    s.split_once(". ")
-        .or_else(|| s.split_once(".\n"))
-        .map(|(first, _)| format!("{first}."))
-        .unwrap_or_else(|| s.to_string())
+const MAX_BRIEF_DESCRIPTION_CHARS: usize = 220;
+
+fn brief_description(s: &str) -> String {
+    let first_paragraph = s
+        .split("\n\n")
+        .find(|part| !part.trim().is_empty())
+        .unwrap_or(s);
+    let compact = first_paragraph
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if compact.chars().count() <= MAX_BRIEF_DESCRIPTION_CHARS {
+        return compact;
+    }
+
+    let mut end = 0;
+    for (idx, _) in compact.char_indices() {
+        if compact[..idx].chars().count() > MAX_BRIEF_DESCRIPTION_CHARS {
+            break;
+        }
+        if compact[..idx].ends_with(' ') {
+            end = idx;
+        }
+    }
+    if end == 0 {
+        end = compact
+            .char_indices()
+            .nth(MAX_BRIEF_DESCRIPTION_CHARS)
+            .map(|(idx, _)| idx)
+            .unwrap_or(compact.len());
+    }
+    format!("{}...", compact[..end].trim_end())
 }
 
 #[cfg(test)]
@@ -750,6 +777,28 @@ mod tests {
             formatted.contains("id: string"),
             "missing return field in:\n{formatted}"
         );
+    }
+
+    #[test]
+    fn brief_description_preserves_abbreviations() {
+        let brief = brief_description(
+            "Search indexed codebases for code patterns matching a query, e.g. pass `fn main` for Rust functions.\n\nUsage tips:\n- Prefer concrete snippets.",
+        );
+
+        assert_eq!(
+            brief,
+            "Search indexed codebases for code patterns matching a query, e.g. pass `fn main` for Rust functions."
+        );
+    }
+
+    #[test]
+    fn brief_description_compacts_and_truncates_on_word_boundary() {
+        let long = format!("{}tail", "alpha ".repeat(60));
+        let brief = brief_description(&long);
+
+        assert!(brief.ends_with("..."), "{brief}");
+        assert!(brief.chars().count() <= MAX_BRIEF_DESCRIPTION_CHARS + 3);
+        assert!(!brief.contains("tail"));
     }
 
     #[test]
