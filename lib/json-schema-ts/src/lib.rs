@@ -32,7 +32,7 @@ pub fn schema_to_ts(schema: &Value) -> String {
 pub fn schema_to_ts_params(schema: &Value) -> String {
     let defs = extract_defs(schema);
     let mut ctx = Ctx::new(defs);
-    emit_object_body(schema, &mut ctx).unwrap_or_else(|| "...args: any".to_string())
+    emit_object_body(schema, &mut ctx).unwrap_or_else(|| "[key: string]: any".to_string())
 }
 
 struct Ctx<'a> {
@@ -234,7 +234,7 @@ fn emit_array(obj: &serde_json::Map<String, Value>, ctx: &mut Ctx<'_>) -> String
             let inner = emit(item, ctx);
             ctx.depth -= 1;
             // Wrap unions/intersections to keep precedence right: `(a | b)[]`.
-            let needs_paren = inner.contains(' ') && !inner.starts_with('{');
+            let needs_paren = inner.contains('|') || inner.contains('&');
             if needs_paren {
                 format!("({inner})[]")
             } else {
@@ -489,6 +489,28 @@ mod tests {
     }
 
     #[test]
+    fn array_of_object_unions_gets_parens() {
+        let s = json!({
+            "type": "array",
+            "items": {
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": {"type": {"const": "scratch"}},
+                        "required": ["type"]
+                    },
+                    {
+                        "type": "object",
+                        "properties": {"type": {"const": "repo"}},
+                        "required": ["type"]
+                    }
+                ]
+            }
+        });
+        assert_eq!(ts(s), "({ type: \"scratch\" } | { type: \"repo\" })[]");
+    }
+
+    #[test]
     fn optional_field() {
         let s = json!({
             "type": "object",
@@ -693,7 +715,7 @@ mod tests {
 
     #[test]
     fn schema_to_ts_params_no_properties_fallback() {
-        assert_eq!(schema_to_ts_params(&json!({})), "...args: any");
+        assert_eq!(schema_to_ts_params(&json!({})), "[key: string]: any");
     }
 
     #[test]
