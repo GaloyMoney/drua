@@ -84,7 +84,7 @@ impl ToolCaching {
         let Some(owner_id) = owner.into() else {
             return Ok(passthrough_no_owner(result));
         };
-        if result.is_error == Some(true) || !is_simple_text_result(&result) {
+        if result.is_error == Some(true) {
             return Ok(passthrough_no_owner(result));
         }
 
@@ -139,7 +139,7 @@ impl ToolCaching {
         let Some(owner_id) = owner.into() else {
             return Ok(passthrough_no_owner(result));
         };
-        if result.is_error == Some(true) || !is_simple_text_result(&result) {
+        if result.is_error == Some(true) {
             return Ok(passthrough_no_owner(result));
         }
 
@@ -211,25 +211,25 @@ impl ToolCaching {
         result: &CallToolResult,
     ) -> Result<Processed, ToolCachingError> {
         let original_structured = result.structured_content.clone();
-        let original_text = extract_text(result);
+        let upstream_t = tool_result_value(result);
+        let original_text = if is_simple_text_result(result) {
+            extract_text(result)
+        } else {
+            serde_json::to_string_pretty(&upstream_t).unwrap_or_else(|_| extract_text(result))
+        };
 
         // Walk the upstream's structured channel when present — that's
         // the canonical `T` whose shape MCP clients validate against the
-        // advertised outputSchema. Fall back to parsed-text Value for
-        // text-only tools (bash, k8s logs, etc.).
+        // advertised outputSchema. Fall back to a normalized content value
+        // for MCP content-only tools, including multi-part text/resource
+        // responses.
         let query_structure = QueryStructure {
-            root: original_structured
-                .clone()
-                .unwrap_or_else(|| QueryStructure::new(&original_text).root),
+            root: upstream_t.clone(),
         };
         let invocation_id = ToolInvocationId::new();
         let summary = self
             .walker
             .summarize(&query_structure, invocation_id, tool_name);
-
-        let upstream_t = original_structured
-            .clone()
-            .unwrap_or_else(|| query_structure.root.clone());
 
         if summary.elided_paths.is_empty() {
             return Ok(Processed {
@@ -292,6 +292,81 @@ pub fn extract_text(result: &CallToolResult) -> String {
         .join("\n")
 }
 
+/// Canonical JSON view of a tool result used by the recovery walker and
+/// compose. Prefer upstream structured content when present; otherwise parse a
+/// single text block as before, or preserve multi-part MCP content as an
+/// inspectable JSON object.
+pub fn tool_result_value(result: &CallToolResult) -> Value {
+    if let Some(structured) = &result.structured_content {
+        return structured.clone();
+    }
+    if is_simple_text_result(result) {
+        return QueryStructure::new(&extract_text(result)).root;
+    }
+    Value::Object(
+        [(
+            "content".to_string(),
+            Value::Array(result.content.iter().map(content_to_value).collect()),
+        )]
+        .into_iter()
+        .collect(),
+    )
+}
+
+fn content_to_value(content: &Content) -> Value {
+    let mut value = serde_json::to_value(content).unwrap_or(Value::Null);
+    match &content.raw {
+        RawContent::Image(image) => {
+            replace_key(
+                &mut value,
+                "data",
+                Value::String(format!("<base64 image elided; {} bytes>", image.data.len())),
+            );
+        }
+        RawContent::Audio(audio) => {
+            replace_key(
+                &mut value,
+                "data",
+                Value::String(format!("<base64 audio elided; {} bytes>", audio.data.len())),
+            );
+        }
+        RawContent::Resource(resource) => {
+            if let rmcp::model::ResourceContents::BlobResourceContents { blob, .. } =
+                &resource.resource
+            {
+                replace_key(
+                    &mut value,
+                    "blob",
+                    Value::String(format!(
+                        "<base64 resource blob elided; {} bytes>",
+                        blob.len()
+                    )),
+                );
+            }
+        }
+        RawContent::Text(_) | RawContent::ResourceLink(_) => {}
+    }
+    value
+}
+
+fn replace_key(value: &mut Value, key: &str, replacement: Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            if map.contains_key(key) {
+                map.insert(key.to_string(), replacement);
+                true
+            } else {
+                map.values_mut()
+                    .any(|child| replace_key(child, key, replacement.clone()))
+            }
+        }
+        Value::Array(items) => items
+            .iter_mut()
+            .any(|child| replace_key(child, key, replacement.clone())),
+        _ => false,
+    }
+}
+
 fn is_simple_text_result(result: &CallToolResult) -> bool {
     result.content.len() == 1 && matches!(result.content[0].raw, RawContent::Text(_))
 }
@@ -304,9 +379,8 @@ fn is_simple_text_result(result: &CallToolResult) -> bool {
 /// something, replaced in place by the `<summary>+<recovery>` envelope.
 ///
 /// Strictly `is_empty()`, not "no text content present": multi-part
-/// results (e.g. images alongside structured data) must keep their
-/// non-text parts intact and fall through to the
-/// `!is_simple_text_result` passthrough below.
+/// results keep their original content channel while the cache walker
+/// operates on `tool_result_value`.
 fn ensure_text_channel(mut result: CallToolResult) -> CallToolResult {
     if !result.content.is_empty() {
         return result;
@@ -317,4 +391,53 @@ fn ensure_text_channel(mut result: CallToolResult) -> CallToolResult {
     let text = serde_json::to_string_pretty(structured).unwrap_or_default();
     result.content = vec![Content::text(text)];
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_result_value_preserves_embedded_text_resources() {
+        let result = CallToolResult::success(vec![
+            Content::text("downloaded"),
+            Content::resource(rmcp::model::ResourceContents::text(
+                "file-body",
+                "repo://owner/repo/file.txt",
+            )),
+        ]);
+
+        let value = tool_result_value(&result);
+
+        assert_eq!(value["content"][0]["type"], "text");
+        assert_eq!(value["content"][0]["text"], "downloaded");
+        assert_eq!(value["content"][1]["type"], "resource");
+        assert_eq!(
+            value["content"][1]["resource"]["uri"],
+            "repo://owner/repo/file.txt"
+        );
+        assert_eq!(value["content"][1]["resource"]["text"], "file-body");
+    }
+
+    #[test]
+    fn tool_result_value_omits_binary_payloads() {
+        let result = CallToolResult::success(vec![
+            Content::image("abcdefgh", "image/png"),
+            Content::resource(rmcp::model::ResourceContents::blob(
+                "0123456789",
+                "repo://owner/repo/image.png",
+            )),
+        ]);
+
+        let value = tool_result_value(&result);
+
+        assert_eq!(
+            value["content"][0]["data"],
+            "<base64 image elided; 8 bytes>"
+        );
+        assert_eq!(
+            value["content"][1]["resource"]["blob"],
+            "<base64 resource blob elided; 10 bytes>"
+        );
+    }
 }
