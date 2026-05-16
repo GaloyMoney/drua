@@ -3,6 +3,7 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::config::ToolCachingConfig;
+use crate::fetch::fetch_text_size_at_path;
 use crate::preprocessors;
 use crate::primitives::{ElidedPath, QueryStructure, ToolCallSummary, ToolInvocationId};
 use crate::string_summarizer::{SegmentedText, StringSummarizerChain};
@@ -21,6 +22,7 @@ struct WalkCtx<'a> {
     primary_path: &'a str,
     primary_mapping: Option<&'a [u32]>,
     primary_raw_bytes: Option<u64>,
+    primary_raw_string: Option<&'a str>,
     /// Mirror of the preprocessor's `prefer_tail`; only honored at `primary_path`.
     primary_prefer_tail: bool,
 }
@@ -71,11 +73,13 @@ impl Walker {
         // Raw upstream size at the primary path — needed so the ElidedPath
         // at that path reports raw byte size (matches what fetch returns),
         // not the preprocessor-stripped size.
+        let primary_raw = navigate_path(&query_structure.root, primary_path);
         let primary_raw_bytes = if preprocessed.is_some() {
-            navigate_path(&query_structure.root, primary_path).map(byte_size)
+            primary_raw.map(byte_size)
         } else {
             None
         };
+        let primary_raw_string = primary_raw.and_then(Value::as_str);
         let primary_prefer_tail = preprocessed.as_ref().is_some_and(|p| p.prefer_tail);
 
         let mut elided_paths = Vec::new();
@@ -84,6 +88,7 @@ impl Walker {
             primary_path,
             primary_mapping,
             primary_raw_bytes,
+            primary_raw_string,
             primary_prefer_tail,
         };
         let wire_result = self.walk(
@@ -275,6 +280,10 @@ impl Walker {
             (true, Some(n)) => n,
             _ => s.len() as u64,
         };
+        let persisted_string = match (is_primary, ctx.primary_raw_string) {
+            (true, Some(raw)) => raw,
+            _ => s,
+        };
         // Pattern passes (nix-copy, cargo-compile, rsync, …) compact runs
         // of boring lines in place. Operates on a SegmentedText so order
         // and line indices stay accurate across passes.
@@ -299,7 +308,12 @@ impl Walker {
                 shown_lines: Some(line_count(&prepared)),
                 total_items: None,
                 shown_items: None,
-                recover: make_full_recover(invocation_id, path),
+                recover: make_safe_full_recover(
+                    invocation_id,
+                    path,
+                    persisted_string,
+                    self.max_fetch_response_bytes,
+                ),
             });
             return Value::String(prepared);
         }
@@ -320,11 +334,13 @@ impl Walker {
                 shown_lines: Some(elide.shown_lines),
                 total_items: None,
                 shown_items: None,
-                recover: make_lines_recover(
+                recover: make_safe_lines_recover(
                     invocation_id,
                     path,
+                    persisted_string,
                     elide.raw_offset as usize,
                     elide.raw_missing as usize,
+                    self.max_fetch_response_bytes,
                 ),
             });
             return Value::String(elide.text);
@@ -343,7 +359,12 @@ impl Walker {
                 shown_lines: None,
                 total_items: None,
                 shown_items: None,
-                recover: make_full_recover(invocation_id, path),
+                recover: make_safe_full_recover(
+                    invocation_id,
+                    path,
+                    persisted_string,
+                    self.max_fetch_response_bytes,
+                ),
             });
             return Value::String(prepared);
         }
@@ -356,7 +377,14 @@ impl Walker {
                 shown_lines: None,
                 total_items: None,
                 shown_items: None,
-                recover: make_range_recover(invocation_id, path, elide.head_end, elide.missing_len),
+                recover: make_safe_range_recover(
+                    invocation_id,
+                    path,
+                    persisted_string,
+                    elide.head_end,
+                    elide.missing_len,
+                    self.max_fetch_response_bytes,
+                ),
             });
             return Value::String(elide.text);
         }
@@ -739,6 +767,34 @@ fn make_range_recover(
     })
 }
 
+fn make_safe_range_recover(
+    invocation_id: ToolInvocationId,
+    path: &str,
+    raw: &str,
+    offset: usize,
+    len: usize,
+    max_fetch_response_bytes: usize,
+) -> Value {
+    if fetch_string_range_fits(path, raw, offset, len, max_fetch_response_bytes) {
+        return make_range_recover(invocation_id, path, offset, len);
+    }
+    let safe_len = max_safe_range_len(path, raw, offset, len, max_fetch_response_bytes);
+    if safe_len == 0 {
+        return make_summary_recover(invocation_id, path);
+    }
+    let mut recover = make_range_recover(invocation_id, path, offset, safe_len);
+    annotate_chunked_recover(
+        &mut recover,
+        "chunked_range",
+        format!(
+            "This bounded recovery returns the first {safe_len} of {len} elided bytes; repeat with a later offset to continue."
+        ),
+        len,
+        offset + safe_len,
+    );
+    recover
+}
+
 fn make_lines_recover(
     invocation_id: ToolInvocationId,
     path: &str,
@@ -755,6 +811,51 @@ fn make_lines_recover(
     })
 }
 
+fn make_safe_lines_recover(
+    invocation_id: ToolInvocationId,
+    path: &str,
+    raw: &str,
+    offset: usize,
+    len: usize,
+    max_fetch_response_bytes: usize,
+) -> Value {
+    if fetch_string_lines_fits(path, raw, offset, len, max_fetch_response_bytes) {
+        return make_lines_recover(invocation_id, path, offset, len);
+    }
+    let safe_len = max_safe_lines_len(path, raw, offset, len, max_fetch_response_bytes);
+    if safe_len > 0 {
+        let mut recover = make_lines_recover(invocation_id, path, offset, safe_len);
+        annotate_chunked_recover(
+            &mut recover,
+            "chunked_lines",
+            format!(
+                "This bounded recovery returns the first {safe_len} of {len} elided lines; repeat with a later offset to continue."
+            ),
+            len,
+            offset + safe_len,
+        );
+        return recover;
+    }
+
+    // A single line can exceed the fetch cap. Fall back to a byte-window
+    // recovery scoped to the elided line span so the advertised call
+    // still succeeds and does not point into already-shown tail content.
+    let start = byte_offset_for_line(raw, offset);
+    let end = byte_offset_for_line(raw, offset.saturating_add(len));
+    let span_len = end.saturating_sub(start);
+    if span_len == 0 {
+        return make_summary_recover(invocation_id, path);
+    }
+    make_safe_range_recover(
+        invocation_id,
+        path,
+        raw,
+        start,
+        span_len,
+        max_fetch_response_bytes,
+    )
+}
+
 fn make_full_recover(invocation_id: ToolInvocationId, path: &str) -> Value {
     serde_json::json!({
         "tool": "tool_output_fetch",
@@ -763,6 +864,19 @@ fn make_full_recover(invocation_id: ToolInvocationId, path: &str) -> Value {
             "path": path,
         }
     })
+}
+
+fn make_safe_full_recover(
+    invocation_id: ToolInvocationId,
+    path: &str,
+    raw: &str,
+    max_fetch_response_bytes: usize,
+) -> Value {
+    if fetch_string_value_fits(path, raw, max_fetch_response_bytes) {
+        make_full_recover(invocation_id, path)
+    } else {
+        make_summary_recover(invocation_id, path)
+    }
 }
 
 fn make_array_slice_recover(
@@ -797,6 +911,129 @@ fn make_summary_recover(invocation_id: ToolInvocationId, scope_path: &str) -> Va
             "query": { "mode": "summary" },
         }
     })
+}
+
+fn annotate_chunked_recover(
+    recover: &mut Value,
+    kind: &'static str,
+    note: String,
+    total_len: usize,
+    next_offset: usize,
+) {
+    if let Value::Object(map) = recover {
+        map.insert("kind".to_string(), Value::String(kind.to_string()));
+        map.insert("note".to_string(), Value::String(note));
+        map.insert("complete".to_string(), Value::Bool(false));
+        map.insert(
+            "total_recovery_len".to_string(),
+            Value::Number(serde_json::Number::from(total_len)),
+        );
+        map.insert(
+            "next_offset".to_string(),
+            Value::Number(serde_json::Number::from(next_offset)),
+        );
+    }
+}
+
+fn fetch_string_lines_fits(
+    path: &str,
+    raw: &str,
+    offset: usize,
+    len: usize,
+    max_fetch_response_bytes: usize,
+) -> bool {
+    let slice = lines_slice(raw, offset, len);
+    fetch_string_value_fits(path, &slice, max_fetch_response_bytes)
+}
+
+fn max_safe_lines_len(
+    path: &str,
+    raw: &str,
+    offset: usize,
+    len: usize,
+    max_fetch_response_bytes: usize,
+) -> usize {
+    let mut lo = 0;
+    let mut hi = len;
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if fetch_string_lines_fits(path, raw, offset, mid, max_fetch_response_bytes) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
+}
+
+fn fetch_string_range_fits(
+    path: &str,
+    raw: &str,
+    offset: usize,
+    len: usize,
+    max_fetch_response_bytes: usize,
+) -> bool {
+    let (start, end) = resolve_utf8_byte_window(raw, offset, len);
+    fetch_string_value_fits(path, &raw[start..end], max_fetch_response_bytes)
+}
+
+fn max_safe_range_len(
+    path: &str,
+    raw: &str,
+    offset: usize,
+    len: usize,
+    max_fetch_response_bytes: usize,
+) -> usize {
+    let mut lo = 0;
+    let mut hi = len;
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if fetch_string_range_fits(path, raw, offset, mid, max_fetch_response_bytes) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
+}
+
+fn fetch_string_value_fits(path: &str, value: &str, max_fetch_response_bytes: usize) -> bool {
+    fetch_string_text_size(path, value) <= max_fetch_response_bytes
+}
+
+fn fetch_string_text_size(path: &str, value: &str) -> usize {
+    fetch_text_size_at_path(path, Value::String(value.to_string())).unwrap_or(usize::MAX)
+}
+
+fn lines_slice(raw: &str, offset: usize, len: usize) -> String {
+    let all: Vec<&str> = raw.lines().collect();
+    let start = offset.min(all.len());
+    let end = start.saturating_add(len).min(all.len());
+    all[start..end].join("\n")
+}
+
+fn byte_offset_for_line(raw: &str, line: usize) -> usize {
+    if line == 0 {
+        return 0;
+    }
+    let mut count = 0;
+    for (idx, ch) in raw.char_indices() {
+        if ch == '\n' {
+            count += 1;
+            if count == line {
+                return idx + 1;
+            }
+        }
+    }
+    raw.len()
+}
+
+fn resolve_utf8_byte_window(s: &str, offset: usize, len: usize) -> (usize, usize) {
+    let requested_start = offset.min(s.len());
+    let requested_end = requested_start.saturating_add(len).min(s.len());
+    let start = ceil_char_boundary(s, requested_start);
+    let end = floor_char_boundary(s, requested_end).max(start);
+    (start, end)
 }
 
 fn make_truncated_array(walked: &[Value], head_count: usize) -> Value {

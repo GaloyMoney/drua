@@ -141,10 +141,10 @@ async fn root_string_over_threshold_yields_envelope_with_recovery_section() {
         recovery.get("root_kind").and_then(|v| v.as_str()),
         Some("string")
     );
-    assert_eq!(
-        recovery.get("persisted_root").and_then(|v| v.as_str()),
-        Some("upstream T directly; not the outer {result: ...} wire wrapper")
-    );
+    assert!(recovery
+        .get("persisted_root")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| s.contains("persisted tool result root directly")),);
     let recommended = recovery
         .get("recommended_queries")
         .and_then(|v| v.as_array())

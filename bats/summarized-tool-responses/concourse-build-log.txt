@@ -164,6 +164,7 @@ INFO: found existing resource cache
 </summary>
 <recovery>
   <elided path="$.logs" total-bytes="39177" shown-bytes="8049" total-lines="320" shown-lines="157">
-    tool_output_fetch(invocation_id="<uuid>", path="$.logs", query={"len":125,"mode":"lines","offset":0})
+    note: This bounded recovery returns the first 94 of 125 elided lines; repeat with a later offset to continue.
+    tool_output_fetch(invocation_id="<uuid>", path="$.logs", query={"len":94,"mode":"lines","offset":0})
   </elided>
 </recovery>
