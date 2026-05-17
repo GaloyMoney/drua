@@ -18,20 +18,20 @@ pub struct ModelSpec {
     pub max_tokens: Option<i32>,
 }
 
-impl From<ModelSpec> for DomainModelSpec {
-    fn from(s: ModelSpec) -> Self {
-        DomainModelSpec {
-            name: s.name,
-            max_tokens: s.max_tokens.map(|n| n.max(0) as u32),
-        }
-    }
-}
-
 impl From<DomainModelSpec> for ModelSpec {
     fn from(s: DomainModelSpec) -> Self {
         Self {
             name: s.name,
             max_tokens: s.max_tokens.map(|n| n as i32),
+        }
+    }
+}
+
+impl From<ModelSpec> for DomainModelSpec {
+    fn from(s: ModelSpec) -> Self {
+        DomainModelSpec {
+            name: s.name,
+            max_tokens: s.max_tokens.map(|n| n.max(0) as u32),
         }
     }
 }
@@ -43,22 +43,18 @@ pub struct ModelChain {
     pub fallbacks: Vec<ModelSpec>,
 }
 
-impl From<ModelChain> for DomainModelChain {
-    fn from(c: ModelChain) -> Self {
-        DomainModelChain {
+impl From<DomainModelChain> for ModelChain {
+    fn from(c: DomainModelChain) -> Self {
+        Self {
             primary: c.primary.into(),
             fallbacks: c.fallbacks.into_iter().map(Into::into).collect(),
         }
     }
 }
 
-/// Policy-shaped chain (name-only specs) → gql. Used by
-/// `WorkflowDefinition.model_chain`, which carries the authored YAML
-/// chain pre-resolution. The agent-side conversion below operates on
-/// the resolved `agent::ModelChain` and is a separate impl.
-impl From<DomainModelChain> for ModelChain {
-    fn from(c: DomainModelChain) -> Self {
-        Self {
+impl From<ModelChain> for DomainModelChain {
+    fn from(c: ModelChain) -> Self {
+        DomainModelChain {
             primary: c.primary.into(),
             fallbacks: c.fallbacks.into_iter().map(Into::into).collect(),
         }
