@@ -96,6 +96,16 @@ impl WorkflowDefinitionRepo {
         }
     }
 
+    pub async fn list_all_non_deleted_ids(
+        &self,
+    ) -> Result<Vec<WorkflowDefinitionId>, sqlx::Error> {
+        let rows: Vec<(WorkflowDefinitionId,)> =
+            sqlx::query_as("SELECT id FROM workflow_definitions WHERE deleted = false")
+                .fetch_all(&self.pool)
+                .await?;
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
     async fn sync_to_library<OP: es_entity::AtomicOperation>(
         &self,
         op: &mut OP,

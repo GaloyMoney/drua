@@ -1,12 +1,11 @@
 //! Outside the auth middleware — authn via the trigger's stored secret.
 //!
-//! Recognised `provider` values on `WorkflowTrigger::Webhook`:
-//! - `None` / `Some("concourse")` — `Authorization: Bearer <secret>`.
-//!   The `concourse` arm is documentation-only; it tags workflows
-//!   meant to be fired by the `concourse-drua-resource` so the
-//!   dashboard and library YAML carry intent.
-//! - `Some("honeycomb")` — `X-Honeycomb-Webhook-Token: <secret>`
-//!   (Honeycomb's non-standard header, no `Bearer` prefix).
+//! Two dispatch surfaces:
+//! - `POST /webhooks/{definition_id}` — per-definition endpoint (1:1).
+//! - `POST /webhooks/providers/{provider}` — fan-out: evaluates every
+//!   definition tagged with this provider and spawns runs for those
+//!   whose `trigger.condition` passes. Auth via env var
+//!   `WEBHOOK_SECRET_{PROVIDER_UPPER}`.
 
 use axum::{
     body::Bytes,
@@ -14,8 +13,9 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::post,
-    Router,
+    Json, Router,
 };
+use serde::Serialize;
 use tracing::instrument;
 
 use drua_core as domain;
@@ -26,7 +26,12 @@ use domain::workflow::WorkflowTrigger;
 use crate::AppState;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/webhooks/{definition_id}", post(handle_webhook))
+    Router::new()
+        .route("/webhooks/{definition_id}", post(handle_webhook))
+        .route(
+            "/webhooks/providers/{provider}",
+            post(handle_provider_webhook),
+        )
 }
 
 #[instrument(name = "web.webhook.handle", skip_all, fields(%definition_id))]
@@ -104,6 +109,101 @@ pub async fn handle_webhook(
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
+}
+
+#[derive(Serialize)]
+struct ProviderFanOutResult {
+    triggered: usize,
+    filtered: usize,
+    errored: usize,
+}
+
+#[instrument(name = "web.webhook.handle_provider", skip_all, fields(%provider))]
+pub async fn handle_provider_webhook(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let env_key = format!(
+        "WEBHOOK_SECRET_{}",
+        provider.to_uppercase().replace('-', "_")
+    );
+    let expected_secret = match std::env::var(&env_key) {
+        Ok(s) if !s.is_empty() => s,
+        _ => {
+            tracing::warn!(%provider, env_key, "provider webhook secret not configured");
+            return StatusCode::NOT_IMPLEMENTED.into_response();
+        }
+    };
+
+    let header_name = header_name_for_provider(Some(&provider));
+    let presented = match headers.get(header_name).and_then(|v| v.to_str().ok()) {
+        Some(value) => extract_secret(value, Some(&provider)),
+        None => {
+            tracing::warn!(header_name, "provider webhook: missing verification header");
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+    };
+
+    if presented != expected_secret {
+        tracing::warn!("provider webhook: secret mismatch");
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let trigger_context = if body.is_empty() {
+        serde_json::Value::Null
+    } else {
+        match serde_json::from_slice::<serde_json::Value>(&body) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "provider webhook: invalid JSON body");
+                return (StatusCode::BAD_REQUEST, "invalid JSON").into_response();
+            }
+        }
+    };
+
+    let definitions = match state
+        .app
+        .workflows()
+        .list_webhook_definitions_for_provider(&provider)
+        .await
+    {
+        Ok(defs) => defs,
+        Err(e) => {
+            tracing::error!(error = %e, "provider webhook: failed to load definitions");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let mut triggered = 0usize;
+    let mut filtered = 0usize;
+    let mut errored = 0usize;
+
+    for defn in definitions {
+        let def_id = defn.id;
+        match state
+            .app
+            .workflows()
+            .trigger_run_for_definition(defn, trigger_context.clone())
+            .await
+        {
+            Ok(Some(run)) => {
+                tracing::info!(%def_id, run_id = %run.id, "provider fan-out: run triggered");
+                triggered += 1;
+            }
+            Ok(None) => {
+                tracing::debug!(%def_id, "provider fan-out: filtered by condition");
+                filtered += 1;
+            }
+            Err(e) => {
+                tracing::warn!(%def_id, error = %e, "provider fan-out: trigger errored");
+                errored += 1;
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(ProviderFanOutResult { triggered, filtered, errored })).into_response()
 }
 
 fn header_name_for_provider(provider: Option<&str>) -> &'static str {

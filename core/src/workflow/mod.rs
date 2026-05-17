@@ -793,6 +793,28 @@ impl Workflows {
         self.spawn_run(definition, trigger_context).await
     }
 
+    #[instrument(name = "core.workflow.list_webhook_definitions_for_provider", skip_all)]
+    pub async fn list_webhook_definitions_for_provider(
+        &self,
+        provider: &str,
+    ) -> Result<Vec<WorkflowDefinition>, WorkflowError> {
+        let ids = self.repo.list_all_non_deleted_ids().await?;
+        let mut matching = Vec::new();
+        for id in ids {
+            let defn = match self.repo.maybe_find_by_id(id).await? {
+                Some(d) => d,
+                None => continue,
+            };
+            if matches!(
+                &defn.trigger,
+                WorkflowTrigger::Webhook { provider: Some(p), .. } if p == provider
+            ) {
+                matching.push(defn);
+            }
+        }
+        Ok(matching)
+    }
+
     async fn spawn_run(
         &self,
         definition: WorkflowDefinition,
