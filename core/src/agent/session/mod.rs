@@ -65,6 +65,7 @@ impl Sessions {
         Ok(session)
     }
 
+    #[allow(clippy::too_many_arguments)]
     #[instrument(
         name = "domain.agent_session.create_in_op",
         skip(self, op, system_blocks, tool_defs)
@@ -130,13 +131,7 @@ impl Sessions {
         let mut op = self.repo.begin_op().await?;
         let mut session = self.repo.find_by_agent_id_in_op(&mut op, agent_id).await?;
 
-        // Lazy drift propagation for config rollouts: when intent is None
-        // (inherited from `agents.default_chain` / role), re-resolve against
-        // the current config and update the snapshot if it changed. The
-        // idempotency guard inside `update_model_chain` makes this a zero-
-        // write check when nothing drifted; `thread_has_stale_model_chain`
-        // inside `session.next_prompt` picks up the new snapshot and spawns
-        // a refreshed thread on the same turn.
+        // Drift-propagate config changes to inherited sessions; no-op when nothing changed.
         if session.chain_override.is_none() {
             let resolved = self
                 .config
