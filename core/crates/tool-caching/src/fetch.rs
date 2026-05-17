@@ -102,13 +102,18 @@ impl FetchQuery {
 
 fn resolve_utf8_byte_window(s: &str, offset: i64, len: usize) -> (usize, usize) {
     let requested_start = resolve_offset(offset, s.len());
+    resolve_utf8_byte_window_usize(s, requested_start, len)
+}
+
+pub(crate) fn resolve_utf8_byte_window_usize(s: &str, offset: usize, len: usize) -> (usize, usize) {
+    let requested_start = offset.min(s.len());
     let requested_end = requested_start.saturating_add(len).min(s.len());
     let start = ceil_char_boundary(s, requested_start);
     let end = floor_char_boundary(s, requested_end).max(start);
     (start, end)
 }
 
-fn floor_char_boundary(s: &str, idx: usize) -> usize {
+pub(crate) fn floor_char_boundary(s: &str, idx: usize) -> usize {
     let mut i = idx.min(s.len());
     while i > 0 && !s.is_char_boundary(i) {
         i -= 1;
@@ -116,7 +121,7 @@ fn floor_char_boundary(s: &str, idx: usize) -> usize {
     i
 }
 
-fn ceil_char_boundary(s: &str, idx: usize) -> usize {
+pub(crate) fn ceil_char_boundary(s: &str, idx: usize) -> usize {
     let mut i = idx.min(s.len());
     while i < s.len() && !s.is_char_boundary(i) {
         i += 1;

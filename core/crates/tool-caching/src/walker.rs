@@ -3,7 +3,10 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::config::ToolCachingConfig;
-use crate::fetch::fetch_text_size_at_path;
+use crate::fetch::{
+    ceil_char_boundary, fetch_text_size_at_path, floor_char_boundary,
+    resolve_utf8_byte_window_usize as resolve_utf8_byte_window,
+};
 use crate::preprocessors;
 use crate::primitives::{ElidedPath, QueryStructure, ToolCallSummary, ToolInvocationId};
 use crate::string_summarizer::{SegmentedText, StringSummarizerChain};
@@ -731,24 +734,6 @@ fn byte_elide_string(s: &str, budget: usize) -> Option<ByteElide> {
     })
 }
 
-fn floor_char_boundary(s: &str, idx: usize) -> usize {
-    let idx = idx.min(s.len());
-    let mut i = idx;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
-fn ceil_char_boundary(s: &str, idx: usize) -> usize {
-    let idx = idx.min(s.len());
-    let mut i = idx;
-    while i < s.len() && !s.is_char_boundary(i) {
-        i += 1;
-    }
-    i
-}
-
 // ── Recovery templates ──
 
 fn make_range_recover(
@@ -1031,14 +1016,6 @@ fn byte_offset_for_line(raw: &str, line: usize) -> usize {
         }
     }
     raw.len()
-}
-
-fn resolve_utf8_byte_window(s: &str, offset: usize, len: usize) -> (usize, usize) {
-    let requested_start = offset.min(s.len());
-    let requested_end = requested_start.saturating_add(len).min(s.len());
-    let start = ceil_char_boundary(s, requested_start);
-    let end = floor_char_boundary(s, requested_end).max(start);
-    (start, end)
 }
 
 fn make_truncated_array(walked: &[Value], head_count: usize) -> Value {
