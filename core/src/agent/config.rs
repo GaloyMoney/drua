@@ -54,24 +54,28 @@ impl ModelChain {
         policy: &LlmModelChain,
         models: &HashMap<String, ModelDefaults>,
     ) -> Result<Self, AgentError> {
-        let primary = lookup(policy.primary.name.as_str(), models)?;
+        let primary = resolve_entry(&policy.primary, models)?;
         let fallbacks = policy
             .fallbacks
             .iter()
-            .map(|spec| lookup(spec.name.as_str(), models))
+            .map(|spec| resolve_entry(spec, models))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self { primary, fallbacks })
     }
 }
 
-fn lookup(
-    name: &str,
+fn resolve_entry(
+    spec: &llm::ModelSpec,
     models: &HashMap<String, ModelDefaults>,
 ) -> Result<ModelDefaults, AgentError> {
-    models
-        .get(name)
+    let mut defaults = models
+        .get(spec.name.as_str())
         .cloned()
-        .ok_or_else(|| AgentError::ModelNotConfigured(name.to_string()))
+        .ok_or_else(|| AgentError::ModelNotConfigured(spec.name.clone()))?;
+    if let Some(mt) = spec.max_tokens {
+        defaults.max_tokens_per_response = mt;
+    }
+    Ok(defaults)
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -237,6 +241,40 @@ mod tests {
         assert_eq!(chain.fallbacks[0].model, "backup");
         assert_eq!(chain.fallbacks[0].max_tokens_per_response, 4096);
         assert_eq!(chain.fallbacks[0].context_window_tokens, 128_000);
+    }
+
+    #[test]
+    fn spec_max_tokens_overrides_registry() {
+        let mut cfg = AgentsConfig {
+            default_chain: Some(
+                LlmModelChain::new(llm::ModelSpec::new("primary").with_max_tokens(2048))
+                    .with_fallback(llm::ModelSpec::new("backup").with_max_tokens(1024))
+                    .with_fallback("backup"),
+            ),
+            ..Default::default()
+        };
+        cfg.models.insert(
+            "primary".into(),
+            ModelDefaults {
+                model: "primary".into(),
+                max_tokens_per_response: 8192,
+                context_window_tokens: 200_000,
+            },
+        );
+        cfg.models.insert(
+            "backup".into(),
+            ModelDefaults {
+                model: "backup".into(),
+                max_tokens_per_response: 4096,
+                context_window_tokens: 128_000,
+            },
+        );
+        cfg.builtin_roles
+            .insert(AgentRole::Agent, RoleConfig::default());
+        let chain = cfg.resolve_chain(AgentRole::Agent, None).unwrap();
+        assert_eq!(chain.primary.max_tokens_per_response, 2048);
+        assert_eq!(chain.fallbacks[0].max_tokens_per_response, 1024);
+        assert_eq!(chain.fallbacks[1].max_tokens_per_response, 4096);
     }
 
     #[test]
