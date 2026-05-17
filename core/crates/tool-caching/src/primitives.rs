@@ -113,7 +113,7 @@ impl ToolCallSummary {
             invocation_id: invocation_id.to_string(),
             root_kind: value_kind(&self.wire_result).to_string(),
             root_path: self.root_path.clone(),
-            persisted_root: "upstream T directly; not the outer {result: ...} wire wrapper"
+            persisted_root: "persisted tool result root directly; catalog/sub-tool calls use upstream T, compose outer calls use ComposeOutput (JS return at $.result); not the outer {result: ...} MCP wire wrapper"
                 .to_string(),
             paths: self.elided_paths.clone(),
             recommended_queries: self
@@ -271,4 +271,5 @@ pub struct ToolCacheResponse {
     pub elided_paths: Vec<ElidedPath>,
     pub invocation_id: Option<ToolInvocationId>,
     pub summary_fetch_info: Option<SummaryFetchInfo>,
+    pub root_path: Option<String>,
 }

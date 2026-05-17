@@ -103,17 +103,20 @@ impl ToolCaching {
                 elided_paths: Vec::new(),
                 invocation_id: None,
                 summary_fetch_info: None,
+                root_path: None,
             });
         }
 
         let elided_paths = processed.summary.elided_paths.clone();
         let summary_fetch_info = self.summary_fetch_info(&processed.summary);
+        let root_path = processed.summary.root_path.clone();
         let wrapped = build_elide_ctr(processed.summary, processed.invocation_id);
         Ok(ToolCacheResponse {
             result: wrapped,
             elided_paths,
             invocation_id: Some(processed.invocation_id),
             summary_fetch_info: Some(summary_fetch_info),
+            root_path: Some(root_path),
         })
     }
 
@@ -156,15 +159,18 @@ impl ToolCaching {
                 elided_paths: Vec::new(),
                 invocation_id: None,
                 summary_fetch_info: None,
+                root_path: None,
             });
         }
 
         let summary_fetch_info = self.summary_fetch_info(&processed.summary);
+        let root_path = processed.summary.root_path.clone();
         Ok(ToolCacheResponse {
             result: wrapped,
             elided_paths: processed.summary.elided_paths,
             invocation_id: Some(processed.invocation_id),
             summary_fetch_info: Some(summary_fetch_info),
+            root_path: Some(root_path),
         })
     }
 
@@ -270,6 +276,7 @@ fn passthrough_no_owner(result: CallToolResult) -> ToolCacheResponse {
         elided_paths: Vec::new(),
         invocation_id: None,
         summary_fetch_info: None,
+        root_path: None,
     }
 }
 

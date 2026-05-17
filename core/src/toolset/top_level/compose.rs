@@ -234,6 +234,8 @@ pub struct SubInvocation {
     pub args_digest: String,
     /// `tool_invocations.id` — pass to `tool_output_fetch`.
     pub invocation_id: uuid::Uuid,
+    /// Root path of the summary view for this persisted sub-call.
+    pub root_path: String,
     /// Summary kind discriminator (`lines`, `range`, `json_array_slice`,
     /// `summarized`) — hint for which `tool_output_fetch` query mode
     /// would naturally slice this sub-call's output.
@@ -451,6 +453,7 @@ impl CatalogDispatcherShared {
                 tool_name: tool_name.to_string(),
                 args_digest: format_args_digest(tool_name, args),
                 invocation_id: uuid::Uuid::from(invocation_id),
+                root_path: resp.root_path.unwrap_or_else(|| "$".to_string()),
                 kind,
                 raw_size_bytes: raw_size,
                 summary_envelope_bytes: summary_fetch_info.summary_envelope_bytes,

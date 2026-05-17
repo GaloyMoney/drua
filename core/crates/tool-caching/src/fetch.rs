@@ -102,13 +102,18 @@ impl FetchQuery {
 
 fn resolve_utf8_byte_window(s: &str, offset: i64, len: usize) -> (usize, usize) {
     let requested_start = resolve_offset(offset, s.len());
+    resolve_utf8_byte_window_usize(s, requested_start, len)
+}
+
+pub(crate) fn resolve_utf8_byte_window_usize(s: &str, offset: usize, len: usize) -> (usize, usize) {
+    let requested_start = offset.min(s.len());
     let requested_end = requested_start.saturating_add(len).min(s.len());
     let start = ceil_char_boundary(s, requested_start);
     let end = floor_char_boundary(s, requested_end).max(start);
     (start, end)
 }
 
-fn floor_char_boundary(s: &str, idx: usize) -> usize {
+pub(crate) fn floor_char_boundary(s: &str, idx: usize) -> usize {
     let mut i = idx.min(s.len());
     while i > 0 && !s.is_char_boundary(i) {
         i -= 1;
@@ -116,7 +121,7 @@ fn floor_char_boundary(s: &str, idx: usize) -> usize {
     i
 }
 
-fn ceil_char_boundary(s: &str, idx: usize) -> usize {
+pub(crate) fn ceil_char_boundary(s: &str, idx: usize) -> usize {
     let mut i = idx.min(s.len());
     while i < s.len() && !s.is_char_boundary(i) {
         i += 1;
@@ -155,11 +160,8 @@ impl StoredInvocation {
             Some(q) => q.apply(resolved)?,
             None => resolved,
         };
-        let wrapped = Self::wrap_at_path(path, sliced)?;
-        let text = match &wrapped {
-            Value::String(s) => s.clone(),
-            other => serde_json::to_string(other).unwrap_or_default(),
-        };
+        let wrapped = wrap_at_path(path, sliced)?;
+        let text = fetch_text_for_wrapped(&wrapped);
         if text.len() > max_bytes {
             return Err(ToolCachingError::FetchResponseTooLarge {
                 size: text.len(),
@@ -227,7 +229,7 @@ impl StoredInvocation {
     }
 
     fn navigate(&self, path: &str) -> Result<&Value, ToolCachingError> {
-        let segments = Self::parse_path(path)?;
+        let segments = parse_path(path)?;
         let mut cur = &self.query_structure.root;
         for seg in &segments {
             cur = match seg {
@@ -247,88 +249,96 @@ impl StoredInvocation {
         }
         Ok(cur)
     }
-
-    /// Rebuild the structure implied by `path` around `value`. For
-    /// `path == "$"` returns `value` directly. Object-key segments nest
-    /// into `{key: …}`; array-index segments wrap into a single-element
-    /// array (`$[3]` → `[value]`) — callers can read `result[0]` and
-    /// recover the original index from the recovery template's `path`
-    /// field. Leading `null` padding scales linearly with the index and
-    /// would burn tokens at every higher position without adding info.
-    fn wrap_at_path(path: &str, value: Value) -> Result<Value, ToolCachingError> {
-        let segments = Self::parse_path(path)?;
-        let mut acc = value;
-        for seg in segments.into_iter().rev() {
-            acc = match seg {
-                PathSegment::Key(k) => {
-                    let mut obj = serde_json::Map::new();
-                    obj.insert(k, acc);
-                    Value::Object(obj)
-                }
-                PathSegment::Index(_) => Value::Array(vec![acc]),
-            };
-        }
-        Ok(acc)
-    }
-
-    /// Tokenize a `$`-prefixed json-path into key / index segments.
-    /// Matches the walker's emitted shape: dotted object keys, bracketed
-    /// numeric array indices, and any mix of the two (`$.items[3].name`).
-    fn parse_path(path: &str) -> Result<Vec<PathSegment>, ToolCachingError> {
-        let Some(rest) = path.strip_prefix('$') else {
-            return Err(ToolCachingError::InvalidPath(format!(
-                "path must start with `$`; got {path}"
-            )));
-        };
-        let bytes = rest.as_bytes();
-        let mut out = Vec::new();
-        let mut i = 0;
-        while i < bytes.len() {
-            match bytes[i] {
-                b'.' => {
-                    i += 1;
-                    let start = i;
-                    while i < bytes.len() && bytes[i] != b'.' && bytes[i] != b'[' {
-                        i += 1;
-                    }
-                    if start == i {
-                        return Err(ToolCachingError::InvalidPath(format!(
-                            "empty key segment in path {path}"
-                        )));
-                    }
-                    out.push(PathSegment::Key(rest[start..i].to_string()));
-                }
-                b'[' => {
-                    i += 1;
-                    let start = i;
-                    while i < bytes.len() && bytes[i] != b']' {
-                        i += 1;
-                    }
-                    if i == bytes.len() {
-                        return Err(ToolCachingError::InvalidPath(format!(
-                            "unclosed `[` in path {path}"
-                        )));
-                    }
-                    let idx: usize = rest[start..i].parse().map_err(|_| {
-                        ToolCachingError::InvalidPath(format!("invalid array index in path {path}"))
-                    })?;
-                    out.push(PathSegment::Index(idx));
-                    i += 1;
-                }
-                _ => {
-                    return Err(ToolCachingError::InvalidPath(format!(
-                        "path after `$` must be `.key` or `[index]`; got {path}"
-                    )));
-                }
-            }
-        }
-        Ok(out)
-    }
 }
 
 enum PathSegment {
     Key(String),
     Index(usize),
+}
+
+pub(crate) fn fetch_text_size_at_path(path: &str, value: Value) -> Result<usize, ToolCachingError> {
+    Ok(fetch_text_for_wrapped(&wrap_at_path(path, value)?).len())
+}
+
+fn fetch_text_for_wrapped(wrapped: &Value) -> String {
+    match wrapped {
+        Value::String(s) => s.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
+    }
+}
+
+/// Rebuild the structure implied by `path` around `value`. For
+/// `path == "$"` returns `value` directly. Object-key segments nest
+/// into `{key: …}`; array-index segments wrap into a single-element
+/// array (`$[3]` → `[value]`) — callers can read `result[0]` and
+/// recover the original index from the recovery template's `path`
+/// field. Leading `null` padding scales linearly with the index and
+/// would burn tokens at every higher position without adding info.
+fn wrap_at_path(path: &str, value: Value) -> Result<Value, ToolCachingError> {
+    let segments = parse_path(path)?;
+    let mut acc = value;
+    for seg in segments.into_iter().rev() {
+        acc = match seg {
+            PathSegment::Key(k) => {
+                let mut obj = serde_json::Map::new();
+                obj.insert(k, acc);
+                Value::Object(obj)
+            }
+            PathSegment::Index(_) => Value::Array(vec![acc]),
+        };
+    }
+    Ok(acc)
+}
+
+fn parse_path(path: &str) -> Result<Vec<PathSegment>, ToolCachingError> {
+    let Some(rest) = path.strip_prefix('$') else {
+        return Err(ToolCachingError::InvalidPath(format!(
+            "path must start with `$`; got {path}"
+        )));
+    };
+    let bytes = rest.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'.' => {
+                i += 1;
+                let start = i;
+                while i < bytes.len() && bytes[i] != b'.' && bytes[i] != b'[' {
+                    i += 1;
+                }
+                if start == i {
+                    return Err(ToolCachingError::InvalidPath(format!(
+                        "empty key segment in path {path}"
+                    )));
+                }
+                out.push(PathSegment::Key(rest[start..i].to_string()));
+            }
+            b'[' => {
+                i += 1;
+                let start = i;
+                while i < bytes.len() && bytes[i] != b']' {
+                    i += 1;
+                }
+                if i == bytes.len() {
+                    return Err(ToolCachingError::InvalidPath(format!(
+                        "unclosed `[` in path {path}"
+                    )));
+                }
+                let idx: usize = rest[start..i].parse().map_err(|_| {
+                    ToolCachingError::InvalidPath(format!("invalid array index in path {path}"))
+                })?;
+                out.push(PathSegment::Index(idx));
+                i += 1;
+            }
+            _ => {
+                return Err(ToolCachingError::InvalidPath(format!(
+                    "path after `$` must be `.key` or `[index]`; got {path}"
+                )));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Describe what's actually at `cur` so the agent can correct a missing
@@ -379,31 +389,30 @@ mod tests {
     #[test]
     fn wrap_at_path_root_is_identity() {
         let v = Value::String("hi".into());
-        assert_eq!(StoredInvocation::wrap_at_path("$", v.clone()).unwrap(), v,);
+        assert_eq!(wrap_at_path("$", v.clone()).unwrap(), v,);
     }
 
     #[test]
     fn wrap_at_path_nested_keys() {
-        let wrapped = StoredInvocation::wrap_at_path("$.a.b", Value::String("hi".into())).unwrap();
+        let wrapped = wrap_at_path("$.a.b", Value::String("hi".into())).unwrap();
         assert_eq!(wrapped, serde_json::json!({"a": {"b": "hi"}}));
     }
 
     #[test]
     fn wrap_at_path_array_root_uses_single_element() {
-        let wrapped = StoredInvocation::wrap_at_path("$[2]", Value::String("hi".into())).unwrap();
+        let wrapped = wrap_at_path("$[2]", Value::String("hi".into())).unwrap();
         assert_eq!(wrapped, serde_json::json!(["hi"]));
     }
 
     #[test]
     fn wrap_at_path_mixed_keys_and_indices() {
-        let wrapped =
-            StoredInvocation::wrap_at_path("$.items[1].name", Value::String("hi".into())).unwrap();
+        let wrapped = wrap_at_path("$.items[1].name", Value::String("hi".into())).unwrap();
         assert_eq!(wrapped, serde_json::json!({"items": [{"name": "hi"}]}),);
     }
 
     #[test]
     fn parse_path_handles_mixed_keys_and_indices() {
-        let segs = StoredInvocation::parse_path("$.items[3].name").unwrap();
+        let segs = parse_path("$.items[3].name").unwrap();
         assert_eq!(segs.len(), 3);
         assert!(matches!(&segs[0], PathSegment::Key(k) if k == "items"));
         assert!(matches!(&segs[1], PathSegment::Index(3)));

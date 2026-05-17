@@ -3,6 +3,10 @@ use std::sync::Arc;
 use serde_json::Value;
 
 use crate::config::ToolCachingConfig;
+use crate::fetch::{
+    ceil_char_boundary, fetch_text_size_at_path, floor_char_boundary,
+    resolve_utf8_byte_window_usize as resolve_utf8_byte_window,
+};
 use crate::preprocessors;
 use crate::primitives::{ElidedPath, QueryStructure, ToolCallSummary, ToolInvocationId};
 use crate::string_summarizer::{SegmentedText, StringSummarizerChain};
@@ -21,6 +25,7 @@ struct WalkCtx<'a> {
     primary_path: &'a str,
     primary_mapping: Option<&'a [u32]>,
     primary_raw_bytes: Option<u64>,
+    primary_raw_string: Option<&'a str>,
     /// Mirror of the preprocessor's `prefer_tail`; only honored at `primary_path`.
     primary_prefer_tail: bool,
 }
@@ -71,11 +76,13 @@ impl Walker {
         // Raw upstream size at the primary path — needed so the ElidedPath
         // at that path reports raw byte size (matches what fetch returns),
         // not the preprocessor-stripped size.
+        let primary_raw = navigate_path(&query_structure.root, primary_path);
         let primary_raw_bytes = if preprocessed.is_some() {
-            navigate_path(&query_structure.root, primary_path).map(byte_size)
+            primary_raw.map(byte_size)
         } else {
             None
         };
+        let primary_raw_string = primary_raw.and_then(Value::as_str);
         let primary_prefer_tail = preprocessed.as_ref().is_some_and(|p| p.prefer_tail);
 
         let mut elided_paths = Vec::new();
@@ -84,6 +91,7 @@ impl Walker {
             primary_path,
             primary_mapping,
             primary_raw_bytes,
+            primary_raw_string,
             primary_prefer_tail,
         };
         let wire_result = self.walk(
@@ -275,6 +283,10 @@ impl Walker {
             (true, Some(n)) => n,
             _ => s.len() as u64,
         };
+        let persisted_string = match (is_primary, ctx.primary_raw_string) {
+            (true, Some(raw)) => raw,
+            _ => s,
+        };
         // Pattern passes (nix-copy, cargo-compile, rsync, …) compact runs
         // of boring lines in place. Operates on a SegmentedText so order
         // and line indices stay accurate across passes.
@@ -299,7 +311,12 @@ impl Walker {
                 shown_lines: Some(line_count(&prepared)),
                 total_items: None,
                 shown_items: None,
-                recover: make_full_recover(invocation_id, path),
+                recover: make_safe_full_recover(
+                    invocation_id,
+                    path,
+                    persisted_string,
+                    self.max_fetch_response_bytes,
+                ),
             });
             return Value::String(prepared);
         }
@@ -320,11 +337,13 @@ impl Walker {
                 shown_lines: Some(elide.shown_lines),
                 total_items: None,
                 shown_items: None,
-                recover: make_lines_recover(
+                recover: make_safe_lines_recover(
                     invocation_id,
                     path,
+                    persisted_string,
                     elide.raw_offset as usize,
                     elide.raw_missing as usize,
+                    self.max_fetch_response_bytes,
                 ),
             });
             return Value::String(elide.text);
@@ -343,7 +362,12 @@ impl Walker {
                 shown_lines: None,
                 total_items: None,
                 shown_items: None,
-                recover: make_full_recover(invocation_id, path),
+                recover: make_safe_full_recover(
+                    invocation_id,
+                    path,
+                    persisted_string,
+                    self.max_fetch_response_bytes,
+                ),
             });
             return Value::String(prepared);
         }
@@ -356,7 +380,14 @@ impl Walker {
                 shown_lines: None,
                 total_items: None,
                 shown_items: None,
-                recover: make_range_recover(invocation_id, path, elide.head_end, elide.missing_len),
+                recover: make_safe_range_recover(
+                    invocation_id,
+                    path,
+                    persisted_string,
+                    elide.head_end,
+                    elide.missing_len,
+                    self.max_fetch_response_bytes,
+                ),
             });
             return Value::String(elide.text);
         }
@@ -703,24 +734,6 @@ fn byte_elide_string(s: &str, budget: usize) -> Option<ByteElide> {
     })
 }
 
-fn floor_char_boundary(s: &str, idx: usize) -> usize {
-    let idx = idx.min(s.len());
-    let mut i = idx;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
-}
-
-fn ceil_char_boundary(s: &str, idx: usize) -> usize {
-    let idx = idx.min(s.len());
-    let mut i = idx;
-    while i < s.len() && !s.is_char_boundary(i) {
-        i += 1;
-    }
-    i
-}
-
 // ── Recovery templates ──
 
 fn make_range_recover(
@@ -739,6 +752,39 @@ fn make_range_recover(
     })
 }
 
+fn make_safe_range_recover(
+    invocation_id: ToolInvocationId,
+    path: &str,
+    raw: &str,
+    offset: usize,
+    len: usize,
+    max_fetch_response_bytes: usize,
+) -> Value {
+    if fetch_string_range_fits(path, raw, offset, len, max_fetch_response_bytes) {
+        return make_range_recover(invocation_id, path, offset, len);
+    }
+    let safe_len = max_safe_range_len(path, raw, offset, len, max_fetch_response_bytes);
+    if safe_len == 0 {
+        return make_summary_recover(invocation_id, path);
+    }
+    let mut recover = make_range_recover(invocation_id, path, offset, safe_len);
+    // next_offset must land on a char boundary consistent with how
+    // resolve_utf8_byte_window computes the chunk end (floor). Without this,
+    // a multi-byte character straddling offset+safe_len is excluded from both
+    // the current chunk (floor moves before it) and the next (ceil moves after).
+    let next_offset = floor_char_boundary(raw, offset + safe_len);
+    annotate_chunked_recover(
+        &mut recover,
+        "chunked_range",
+        format!(
+            "This bounded recovery returns the first {safe_len} of {len} elided bytes; repeat with a later offset to continue."
+        ),
+        len,
+        next_offset,
+    );
+    recover
+}
+
 fn make_lines_recover(
     invocation_id: ToolInvocationId,
     path: &str,
@@ -755,6 +801,51 @@ fn make_lines_recover(
     })
 }
 
+fn make_safe_lines_recover(
+    invocation_id: ToolInvocationId,
+    path: &str,
+    raw: &str,
+    offset: usize,
+    len: usize,
+    max_fetch_response_bytes: usize,
+) -> Value {
+    if fetch_string_lines_fits(path, raw, offset, len, max_fetch_response_bytes) {
+        return make_lines_recover(invocation_id, path, offset, len);
+    }
+    let safe_len = max_safe_lines_len(path, raw, offset, len, max_fetch_response_bytes);
+    if safe_len > 0 {
+        let mut recover = make_lines_recover(invocation_id, path, offset, safe_len);
+        annotate_chunked_recover(
+            &mut recover,
+            "chunked_lines",
+            format!(
+                "This bounded recovery returns the first {safe_len} of {len} elided lines; repeat with a later offset to continue."
+            ),
+            len,
+            offset + safe_len,
+        );
+        return recover;
+    }
+
+    // A single line can exceed the fetch cap. Fall back to a byte-window
+    // recovery scoped to the elided line span so the advertised call
+    // still succeeds and does not point into already-shown tail content.
+    let start = byte_offset_for_line(raw, offset);
+    let end = byte_offset_for_line(raw, offset.saturating_add(len));
+    let span_len = end.saturating_sub(start);
+    if span_len == 0 {
+        return make_summary_recover(invocation_id, path);
+    }
+    make_safe_range_recover(
+        invocation_id,
+        path,
+        raw,
+        start,
+        span_len,
+        max_fetch_response_bytes,
+    )
+}
+
 fn make_full_recover(invocation_id: ToolInvocationId, path: &str) -> Value {
     serde_json::json!({
         "tool": "tool_output_fetch",
@@ -763,6 +854,19 @@ fn make_full_recover(invocation_id: ToolInvocationId, path: &str) -> Value {
             "path": path,
         }
     })
+}
+
+fn make_safe_full_recover(
+    invocation_id: ToolInvocationId,
+    path: &str,
+    raw: &str,
+    max_fetch_response_bytes: usize,
+) -> Value {
+    if fetch_string_value_fits(path, raw, max_fetch_response_bytes) {
+        make_full_recover(invocation_id, path)
+    } else {
+        make_summary_recover(invocation_id, path)
+    }
 }
 
 fn make_array_slice_recover(
@@ -797,6 +901,121 @@ fn make_summary_recover(invocation_id: ToolInvocationId, scope_path: &str) -> Va
             "query": { "mode": "summary" },
         }
     })
+}
+
+fn annotate_chunked_recover(
+    recover: &mut Value,
+    kind: &'static str,
+    note: String,
+    total_len: usize,
+    next_offset: usize,
+) {
+    if let Value::Object(map) = recover {
+        map.insert("kind".to_string(), Value::String(kind.to_string()));
+        map.insert("note".to_string(), Value::String(note));
+        map.insert("complete".to_string(), Value::Bool(false));
+        map.insert(
+            "total_recovery_len".to_string(),
+            Value::Number(serde_json::Number::from(total_len)),
+        );
+        map.insert(
+            "next_offset".to_string(),
+            Value::Number(serde_json::Number::from(next_offset)),
+        );
+    }
+}
+
+fn fetch_string_lines_fits(
+    path: &str,
+    raw: &str,
+    offset: usize,
+    len: usize,
+    max_fetch_response_bytes: usize,
+) -> bool {
+    let slice = lines_slice(raw, offset, len);
+    fetch_string_value_fits(path, &slice, max_fetch_response_bytes)
+}
+
+fn max_safe_lines_len(
+    path: &str,
+    raw: &str,
+    offset: usize,
+    len: usize,
+    max_fetch_response_bytes: usize,
+) -> usize {
+    let mut lo = 0;
+    let mut hi = len;
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if fetch_string_lines_fits(path, raw, offset, mid, max_fetch_response_bytes) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
+}
+
+fn fetch_string_range_fits(
+    path: &str,
+    raw: &str,
+    offset: usize,
+    len: usize,
+    max_fetch_response_bytes: usize,
+) -> bool {
+    let (start, end) = resolve_utf8_byte_window(raw, offset, len);
+    fetch_string_value_fits(path, &raw[start..end], max_fetch_response_bytes)
+}
+
+fn max_safe_range_len(
+    path: &str,
+    raw: &str,
+    offset: usize,
+    len: usize,
+    max_fetch_response_bytes: usize,
+) -> usize {
+    let mut lo = 0;
+    let mut hi = len;
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if fetch_string_range_fits(path, raw, offset, mid, max_fetch_response_bytes) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
+}
+
+fn fetch_string_value_fits(path: &str, value: &str, max_fetch_response_bytes: usize) -> bool {
+    fetch_string_text_size(path, value) <= max_fetch_response_bytes
+}
+
+fn fetch_string_text_size(path: &str, value: &str) -> usize {
+    fetch_text_size_at_path(path, Value::String(value.to_string())).unwrap_or(usize::MAX)
+}
+
+fn lines_slice(raw: &str, offset: usize, len: usize) -> String {
+    let all: Vec<&str> = raw.lines().collect();
+    let start = offset.min(all.len());
+    let end = start.saturating_add(len).min(all.len());
+    all[start..end].join("\n")
+}
+
+fn byte_offset_for_line(raw: &str, line: usize) -> usize {
+    if line == 0 {
+        return 0;
+    }
+    let mut count = 0;
+    for (idx, ch) in raw.char_indices() {
+        if ch == '\n' {
+            count += 1;
+            if count == line {
+                return idx + 1;
+            }
+        }
+    }
+    raw.len()
 }
 
 fn make_truncated_array(walked: &[Value], head_count: usize) -> Value {
@@ -1041,6 +1260,51 @@ mod tests {
         ] {
             regen_one(fixture_name, tool_name);
         }
+    }
+
+    #[test]
+    fn chunked_range_next_offset_lands_on_char_boundary() {
+        // "aaa…🔥bbb…" — the 4-byte emoji sits at bytes 50..54.
+        // With fetch cap = 50, the binary search in max_safe_range_len settles on
+        // safe_len = 53 (floor_char_boundary(53) = 50 bytes of content fits exactly).
+        // Before fix: next_offset = 53 (mid-emoji) → ceil rounds to 54 → emoji lost.
+        // After fix: next_offset = floor(53) = 50 → second chunk starts there.
+        let prefix = "a".repeat(50);
+        let emoji = "🔥"; // 4 bytes
+        let suffix = "b".repeat(50);
+        let raw = format!("{prefix}{emoji}{suffix}");
+        let emoji_start = prefix.len();
+
+        let path = "$";
+        let inv = ToolInvocationId::new();
+        // At path "$" the fetch size equals the byte length of the slice.
+        // Cap=50 means only the 50 ASCII "a" chars fit; the emoji pushes over.
+        let cap = 50;
+
+        let recover = make_safe_range_recover(inv, path, &raw, 0, raw.len(), cap);
+
+        let next_offset = recover
+            .get("next_offset")
+            .and_then(Value::as_u64)
+            .expect("chunked recover has next_offset") as usize;
+
+        assert!(
+            raw.is_char_boundary(next_offset),
+            "next_offset {next_offset} is not a char boundary"
+        );
+        assert!(
+            next_offset <= emoji_start,
+            "next_offset ({next_offset}) should be at or before emoji_start ({emoji_start})"
+        );
+
+        // Two-chunk fetch must reconstruct the full string without gaps.
+        let (s1, e1) = resolve_utf8_byte_window(&raw, 0, next_offset);
+        let (s2, e2) = resolve_utf8_byte_window(&raw, next_offset, raw.len() - next_offset);
+        let reassembled = format!("{}{}", &raw[s1..e1], &raw[s2..e2]);
+        assert_eq!(
+            reassembled, raw,
+            "two-chunk fetch must reconstruct the full string without gaps"
+        );
     }
 
     fn regen_one(fixture_name: &str, tool_name: &str) {

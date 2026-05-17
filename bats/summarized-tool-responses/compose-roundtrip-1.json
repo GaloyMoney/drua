@@ -84,7 +84,7 @@
         "total_lines": 41
       }
     ],
-    "persisted_root": "upstream T directly; not the outer {result: ...} wire wrapper",
+    "persisted_root": "persisted tool result root directly; catalog/sub-tool calls use upstream T, compose outer calls use ComposeOutput (JS return at $.result); not the outer {result: ...} MCP wire wrapper",
     "recommended_queries": [
       {
         "args_template": {
@@ -119,6 +119,7 @@
         "invocation_id": "<uuid>",
         "kind": "lines",
         "raw_size_bytes": 13093,
+        "root_path": "$",
         "summary_envelope_bytes": 8233,
         "tool_name": "fake_upstream_str-large-table"
       },
@@ -127,6 +128,7 @@
         "invocation_id": "<uuid>",
         "kind": "json_array_slice",
         "raw_size_bytes": 10391,
+        "root_path": "$",
         "summary_envelope_bytes": 8566,
         "tool_name": "fake_upstream_arr-large-passthrough-items"
       }
@@ -1732,6 +1734,7 @@
         "invocation_id": "<uuid>",
         "kind": "lines",
         "raw_size_bytes": 13093,
+        "root_path": "$",
         "summary_envelope_bytes": 8233,
         "tool_name": "fake_upstream_str-large-table"
       },
@@ -1740,6 +1743,7 @@
         "invocation_id": "<uuid>",
         "kind": "json_array_slice",
         "raw_size_bytes": 10391,
+        "root_path": "$",
         "summary_envelope_bytes": 8566,
         "tool_name": "fake_upstream_arr-large-passthrough-items"
       }
