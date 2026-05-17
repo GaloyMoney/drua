@@ -41,10 +41,6 @@ impl Sessions {
         }
     }
 
-    pub fn repo(&self) -> &AgentSessionRepo {
-        &self.repo
-    }
-
     #[instrument(name = "domain.agent_session.update_chain_for_agent", skip(self))]
     pub async fn update_chain_for_agent(
         &self,
@@ -89,6 +85,7 @@ impl Sessions {
             .map_err(|e| AgentSessionError::ModelChainInvalid(e.to_string()))?;
         let new_session = NewAgentSession::builder()
             .agent_id(agent_id)
+            .agent_role(agent_role)
             .chain_override(chain_override)
             .model_chain(model_chain)
             .compaction_config(compaction_config)
@@ -132,6 +129,22 @@ impl Sessions {
     ) -> Result<llm::Prompt, AgentSessionError> {
         let mut op = self.repo.begin_op().await?;
         let mut session = self.repo.find_by_agent_id_in_op(&mut op, agent_id).await?;
+
+        // Lazy drift propagation for config rollouts: when intent is None
+        // (inherited from `agents.default_chain` / role), re-resolve against
+        // the current config and update the snapshot if it changed. The
+        // idempotency guard inside `update_model_chain` makes this a zero-
+        // write check when nothing drifted; `thread_has_stale_model_chain`
+        // inside `session.next_prompt` picks up the new snapshot and spawns
+        // a refreshed thread on the same turn.
+        if session.chain_override.is_none() {
+            let resolved = self
+                .config
+                .resolve_chain(session.agent_role, None)
+                .map_err(|e| AgentSessionError::ModelChainInvalid(e.to_string()))?;
+            let _ = session.update_model_chain(None, resolved);
+        }
+
         let prompt = session.next_prompt(target)?;
         self.repo.update_in_op(&mut op, &mut session).await?;
         op.commit().await?;

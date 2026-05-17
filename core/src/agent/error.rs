@@ -6,7 +6,7 @@ use crate::sandbox::error::SandboxError;
 use crate::skill::SkillError;
 
 use super::repo::{AgentCreateError, AgentFindError, AgentModifyError, AgentQueryError};
-use super::session::{error::AgentSessionError, repo::AgentSessionQueryError};
+use super::session::error::AgentSessionError;
 
 #[derive(Error, Debug)]
 pub enum AgentError {
@@ -22,8 +22,6 @@ pub enum AgentError {
     Query(#[from] AgentQueryError),
     #[error("AgentError - Session: {0}")]
     Session(#[from] AgentSessionError),
-    #[error("AgentError - SessionQuery: {0}")]
-    SessionQuery(#[from] AgentSessionQueryError),
     #[error("AgentError - Sandbox: {0}")]
     Sandbox(#[from] SandboxError),
     #[error("AgentError - Skill: {0}")]

@@ -553,39 +553,6 @@ impl Agents {
         Ok(agent)
     }
 
-    #[instrument(name = "domain.agent.reconcile_inherited_session_chains", skip(self))]
-    pub async fn reconcile_inherited_session_chains(&self) -> Result<(), AgentError> {
-        let mut query = es_entity::PaginatedQueryArgs {
-            first: 100,
-            after: None,
-        };
-        loop {
-            let result = self
-                .sessions
-                .repo()
-                .list_for_is_chain_inherited_by_created_at(
-                    true,
-                    query,
-                    es_entity::ListDirection::Ascending,
-                )
-                .await?;
-            for session in &result.entities {
-                let agent = match self.repo.find_by_id(session.agent_id).await {
-                    Ok(a) => a,
-                    Err(_) => continue,
-                };
-                self.sessions
-                    .update_chain_for_agent(agent.agent_role, agent.id, None)
-                    .await?;
-            }
-            match result.into_next_query() {
-                Some(next) => query = next,
-                None => break,
-            }
-        }
-        Ok(())
-    }
-
     #[instrument(name = "domain.agent.update_session_chain", skip(self, sub))]
     pub async fn update_session_chain(
         &self,

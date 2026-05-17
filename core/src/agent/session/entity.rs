@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::primitives::{AgentId, UserMessageSource};
 use es_entity::*;
 
-use crate::agent::config::ModelChain;
+use crate::agent::{config::ModelChain, AgentRole};
 
 use super::{
     compaction, error::AgentSessionError, export, history, message::*, metadata::*, settings::*,
@@ -38,6 +38,7 @@ pub enum AgentSessionEvent {
     Initialized {
         id: AgentSessionId,
         agent_id: AgentId,
+        agent_role: AgentRole,
         #[serde(default)]
         chain_override: Option<llm::ModelChain>,
         model_chain: ModelChain,
@@ -122,12 +123,13 @@ pub struct MaskedToolResult {
 pub struct AgentSession {
     pub id: AgentSessionId,
     pub agent_id: AgentId,
+    pub(super) agent_role: AgentRole,
 
     #[builder(default)]
     current_main_thread: Option<SessionThreadId>,
 
     #[builder(default)]
-    chain_override: Option<llm::ModelChain>,
+    pub(super) chain_override: Option<llm::ModelChain>,
     model_chain: ModelChain,
 
     #[builder(default)]
@@ -167,10 +169,6 @@ impl AgentSession {
 
     pub fn chain(&self) -> &ModelChain {
         &self.model_chain
-    }
-
-    pub fn is_chain_inherited(&self) -> bool {
-        self.chain_override.is_none()
     }
 
     pub fn exportable_thread(
@@ -902,6 +900,7 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                 AgentSessionEvent::Initialized {
                     id,
                     agent_id,
+                    agent_role,
                     chain_override,
                     model_chain,
                     compaction_config,
@@ -910,6 +909,7 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                     builder = builder
                         .id(*id)
                         .agent_id(*agent_id)
+                        .agent_role(*agent_role)
                         .chain_override(chain_override.clone())
                         .model_chain(model_chain.clone())
                         .compaction_config(compaction_config.clone());
@@ -947,6 +947,7 @@ pub struct NewAgentSession {
     #[builder(setter(into))]
     pub(super) id: AgentSessionId,
     pub(super) agent_id: AgentId,
+    pub(super) agent_role: AgentRole,
     #[builder(default)]
     pub(super) chain_override: Option<llm::ModelChain>,
     pub(super) model_chain: ModelChain,
@@ -962,10 +963,6 @@ impl NewAgentSession {
         builder.id(AgentSessionId::new());
         builder
     }
-
-    pub fn is_chain_inherited(&self) -> bool {
-        self.chain_override.is_none()
-    }
 }
 
 impl IntoEvents<AgentSessionEvent> for NewAgentSession {
@@ -975,6 +972,7 @@ impl IntoEvents<AgentSessionEvent> for NewAgentSession {
             [AgentSessionEvent::Initialized {
                 id: self.id,
                 agent_id: self.agent_id,
+                agent_role: self.agent_role,
                 chain_override: self.chain_override,
                 model_chain: self.model_chain,
                 compaction_config: self.compaction_config,
@@ -996,6 +994,7 @@ mod tests {
     fn new_session() -> AgentSession {
         let new = NewAgentSession::builder()
             .agent_id(AgentId::new())
+            .agent_role(AgentRole::Agent)
             .model_chain(ModelChain {
                 primary: ModelDefaults {
                     model: "test-model".into(),
@@ -1484,6 +1483,7 @@ mod tests {
     fn new_session_with_compaction(keep_recent: usize) -> AgentSession {
         let new = NewAgentSession::builder()
             .agent_id(AgentId::new())
+            .agent_role(AgentRole::Agent)
             .model_chain(ModelChain {
                 primary: ModelDefaults {
                     model: "test-model".into(),
