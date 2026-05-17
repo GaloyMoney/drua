@@ -783,6 +783,11 @@ fn make_safe_range_recover(
         return make_summary_recover(invocation_id, path);
     }
     let mut recover = make_range_recover(invocation_id, path, offset, safe_len);
+    // next_offset must land on a char boundary consistent with how
+    // resolve_utf8_byte_window computes the chunk end (floor). Without this,
+    // a multi-byte character straddling offset+safe_len is excluded from both
+    // the current chunk (floor moves before it) and the next (ceil moves after).
+    let next_offset = floor_char_boundary(raw, offset + safe_len);
     annotate_chunked_recover(
         &mut recover,
         "chunked_range",
@@ -790,7 +795,7 @@ fn make_safe_range_recover(
             "This bounded recovery returns the first {safe_len} of {len} elided bytes; repeat with a later offset to continue."
         ),
         len,
-        offset + safe_len,
+        next_offset,
     );
     recover
 }
@@ -1278,6 +1283,51 @@ mod tests {
         ] {
             regen_one(fixture_name, tool_name);
         }
+    }
+
+    #[test]
+    fn chunked_range_next_offset_lands_on_char_boundary() {
+        // "aaa…🔥bbb…" — the 4-byte emoji sits at bytes 50..54.
+        // With fetch cap = 50, the binary search in max_safe_range_len settles on
+        // safe_len = 53 (floor_char_boundary(53) = 50 bytes of content fits exactly).
+        // Before fix: next_offset = 53 (mid-emoji) → ceil rounds to 54 → emoji lost.
+        // After fix: next_offset = floor(53) = 50 → second chunk starts there.
+        let prefix = "a".repeat(50);
+        let emoji = "🔥"; // 4 bytes
+        let suffix = "b".repeat(50);
+        let raw = format!("{prefix}{emoji}{suffix}");
+        let emoji_start = prefix.len();
+
+        let path = "$";
+        let inv = ToolInvocationId::new();
+        // At path "$" the fetch size equals the byte length of the slice.
+        // Cap=50 means only the 50 ASCII "a" chars fit; the emoji pushes over.
+        let cap = 50;
+
+        let recover = make_safe_range_recover(inv, path, &raw, 0, raw.len(), cap);
+
+        let next_offset = recover
+            .get("next_offset")
+            .and_then(Value::as_u64)
+            .expect("chunked recover has next_offset") as usize;
+
+        assert!(
+            raw.is_char_boundary(next_offset),
+            "next_offset {next_offset} is not a char boundary"
+        );
+        assert!(
+            next_offset <= emoji_start,
+            "next_offset ({next_offset}) should be at or before emoji_start ({emoji_start})"
+        );
+
+        // Two-chunk fetch must reconstruct the full string without gaps.
+        let (s1, e1) = resolve_utf8_byte_window(&raw, 0, next_offset);
+        let (s2, e2) = resolve_utf8_byte_window(&raw, next_offset, raw.len() - next_offset);
+        let reassembled = format!("{}{}", &raw[s1..e1], &raw[s2..e2]);
+        assert_eq!(
+            reassembled, raw,
+            "two-chunk fetch must reconstruct the full string without gaps"
+        );
     }
 
     fn regen_one(fixture_name: &str, tool_name: &str) {
