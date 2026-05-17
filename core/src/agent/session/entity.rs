@@ -171,6 +171,10 @@ impl AgentSession {
         &self.model_chain
     }
 
+    pub fn is_workflow_agent(&self) -> bool {
+        self.agent_role == AgentRole::WorkflowStepAgent
+    }
+
     pub fn exportable_thread(
         &self,
         target: TargetThread,

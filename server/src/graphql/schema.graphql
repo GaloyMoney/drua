@@ -91,6 +91,8 @@ input AgentUpdateSessionChainInput {
 	agentId: AgentId!
 	"""
 	`None` reverts the session chain to the role / `agents.default_chain`.
+	Takes effect on the next prompt, which spawns a refreshed thread
+	when the resolved chain differs from the current thread's snapshot.
 	Rejects workflow-spawned agents.
 	"""
 	chain: ModelChainInput

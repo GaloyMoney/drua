@@ -131,8 +131,8 @@ impl Sessions {
         let mut op = self.repo.begin_op().await?;
         let mut session = self.repo.find_by_agent_id_in_op(&mut op, agent_id).await?;
 
-        // Drift-propagate config changes to inherited sessions; no-op when nothing changed.
-        if session.chain_override.is_none() {
+        // Drift-propagate config changes to inherited sessions; workflow agents are immutable for the run.
+        if session.chain_override.is_none() && !session.is_workflow_agent() {
             let resolved = self
                 .config
                 .resolve_chain(session.agent_role, None)

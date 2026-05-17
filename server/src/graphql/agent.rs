@@ -198,6 +198,8 @@ mutation_payload! { AgentCreatePayload, agent: Agent }
 pub struct AgentUpdateSessionChainInput {
     pub agent_id: AgentId,
     /// `None` reverts the session chain to the role / `agents.default_chain`.
+    /// Takes effect on the next prompt, which spawns a refreshed thread
+    /// when the resolved chain differs from the current thread's snapshot.
     /// Rejects workflow-spawned agents.
     pub chain: Option<ModelChain>,
 }
