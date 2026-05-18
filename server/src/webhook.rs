@@ -125,6 +125,7 @@ pub async fn handle_provider_webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
+    let provider = provider.to_lowercase();
     let env_key = format!(
         "WEBHOOK_SECRET_{}",
         provider.to_uppercase().replace('-', "_")

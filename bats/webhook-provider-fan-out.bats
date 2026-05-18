@@ -49,7 +49,7 @@ extract_id_field() {
     project_id: $pid,
     name: "concourse-agents-flow",
     provider: "concourse",
-    trigger_condition: "trigger.pipeline == \"galoy-agents\"",
+    trigger_condition: "trigger.payload.pipeline == \"galoy-agents\"",
     steps: [
       { type: "tool_step", name: "identify", tool: "whoami", params: {} }
     ]
@@ -65,7 +65,7 @@ extract_id_field() {
     project_id: $pid,
     name: "concourse-lana-flow",
     provider: "concourse",
-    trigger_condition: "trigger.pipeline == \"lana-bank\"",
+    trigger_condition: "trigger.payload.pipeline == \"lana-bank\"",
     steps: [
       { type: "tool_step", name: "identify", tool: "whoami", params: {} }
     ]
