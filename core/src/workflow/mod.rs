@@ -798,19 +798,27 @@ impl Workflows {
         &self,
         provider: &str,
     ) -> Result<Vec<WorkflowDefinition>, WorkflowError> {
-        let query = es_entity::PaginatedQueryArgs {
+        let mut all = Vec::new();
+        let mut query = es_entity::PaginatedQueryArgs {
             first: 100,
             after: None,
         };
-        let result = self
-            .repo
-            .list_for_provider_by_created_at(
-                Some(provider.to_string()),
-                query,
-                es_entity::ListDirection::Descending,
-            )
-            .await?;
-        Ok(result.entities)
+        loop {
+            let mut result = self
+                .repo
+                .list_for_provider_by_created_at(
+                    Some(provider.to_string()),
+                    query,
+                    es_entity::ListDirection::Descending,
+                )
+                .await?;
+            all.append(&mut result.entities);
+            match result.into_next_query() {
+                Some(next) => query = next,
+                None => break,
+            }
+        }
+        Ok(all)
     }
 
     async fn spawn_run(
