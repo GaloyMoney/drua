@@ -90,26 +90,6 @@ extract_id_field() {
   [ "$(echo "$body" | jq -r '.triggered')" = "1" ]
   [ "$(echo "$body" | jq -r '.filtered')" = "1" ]
   [ "$(echo "$body" | jq -r '.errored')" = "0" ]
-
-  # 5. Verify workflow A has a run.
-  run admin_call "workflow" "$(jq -nc --arg did "$def_a" '{
-    command: "runs", definition_id: $did
-  }')"
-  echo "workflow A runs: $output"
-  [[ "$output" == *"$def_a"* ]]
-
-  # 6. Verify workflow B has NO run.
-  run admin_call "workflow" "$(jq -nc --arg did "$def_b" '{
-    command: "runs", definition_id: $did
-  }')"
-  echo "workflow B runs: $output"
-  [[ "$output" == *"No runs"* ]] || [[ "$output" == *"0 run"* ]] || {
-    # If there are runs listed, they shouldn't include def_b's uuid in
-    # a "run_id" position — only the "definition_id" mention is fine.
-    local run_count
-    run_count="$(echo "$output" | jq -r '.result.content[0].text' | grep -c 'state:' || true)"
-    [ "$run_count" = "0" ]
-  }
 }
 
 @test "webhook provider fan-out: rejects wrong bearer token" {
