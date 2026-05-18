@@ -1725,6 +1725,7 @@ async fn run_event_loop(
             let cur_def = state.selected_workflow_definition_id();
             if cur_def != fetched_def_id {
                 fetched_def_id = cur_def.clone();
+                state.workflows.error = None;
                 if let Some(def_id) = &cur_def {
                     let (def_result, runs_result) = tokio::join!(
                         fetch_workflow_definition(client, def_id),
@@ -1750,6 +1751,7 @@ async fn run_event_loop(
             let cur_run = state.selected_workflow_run_id();
             if cur_run != fetched_run_id {
                 fetched_run_id = cur_run.clone();
+                state.workflows.error = None;
                 if let Some(run_id) = &cur_run {
                     match fetch_workflow_run(client, run_id).await {
                         Ok(run) => state.replace_workflow_run_detail(run),

@@ -493,7 +493,6 @@ impl ScreenState {
     pub fn replace_workflow_definition_detail(&mut self, detail: WorkflowDefinitionDetail) {
         self.workflows.selected_definition = Some(detail);
         self.workflows.loading = false;
-        self.workflows.error = None;
     }
 
     pub fn replace_workflow_runs(&mut self, runs: Vec<WorkflowRunItem>) {
@@ -502,7 +501,6 @@ impl ScreenState {
             self.workflows.run_cursor = self.workflows.runs.len().saturating_sub(1);
         }
         self.workflows.loading = false;
-        self.workflows.error = None;
     }
 
     pub fn replace_workflow_run_detail(&mut self, run: WorkflowRunDetail) {
@@ -517,7 +515,6 @@ impl ScreenState {
             self.workflows.expanded = false;
         }
         self.workflows.loading = false;
-        self.workflows.error = None;
     }
 
     pub fn set_workflow_error(&mut self, error: String) {
