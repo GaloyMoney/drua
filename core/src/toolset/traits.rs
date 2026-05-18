@@ -2,20 +2,11 @@ use rmcp::model::{CallToolResult, JsonObject, Tool};
 
 use crate::auth::AuthSubject;
 
-use super::ToolSetsError;
+use super::{ToolSetScope, ToolSetsError};
 
 pub struct ToolSetEntry {
     pub name: String,
     pub description: Tool,
-}
-
-/// Dynamic-registration provenance for atomic scope-based replacement of toolsets.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ToolSetScope {
-    Tunnel {
-        deployment_id: String,
-        session_id: uuid::Uuid,
-    },
 }
 
 #[async_trait::async_trait]

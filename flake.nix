@@ -205,6 +205,7 @@
           # setup_file doesn't fall back to `cargo run` (which fetches
           # + compiles the crate in CI and blows past the bats timeout).
           export SANDBOX_TOOL_SERVER_BIN="${sandboxToolServerBin}/bin/sandbox-tool-server"
+          export TUNNEL_FIXTURE_BIN="${self.packages.${system}.tunnel-fixture}/bin/tunnel-fixture"
           export PG_CON="postgres://user:password@localhost:5432/drua"
           export COMPOSE_CMD="''${COMPOSE_CMD:-podman-compose-runner}"
 
@@ -446,7 +447,13 @@
         packages.tunnel-connector = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
           pname = "tunnel-connector";
-          cargoExtraArgs = "-p tunnel-connector";
+          cargoExtraArgs = "-p tunnel-connector --bin tunnel-connector";
+        });
+
+        packages.tunnel-fixture = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+          pname = "tunnel-fixture";
+          cargoExtraArgs = "-p tunnel-connector --bin tunnel-fixture";
         });
 
         packages.tunnel-connector-image = import ./images/tunnel-connector/default.nix {

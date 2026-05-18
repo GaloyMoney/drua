@@ -6,6 +6,7 @@ members = [
   "lib/concourse-client",
   "lib/zenduty-client",
   "core",
+  "core/crates/tunnel",
   "core/crates/library",
   "core/crates/tool-caching",
   "mcp-gateway",
@@ -64,6 +65,7 @@ openai-client = { path = "lib/openai-client" }
 github-app = { path = "lib/github-app" }
 fake-mcp-upstream = { path = "lib/fake-mcp-upstream" }
 drua-git-proxy = { path = "lib/git-proxy" }
+drua-tunnel = { path = "core/crates/tunnel" }
 
 # MCP
 rmcp = { version = "1.2", features = ["server", "client", "transport-streamable-http-server", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "macros"] }
@@ -91,9 +93,11 @@ schemars = { version = "0.8", features = ["uuid1"] }
 # Config
 toml = "0.8"
 dirs = "6"
+chrono = { version = "0.4", features = ["clock", "serde"], default-features = false }
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
 
 # HTTP client
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "charset", "http2", "macos-system-configuration"] }

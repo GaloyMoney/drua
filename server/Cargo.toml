@@ -11,6 +11,7 @@ path = "src/bin/write_sdl.rs"
 
 [dependencies]
 drua-core = { path = "../core", features = ["graphql"] }
+drua-tunnel = { workspace = true }
 drua-mcp-gateway = { path = "../mcp-gateway" }
 drua-tracing-utils = { workspace = true }
 sandbox = { workspace = true }
@@ -58,6 +59,7 @@ uuid = { version = "1", features = ["v4"] }
 async-graphql = { version = "8.0.0-rc.4", default-features = false }
 drua-core = { path = "../core", features = ["graphql"] }
 serde_json = "1.0"
+serde_urlencoded = "0.7"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 uuid = { version = "1", features = ["v4"] }

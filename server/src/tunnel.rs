@@ -17,9 +17,10 @@ use ed25519_dalek::{pkcs8::DecodePublicKey, Signature, Verifier, VerifyingKey};
 use tracing::instrument;
 
 use drua_core as domain;
+use drua_tunnel::{RegisteredToolSet, TunnelHandle, TunnelMessage, TunnelRegistrations};
 
 use domain::toolset::SearchableToolSet;
-use domain::tunnel::{TunnelHandle, TunnelMessage, TunnelToolSet};
+use domain::tunnel::OwnedTunnelToolSet;
 
 use crate::config::TunnelConfig;
 use crate::AppState;
@@ -183,13 +184,12 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
     let (outbound_tx, mut outbound_rx) = tokio::sync::mpsc::channel::<String>(256);
     let handle = TunnelHandle::new(outbound_tx);
 
-    // Capacity-1 channel: a single eviction signal is all we ever send.
     let (close_tx, mut close_rx) = tokio::sync::mpsc::channel::<()>(1);
     let session_id = uuid::Uuid::new_v4();
     let evicted = state
         .app
         .tunnels()
-        .claim(&deployment_id, session_id, close_tx)
+        .claim(&deployment_id, session_id, close_tx, handle.clone())
         .await;
     if evicted {
         tracing::warn!(
@@ -198,15 +198,36 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
         );
     }
 
-    // `replace_tunnel_toolsets` retains any evicted session's entries out
-    // of the catalog and appends the new ones under a single write lock,
-    // so (a) first-match routing never sees stale entries for this
-    // deployment, and (b) the evicted loop's later session-scoped
-    // cleanup is a no-op on the new entries.
+    let runtime = state.app.tunnel_runtime().clone();
+    let upsert_target = runtime.self_pod_addr.clone();
+    if let Some(self_addr) = upsert_target.as_deref() {
+        let ttl = std::time::Duration::from_secs(runtime.expires_after_secs);
+        if let Err(e) = state
+            .app
+            .tunnel_registrations()
+            .upsert(
+                &deployment_id,
+                session_id,
+                self_addr,
+                &toolset_registrations,
+                ttl,
+            )
+            .await
+        {
+            tracing::error!(
+                deployment_id = %deployment_id,
+                error = %e,
+                "tunnel registrations upsert failed; refusing connector"
+            );
+            state.app.tunnels().release(&deployment_id, session_id);
+            return;
+        }
+    }
+
     let mut new_sets: Vec<std::sync::Arc<dyn SearchableToolSet>> =
         Vec::with_capacity(toolset_registrations.len());
     for reg in &toolset_registrations {
-        match TunnelToolSet::new(&deployment_id, session_id, reg, handle.clone()) {
+        match OwnedTunnelToolSet::new(&deployment_id, session_id, reg, handle.clone()) {
             Ok(ts) => {
                 tracing::info!(
                     deployment_id = %deployment_id,
@@ -233,11 +254,29 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
         .toolsets()
         .replace_tunnel_toolsets(&deployment_id, new_sets);
 
+    let heartbeat_state = upsert_target.as_deref().map(|_| {
+        spawn_heartbeat(
+            state.app.tunnel_registrations().clone(),
+            deployment_id.clone(),
+            session_id,
+            std::time::Duration::from_secs(runtime.heartbeat_secs),
+            std::time::Duration::from_secs(runtime.expires_after_secs),
+        )
+    });
+    let (heartbeat_handle, mut displaced_rx) = match heartbeat_state {
+        Some((h, rx)) => (Some(h), Some(rx)),
+        None => (None, None),
+    };
+
     loop {
+        let displaced_fut = async {
+            match displaced_rx.as_mut() {
+                Some(rx) => rx.recv().await,
+                None => std::future::pending::<Option<()>>().await,
+            }
+        };
         tokio::select! {
-            // `biased` so an eviction signal always beats in-flight traffic.
             biased;
-            // Eviction: another connector claimed the same deployment_id.
             _ = close_rx.recv() => {
                 tracing::info!(
                     deployment_id = %deployment_id,
@@ -247,6 +286,19 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
                     .send(Message::Close(Some(axum::extract::ws::CloseFrame {
                         code: axum::extract::ws::close_code::POLICY,
                         reason: "evicted by a new tunnel registration for the same deployment_id".into(),
+                    })))
+                    .await;
+                break;
+            }
+            _ = displaced_fut => {
+                tracing::info!(
+                    deployment_id = %deployment_id,
+                    "tunnel displaced by peer pod's registration; closing"
+                );
+                let _ = socket
+                    .send(Message::Close(Some(axum::extract::ws::CloseFrame {
+                        code: axum::extract::ws::close_code::POLICY,
+                        reason: "displaced by a peer pod's registration".into(),
                     })))
                     .await;
                 break;
@@ -282,6 +334,10 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
         }
     }
 
+    if let Some(h) = heartbeat_handle {
+        h.abort();
+    }
+
     // Cleanup ordering matters:
     //
     //   1. `unregister_searchable_by_session` — removes our entries from the
@@ -293,7 +349,7 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
     //      tunnel going down and the unregister completing. Without this,
     //      those callers wait the full 120s timeout for a response that
     //      will never arrive (the `TunnelHandle` clones inside the now-
-    //      unregistered `TunnelToolSet`s kept the pending map alive).
+    //      unregistered `OwnedTunnelToolSet`s kept the pending map alive).
     //
     //   3. `TunnelRegistry::release` — same session_id invariant as above.
     state
@@ -302,6 +358,37 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
         .unregister_searchable_by_session(session_id);
     handle.fail_all_pending("tunnel disconnected").await;
     state.app.tunnels().release(&deployment_id, session_id);
+
+    if upsert_target.is_some() {
+        match state
+            .app
+            .tunnel_registrations()
+            .delete_if_owner(&deployment_id, session_id)
+            .await
+        {
+            Ok(0) => tracing::debug!(
+                deployment_id = %deployment_id,
+                "DB row was already taken over before disconnect"
+            ),
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                deployment_id = %deployment_id,
+                error = %e,
+                "tunnel registration delete failed"
+            ),
+        }
+    }
+
+    if upsert_target.is_some() {
+        if let Err(e) = state.app.tunnel_reconcile(&deployment_id).await {
+            tracing::warn!(
+                deployment_id = %deployment_id,
+                error = %e,
+                "post-cleanup tunnel reconcile failed"
+            );
+        }
+    }
+
     tracing::info!(
         deployment_id = %deployment_id,
         toolsets = registered_count,
@@ -309,11 +396,41 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
     );
 }
 
+fn spawn_heartbeat(
+    regs: TunnelRegistrations,
+    deployment_id: String,
+    session_id: uuid::Uuid,
+    heartbeat_every: std::time::Duration,
+    ttl: std::time::Duration,
+) -> (tokio::task::AbortHandle, tokio::sync::mpsc::Receiver<()>) {
+    let (tx, rx) = tokio::sync::mpsc::channel::<()>(1);
+    let handle = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(heartbeat_every);
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            match regs.heartbeat(&deployment_id, session_id, ttl).await {
+                Ok(true) => continue,
+                Ok(false) => {
+                    let _ = tx.try_send(());
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        deployment_id = %deployment_id,
+                        error = %e,
+                        "tunnel heartbeat error; will retry"
+                    );
+                }
+            }
+        }
+    });
+    (handle.abort_handle(), rx)
+}
+
 /// Read the register frame. The `deployment_id` in the payload is
 /// ignored; the authoritative identity comes from the handshake.
-async fn read_registration(
-    socket: &mut WebSocket,
-) -> Option<Vec<domain::tunnel::RegisteredToolSet>> {
+async fn read_registration(socket: &mut WebSocket) -> Option<Vec<RegisteredToolSet>> {
     let msg = match socket.recv().await {
         Some(Ok(Message::Text(text))) => text,
         _ => {
@@ -339,7 +456,6 @@ async fn read_registration(
     }
 }
 
-/// Route an inbound message (tool result or error) to the pending request.
 async fn handle_inbound(handle: &TunnelHandle, text: &str) {
     let msg: TunnelMessage = match serde_json::from_str(text) {
         Ok(m) => m,
@@ -373,9 +489,6 @@ mod tests {
     use ed25519_dalek::pkcs8::{spki::der::pem::LineEnding, EncodePublicKey};
     use ed25519_dalek::{Signer, SigningKey};
 
-    /// Returns the keypair along with a PEM encoding of the public half,
-    /// matching the shape `parse_configured_keys` will see in real
-    /// config (emitted by Terraform `tls_private_key`).
     fn make_key() -> (SigningKey, VerifyingKey, String) {
         let signing = SigningKey::generate(&mut rand::thread_rng());
         let verifying = signing.verifying_key();

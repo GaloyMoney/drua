@@ -6,6 +6,7 @@ mod inspect;
 pub mod searchable;
 pub mod top_level;
 mod traits;
+mod tunnel;
 pub(crate) mod wrap;
 
 pub use config::*;
@@ -18,6 +19,7 @@ pub use top_level::{
     WorkflowTool,
 };
 pub use traits::*;
+pub use tunnel::*;
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -331,12 +333,82 @@ impl ToolSets {
         );
     }
 
-    /// Remove every tunnel-scoped toolset owned by `session_id`. Called
-    /// from a WS loop's cleanup path. If the session was already evicted
-    /// by a newer connector (which reused the `deployment_id` via
-    /// [`Self::replace_tunnel_toolsets`]), this is a no-op — the new
-    /// session has a different `session_id` and its entries are not
-    /// touched. This is the invariant that makes takeover safe.
+    pub fn install_proxy_toolsets(
+        &self,
+        deployment_id: &str,
+        new_sets: Vec<Arc<dyn SearchableToolSet>>,
+    ) -> bool {
+        let mut sets = self.sets.write().expect("toolset lock poisoned");
+        let has_local = sets.iter().any(|s| {
+            matches!(
+                s.scope(),
+                Some(ToolSetScope::Tunnel { deployment_id: d, route: TunnelRoute::Owned, .. })
+                    if d == deployment_id
+            )
+        });
+        if has_local {
+            tracing::debug!(
+                deployment_id = %deployment_id,
+                "Skipping proxy install - owned entry present"
+            );
+            return false;
+        }
+        let before = sets.len();
+        sets.retain(|s| {
+            !matches!(
+                s.scope(),
+                Some(ToolSetScope::Tunnel { deployment_id: d, route: TunnelRoute::Proxy, .. })
+                    if d == deployment_id
+            )
+        });
+        let removed = before - sets.len();
+        let added = new_sets.len();
+        sets.extend(new_sets);
+        tracing::info!(
+            deployment_id = %deployment_id,
+            removed,
+            added,
+            "Installed proxy tunnel toolsets"
+        );
+        true
+    }
+
+    pub fn proxy_deployment_ids(&self) -> std::collections::HashSet<String> {
+        let sets = self.sets.read().expect("toolset lock poisoned");
+        let mut ids = std::collections::HashSet::new();
+        for s in sets.iter() {
+            if let Some(ToolSetScope::Tunnel {
+                deployment_id,
+                route: TunnelRoute::Proxy,
+                ..
+            }) = s.scope()
+            {
+                ids.insert(deployment_id.clone());
+            }
+        }
+        ids
+    }
+
+    pub fn remove_proxy_toolsets(&self, deployment_id: &str) {
+        let mut sets = self.sets.write().expect("toolset lock poisoned");
+        let before = sets.len();
+        sets.retain(|s| {
+            !matches!(
+                s.scope(),
+                Some(ToolSetScope::Tunnel { deployment_id: d, route: TunnelRoute::Proxy, .. })
+                    if d == deployment_id
+            )
+        });
+        let removed = before - sets.len();
+        if removed > 0 {
+            tracing::info!(
+                deployment_id = %deployment_id,
+                removed,
+                "Removed proxy tunnel toolsets"
+            );
+        }
+    }
+
     pub fn unregister_searchable_by_session(&self, session_id: uuid::Uuid) {
         let mut sets = self.sets.write().expect("toolset lock poisoned");
         let before = sets.len();
@@ -574,7 +646,9 @@ pub fn estimate_tokens(result: &CallToolResult) -> u64 {
     (total_chars / 4).max(1) as u64
 }
 
-#[cfg(test)]
+/// Test-only constructors / introspection. Public so integration
+/// tests in sibling crates (e.g. tunnel HA tests in `core/tests/`) can
+/// build a bare `ToolSets` without standing up an `App`.
 impl ToolSets {
     pub fn empty_for_test() -> Self {
         Self {
@@ -584,6 +658,10 @@ impl ToolSets {
             tool_caching: None,
             init_errors: Vec::new(),
         }
+    }
+
+    pub fn proxy_deployment_ids_for_test(&self) -> std::collections::HashSet<String> {
+        self.proxy_deployment_ids()
     }
 
     pub fn toolset_names_for_test(&self) -> Vec<String> {
@@ -610,11 +688,21 @@ mod tests {
 
     impl StubToolSet {
         fn tunnel(name: &str, deployment_id: &str, session_id: uuid::Uuid) -> Self {
+            Self::tunnel_route(name, deployment_id, session_id, TunnelRoute::Owned)
+        }
+
+        fn tunnel_route(
+            name: &str,
+            deployment_id: &str,
+            session_id: uuid::Uuid,
+            route: TunnelRoute,
+        ) -> Self {
             Self {
                 name: name.to_string(),
                 scope: Some(ToolSetScope::Tunnel {
                     deployment_id: deployment_id.to_string(),
                     session_id,
+                    route,
                 }),
                 tools: Vec::new(),
                 admin_only: false,
@@ -741,6 +829,106 @@ mod tests {
 
         toolsets.unregister_searchable_by_session(session);
         assert_eq!(toolsets.toolset_names_for_test(), vec!["concourse"]);
+    }
+
+    #[test]
+    fn install_proxy_no_op_when_local_present() {
+        let toolsets = ToolSets::empty_for_test();
+        let local_session = uuid::Uuid::new_v4();
+        toolsets.register_searchable(StubToolSet::tunnel_route(
+            "stg-k8s",
+            "staging",
+            local_session,
+            TunnelRoute::Owned,
+        ));
+
+        let proxy_session = uuid::Uuid::new_v4();
+        let proxy_set: Arc<dyn SearchableToolSet> = Arc::new(StubToolSet::tunnel_route(
+            "stg-k8s-proxy",
+            "staging",
+            proxy_session,
+            TunnelRoute::Proxy,
+        ));
+        let installed = toolsets.install_proxy_toolsets("staging", vec![proxy_set]);
+        assert!(
+            !installed,
+            "install_proxy must skip while owned route exists"
+        );
+        assert_eq!(toolsets.toolset_names_for_test(), vec!["stg-k8s"]);
+    }
+
+    #[test]
+    fn install_proxy_replaces_stale_proxies() {
+        let toolsets = ToolSets::empty_for_test();
+        let stale_session = uuid::Uuid::new_v4();
+        toolsets.register_searchable(StubToolSet::tunnel_route(
+            "stale",
+            "staging",
+            stale_session,
+            TunnelRoute::Proxy,
+        ));
+
+        let fresh_session = uuid::Uuid::new_v4();
+        let fresh: Arc<dyn SearchableToolSet> = Arc::new(StubToolSet::tunnel_route(
+            "fresh",
+            "staging",
+            fresh_session,
+            TunnelRoute::Proxy,
+        ));
+        let installed = toolsets.install_proxy_toolsets("staging", vec![fresh]);
+        assert!(installed);
+        assert_eq!(toolsets.toolset_names_for_test(), vec!["fresh"]);
+    }
+
+    #[test]
+    fn proxy_deployment_ids_skips_local() {
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_searchable(StubToolSet::tunnel_route(
+            "local",
+            "deployment-a",
+            uuid::Uuid::new_v4(),
+            TunnelRoute::Owned,
+        ));
+        toolsets.register_searchable(StubToolSet::tunnel_route(
+            "proxy-b",
+            "deployment-b",
+            uuid::Uuid::new_v4(),
+            TunnelRoute::Proxy,
+        ));
+        toolsets.register_searchable(StubToolSet::tunnel_route(
+            "proxy-b-2",
+            "deployment-b",
+            uuid::Uuid::new_v4(),
+            TunnelRoute::Proxy,
+        ));
+        toolsets.register_searchable(StubToolSet::static_("static"));
+
+        let ids = toolsets.proxy_deployment_ids();
+        assert_eq!(ids.len(), 1, "only proxy deployments are listed");
+        assert!(ids.contains("deployment-b"));
+    }
+
+    #[test]
+    fn remove_proxy_leaves_local_alone() {
+        let toolsets = ToolSets::empty_for_test();
+        let local_session = uuid::Uuid::new_v4();
+        let proxy_session = uuid::Uuid::new_v4();
+        toolsets.register_searchable(StubToolSet::tunnel_route(
+            "local",
+            "staging",
+            local_session,
+            TunnelRoute::Owned,
+        ));
+        toolsets.register_searchable(StubToolSet::tunnel_route(
+            "proxy",
+            "production",
+            proxy_session,
+            TunnelRoute::Proxy,
+        ));
+
+        toolsets.remove_proxy_toolsets("staging");
+        toolsets.remove_proxy_toolsets("production");
+        assert_eq!(toolsets.toolset_names_for_test(), vec!["local"]);
     }
 
     #[test]

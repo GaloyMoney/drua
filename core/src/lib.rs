@@ -66,9 +66,7 @@ pub struct App {
     workflows: Arc<Workflows>,
     github_app: Option<Arc<GitHubAppTokenProvider>>,
     git_proxies: Arc<GitProxies>,
-    /// Keyed by `deployment_id`; `/tunnel/ws` evicts a previous tunnel when
-    /// a new connector registers the same `deployment_id`.
-    tunnels: Arc<tunnel::TunnelRegistry>,
+    tunnel: Arc<tunnel::TunnelService>,
     library: drua_library::Library,
     spaces: Arc<AuthedSpaces>,
     search: Arc<AuthedSearch>,
@@ -381,6 +379,12 @@ impl App {
             .map_err(|e| AppError::Job(e.to_string()))?;
         let jobs = Arc::new(jobs);
 
+        let tunnel = Arc::new(tunnel::TunnelService::start(
+            pool.clone(),
+            config.tunnel_runtime,
+            Arc::clone(&toolsets),
+        )?);
+
         Ok(Self {
             users,
             mcp_creds: Arc::new(mcp_creds),
@@ -395,7 +399,7 @@ impl App {
             workflows,
             github_app,
             git_proxies,
-            tunnels: Arc::new(tunnel::TunnelRegistry::new()),
+            tunnel,
             library,
             spaces,
             search,
@@ -457,8 +461,20 @@ impl App {
         &self.git_proxies
     }
 
-    pub fn tunnels(&self) -> &tunnel::TunnelRegistry {
-        &self.tunnels
+    pub fn tunnels(&self) -> &drua_tunnel::TunnelRegistry {
+        self.tunnel.registry()
+    }
+
+    pub fn tunnel_registrations(&self) -> &drua_tunnel::TunnelRegistrations {
+        self.tunnel.registrations()
+    }
+
+    pub fn tunnel_runtime(&self) -> &drua_tunnel::TunnelRuntimeConfig {
+        self.tunnel.runtime()
+    }
+
+    pub async fn tunnel_reconcile(&self, deployment_id: &str) -> Result<(), sqlx::Error> {
+        self.tunnel.reconcile(deployment_id).await
     }
 
     pub fn library(&self) -> &drua_library::Library {
@@ -479,6 +495,7 @@ impl App {
 
     /// Gracefully shut down background jobs. Call on SIGTERM / ctrl-c.
     pub async fn shutdown(&self) {
+        self.tunnel.shutdown().await;
         if let Err(e) = self.jobs.shutdown().await {
             tracing::error!(error = %e, "job shutdown failed");
         }
@@ -540,4 +557,6 @@ pub enum AppError {
     Library(String),
     #[error("AppError - GitProxy: {0}")]
     GitProxy(String),
+    #[error("AppError - Tunnel: {0}")]
+    Tunnel(#[from] tunnel::TunnelServiceError),
 }

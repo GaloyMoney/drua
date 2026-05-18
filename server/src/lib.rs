@@ -2,6 +2,7 @@ pub mod auth;
 pub mod config;
 pub mod git_proxy;
 pub mod graphql;
+mod internal_routes;
 mod routes;
 pub mod server;
 mod templates;
@@ -86,6 +87,7 @@ pub fn router() -> Router<AppState> {
         .merge(graphql::router())
         .merge(webhook::router())
         .merge(git_proxy::router())
+        .merge(internal_routes::internal_router())
 }
 
 pub struct RunServerArgs {
@@ -152,6 +154,25 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
         }
     });
 
+    let pod_ip = std::env::var("POD_IP").ok().filter(|s| !s.is_empty());
+    let self_pod_addr = pod_ip.map(|ip| format!("{}:{}", ip, config.server.port));
+    let internal_secret = std::env::var("DRUA_TUNNEL_INTERNAL_SECRET")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| config.server.tunnel.internal_secret.clone());
+    let tunnel_runtime = drua_tunnel::TunnelRuntimeConfig {
+        self_pod_addr: self_pod_addr.clone(),
+        heartbeat_secs: config.server.tunnel.heartbeat_secs,
+        expires_after_secs: config.server.tunnel.expires_after_secs,
+        reaper_interval_secs: config.server.tunnel.reaper_interval_secs,
+        internal_secret,
+    };
+    if let Some(addr) = self_pod_addr.as_deref() {
+        tracing::info!(self_pod_addr = %addr, "tunnel HA mode enabled");
+    } else {
+        tracing::info!("tunnel running in single-replica mode (POD_IP unset)");
+    }
+
     let app_config = domain::AppConfig {
         agents: config.agents.clone(),
         prompt_executor: config.prompt_executor_config(),
@@ -161,6 +182,7 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
         github_app: github_app_config,
         library: config.library.clone(),
         git_proxy: config.git_proxy.clone(),
+        tunnel_runtime,
     };
 
     let app = domain::App::init(&pool, app_config).await?;

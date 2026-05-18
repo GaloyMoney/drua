@@ -1490,6 +1490,7 @@ dependencies = [
  "drua-git-proxy",
  "drua-library",
  "drua-tool-caching",
+ "drua-tunnel",
  "es-entity",
  "futures",
  "git2",
@@ -1601,6 +1602,7 @@ dependencies = [
  "drua-core",
  "drua-mcp-gateway",
  "drua-tracing-utils",
+ "drua-tunnel",
  "ed25519-dalek",
  "es-entity",
  "http-body-util",
@@ -1615,6 +1617,7 @@ dependencies = [
  "sandbox",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "serde_yaml",
  "sha2",
  "sqlx",
@@ -1660,6 +1663,22 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "drua-tunnel"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

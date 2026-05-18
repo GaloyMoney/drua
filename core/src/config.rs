@@ -9,6 +9,11 @@ use crate::sandbox::SandboxConfig;
 use crate::toolset::ToolSetsConfig;
 use drua_git_proxy::AllowlistConfig;
 
+pub use drua_tunnel::{
+    default_tunnel_expires_after_secs, default_tunnel_heartbeat_secs,
+    default_tunnel_reaper_interval_secs, TunnelRuntimeConfig,
+};
+
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
@@ -31,6 +36,8 @@ pub struct AppConfig {
     /// the server to apply edits (no live reload — memo `019dfebc` §7.2).
     #[serde(default)]
     pub git_proxy: GitProxyAppConfig,
+    #[serde(default)]
+    pub tunnel_runtime: TunnelRuntimeConfig,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -51,7 +58,6 @@ pub struct GitProxyAppConfig {
 fn default_mirror_ttl_seconds() -> u64 {
     300
 }
-
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct EncryptionConfig {
     /// Hex-encoded 32-byte encryption key for project secrets.

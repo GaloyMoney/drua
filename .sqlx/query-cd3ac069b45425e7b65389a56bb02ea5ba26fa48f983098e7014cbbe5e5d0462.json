@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE tunnel_registrations\n               SET expires_at = now() + ($3::double precision * INTERVAL '1 second')\n             WHERE deployment_id = $1 AND session_id = $2 AND expires_at > now()\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Uuid",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cd3ac069b45425e7b65389a56bb02ea5ba26fa48f983098e7014cbbe5e5d0462"
+}

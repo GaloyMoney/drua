@@ -131,12 +131,31 @@ pub struct ServerConfig {
     pub tunnel: TunnelConfig,
 }
 
-/// `deployment_id` → PEM Ed25519 public key. Keypairs live in Terraform.
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TunnelConfig {
     #[serde(default)]
     pub deployments: std::collections::BTreeMap<String, String>,
+    #[serde(default = "drua_core::default_tunnel_heartbeat_secs")]
+    pub heartbeat_secs: u64,
+    #[serde(default = "drua_core::default_tunnel_expires_after_secs")]
+    pub expires_after_secs: u64,
+    #[serde(default = "drua_core::default_tunnel_reaper_interval_secs")]
+    pub reaper_interval_secs: u64,
+    #[serde(default, skip)]
+    pub internal_secret: Option<String>,
+}
+
+impl Default for TunnelConfig {
+    fn default() -> Self {
+        Self {
+            deployments: Default::default(),
+            heartbeat_secs: drua_core::default_tunnel_heartbeat_secs(),
+            expires_after_secs: drua_core::default_tunnel_expires_after_secs(),
+            reaper_interval_secs: drua_core::default_tunnel_reaper_interval_secs(),
+            internal_secret: None,
+        }
+    }
 }
 
 fn default_port() -> u16 {
