@@ -420,37 +420,55 @@ impl Walker {
             truncated = make_truncated_array(walked, head_count);
         }
 
+        let missing_len = original_length.saturating_sub(head_count);
+
         // Validate the slice-mode recovery template against the FETCH
         // cap by sizing the *original* tail items (what
         // `tool_output_fetch` would actually return — it reads from the
-        // persisted root, not the walked tree). If the slice would
-        // exceed the cap, we'd be advertising a recovery call that's
-        // guaranteed to fail with `FetchResponseTooLarge`. Switch to
-        // per-index elided paths + summary-mode aggregate recover
-        // instead — both are bounded by construction.
-        let tail_originals_size =
-            json_size(&Value::Array(originals[head_count..].to_vec())) as usize;
-        let slice_fits_fetch_cap = tail_originals_size <= self.max_fetch_response_bytes;
+        // persisted root, not the walked tree). If the whole tail would
+        // exceed the cap, advertise the largest bounded page that fits.
+        // Fall back to per-index elided paths + summary only when even a
+        // single item cannot be fetched safely.
+        let safe_slice_len = max_safe_array_slice_len(
+            path,
+            originals,
+            head_count,
+            missing_len,
+            self.max_fetch_response_bytes,
+        );
+        let slice_recover_available = safe_slice_len > 0;
 
         // Per-item elided_paths emitted during walk:
         //   - kept indices `[0..head_count)`: keep (still in wire shape)
-        //   - dropped indices `[head_count..n)`: KEEP when slice
-        //     wouldn't fit fetch cap (the agent needs them as per-index
+        //   - dropped indices `[head_count..n)`: KEEP when no bounded slice
+        //     page fits the fetch cap (the agent needs them as per-index
         //     drill-downs); DROP otherwise (slice recovery covers the
-        //     whole tail in one call).
+        //     tail across one or more calls).
         let after_walk: Vec<ElidedPath> = elided_paths.split_off(paths_before);
         for entry in after_walk {
             match parse_array_index(&entry.path, path) {
                 Some(i) if i < head_count => elided_paths.push(entry),
                 None => elided_paths.push(entry),
-                Some(_) if !slice_fits_fetch_cap => elided_paths.push(entry),
+                Some(_) if !slice_recover_available => elided_paths.push(entry),
                 _ => {} // drop: this index is in the slice-recovered tail
             }
         }
-        let missing_len = original_length.saturating_sub(head_count);
         let shown_bytes = json_size(&truncated);
-        let recover = if slice_fits_fetch_cap {
-            make_array_slice_recover(invocation_id, path, head_count, missing_len)
+        let recover = if slice_recover_available {
+            let mut recover =
+                make_array_slice_recover(invocation_id, path, head_count, safe_slice_len);
+            if safe_slice_len < missing_len {
+                annotate_chunked_recover(
+                    &mut recover,
+                    "chunked_json_array_slice",
+                    format!(
+                        "This bounded recovery returns the first {safe_slice_len} of {missing_len} elided items; repeat with a later offset to continue."
+                    ),
+                    missing_len,
+                    head_count + safe_slice_len,
+                );
+            }
+            recover
         } else {
             make_summary_recover(invocation_id, path)
         };
@@ -885,6 +903,39 @@ fn make_array_slice_recover(
     })
 }
 
+fn fetch_array_slice_fits(
+    path: &str,
+    originals: &[Value],
+    offset: usize,
+    len: usize,
+    max_fetch_response_bytes: usize,
+) -> bool {
+    let start = offset.min(originals.len());
+    let end = start.saturating_add(len).min(originals.len());
+    let value = Value::Array(originals[start..end].to_vec());
+    fetch_text_size_at_path(path, value).unwrap_or(usize::MAX) <= max_fetch_response_bytes
+}
+
+fn max_safe_array_slice_len(
+    path: &str,
+    originals: &[Value],
+    offset: usize,
+    len: usize,
+    max_fetch_response_bytes: usize,
+) -> usize {
+    let mut lo = 0;
+    let mut hi = len;
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        if fetch_array_slice_fits(path, originals, offset, mid, max_fetch_response_bytes) {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+    lo
+}
+
 /// Aggregate fallback marker for elisions whose direct slice would
 /// exceed `max_fetch_response_bytes`. This is intentionally not
 /// path-scoped: `mode:"summary"` replays the invocation's root summary
@@ -1048,17 +1099,15 @@ mod tests {
         Value::Object(obj)
     }
 
-    /// Tail of originals exceeds max_fetch_response_bytes → aggregate
-    /// recover must switch to summary mode (slice would have produced
-    /// a "fetch response too large" error).
+    /// If even one original tail item exceeds max_fetch_response_bytes,
+    /// aggregate recover must switch to summary mode (slice would have
+    /// produced a "fetch response too large" error).
     #[test]
     fn fat_tail_array_emits_summary_recover_not_slice() {
-        // 5 items × ~600 bytes each = ~3KB array; walker budget 512
-        // forces head_count=0 (or 1) so the tail covers all/most items.
-        // Each item is ~600 bytes of incompressible numeric data — tail
-        // size as fetched from persisted root would be ~3KB, well above
-        // the 1KB fetch cap below.
-        let items: Vec<Value> = (0..5).map(|i| incompressible_item(i, 40)).collect();
+        // 5 items where each individual item is too large for the 1KB
+        // fetch cap below, so no bounded json_array_slice page can be
+        // advertised safely.
+        let items: Vec<Value> = (0..5).map(|i| incompressible_item(i, 140)).collect();
         let qs = QueryStructure {
             root: Value::Array(items),
         };
@@ -1099,12 +1148,84 @@ mod tests {
             agg.recover.get("scope_path").and_then(Value::as_str),
             Some("$")
         );
-        assert!(agg
+        assert!(
+            agg.recover
+                .get("note")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .contains("narrower recovery paths")
+        );
+    }
+
+    /// When the whole tail exceeds max_fetch_response_bytes but a smaller
+    /// page fits, advertise a bounded json_array_slice with continuation
+    /// metadata instead of a vague summary recovery.
+    #[test]
+    fn long_tail_array_uses_chunked_slice_recover() {
+        let items: Vec<Value> = (0..100).map(|i| incompressible_item(i, 3)).collect();
+        let qs = QueryStructure {
+            root: Value::Array(items),
+        };
+        let walker = walker_with_fetch_cap(1024);
+        let summary = walker.summarize(&qs, ToolInvocationId::new(), "test_tool");
+
+        let agg = summary
+            .elided_paths
+            .iter()
+            .find(|e| e.path == "$")
+            .unwrap_or_else(|| {
+                panic!(
+                    "aggregate elided path at $ missing; got paths: {:?}",
+                    summary
+                        .elided_paths
+                        .iter()
+                        .map(|e| &e.path)
+                        .collect::<Vec<_>>()
+                )
+            });
+        let query = agg
             .recover
-            .get("note")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .contains("narrower recovery paths"));
+            .get("args_template")
+            .and_then(|t| t.get("query"))
+            .expect("recover has query");
+        assert_eq!(
+            query.get("mode").and_then(Value::as_str),
+            Some("json_array_slice")
+        );
+        assert_eq!(
+            agg.recover.get("kind").and_then(Value::as_str),
+            Some("chunked_json_array_slice")
+        );
+        assert_eq!(
+            agg.recover.get("complete").and_then(Value::as_bool),
+            Some(false)
+        );
+
+        let offset = query
+            .get("offset")
+            .and_then(Value::as_u64)
+            .expect("query has offset") as usize;
+        let len = query
+            .get("len")
+            .and_then(Value::as_u64)
+            .expect("query has len") as usize;
+        let missing_len = agg.total_items.unwrap() as usize - offset;
+
+        assert!(len > 0, "chunked slice should fetch at least one item");
+        assert!(
+            len < missing_len,
+            "test should exercise chunking, got len={len}, missing_len={missing_len}"
+        );
+        assert_eq!(
+            agg.recover.get("next_offset").and_then(Value::as_u64),
+            Some((offset + len) as u64)
+        );
+        assert_eq!(
+            agg.recover
+                .get("total_recovery_len")
+                .and_then(Value::as_u64),
+            Some(missing_len as u64)
+        );
     }
 
     /// When the tail slice does fit the fetch cap, existing slice-mode
