@@ -160,8 +160,10 @@ impl StoredInvocation {
             Some(q) => q.apply(resolved)?,
             None => resolved,
         };
+        // Text channel shows the resolved value raw — strings stay
+        // human-readable instead of becoming JSON-escaped `"..."`.
+        let text = fetch_text_for_raw(&sliced);
         let wrapped = wrap_at_path(path, sliced)?;
-        let text = fetch_text_for_wrapped(&wrapped);
         if text.len() > max_bytes {
             return Err(ToolCachingError::FetchResponseTooLarge {
                 size: text.len(),
@@ -257,23 +259,29 @@ enum PathSegment {
 }
 
 pub(crate) fn fetch_text_size_at_path(path: &str, value: Value) -> Result<usize, ToolCachingError> {
-    Ok(fetch_text_for_wrapped(&wrap_at_path(path, value)?).len())
+    Ok(fetch_text_for_raw(&value).len())
 }
 
-fn fetch_text_for_wrapped(wrapped: &Value) -> String {
-    match wrapped {
+fn fetch_text_for_raw(value: &Value) -> String {
+    match value {
         Value::String(s) => s.clone(),
         other => serde_json::to_string(other).unwrap_or_default(),
     }
 }
 
-/// Rebuild the structure implied by `path` around `value`. For
-/// `path == "$"` returns `value` directly. Object-key segments nest
-/// into `{key: …}`; array-index segments wrap into a single-element
-/// array (`$[3]` → `[value]`) — callers can read `result[0]` and
-/// recover the original index from the recovery template's `path`
-/// field. Leading `null` padding scales linearly with the index and
-/// would burn tokens at every higher position without adding info.
+/// Rebuild the structure implied by `path` around `value`. Object-key
+/// segments nest into `{key: …}`; array-index segments wrap into a
+/// single-element array (`$[3]` → `[value]`) — callers can read
+/// `result[0]` and recover the original index from the recovery
+/// template's `path` field. Leading `null` padding scales linearly
+/// with the index and would burn tokens at every higher position
+/// without adding info.
+///
+/// MCP spec requires `structuredContent` to be a JSON object, so when
+/// the wrapped value would otherwise be a scalar or array (string-rooted
+/// tools like `k8s_pods_list`, array-rooted upstreams, `$[N]` slices),
+/// the result is wrapped in `{result: <value>}` to satisfy clients
+/// that validate the envelope as an object.
 fn wrap_at_path(path: &str, value: Value) -> Result<Value, ToolCachingError> {
     let segments = parse_path(path)?;
     let mut acc = value;
@@ -286,6 +294,11 @@ fn wrap_at_path(path: &str, value: Value) -> Result<Value, ToolCachingError> {
             }
             PathSegment::Index(_) => Value::Array(vec![acc]),
         };
+    }
+    if !matches!(acc, Value::Object(_)) {
+        let mut obj = serde_json::Map::new();
+        obj.insert("result".to_string(), acc);
+        acc = Value::Object(obj);
     }
     Ok(acc)
 }
@@ -387,9 +400,19 @@ mod tests {
     }
 
     #[test]
-    fn wrap_at_path_root_is_identity() {
+    fn wrap_at_path_root_wraps_scalar_in_result_for_mcp_object_constraint() {
         let v = Value::String("hi".into());
-        assert_eq!(wrap_at_path("$", v.clone()).unwrap(), v,);
+        assert_eq!(
+            wrap_at_path("$", v).unwrap(),
+            serde_json::json!({"result": "hi"}),
+            "scalar root must wrap to an object so structuredContent stays a record",
+        );
+    }
+
+    #[test]
+    fn wrap_at_path_root_keeps_object_value_as_object() {
+        let v = serde_json::json!({"logs": "x"});
+        assert_eq!(wrap_at_path("$", v.clone()).unwrap(), v);
     }
 
     #[test]
@@ -399,9 +422,9 @@ mod tests {
     }
 
     #[test]
-    fn wrap_at_path_array_root_uses_single_element() {
+    fn wrap_at_path_array_root_wraps_single_element_in_result() {
         let wrapped = wrap_at_path("$[2]", Value::String("hi".into())).unwrap();
-        assert_eq!(wrapped, serde_json::json!(["hi"]));
+        assert_eq!(wrapped, serde_json::json!({"result": ["hi"]}));
     }
 
     #[test]
