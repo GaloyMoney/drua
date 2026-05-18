@@ -130,10 +130,10 @@ pub(crate) fn ceil_char_boundary(s: &str, idx: usize) -> usize {
 }
 
 /// What `ToolCaching::fetch` hands back to the caller. `result` is the
-/// agent-facing `CallToolResult`; `structured` is the wrapped json
-/// value at `path` (e.g. `{"a": {"b": <slice>}}` for `path="$.a.b"`),
-/// surfaced separately so the dispatch layer / compose can consume it
-/// without re-parsing the text channel.
+/// agent-facing `CallToolResult`; `structured` is the path-wrapped json
+/// value (e.g. `{"a": {"b": <slice>}}` for `path="$.a.b"`), surfaced
+/// separately so the dispatch layer / compose can consume it without
+/// re-parsing the text channel.
 pub struct FetchResult {
     pub result: CallToolResult,
     pub structured: Value,
@@ -258,7 +258,10 @@ enum PathSegment {
     Index(usize),
 }
 
-pub(crate) fn fetch_text_size_at_path(path: &str, value: Value) -> Result<usize, ToolCachingError> {
+pub(crate) fn fetch_text_size_at_path(
+    _path: &str,
+    value: Value,
+) -> Result<usize, ToolCachingError> {
     Ok(fetch_text_for_raw(&value).len())
 }
 
@@ -276,12 +279,6 @@ fn fetch_text_for_raw(value: &Value) -> String {
 /// template's `path` field. Leading `null` padding scales linearly
 /// with the index and would burn tokens at every higher position
 /// without adding info.
-///
-/// MCP spec requires `structuredContent` to be a JSON object, so when
-/// the wrapped value would otherwise be a scalar or array (string-rooted
-/// tools like `k8s_pods_list`, array-rooted upstreams, `$[N]` slices),
-/// the result is wrapped in `{result: <value>}` to satisfy clients
-/// that validate the envelope as an object.
 fn wrap_at_path(path: &str, value: Value) -> Result<Value, ToolCachingError> {
     let segments = parse_path(path)?;
     let mut acc = value;
@@ -295,12 +292,22 @@ fn wrap_at_path(path: &str, value: Value) -> Result<Value, ToolCachingError> {
             PathSegment::Index(_) => Value::Array(vec![acc]),
         };
     }
-    if !matches!(acc, Value::Object(_)) {
-        let mut obj = serde_json::Map::new();
-        obj.insert("result".to_string(), acc);
-        acc = Value::Object(obj);
-    }
     Ok(acc)
+}
+
+/// MCP spec requires `structuredContent` to be a JSON object. When the
+/// wrapped value is a scalar or array (string-rooted tools like
+/// `k8s_pods_list`, array-rooted upstreams, `$[N]` slices), wrap it in
+/// `{"result": <value>}` so MCP clients that validate the envelope as
+/// an object don't reject it.
+pub fn ensure_object(value: Value) -> Value {
+    if matches!(value, Value::Object(_)) {
+        value
+    } else {
+        let mut obj = serde_json::Map::new();
+        obj.insert("result".to_string(), value);
+        Value::Object(obj)
+    }
 }
 
 fn parse_path(path: &str) -> Result<Vec<PathSegment>, ToolCachingError> {
@@ -400,19 +407,23 @@ mod tests {
     }
 
     #[test]
-    fn wrap_at_path_root_wraps_scalar_in_result_for_mcp_object_constraint() {
+    fn wrap_at_path_root_is_identity() {
         let v = Value::String("hi".into());
-        assert_eq!(
-            wrap_at_path("$", v).unwrap(),
-            serde_json::json!({"result": "hi"}),
-            "scalar root must wrap to an object so structuredContent stays a record",
-        );
+        assert_eq!(wrap_at_path("$", v.clone()).unwrap(), v);
     }
 
     #[test]
-    fn wrap_at_path_root_keeps_object_value_as_object() {
-        let v = serde_json::json!({"logs": "x"});
-        assert_eq!(wrap_at_path("$", v.clone()).unwrap(), v);
+    fn ensure_object_wraps_non_objects() {
+        assert_eq!(
+            ensure_object(Value::String("hi".into())),
+            serde_json::json!({"result": "hi"}),
+        );
+        assert_eq!(
+            ensure_object(serde_json::json!(["a", "b"])),
+            serde_json::json!({"result": ["a", "b"]}),
+        );
+        let obj = serde_json::json!({"logs": "x"});
+        assert_eq!(ensure_object(obj.clone()), obj);
     }
 
     #[test]
@@ -422,9 +433,9 @@ mod tests {
     }
 
     #[test]
-    fn wrap_at_path_array_root_wraps_single_element_in_result() {
+    fn wrap_at_path_array_root_uses_single_element() {
         let wrapped = wrap_at_path("$[2]", Value::String("hi".into())).unwrap();
-        assert_eq!(wrapped, serde_json::json!({"result": ["hi"]}));
+        assert_eq!(wrapped, serde_json::json!(["hi"]));
     }
 
     #[test]
