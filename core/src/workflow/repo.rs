@@ -13,6 +13,12 @@ use super::yaml::canonical_workflow_path;
     columns(
         project_id(ty = "ProjectId", list_for(by(created_at))),
         name(ty = "String"),
+        provider(
+            ty = "Option<String>",
+            list_for(by(created_at)),
+            create(accessor = "provider()"),
+            update(accessor = "provider()")
+        ),
     ),
     delete = "soft_without_queries",
     post_persist_hook(method = "sync_to_library", error = "drua_library::LibraryError")
@@ -94,16 +100,6 @@ impl WorkflowDefinitionRepo {
                 None => return Ok(None),
             }
         }
-    }
-
-    pub async fn list_all_non_deleted_ids(
-        &self,
-    ) -> Result<Vec<WorkflowDefinitionId>, sqlx::Error> {
-        let rows: Vec<(WorkflowDefinitionId,)> =
-            sqlx::query_as("SELECT id FROM workflow_definitions WHERE deleted = false")
-                .fetch_all(&self.pool)
-                .await?;
-        Ok(rows.into_iter().map(|(id,)| id).collect())
     }
 
     async fn sync_to_library<OP: es_entity::AtomicOperation>(

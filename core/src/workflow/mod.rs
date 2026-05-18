@@ -798,21 +798,19 @@ impl Workflows {
         &self,
         provider: &str,
     ) -> Result<Vec<WorkflowDefinition>, WorkflowError> {
-        let ids = self.repo.list_all_non_deleted_ids().await?;
-        let mut matching = Vec::new();
-        for id in ids {
-            let defn = match self.repo.maybe_find_by_id(id).await? {
-                Some(d) => d,
-                None => continue,
-            };
-            if matches!(
-                &defn.trigger,
-                WorkflowTrigger::Webhook { provider: Some(p), .. } if p == provider
-            ) {
-                matching.push(defn);
-            }
-        }
-        Ok(matching)
+        let query = es_entity::PaginatedQueryArgs {
+            first: 100,
+            after: None,
+        };
+        let result = self
+            .repo
+            .list_for_provider_by_created_at(
+                Some(provider.to_string()),
+                query,
+                es_entity::ListDirection::Descending,
+            )
+            .await?;
+        Ok(result.entities)
     }
 
     async fn spawn_run(

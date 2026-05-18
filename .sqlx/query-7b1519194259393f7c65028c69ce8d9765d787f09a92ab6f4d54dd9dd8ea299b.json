@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "WITH entities AS (SELECT id FROM sandboxes WHERE COALESCE(project_id = $1, $1 IS NULL) AND COALESCE(name = $2, $2 IS NULL) AND (COALESCE(id < $4, true)) AND deleted = FALSE ORDER BY id DESC LIMIT $3) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $5 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN sandbox_events e ON i.id = e.id ORDER BY i.id desc, i.id, e.sequence",
+  "query": "WITH entities AS (SELECT created_at, id FROM workflow_definitions WHERE COALESCE(project_id = $1, $1 IS NULL) AND (NOT $2 OR provider IS NOT DISTINCT FROM $3) AND (COALESCE((created_at, id) > ($6, $5), $5 IS NULL)) AND deleted = FALSE ORDER BY created_at ASC, id ASC LIMIT $4) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $7 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN workflow_definition_events e ON i.id = e.id ORDER BY i.created_at asc, i.id asc, i.id, e.sequence",
   "describe": {
     "columns": [
       {
@@ -32,9 +32,11 @@
     "parameters": {
       "Left": [
         "Uuid",
+        "Bool",
         "Text",
         "Int8",
         "Uuid",
+        "Timestamptz",
         "Bool"
       ]
     },
@@ -46,5 +48,5 @@
       false
     ]
   },
-  "hash": "60fbbf91e6f6525665d74ed63e9948b02d9e3f3f1c68766cee53f1416f972f03"
+  "hash": "7b1519194259393f7c65028c69ce8d9765d787f09a92ab6f4d54dd9dd8ea299b"
 }
