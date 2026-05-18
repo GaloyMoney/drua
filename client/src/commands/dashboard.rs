@@ -1667,6 +1667,8 @@ async fn run_event_loop(
                                         Ok(definitions) => state.replace_workflow_definitions(definitions),
                                         Err(e) => state.set_workflow_error(format!("Failed to refresh workflows: {e}")),
                                     }
+                                } else {
+                                    state.workflows.loading = false;
                                 }
                             }
                             handlers::Action::TriggerWorkflow { definition_id, payload } => {

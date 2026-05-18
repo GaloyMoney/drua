@@ -63,11 +63,17 @@ fn draw_col_definitions(frame: &mut Frame, state: &ScreenState, area: Rect) {
         .title(format!(" Workflows ({project}) "));
 
     let mut items = Vec::new();
-    if state.workflows.loading && state.workflows.definitions.is_empty() {
+    if let Some(err) = &state.workflows.error {
+        items.push(ListItem::new(Line::from(Span::styled(
+            truncate(err, 30),
+            Style::default().fg(Color::Red),
+        ))));
+    } else if state.workflows.loading && state.workflows.definitions.is_empty() {
         items.push(ListItem::new(Line::from("Loading...")));
     } else if state.workflows.definitions.is_empty() {
         items.push(ListItem::new(Line::from("No workflows")));
-    } else {
+    }
+    if !state.workflows.definitions.is_empty() {
         for (idx, definition) in state.workflows.definitions.iter().enumerate() {
             let selected = idx == state.workflows.def_cursor;
             let marker = if selected { ">" } else { " " };
