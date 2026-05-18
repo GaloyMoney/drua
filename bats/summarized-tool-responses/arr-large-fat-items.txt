@@ -11,14 +11,8 @@
   <elided path="$[2].body" total-bytes="11778" shown-bytes="1439" total-lines="99" shown-lines="19">
     tool_output_fetch(invocation_id="<uuid>", path="$[2].body", query={"len":80,"mode":"lines","offset":9})
   </elided>
-  <elided path="$[3].body" total-bytes="11778" shown-bytes="1439" total-lines="99" shown-lines="19">
-    tool_output_fetch(invocation_id="<uuid>", path="$[3].body", query={"len":80,"mode":"lines","offset":9})
-  </elided>
-  <elided path="$[4].body" total-bytes="11778" shown-bytes="1439" total-lines="99" shown-lines="19">
-    tool_output_fetch(invocation_id="<uuid>", path="$[4].body", query={"len":80,"mode":"lines","offset":9})
-  </elided>
   <elided path="$" total-bytes="65221" shown-bytes="7048" total-items="5" shown-items="3">
-    note: Direct recovery for this aggregate would exceed the fetch response cap; use the narrower recovery paths listed in this envelope. Summary mode only replays this overview.
-    tool_output_fetch(invocation_id="<uuid>", query={"mode":"summary"})
+    note: This bounded recovery returns the first 1 of 2 elided items; repeat with a later offset to continue.
+    tool_output_fetch(invocation_id="<uuid>", path="$", query={"len":1,"mode":"json_array_slice","offset":3})
   </elided>
 </recovery>
