@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::primitives::{AgentId, UserMessageSource};
 use es_entity::*;
 
-use crate::agent::config::ModelDefaults;
+use crate::agent::{config::ModelChain, AgentRole};
 
 use super::{
     compaction, error::AgentSessionError, export, history, message::*, metadata::*, settings::*,
@@ -38,7 +38,10 @@ pub enum AgentSessionEvent {
     Initialized {
         id: AgentSessionId,
         agent_id: AgentId,
-        model_defaults: ModelDefaults,
+        agent_role: AgentRole,
+        #[serde(default)]
+        chain_override: Option<llm::ModelChain>,
+        model_chain: ModelChain,
         compaction_config: CompactionConfig,
         system_blocks: Vec<SystemBlock>,
         tool_defs: Vec<ToolDefinition>,
@@ -103,6 +106,10 @@ pub enum AgentSessionEvent {
         value: serde_json::Value,
         submitted_at: chrono::DateTime<chrono::Utc>,
     },
+    ModelChainUpdated {
+        chain_override: Option<llm::ModelChain>,
+        model_chain: ModelChain,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -116,12 +123,14 @@ pub struct MaskedToolResult {
 pub struct AgentSession {
     pub id: AgentSessionId,
     pub agent_id: AgentId,
+    pub(super) agent_role: AgentRole,
 
     #[builder(default)]
     current_main_thread: Option<SessionThreadId>,
 
     #[builder(default)]
-    model_defaults: ModelDefaults,
+    pub(super) chain_override: Option<llm::ModelChain>,
+    model_chain: ModelChain,
 
     #[builder(default)]
     compaction_config: CompactionConfig,
@@ -155,7 +164,15 @@ impl AgentSession {
     }
 
     pub fn model(&self) -> &str {
-        &self.model_defaults.model
+        &self.model_chain.primary.model
+    }
+
+    pub fn chain(&self) -> &ModelChain {
+        &self.model_chain
+    }
+
+    pub fn is_workflow_agent(&self) -> bool {
+        self.agent_role == AgentRole::WorkflowStepAgent
     }
 
     pub fn exportable_thread(
@@ -171,11 +188,36 @@ impl AgentSession {
 
         Ok(export::build_exportable_thread(
             self.id,
-            &self.model_defaults.model,
+            &self.model_chain.primary.model,
             &self.events,
             thread_id,
             self.current_main_thread,
         ))
+    }
+
+    pub(super) fn update_model_chain(
+        &mut self,
+        new_override: Option<llm::ModelChain>,
+        new_chain: ModelChain,
+    ) -> Idempotent<()> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied:
+                AgentSessionEvent::ModelChainUpdated { chain_override, model_chain }
+                    if *chain_override == new_override && *model_chain == new_chain,
+            already_applied:
+                AgentSessionEvent::Initialized { chain_override, model_chain, .. }
+                    if *chain_override == new_override && *model_chain == new_chain,
+            resets_on:
+                AgentSessionEvent::ModelChainUpdated { .. } | AgentSessionEvent::Initialized { .. }
+        );
+        self.chain_override = new_override.clone();
+        self.model_chain = new_chain.clone();
+        self.events.push(AgentSessionEvent::ModelChainUpdated {
+            chain_override: new_override,
+            model_chain: new_chain,
+        });
+        Idempotent::Executed(())
     }
 
     pub fn add_user_input(
@@ -322,7 +364,8 @@ impl AgentSession {
         // the user turn that triggered this prompt; otherwise hydration would
         // set its turn to User and reject the upcoming assistant response.
         let (thread_id, prompt_definition) = if matches!(target, TargetThread::Main)
-            && self.thread_has_stale_system_view(thread_id)
+            && (self.thread_has_stale_system_view(thread_id)
+                || self.thread_has_stale_model_chain(thread_id))
         {
             let (new_id, new_pd) =
                 self.spawn_context_refreshed_thread(thread_id, prompt_definition.messages.clone());
@@ -463,6 +506,14 @@ impl AgentSession {
         view.indexes() != refreshed.indexes()
     }
 
+    /// Stale when session.model_chain has diverged from the thread's snapshot.
+    fn thread_has_stale_model_chain(&self, thread_id: SessionThreadId) -> bool {
+        let Some(thread) = self.threads.get_persisted(&thread_id) else {
+            return false;
+        };
+        thread.prompt_definition().model_chain() != &self.model_chain
+    }
+
     /// Latest-per-kind ordered by `SystemBlockKind::ORDER`; skips unset kinds.
     fn canonical_refreshed_view(&self) -> SystemView {
         let materialized = self.materialize();
@@ -473,10 +524,11 @@ impl AgentSession {
         SystemView::from_indexes(indexes)
     }
 
-    /// Inherits supplied `messages` verbatim and refreshes system blocks.
+    /// Inherits supplied `messages` verbatim and refreshes system blocks + model_chain.
     /// Returns id + prompt definition so caller doesn't re-fetch (new thread
     /// lives in `new_entities`, not visible to `get_persisted`).
-    /// Caller must verify staleness via `thread_has_stale_system_view`.
+    /// Caller must verify staleness via `thread_has_stale_system_view` or
+    /// `thread_has_stale_model_chain`.
     fn spawn_context_refreshed_thread(
         &mut self,
         from_thread: SessionThreadId,
@@ -495,7 +547,7 @@ impl AgentSession {
         let new_thread = NewSessionThread::refreshed(
             new_thread_id,
             self.id,
-            self.model_defaults.clone(),
+            self.model_chain.clone(),
             new_view.clone(),
             tool_view.clone(),
             messages.clone(),
@@ -509,7 +561,7 @@ impl AgentSession {
         self.current_main_thread = Some(new_thread_id);
 
         let new_pd = PromptDefinition::for_refreshed_thread(
-            self.model_defaults.clone(),
+            self.model_chain.clone(),
             new_view,
             tool_view,
             messages,
@@ -697,7 +749,7 @@ impl AgentSession {
         let result = compaction::maybe_prune(
             &self.events,
             &self.compaction_config,
-            &self.model_defaults,
+            &self.model_chain,
             self.id,
             current_thread_id,
             is_main_thread,
@@ -720,7 +772,7 @@ impl AgentSession {
             .id(thread_id)
             .session_id(self.id)
             .start_reason(ThreadStartReason::InitialThread)
-            .model_defaults(self.model_defaults.clone())
+            .model_chain(self.model_chain.clone())
             .system_view(prompt_definition.system_view().clone())
             .tool_definitions_view(prompt_definition.tool_definitions_view().clone())
             .initial_user_messages(prompt_definition.user_messages_view())
@@ -746,7 +798,7 @@ impl AgentSession {
     }
 
     fn materialize(&self) -> MaterializedSession<'_> {
-        let mut materialized = MaterializedSession::init(&self.model_defaults);
+        let mut materialized = MaterializedSession::init(&self.model_chain);
         for event in self.events.iter_all() {
             match event {
                 AgentSessionEvent::Initialized {
@@ -754,7 +806,7 @@ impl AgentSession {
                     tool_defs,
                     ..
                 } => {
-                    materialized = MaterializedSession::init(&self.model_defaults);
+                    materialized = MaterializedSession::init(&self.model_chain);
                     materialized.push_system_blocks(system_blocks.iter());
                     materialized.push_tool_defs(tool_defs.iter());
                 }
@@ -852,14 +904,18 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                 AgentSessionEvent::Initialized {
                     id,
                     agent_id,
-                    model_defaults,
+                    agent_role,
+                    chain_override,
+                    model_chain,
                     compaction_config,
                     ..
                 } => {
                     builder = builder
                         .id(*id)
                         .agent_id(*agent_id)
-                        .model_defaults(model_defaults.clone())
+                        .agent_role(*agent_role)
+                        .chain_override(chain_override.clone())
+                        .model_chain(model_chain.clone())
                         .compaction_config(compaction_config.clone());
                 }
                 AgentSessionEvent::ThreadStarted { thread_id, .. } => {
@@ -875,6 +931,14 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                 AgentSessionEvent::ToolResultsMasked { .. } => {}
                 AgentSessionEvent::CompactionApplied { .. } => {}
                 AgentSessionEvent::OutputSubmitted { .. } => {}
+                AgentSessionEvent::ModelChainUpdated {
+                    chain_override,
+                    model_chain,
+                } => {
+                    builder = builder
+                        .chain_override(chain_override.clone())
+                        .model_chain(model_chain.clone());
+                }
             }
         }
 
@@ -887,7 +951,10 @@ pub struct NewAgentSession {
     #[builder(setter(into))]
     pub(super) id: AgentSessionId,
     pub(super) agent_id: AgentId,
-    pub(super) model_defaults: ModelDefaults,
+    pub(super) agent_role: AgentRole,
+    #[builder(default)]
+    pub(super) chain_override: Option<llm::ModelChain>,
+    pub(super) model_chain: ModelChain,
     #[builder(default)]
     pub(super) compaction_config: CompactionConfig,
     pub(super) system_blocks: Vec<SystemBlock>,
@@ -909,7 +976,9 @@ impl IntoEvents<AgentSessionEvent> for NewAgentSession {
             [AgentSessionEvent::Initialized {
                 id: self.id,
                 agent_id: self.agent_id,
-                model_defaults: self.model_defaults,
+                agent_role: self.agent_role,
+                chain_override: self.chain_override,
+                model_chain: self.model_chain,
                 compaction_config: self.compaction_config,
                 system_blocks: self.system_blocks,
                 tool_defs: self.tool_defs,
@@ -920,6 +989,7 @@ impl IntoEvents<AgentSessionEvent> for NewAgentSession {
 
 #[cfg(test)]
 mod tests {
+    use crate::agent::config::ModelDefaults;
     use crate::primitives::UserId;
     use es_entity::{IntoEvents as _, TryFromEvents as _};
 
@@ -928,10 +998,14 @@ mod tests {
     fn new_session() -> AgentSession {
         let new = NewAgentSession::builder()
             .agent_id(AgentId::new())
-            .model_defaults(ModelDefaults {
-                model: "test-model".into(),
-                max_tokens_per_response: 1024,
-                context_window_tokens: 200_000,
+            .agent_role(AgentRole::Agent)
+            .model_chain(ModelChain {
+                primary: ModelDefaults {
+                    model: "test-model".into(),
+                    max_tokens_per_response: 1024,
+                    context_window_tokens: 200_000,
+                },
+                fallbacks: Vec::new(),
             })
             .compaction_config(CompactionConfig {
                 enabled: false,
@@ -1143,7 +1217,10 @@ mod tests {
         // The rebuilt prompt mirrors the one emitted by `next_prompt`:
         // same model, same messages, same system view.
         assert_eq!(pending.messages.len(), issued.messages.len());
-        assert_eq!(pending.model, issued.model);
+        assert_eq!(
+            pending.model_chain.primary.model,
+            issued.model_chain.primary.model
+        );
     }
 
     #[test]
@@ -1368,7 +1445,7 @@ mod tests {
             .next_prompt(TargetThread::Main)
             .expect("next_prompt should succeed");
 
-        assert_eq!(prompt.model, "test-model");
+        assert_eq!(prompt.model_chain.primary.model, "test-model");
         let expected_cache_key = format!("agent-session:{}", session.id);
         assert_eq!(
             prompt.cache_key.as_deref(),
@@ -1410,10 +1487,14 @@ mod tests {
     fn new_session_with_compaction(keep_recent: usize) -> AgentSession {
         let new = NewAgentSession::builder()
             .agent_id(AgentId::new())
-            .model_defaults(ModelDefaults {
-                model: "test-model".into(),
-                max_tokens_per_response: 1024,
-                context_window_tokens: 100,
+            .agent_role(AgentRole::Agent)
+            .model_chain(ModelChain {
+                primary: ModelDefaults {
+                    model: "test-model".into(),
+                    max_tokens_per_response: 1024,
+                    context_window_tokens: 100,
+                },
+                fallbacks: Vec::new(),
             })
             .compaction_config(CompactionConfig {
                 enabled: true,

@@ -1,11 +1,6 @@
 type Agent {
 	attachedSandbox: SandboxAttachment
 	id: AgentId!
-	"""
-	`None` ⇒ use the project / role / config-default chain.
-	Always `None` for workflow-spawned agents.
-	"""
-	modelChainOverride: ModelChain
 	name: String!
 	projectId: ProjectId!
 	role: AgentRole!
@@ -65,12 +60,17 @@ enum AgentRole {
 
 type AgentSession {
 	"""
+	Full chain (primary + fallbacks) currently persisted on the session.
+	Read-shape mirror of `AgentUpdateSessionChainInput.chain`.
+	"""
+	chain: ModelChain!
+	"""
 	Flat chat history: recent user messages and assistant responses.
 	Returns the last `last` messages in chronological order.
 	"""
 	chatHistory(last: Int! = 20): [ChatMessage!]!
 	"""
-	Model used by the LLM for this session's prompts.
+	Primary model name — what the chat header shows.
 	"""
 	model: String!
 	"""
@@ -87,17 +87,19 @@ type AgentSession {
 	threads: [SessionThread!]!
 }
 
-input AgentUpdateModelChainInput {
+input AgentUpdateSessionChainInput {
 	agentId: AgentId!
 	"""
-	`None` clears the override (revert to project / role / default).
+	`None` reverts the session chain to the role / `agents.default_chain`.
+	Takes effect on the next prompt, which spawns a refreshed thread
+	when the resolved chain differs from the current thread's snapshot.
 	Rejects workflow-spawned agents.
 	"""
 	chain: ModelChainInput
 }
 
-type AgentUpdateModelChainPayload {
-	agent: Agent!
+type AgentUpdateSessionChainPayload {
+	session: AgentSession!
 }
 
 type AssistantDoneEvent {
@@ -276,11 +278,19 @@ input ModelChainInput {
 }
 
 type ModelSpec {
+	"""
+	Input: optional override of the registry's `max_tokens_per_response`.
+	Output: the effective max_tokens currently in force (registry value or override).
+	"""
 	maxTokens: Int
 	name: String!
 }
 
 input ModelSpecInput {
+	"""
+	Input: optional override of the registry's `max_tokens_per_response`.
+	Output: the effective max_tokens currently in force (registry value or override).
+	"""
 	maxTokens: Int
 	name: String!
 }
@@ -290,7 +300,7 @@ type Mutation {
 	agentCreate(input: AgentCreateInput!): AgentCreatePayload!
 	agentDelete(input: AgentDeleteInput!): AgentDeletePayload!
 	agentDetachSandbox(input: AgentDetachSandboxInput!): AgentDetachSandboxPayload!
-	agentUpdateModelChain(input: AgentUpdateModelChainInput!): AgentUpdateModelChainPayload!
+	agentUpdateSessionChain(input: AgentUpdateSessionChainInput!): AgentUpdateSessionChainPayload!
 	bootstrapPersonalProject: BootstrapPersonalProjectPayload!
 	mcpCredentialsCreate(input: McpCredentialsCreateInput!): McpCredentialsCreatePayload!
 	mcpCredentialsRevoke(input: McpCredentialsRevokeInput!): McpCredentialsRevokePayload!
@@ -301,7 +311,6 @@ type Mutation {
 	projectSecretCreate(input: ProjectSecretCreateInput!): ProjectSecretCreatePayload!
 	projectSecretDelete(input: ProjectSecretDeleteInput!): ProjectSecretDeletePayload!
 	projectUpdate(input: ProjectUpdateInput!): ProjectUpdatePayload!
-	projectUpdateModelChain(input: ProjectUpdateModelChainInput!): ProjectUpdateModelChainPayload!
 	sandboxCreate(input: SandboxCreateInput!): SandboxCreatePayload!
 	sandboxRestart(input: SandboxRestartInput!): SandboxRestartPayload!
 	sandboxSuspend(input: SandboxSuspendInput!): SandboxSuspendPayload!
@@ -353,11 +362,6 @@ type Project {
 	id: ProjectId!
 	lead: Agent!
 	mcpCredentials: [McpCreds!]!
-	"""
-	Per-project chain. Inherited by every non-workflow agent in
-	the project unless the agent has its own override.
-	"""
-	modelChainOverride: ModelChain
 	name: String!
 	sandboxes: [Sandbox!]!
 	"""
@@ -447,18 +451,6 @@ scalar ProjectSecretId
 input ProjectUpdateInput {
 	description: String
 	id: ProjectId!
-}
-
-input ProjectUpdateModelChainInput {
-	"""
-	`None` clears the override.
-	"""
-	chain: ModelChainInput
-	id: ProjectId!
-}
-
-type ProjectUpdateModelChainPayload {
-	project: Project!
 }
 
 type ProjectUpdatePayload {

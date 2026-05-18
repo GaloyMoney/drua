@@ -1,14 +1,12 @@
 use std::collections::HashMap;
 
-use llm::ModelChain;
+use llm::ModelChain as LlmModelChain;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::error::AgentError;
 use super::session::CompactionConfig;
 use super::AgentRole;
 
-/// Roles that must be present in `builtin_roles`. New variants must be
-/// added here too — `validate` fails fast at startup if missing.
 const REQUIRED_ROLES: &[AgentRole] = &[
     AgentRole::ProjectLead,
     AgentRole::Agent,
@@ -17,14 +15,13 @@ const REQUIRED_ROLES: &[AgentRole] = &[
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RoleConfig {
-    /// Per-role override; falls through to `AgentsConfig.default_chain`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub chain: Option<ModelChain>,
+    pub chain: Option<LlmModelChain>,
     #[serde(default)]
     pub compaction: CompactionConfig,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelDefaults {
     pub model: String,
     pub max_tokens_per_response: u32,
@@ -41,21 +38,58 @@ impl Default for ModelDefaults {
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelChain {
+    pub primary: ModelDefaults,
+    #[serde(default)]
+    pub fallbacks: Vec<ModelDefaults>,
+}
+
+impl ModelChain {
+    pub fn iter(&self) -> impl Iterator<Item = &ModelDefaults> {
+        std::iter::once(&self.primary).chain(self.fallbacks.iter())
+    }
+
+    pub(super) fn from_policy(
+        policy: &LlmModelChain,
+        models: &HashMap<String, ModelDefaults>,
+    ) -> Result<Self, AgentError> {
+        let primary = resolve_entry(&policy.primary, models)?;
+        let fallbacks = policy
+            .fallbacks
+            .iter()
+            .map(|spec| resolve_entry(spec, models))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { primary, fallbacks })
+    }
+}
+
+fn resolve_entry(
+    spec: &llm::ModelSpec,
+    models: &HashMap<String, ModelDefaults>,
+) -> Result<ModelDefaults, AgentError> {
+    let mut defaults = models
+        .get(spec.name.as_str())
+        .cloned()
+        .ok_or_else(|| AgentError::ModelNotConfigured(spec.name.clone()))?;
+    if let Some(mt) = spec.max_tokens {
+        defaults.max_tokens_per_response = mt;
+    }
+    Ok(defaults)
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentsConfig {
-    /// Required at startup unless every role sets its own `chain`.
-    /// Workflow / per-step overrides ride on the entity, not here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(deserialize_with = "deserialize_chain_loose")]
-    pub default_chain: Option<ModelChain>,
+    pub default_chain: Option<LlmModelChain>,
     #[serde(default)]
     pub builtin_roles: HashMap<AgentRole, RoleConfig>,
     #[serde(default)]
     pub models: HashMap<String, ModelDefaults>,
 }
 
-/// Accepts the bare-string shortcut `"x"` as well as the full object.
-fn deserialize_chain_loose<'de, D>(deserializer: D) -> Result<Option<ModelChain>, D::Error>
+fn deserialize_chain_loose<'de, D>(deserializer: D) -> Result<Option<LlmModelChain>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -63,17 +97,16 @@ where
     #[serde(untagged)]
     enum Either {
         Bare(String),
-        Full(ModelChain),
+        Full(LlmModelChain),
     }
     let opt: Option<Either> = Option::deserialize(deserializer)?;
     Ok(opt.map(|e| match e {
-        Either::Bare(name) => ModelChain::new(name),
+        Either::Bare(name) => LlmModelChain::new(name),
         Either::Full(chain) => chain,
     }))
 }
 
 impl AgentsConfig {
-    /// Called from `App::init` to fail loudly at startup.
     pub fn validate(&self) -> Result<(), AgentError> {
         for role in REQUIRED_ROLES {
             let role_cfg = self
@@ -100,11 +133,11 @@ impl AgentsConfig {
     }
 
     /// Precedence: `override_chain` > role `chain` > `default_chain`.
-    pub fn resolve_chain(
+    pub fn resolve_policy(
         &self,
         role: AgentRole,
-        override_chain: Option<ModelChain>,
-    ) -> Result<ModelChain, AgentError> {
+        override_chain: Option<LlmModelChain>,
+    ) -> Result<LlmModelChain, AgentError> {
         if let Some(c) = override_chain {
             return Ok(c);
         }
@@ -119,6 +152,15 @@ impl AgentsConfig {
             .ok_or_else(|| {
                 AgentError::ModelNotConfigured(format!("no chain resolvable for role {role:?}"))
             })
+    }
+
+    pub(crate) fn resolve_chain(
+        &self,
+        role: AgentRole,
+        override_chain: Option<LlmModelChain>,
+    ) -> Result<ModelChain, AgentError> {
+        let policy = self.resolve_policy(role, override_chain)?;
+        ModelChain::from_policy(&policy, &self.models)
     }
 }
 
@@ -137,7 +179,7 @@ mod tests {
     #[test]
     fn validate_passes_with_default_chain_and_role_without_override() {
         let mut cfg = AgentsConfig {
-            default_chain: Some(ModelChain::new("primary").with_fallback("backup")),
+            default_chain: Some(LlmModelChain::new("primary").with_fallback("backup")),
             ..Default::default()
         };
         cfg.models.insert("primary".into(), defaults_for("primary"));
@@ -154,7 +196,7 @@ mod tests {
     #[test]
     fn validate_fails_when_chain_references_unregistered_model() {
         let mut cfg = AgentsConfig {
-            default_chain: Some(ModelChain::new("missing")),
+            default_chain: Some(LlmModelChain::new("missing")),
             ..Default::default()
         };
         cfg.builtin_roles
@@ -168,9 +210,96 @@ mod tests {
     }
 
     #[test]
+    fn resolve_chain_pulls_limits_from_models_map() {
+        let mut cfg = AgentsConfig {
+            default_chain: Some(LlmModelChain::new("primary").with_fallback("backup")),
+            ..Default::default()
+        };
+        cfg.models.insert(
+            "primary".into(),
+            ModelDefaults {
+                model: "primary".into(),
+                max_tokens_per_response: 8192,
+                context_window_tokens: 200_000,
+            },
+        );
+        cfg.models.insert(
+            "backup".into(),
+            ModelDefaults {
+                model: "backup".into(),
+                max_tokens_per_response: 4096,
+                context_window_tokens: 128_000,
+            },
+        );
+        cfg.builtin_roles
+            .insert(AgentRole::Agent, RoleConfig::default());
+        let chain = cfg.resolve_chain(AgentRole::Agent, None).unwrap();
+        assert_eq!(chain.primary.model, "primary");
+        assert_eq!(chain.primary.max_tokens_per_response, 8192);
+        assert_eq!(chain.primary.context_window_tokens, 200_000);
+        assert_eq!(chain.fallbacks.len(), 1);
+        assert_eq!(chain.fallbacks[0].model, "backup");
+        assert_eq!(chain.fallbacks[0].max_tokens_per_response, 4096);
+        assert_eq!(chain.fallbacks[0].context_window_tokens, 128_000);
+    }
+
+    #[test]
+    fn spec_max_tokens_overrides_registry() {
+        let mut cfg = AgentsConfig {
+            default_chain: Some(
+                LlmModelChain::new(llm::ModelSpec::new("primary").with_max_tokens(2048))
+                    .with_fallback(llm::ModelSpec::new("backup").with_max_tokens(1024))
+                    .with_fallback("backup"),
+            ),
+            ..Default::default()
+        };
+        cfg.models.insert(
+            "primary".into(),
+            ModelDefaults {
+                model: "primary".into(),
+                max_tokens_per_response: 8192,
+                context_window_tokens: 200_000,
+            },
+        );
+        cfg.models.insert(
+            "backup".into(),
+            ModelDefaults {
+                model: "backup".into(),
+                max_tokens_per_response: 4096,
+                context_window_tokens: 128_000,
+            },
+        );
+        cfg.builtin_roles
+            .insert(AgentRole::Agent, RoleConfig::default());
+        let chain = cfg.resolve_chain(AgentRole::Agent, None).unwrap();
+        assert_eq!(chain.primary.max_tokens_per_response, 2048);
+        assert_eq!(chain.fallbacks[0].max_tokens_per_response, 1024);
+        assert_eq!(chain.fallbacks[1].max_tokens_per_response, 4096);
+    }
+
+    #[test]
+    fn explicit_override_beats_role_and_default() {
+        let mut cfg = AgentsConfig {
+            default_chain: Some(LlmModelChain::new("default")),
+            ..Default::default()
+        };
+        cfg.builtin_roles.insert(
+            AgentRole::Agent,
+            RoleConfig {
+                chain: Some(LlmModelChain::new("role")),
+                ..Default::default()
+            },
+        );
+        let resolved = cfg
+            .resolve_policy(AgentRole::Agent, Some(LlmModelChain::new("explicit")))
+            .unwrap();
+        assert_eq!(resolved.primary.name, "explicit");
+    }
+
+    #[test]
     fn role_chain_overrides_default() {
         let mut cfg = AgentsConfig {
-            default_chain: Some(ModelChain::new("default")),
+            default_chain: Some(LlmModelChain::new("default")),
             ..Default::default()
         };
         cfg.models.insert("default".into(), defaults_for("default"));
@@ -178,44 +307,25 @@ mod tests {
         cfg.builtin_roles.insert(
             AgentRole::Agent,
             RoleConfig {
-                chain: Some(ModelChain::new("role")),
+                chain: Some(LlmModelChain::new("role")),
                 ..Default::default()
             },
         );
-        let resolved = cfg.resolve_chain(AgentRole::Agent, None).unwrap();
-        assert_eq!(resolved.primary.name, "role");
-    }
-
-    #[test]
-    fn explicit_override_beats_role_and_default() {
-        let mut cfg = AgentsConfig {
-            default_chain: Some(ModelChain::new("default")),
-            ..Default::default()
-        };
-        cfg.builtin_roles.insert(
-            AgentRole::Agent,
-            RoleConfig {
-                chain: Some(ModelChain::new("role")),
-                ..Default::default()
-            },
-        );
-        let resolved = cfg
-            .resolve_chain(AgentRole::Agent, Some(ModelChain::new("explicit")))
-            .unwrap();
-        assert_eq!(resolved.primary.name, "explicit");
+        let chain = cfg.resolve_chain(AgentRole::Agent, None).unwrap();
+        assert_eq!(chain.primary.model, "role");
     }
 
     #[test]
     fn falls_back_to_default_when_role_has_no_override() {
         let mut cfg = AgentsConfig {
-            default_chain: Some(ModelChain::new("default")),
+            default_chain: Some(LlmModelChain::new("default")),
             ..Default::default()
         };
         cfg.models.insert("default".into(), defaults_for("default"));
         cfg.builtin_roles
             .insert(AgentRole::Agent, RoleConfig::default());
-        let resolved = cfg.resolve_chain(AgentRole::Agent, None).unwrap();
-        assert_eq!(resolved.primary.name, "default");
+        let chain = cfg.resolve_chain(AgentRole::Agent, None).unwrap();
+        assert_eq!(chain.primary.model, "default");
     }
 
     #[test]
@@ -287,9 +397,9 @@ models:
     context_window_tokens: 200000
 "#;
         let cfg: AgentsConfig = serde_yaml::from_str(yaml).unwrap();
-        let lead_chain = cfg.resolve_chain(AgentRole::ProjectLead, None).unwrap();
-        assert_eq!(lead_chain.primary.name, "lead/special");
-        let agent_chain = cfg.resolve_chain(AgentRole::Agent, None).unwrap();
-        assert_eq!(agent_chain.primary.name, "primary/model");
+        let lead = cfg.resolve_chain(AgentRole::ProjectLead, None).unwrap();
+        assert_eq!(lead.primary.model, "lead/special");
+        let agent = cfg.resolve_chain(AgentRole::Agent, None).unwrap();
+        assert_eq!(agent.primary.model, "primary/model");
     }
 }
