@@ -2,43 +2,26 @@ use serde_json::Value;
 
 use super::SandboxInfo;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum WorkflowView {
-    #[default]
-    Catalog,
-    Definition {
-        definition_id: String,
-        yaml_scroll: u16,
-    },
-    Runs {
-        definition_id: String,
-        cursor: usize,
-    },
-    RunDetail {
-        run_id: String,
-        step_cursor: usize,
-        panel: RunDetailPanel,
-        expanded: bool,
-    },
-}
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub enum RunDetailPanel {
+pub enum MillerFocus {
     #[default]
-    Step,
-    Trigger,
-    Agents,
-    Sandboxes,
+    Definitions,
+    Runs,
+    StepDetail,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct WorkflowState {
-    pub view: WorkflowView,
+    pub focus: MillerFocus,
     pub definitions: Vec<WorkflowDefinitionItem>,
+    pub def_cursor: usize,
     pub selected_definition: Option<WorkflowDefinitionDetail>,
     pub runs: Vec<WorkflowRunItem>,
+    pub run_cursor: usize,
     pub selected_run: Option<WorkflowRunDetail>,
-    pub cursor: usize,
+    pub step_cursor: usize,
+    pub expanded: bool,
+    pub detail_scroll: u16,
     pub loading: bool,
     pub error: Option<String>,
 }

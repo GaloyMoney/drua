@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -9,316 +7,418 @@ use ratatui::{
 };
 
 use super::super::state::{
-    RunDetailPanel, ScreenState, WorkflowRunDetail, WorkflowStepItem, WorkflowStepResultItem,
-    WorkflowView,
+    MillerFocus, ScreenState, WorkflowRunDetail, WorkflowStepItem, WorkflowStepResultItem,
 };
 
 pub fn draw_workflows(frame: &mut Frame, state: &ScreenState, area: Rect) {
-    match &state.workflows.view {
-        WorkflowView::Catalog => draw_catalog(frame, state, area),
-        WorkflowView::Definition { yaml_scroll, .. } => {
-            draw_definition(frame, state, area, *yaml_scroll)
-        }
-        WorkflowView::Runs { cursor, .. } => draw_runs(frame, state, area, *cursor),
-        WorkflowView::RunDetail {
-            step_cursor,
-            panel,
-            expanded,
-            ..
-        } => draw_run_detail(frame, state, area, *step_cursor, *panel, *expanded),
-    }
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(25),
+            Constraint::Percentage(25),
+            Constraint::Percentage(50),
+        ])
+        .split(area);
+
+    draw_col_definitions(frame, state, chunks[0]);
+    draw_col_runs(frame, state, chunks[1]);
+    draw_col_detail(frame, state, chunks[2]);
 }
 
 pub fn status_keys(state: &ScreenState) -> &'static str {
-    match state.workflows.view {
-        WorkflowView::Catalog => " │ ↑/↓:nav  Enter:detail  T:trigger  r:refresh  Esc:chat ",
-        WorkflowView::Definition { .. } => " │ ↑/↓:scroll  T:trigger  R:runs  r:refresh  Esc:list ",
-        WorkflowView::Runs { .. } => " │ ↑/↓:nav  Enter:inspect  r:refresh  Esc:workflow ",
-        WorkflowView::RunDetail { .. } => {
-            " │ ↑/↓:step  Enter:expand  d/p/a/s:panel  r:refresh  Esc:runs "
-        }
+    match state.workflows.focus {
+        MillerFocus::Definitions => " │ ↑/↓:nav  →:runs  T:trigger  r:refresh  Esc:chat ",
+        MillerFocus::Runs => " │ ↑/↓:nav  ←:defs  →:steps  r:refresh  Esc:chat ",
+        MillerFocus::StepDetail => " │ ↑/↓:step  ←:runs  Enter:expand  r:refresh  Esc:chat ",
     }
 }
 
-fn draw_catalog(frame: &mut Frame, state: &ScreenState, area: Rect) {
+fn col_border(state: &ScreenState, col: MillerFocus) -> Color {
+    if state.workflows.focus == col {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    }
+}
+
+fn draw_col_definitions(frame: &mut Frame, state: &ScreenState, area: Rect) {
     let project = state
         .selected_project()
         .map(|p| p.name.as_str())
         .unwrap_or("-");
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(format!(" Workflows - project: {project} "));
+        .border_style(Style::default().fg(col_border(state, MillerFocus::Definitions)))
+        .title(format!(" Workflows ({project}) "));
 
     let mut items = Vec::new();
-    if state.workflows.loading {
-        items.push(ListItem::new(Line::from("Loading workflows...")));
+    if state.workflows.loading && state.workflows.definitions.is_empty() {
+        items.push(ListItem::new(Line::from("Loading...")));
     } else if state.workflows.definitions.is_empty() {
-        items.push(ListItem::new(Line::from("No workflows in this project")));
+        items.push(ListItem::new(Line::from("No workflows")));
     } else {
         for (idx, definition) in state.workflows.definitions.iter().enumerate() {
-            let selected = idx == state.workflows.cursor;
+            let selected = idx == state.workflows.def_cursor;
             let marker = if selected { ">" } else { " " };
-            let run = definition
+            let run_indicator = definition
                 .recent_runs
                 .first()
-                .map(|r| {
-                    (
-                        format!(
-                            "last: {} {}",
-                            state_label(&r.state),
-                            short_time(&r.started_at)
-                        ),
-                        state_color(&r.state),
-                    )
-                })
-                .unwrap_or_else(|| ("no runs".to_string(), Color::DarkGray));
-            let trigger = trigger_label(
-                &definition.trigger.kind,
-                definition.trigger.provider.as_deref(),
-            );
-            let next = definition
-                .trigger
-                .next_run_at
-                .as_deref()
-                .map(|t| format!(" next: {}", short_time(t)))
-                .unwrap_or_default();
+                .map(|r| (state_label(&r.state), state_color(&r.state)))
+                .unwrap_or(("—", Color::DarkGray));
             let line = Line::from(vec![
                 Span::styled(marker, Style::default().fg(Color::Yellow)),
                 Span::raw(" "),
                 Span::styled(
-                    truncate(&definition.name, 30),
+                    truncate(&definition.name, 20),
                     if selected {
                         Style::default().add_modifier(Modifier::BOLD)
                     } else {
                         Style::default()
                     },
                 ),
-                Span::styled(format!("  {trigger:<18}"), Style::default().fg(Color::Cyan)),
-                Span::styled(format!("  {:<24}", run.0), Style::default().fg(run.1)),
-                Span::styled(
-                    format!("  steps: {}{next}", definition.steps.len()),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::raw(" "),
+                Span::styled(run_indicator.0, Style::default().fg(run_indicator.1)),
             ]);
             items.push(ListItem::new(line));
         }
     }
 
-    if let Some(error) = &state.workflows.error {
-        items.push(ListItem::new(Line::from("")));
-        items.push(ListItem::new(Line::from(Span::styled(
-            error,
-            Style::default().fg(Color::Red),
-        ))));
-    }
-
     frame.render_widget(List::new(items).block(block), area);
 }
 
-fn draw_definition(frame: &mut Frame, state: &ScreenState, area: Rect, yaml_scroll: u16) {
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(1), Constraint::Length(34)])
-        .split(area);
-
-    let title = state
-        .workflows
-        .selected_definition
-        .as_ref()
-        .map(|d| format!(" {} ", d.name))
-        .unwrap_or_else(|| " Workflow ".to_string());
-    let yaml = state
-        .workflows
-        .selected_definition
-        .as_ref()
-        .map(|d| d.yaml.as_str())
-        .unwrap_or("Loading workflow YAML...");
-
-    frame.render_widget(
-        Paragraph::new(yaml)
-            .block(Block::default().borders(Borders::ALL).title(title))
-            .scroll((yaml_scroll, 0))
-            .wrap(Wrap { trim: false }),
-        chunks[0],
-    );
-
-    let lines = if let Some(definition) = &state.workflows.selected_definition {
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled("Trigger ", Style::default().fg(Color::DarkGray)),
-                Span::raw(trigger_label(
-                    &definition.trigger.kind,
-                    definition.trigger.provider.as_deref(),
-                )),
-            ]),
-            Line::from(vec![
-                Span::styled("Steps   ", Style::default().fg(Color::DarkGray)),
-                Span::raw(definition.steps.len().to_string()),
-            ]),
-        ];
-        if let Some(condition) = &definition.trigger.condition {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "Condition",
-                Style::default().fg(Color::DarkGray),
-            )));
-            lines.push(Line::from(condition.as_str()));
-        }
-        if let Some(next) = &definition.trigger.next_run_at {
-            lines.push(Line::from(""));
-            lines.push(Line::from(vec![
-                Span::styled("Next run ", Style::default().fg(Color::DarkGray)),
-                Span::raw(short_time(next)),
-            ]));
-        }
-        if !definition.recent_runs.is_empty() {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                "Recent runs",
-                Style::default().fg(Color::DarkGray),
-            )));
-            for run in &definition.recent_runs {
-                lines.push(Line::from(vec![
-                    Span::styled(
-                        state_label(&run.state),
-                        Style::default().fg(state_color(&run.state)),
-                    ),
-                    Span::raw(format!(" {}", short_time(&run.started_at))),
-                ]));
-            }
-        }
-        if let Some(error) = &state.workflows.error {
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                error,
-                Style::default().fg(Color::Red),
-            )));
-        }
-        lines
-    } else {
-        vec![Line::from("Loading...")]
-    };
-
-    frame.render_widget(
-        Paragraph::new(lines)
-            .block(Block::default().borders(Borders::ALL).title(" Metadata "))
-            .wrap(Wrap { trim: true }),
-        chunks[1],
-    );
-}
-
-fn draw_runs(frame: &mut Frame, state: &ScreenState, area: Rect, cursor: usize) {
-    let name = state.selected_workflow_name();
+fn draw_col_runs(frame: &mut Frame, state: &ScreenState, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(format!(" Runs - {name} "));
+        .border_style(Style::default().fg(col_border(state, MillerFocus::Runs)))
+        .title(" Runs ");
+
+    let show_cursor = state.workflows.focus == MillerFocus::Runs
+        || state.workflows.focus == MillerFocus::StepDetail;
+
     let mut items = Vec::new();
-    if state.workflows.loading {
-        items.push(ListItem::new(Line::from("Loading runs...")));
-    } else if state.workflows.runs.is_empty() {
-        items.push(ListItem::new(Line::from("No workflow runs")));
+    if state.workflows.runs.is_empty() {
+        items.push(ListItem::new(Line::from(Span::styled(
+            "No runs",
+            Style::default().fg(Color::DarkGray),
+        ))));
     } else {
         for (idx, run) in state.workflows.runs.iter().enumerate() {
-            let selected = idx == cursor;
+            let selected = show_cursor && idx == state.workflows.run_cursor;
             let marker = if selected { ">" } else { " " };
-            let summary = run_summary(run);
             items.push(ListItem::new(Line::from(vec![
                 Span::styled(marker, Style::default().fg(Color::Yellow)),
                 Span::raw(" "),
                 Span::styled(short_id(&run.id), Style::default().fg(Color::White)),
-                Span::raw("  "),
+                Span::raw(" "),
                 Span::styled(
                     state_label(&run.state),
                     Style::default().fg(state_color(&run.state)),
                 ),
-                Span::raw(format!("  {}  ", short_time(&run.started_at))),
-                Span::styled(summary, Style::default().fg(Color::DarkGray)),
+                Span::raw(format!(" {}", short_time(&run.started_at))),
             ])));
         }
     }
-    if let Some(error) = &state.workflows.error {
-        items.push(ListItem::new(Line::from("")));
-        items.push(ListItem::new(Line::from(Span::styled(
-            error,
-            Style::default().fg(Color::Red),
-        ))));
-    }
+
     frame.render_widget(List::new(items).block(block), area);
 }
 
-fn draw_run_detail(
-    frame: &mut Frame,
-    state: &ScreenState,
-    area: Rect,
-    step_cursor: usize,
-    panel: RunDetailPanel,
-    expanded: bool,
-) {
+fn draw_col_detail(frame: &mut Frame, state: &ScreenState, area: Rect) {
+    match state.workflows.focus {
+        MillerFocus::Definitions => draw_definition_detail(frame, state, area),
+        MillerFocus::Runs => draw_run_overview(frame, state, area),
+        MillerFocus::StepDetail => draw_step_detail_view(frame, state, area),
+    }
+}
+
+fn draw_definition_detail(frame: &mut Frame, state: &ScreenState, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(" Definition ");
+
+    let Some(definition) = &state.workflows.selected_definition else {
+        let msg = if state.workflows.definitions.is_empty() {
+            "No workflow selected"
+        } else {
+            "Loading..."
+        };
+        frame.render_widget(Paragraph::new(msg).block(block), area);
+        return;
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    lines.push(Line::from(vec![
+        Span::styled("Trigger  ", Style::default().fg(Color::DarkGray)),
+        Span::raw(trigger_label(
+            &definition.trigger.kind,
+            definition.trigger.provider.as_deref(),
+        )),
+    ]));
+
+    lines.push(Line::from(vec![
+        Span::styled("Steps    ", Style::default().fg(Color::DarkGray)),
+        Span::raw(definition.steps.len().to_string()),
+    ]));
+
+    if let Some(condition) = &definition.trigger.condition {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Condition",
+            Style::default().fg(Color::DarkGray),
+        )));
+        lines.push(Line::from(condition.as_str()));
+    }
+
+    if let Some(next) = &definition.trigger.next_run_at {
+        lines.push(Line::from(vec![
+            Span::styled("Next run ", Style::default().fg(Color::DarkGray)),
+            Span::raw(short_time(next)),
+        ]));
+    }
+
+    // Step summary
+    lines.push(Line::from(""));
+    for step in &definition.steps {
+        let skill_or_tool = step
+            .skill
+            .as_deref()
+            .or(step.tool.as_deref())
+            .unwrap_or("—");
+        lines.push(Line::from(vec![
+            Span::styled("  • ", Style::default().fg(Color::DarkGray)),
+            Span::raw(&step.name),
+            Span::styled(
+                format!("  ({skill_or_tool})"),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]));
+    }
+
+    // Recent runs
+    if !definition.recent_runs.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Recent runs",
+            Style::default().fg(Color::DarkGray),
+        )));
+        for run in &definition.recent_runs {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!("  {}", state_label(&run.state)),
+                    Style::default().fg(state_color(&run.state)),
+                ),
+                Span::raw(format!("  {}", short_time(&run.started_at))),
+            ]));
+        }
+    }
+
+    // YAML
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "─── YAML ───",
+        Style::default().fg(Color::DarkGray),
+    )));
+    for yaml_line in definition.yaml.lines() {
+        lines.push(Line::from(yaml_line.to_string()));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .scroll((state.workflows.detail_scroll, 0))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn draw_run_overview(frame: &mut Frame, state: &ScreenState, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(" Run Detail ");
+
+    let Some(run) = &state.workflows.selected_run else {
+        let msg = if state.workflows.runs.is_empty() {
+            "No run selected"
+        } else {
+            "Loading..."
+        };
+        frame.render_widget(Paragraph::new(msg).block(block), area);
+        return;
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Header
+    lines.push(Line::from(vec![
+        Span::styled("Run  ", Style::default().fg(Color::DarkGray)),
+        Span::raw(short_id(&run.id)),
+        Span::raw("  "),
+        Span::styled(
+            state_label(&run.state),
+            Style::default().fg(state_color(&run.state)),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("Started  ", Style::default().fg(Color::DarkGray)),
+        Span::raw(short_time(&run.started_at)),
+    ]));
+    if let Some(completed) = &run.completed_at {
+        lines.push(Line::from(vec![
+            Span::styled("Ended    ", Style::default().fg(Color::DarkGray)),
+            Span::raw(short_time(completed)),
+        ]));
+    }
+
+    // Steps
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Steps",
+        Style::default().fg(Color::DarkGray),
+    )));
+    let count = run.steps_snapshot.len().max(run.step_results.len());
+    for idx in 0..count {
+        let step = run.steps_snapshot.get(idx);
+        let result = result_for_step(run, idx, step);
+        let name = step
+            .map(|s| s.name.as_str())
+            .or_else(|| result.map(|r| r.name.as_str()))
+            .unwrap_or("step");
+        let st = result.map(|r| r.state.as_str()).unwrap_or("PENDING");
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(format!("{:<20}", truncate(name, 20)), Style::default()),
+            Span::styled(state_label(st), Style::default().fg(state_color(st))),
+        ]));
+    }
+
+    // Trigger context
+    let trigger_json = pretty_json(&run.trigger_context);
+    if trigger_json != "{}" {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Trigger Payload",
+            Style::default().fg(Color::DarkGray),
+        )));
+        for l in trigger_json.lines() {
+            lines.push(Line::from(format!("  {l}")));
+        }
+    }
+
+    // Agents
+    if !run.agents.is_empty() {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Agents",
+            Style::default().fg(Color::DarkGray),
+        )));
+        for agent in &run.agents {
+            let sandbox = agent
+                .sandbox
+                .as_ref()
+                .map(|s| format!(" sandbox={}({})", s.name, s.mode))
+                .unwrap_or_default();
+            lines.push(Line::from(format!(
+                "  {} {} model={}{}",
+                short_id(&agent.id),
+                agent.name,
+                agent.model,
+                sandbox
+            )));
+        }
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .scroll((state.workflows.detail_scroll, 0))
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn draw_step_detail_view(frame: &mut Frame, state: &ScreenState, area: Rect) {
     let Some(run) = &state.workflows.selected_run else {
         frame.render_widget(
-            Paragraph::new("Loading run...")
-                .block(Block::default().borders(Borders::ALL).title(" Run ")),
+            Paragraph::new("No run selected").block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow))
+                    .title(" Steps "),
+            ),
             area,
         );
         return;
     };
 
     let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(34), Constraint::Min(1)])
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
         .split(area);
-    draw_step_list(frame, run, chunks[0], step_cursor);
-    draw_run_panel(frame, run, chunks[1], step_cursor, panel, expanded);
+
+    draw_step_list(frame, state, run, chunks[0]);
+    draw_step_body(
+        frame,
+        run,
+        state.workflows.step_cursor,
+        state.workflows.expanded,
+        chunks[1],
+    );
 }
 
-fn draw_step_list(frame: &mut Frame, run: &WorkflowRunDetail, area: Rect, cursor: usize) {
+fn draw_step_list(frame: &mut Frame, state: &ScreenState, run: &WorkflowRunDetail, area: Rect) {
     let mut items = Vec::new();
     let count = run.steps_snapshot.len().max(run.step_results.len());
     for idx in 0..count {
         let step = run.steps_snapshot.get(idx);
         let result = result_for_step(run, idx, step);
-        let selected = idx == cursor;
+        let selected = idx == state.workflows.step_cursor;
         let marker = if selected { ">" } else { " " };
         let name = step
             .map(|s| s.name.as_str())
             .or_else(|| result.map(|r| r.name.as_str()))
             .unwrap_or("step");
-        let state = result.map(|r| r.state.as_str()).unwrap_or("PENDING");
+        let st = result.map(|r| r.state.as_str()).unwrap_or("PENDING");
         items.push(ListItem::new(Line::from(vec![
             Span::styled(marker, Style::default().fg(Color::Yellow)),
             Span::raw(" "),
             Span::styled(truncate(name, 18), Style::default()),
             Span::raw(" "),
-            Span::styled(state_label(state), Style::default().fg(state_color(state))),
+            Span::styled(state_label(st), Style::default().fg(state_color(st))),
         ])));
     }
     frame.render_widget(
-        List::new(items).block(Block::default().borders(Borders::ALL).title(format!(
-            " Run {} - {} ",
-            short_id(&run.id),
-            state_label(&run.state)
-        ))),
+        List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(format!(
+                    " Run {} - {} ",
+                    short_id(&run.id),
+                    state_label(&run.state)
+                )),
+        ),
         area,
     );
 }
 
-fn draw_run_panel(
+fn draw_step_body(
     frame: &mut Frame,
     run: &WorkflowRunDetail,
-    area: Rect,
-    step_cursor: usize,
-    panel: RunDetailPanel,
+    cursor: usize,
     expanded: bool,
+    area: Rect,
 ) {
-    let (title, body) = match panel {
-        RunDetailPanel::Step => (" Step ", selected_step_body(run, step_cursor, expanded)),
-        RunDetailPanel::Trigger => (" Trigger Payload ", pretty_json(&run.trigger_context)),
-        RunDetailPanel::Agents => (" Related Agents ", agents_body(run)),
-        RunDetailPanel::Sandboxes => (" Related Sandboxes ", sandboxes_body(run)),
-    };
+    let body = selected_step_body(run, cursor, expanded);
     frame.render_widget(
         Paragraph::new(body)
-            .block(Block::default().borders(Borders::ALL).title(title))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow))
+                    .title(" Step Detail "),
+            )
             .wrap(Wrap { trim: false }),
         area,
     );
@@ -377,54 +477,6 @@ fn selected_step_body(run: &WorkflowRunDetail, cursor: usize, expanded: bool) ->
     lines.join("\n")
 }
 
-fn agents_body(run: &WorkflowRunDetail) -> String {
-    if run.agents.is_empty() {
-        return "No related agents reported for this run".to_string();
-    }
-    run.agents
-        .iter()
-        .map(|agent| {
-            let sandbox = agent
-                .sandbox
-                .as_ref()
-                .map(|s| format!(" sandbox={}({})", s.name, s.mode))
-                .unwrap_or_default();
-            format!(
-                "{}  {}  {}  model={}{}",
-                short_id(&agent.id),
-                agent.name,
-                agent.role,
-                agent.model,
-                sandbox
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn sandboxes_body(run: &WorkflowRunDetail) -> String {
-    let mut sandboxes = BTreeSet::new();
-    for step in &run.steps_snapshot {
-        if let Some(name) = &step.sandbox {
-            let mode = step.sandbox_mode.as_deref().unwrap_or("default");
-            sandboxes.insert(format!("{name}  mode={mode}"));
-        }
-    }
-    for agent in &run.agents {
-        if let Some(sandbox) = &agent.sandbox {
-            sandboxes.insert(format!(
-                "{}  mode={}  agent={}",
-                sandbox.name, sandbox.mode, agent.name
-            ));
-        }
-    }
-    if sandboxes.is_empty() {
-        "No related sandboxes reported for this run".to_string()
-    } else {
-        sandboxes.into_iter().collect::<Vec<_>>().join("\n")
-    }
-}
-
 fn result_for_step<'a>(
     run: &'a WorkflowRunDetail,
     idx: usize,
@@ -432,27 +484,6 @@ fn result_for_step<'a>(
 ) -> Option<&'a WorkflowStepResultItem> {
     step.and_then(|s| run.step_results.iter().find(|r| r.name == s.name))
         .or_else(|| run.step_results.get(idx))
-}
-
-fn run_summary(run: &super::super::state::WorkflowRunItem) -> String {
-    if let Some(failed) = run
-        .step_results
-        .iter()
-        .find(|r| matches!(r.state.as_str(), "FAILED" | "ERRORED"))
-    {
-        if let Some(error) = &failed.error {
-            return format!("step: {}  {}", failed.name, truncate(error, 48));
-        }
-        if let Some(output) = &failed.output {
-            return format!(
-                "step: {}  {}",
-                failed.name,
-                truncate(&pretty_json(output), 48)
-            );
-        }
-        return format!("step: {}", failed.name);
-    }
-    format!("{} steps", run.step_results.len())
 }
 
 fn trigger_label(kind: &str, provider: Option<&str>) -> String {

@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::state::{Focus, Mode, RunDetailPanel, ScreenState, WorkflowView};
+use super::state::{Focus, MillerFocus, Mode, ScreenState};
 
 /// Async side-effects returned from key handlers for the event loop to execute.
 pub enum Action {
@@ -19,15 +19,6 @@ pub enum Action {
     ToggleThreads,
     OpenWorkflows,
     RefreshWorkflows,
-    FetchWorkflowDefinition {
-        definition_id: String,
-    },
-    FetchWorkflowRuns {
-        definition_id: String,
-    },
-    FetchWorkflowRun {
-        run_id: String,
-    },
     TriggerWorkflow {
         definition_id: String,
         payload: serde_json::Value,
@@ -99,15 +90,14 @@ pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
 
 fn handle_workflows_key(state: &mut ScreenState, key: KeyEvent) -> Action {
     state.status_message = None;
-    match &state.workflows.view {
-        WorkflowView::Catalog => handle_workflow_catalog_key(state, key),
-        WorkflowView::Definition { .. } => handle_workflow_definition_key(state, key),
-        WorkflowView::Runs { .. } => handle_workflow_runs_key(state, key),
-        WorkflowView::RunDetail { .. } => handle_workflow_run_detail_key(state, key),
+    match state.workflows.focus {
+        MillerFocus::Definitions => handle_workflow_definitions_key(state, key),
+        MillerFocus::Runs => handle_workflow_runs_key(state, key),
+        MillerFocus::StepDetail => handle_workflow_step_detail_key(state, key),
     }
 }
 
-fn handle_workflow_catalog_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+fn handle_workflow_definitions_key(state: &mut ScreenState, key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Char('j') | KeyCode::Down => {
             state.workflow_cursor_down();
@@ -117,47 +107,14 @@ fn handle_workflow_catalog_key(state: &mut ScreenState, key: KeyEvent) -> Action
             state.workflow_cursor_up();
             Action::None
         }
-        KeyCode::Enter => match state.selected_workflow_definition_id() {
-            Some(definition_id) => {
-                state.open_workflow_definition(definition_id.clone());
-                Action::FetchWorkflowDefinition { definition_id }
-            }
-            None => Action::None,
-        },
+        KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+            state.workflow_focus_right();
+            Action::None
+        }
         KeyCode::Char('T') => enter_trigger_for_selected_workflow(state),
         KeyCode::Char('r') => Action::RefreshWorkflows,
         KeyCode::Esc => {
-            state.workflow_back();
-            Action::None
-        }
-        _ => Action::None,
-    }
-}
-
-fn handle_workflow_definition_key(state: &mut ScreenState, key: KeyEvent) -> Action {
-    match key.code {
-        KeyCode::Char('j') | KeyCode::Down => {
-            state.workflow_scroll_yaml_down();
-            Action::None
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            state.workflow_scroll_yaml_up();
-            Action::None
-        }
-        KeyCode::Char('T') => enter_trigger_for_selected_workflow(state),
-        KeyCode::Char('R') => match state.selected_workflow_definition_id() {
-            Some(definition_id) => {
-                state.open_workflow_runs(definition_id.clone());
-                Action::FetchWorkflowRuns { definition_id }
-            }
-            None => Action::None,
-        },
-        KeyCode::Char('r') => match state.selected_workflow_definition_id() {
-            Some(definition_id) => Action::FetchWorkflowDefinition { definition_id },
-            None => Action::None,
-        },
-        KeyCode::Esc => {
-            state.workflow_back();
+            state.focus = Focus::Chat;
             Action::None
         }
         _ => Action::None,
@@ -174,26 +131,24 @@ fn handle_workflow_runs_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             state.workflow_runs_cursor_up();
             Action::None
         }
-        KeyCode::Enter => match state.selected_workflow_run_id() {
-            Some(run_id) => {
-                state.open_workflow_run_detail(run_id.clone());
-                Action::FetchWorkflowRun { run_id }
-            }
-            None => Action::None,
-        },
-        KeyCode::Char('r') => match state.selected_workflow_definition_id() {
-            Some(definition_id) => Action::FetchWorkflowRuns { definition_id },
-            None => Action::None,
-        },
+        KeyCode::Left | KeyCode::Char('h') => {
+            state.workflow_focus_left();
+            Action::None
+        }
+        KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+            state.workflow_focus_right();
+            Action::None
+        }
+        KeyCode::Char('r') => Action::RefreshWorkflows,
         KeyCode::Esc => {
-            state.workflow_back();
+            state.focus = Focus::Chat;
             Action::None
         }
         _ => Action::None,
     }
 }
 
-fn handle_workflow_run_detail_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+fn handle_workflow_step_detail_key(state: &mut ScreenState, key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Char('j') | KeyCode::Down => {
             state.workflow_step_cursor_down();
@@ -203,32 +158,17 @@ fn handle_workflow_run_detail_key(state: &mut ScreenState, key: KeyEvent) -> Act
             state.workflow_step_cursor_up();
             Action::None
         }
+        KeyCode::Left | KeyCode::Char('h') => {
+            state.workflow_focus_left();
+            Action::None
+        }
         KeyCode::Enter => {
             state.workflow_toggle_expanded();
             Action::None
         }
-        KeyCode::Char('p') => {
-            state.workflow_set_panel(RunDetailPanel::Trigger);
-            Action::None
-        }
-        KeyCode::Char('a') => {
-            state.workflow_set_panel(RunDetailPanel::Agents);
-            Action::None
-        }
-        KeyCode::Char('s') => {
-            state.workflow_set_panel(RunDetailPanel::Sandboxes);
-            Action::None
-        }
-        KeyCode::Char('d') => {
-            state.workflow_set_panel(RunDetailPanel::Step);
-            Action::None
-        }
-        KeyCode::Char('r') => match state.selected_workflow_run_id() {
-            Some(run_id) => Action::FetchWorkflowRun { run_id },
-            None => Action::None,
-        },
+        KeyCode::Char('r') => Action::RefreshWorkflows,
         KeyCode::Esc => {
-            state.workflow_back();
+            state.focus = Focus::Chat;
             Action::None
         }
         _ => Action::None,
@@ -559,7 +499,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     use super::*;
-    use crate::tui::state::{AgentItem, ProjectItem};
+    use crate::tui::state::{AgentItem, MillerFocus, ProjectItem};
 
     fn project() -> ProjectItem {
         ProjectItem {
@@ -600,7 +540,7 @@ mod tests {
     fn ctrl_w_is_noop_when_already_focused_on_workflows() {
         let mut state = state();
         state.enter_workflows();
-        state.open_workflow_run_detail("run-1".into());
+        state.workflows.focus = MillerFocus::Runs;
 
         let action = handle_key(
             &mut state,
@@ -608,10 +548,7 @@ mod tests {
         );
 
         assert!(matches!(action, Action::None));
-        assert!(matches!(
-            state.workflows.view,
-            crate::tui::state::WorkflowView::RunDetail { .. }
-        ));
+        assert_eq!(state.workflows.focus, MillerFocus::Runs);
     }
 
     #[test]
@@ -666,5 +603,53 @@ mod tests {
             state.mode,
             Mode::TriggerWorkflow { error: Some(_), .. }
         ));
+    }
+
+    #[test]
+    fn arrow_right_moves_focus_from_definitions_to_runs() {
+        let mut state = state();
+        state.enter_workflows();
+        state.workflows.runs = vec![crate::tui::state::WorkflowRunItem {
+            id: "r-1".into(),
+            state: "SUCCEEDED".into(),
+            started_at: "now".into(),
+            completed_at: None,
+            step_results: vec![],
+        }];
+
+        let action = handle_key(&mut state, key(KeyCode::Right));
+
+        assert!(matches!(action, Action::None));
+        assert_eq!(state.workflows.focus, MillerFocus::Runs);
+    }
+
+    #[test]
+    fn arrow_left_moves_focus_from_runs_to_definitions() {
+        let mut state = state();
+        state.enter_workflows();
+        state.workflows.focus = MillerFocus::Runs;
+
+        let action = handle_key(&mut state, key(KeyCode::Left));
+
+        assert!(matches!(action, Action::None));
+        assert_eq!(state.workflows.focus, MillerFocus::Definitions);
+    }
+
+    #[test]
+    fn esc_exits_workflows_from_any_focus() {
+        for focus in [
+            MillerFocus::Definitions,
+            MillerFocus::Runs,
+            MillerFocus::StepDetail,
+        ] {
+            let mut state = state();
+            state.enter_workflows();
+            state.workflows.focus = focus;
+
+            let action = handle_key(&mut state, key(KeyCode::Esc));
+
+            assert!(matches!(action, Action::None));
+            assert_eq!(state.focus, Focus::Chat);
+        }
     }
 }

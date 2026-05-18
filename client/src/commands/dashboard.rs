@@ -1560,6 +1560,8 @@ async fn run_event_loop(
     let mut event_stream = EventStream::new();
     let mut persisted_project_id: Option<String> = state.selected_project().map(|p| p.id.clone());
     let mut last_workflow_poll = Instant::now();
+    let mut fetched_def_id: Option<String> = None;
+    let mut fetched_run_id: Option<String> = None;
     loop {
         terminal.draw(|frame| ui::draw(frame, state))?;
 
@@ -1645,6 +1647,8 @@ async fn run_event_loop(
                             handlers::Action::OpenWorkflows => {
                                 state.enter_workflows();
                                 state.workflows.loading = true;
+                                fetched_def_id = None;
+                                fetched_run_id = None;
                                 if let Some(project_id) = state.selected_project().map(|p| p.id.clone()) {
                                     match fetch_workflow_definitions(client, &project_id).await {
                                         Ok(definitions) => state.replace_workflow_definitions(definitions),
@@ -1656,32 +1660,13 @@ async fn run_event_loop(
                             }
                             handlers::Action::RefreshWorkflows => {
                                 state.workflows.loading = true;
+                                fetched_def_id = None;
+                                fetched_run_id = None;
                                 if let Some(project_id) = state.selected_project().map(|p| p.id.clone()) {
                                     match fetch_workflow_definitions(client, &project_id).await {
                                         Ok(definitions) => state.replace_workflow_definitions(definitions),
                                         Err(e) => state.set_workflow_error(format!("Failed to refresh workflows: {e}")),
                                     }
-                                }
-                            }
-                            handlers::Action::FetchWorkflowDefinition { definition_id } => {
-                                state.workflows.loading = true;
-                                match fetch_workflow_definition(client, &definition_id).await {
-                                    Ok(definition) => state.replace_workflow_definition_detail(definition),
-                                    Err(e) => state.set_workflow_error(format!("Failed to load workflow: {e}")),
-                                }
-                            }
-                            handlers::Action::FetchWorkflowRuns { definition_id } => {
-                                state.workflows.loading = true;
-                                match fetch_workflow_runs(client, &definition_id).await {
-                                    Ok(runs) => state.replace_workflow_runs(runs),
-                                    Err(e) => state.set_workflow_error(format!("Failed to load runs: {e}")),
-                                }
-                            }
-                            handlers::Action::FetchWorkflowRun { run_id } => {
-                                state.workflows.loading = true;
-                                match fetch_workflow_run(client, &run_id).await {
-                                    Ok(run) => state.replace_workflow_run_detail(run),
-                                    Err(e) => state.set_workflow_error(format!("Failed to load run: {e}")),
                                 }
                             }
                             handlers::Action::TriggerWorkflow { definition_id, payload } => {
@@ -1694,11 +1679,19 @@ async fn run_event_loop(
                                         if let Some(run) = payload.run {
                                             let run_id = run.id.clone();
                                             state.status_message = Some(format!("Workflow run {run_id} created"));
-                                            state.open_workflow_run_detail(run_id.clone());
+                                            state.workflows.run_cursor = 0;
+                                            state.workflows.focus = crate::tui::state::MillerFocus::Runs;
                                             match fetch_workflow_run(client, &run_id).await {
                                                 Ok(detail) => state.replace_workflow_run_detail(detail),
                                                 Err(_) => state.replace_workflow_run_detail(workflow_run_node_to_detail(run)),
                                             }
+                                            // Re-fetch runs to include the new run
+                                            if let Some(def_id) = state.selected_workflow_definition_id() {
+                                                if let Ok(runs) = fetch_workflow_runs(client, &def_id).await {
+                                                    state.replace_workflow_runs(runs);
+                                                }
+                                            }
+                                            fetched_run_id = None;
                                         } else {
                                             state.status_message = Some("Workflow trigger returned no run".to_string());
                                         }
@@ -1725,6 +1718,47 @@ async fn run_event_loop(
                 let _ = Config::save_last_project(id);
             }
             persisted_project_id = current_project_id;
+        }
+
+        // Reactive auto-fetch: when the selected workflow or run changes, load details.
+        if state.focus == Focus::Workflows {
+            let cur_def = state.selected_workflow_definition_id();
+            if cur_def != fetched_def_id {
+                fetched_def_id = cur_def.clone();
+                if let Some(def_id) = &cur_def {
+                    let (def_result, runs_result) = tokio::join!(
+                        fetch_workflow_definition(client, def_id),
+                        fetch_workflow_runs(client, def_id),
+                    );
+                    match def_result {
+                        Ok(detail) => state.replace_workflow_definition_detail(detail),
+                        Err(e) => {
+                            state.set_workflow_error(format!("Failed to load definition: {e}"))
+                        }
+                    }
+                    match runs_result {
+                        Ok(runs) => state.replace_workflow_runs(runs),
+                        Err(e) => state.set_workflow_error(format!("Failed to load runs: {e}")),
+                    }
+                } else {
+                    state.workflows.selected_definition = None;
+                    state.workflows.runs.clear();
+                }
+                fetched_run_id = None;
+            }
+
+            let cur_run = state.selected_workflow_run_id();
+            if cur_run != fetched_run_id {
+                fetched_run_id = cur_run.clone();
+                if let Some(run_id) = &cur_run {
+                    match fetch_workflow_run(client, run_id).await {
+                        Ok(run) => state.replace_workflow_run_detail(run),
+                        Err(e) => state.set_workflow_error(format!("Failed to load run: {e}")),
+                    }
+                } else {
+                    state.workflows.selected_run = None;
+                }
+            }
         }
 
         if last_workflow_poll.elapsed() >= Duration::from_secs(1) {

@@ -483,40 +483,32 @@ impl ScreenState {
 
     pub fn replace_workflow_definitions(&mut self, definitions: Vec<WorkflowDefinitionItem>) {
         self.workflows.definitions = definitions;
-        if self.workflows.cursor >= self.workflows.definitions.len() {
-            self.workflows.cursor = self.workflows.definitions.len().saturating_sub(1);
+        if self.workflows.def_cursor >= self.workflows.definitions.len() {
+            self.workflows.def_cursor = self.workflows.definitions.len().saturating_sub(1);
         }
         self.workflows.loading = false;
         self.workflows.error = None;
     }
 
     pub fn replace_workflow_definition_detail(&mut self, detail: WorkflowDefinitionDetail) {
-        let id = detail.id.clone();
         self.workflows.selected_definition = Some(detail);
-        if !matches!(self.workflows.view, WorkflowView::Definition { .. }) {
-            self.open_workflow_definition(id);
-        }
         self.workflows.loading = false;
         self.workflows.error = None;
     }
 
     pub fn replace_workflow_runs(&mut self, runs: Vec<WorkflowRunItem>) {
         self.workflows.runs = runs;
-        if let WorkflowView::Runs { cursor, .. } = &mut self.workflows.view {
-            if *cursor >= self.workflows.runs.len() {
-                *cursor = self.workflows.runs.len().saturating_sub(1);
-            }
+        if self.workflows.run_cursor >= self.workflows.runs.len() {
+            self.workflows.run_cursor = self.workflows.runs.len().saturating_sub(1);
         }
         self.workflows.loading = false;
         self.workflows.error = None;
     }
 
     pub fn replace_workflow_run_detail(&mut self, run: WorkflowRunDetail) {
-        let id = run.id.clone();
         self.workflows.selected_run = Some(run);
-        if !matches!(self.workflows.view, WorkflowView::RunDetail { .. }) {
-            self.open_workflow_run_detail(id);
-        }
+        self.workflows.step_cursor = 0;
+        self.workflows.expanded = false;
         self.workflows.loading = false;
         self.workflows.error = None;
     }
@@ -529,25 +521,16 @@ impl ScreenState {
     pub fn enter_workflows(&mut self) {
         self.focus = Focus::Workflows;
         self.thread_view = None;
-        self.workflows.view = WorkflowView::Catalog;
+        self.workflows.focus = MillerFocus::Definitions;
         self.workflows.error = None;
     }
 
     pub fn selected_workflow_definition(&self) -> Option<&WorkflowDefinitionItem> {
-        self.workflows.definitions.get(self.workflows.cursor)
+        self.workflows.definitions.get(self.workflows.def_cursor)
     }
 
     pub fn selected_workflow_definition_id(&self) -> Option<String> {
-        match &self.workflows.view {
-            WorkflowView::Catalog => self.selected_workflow_definition().map(|d| d.id.clone()),
-            WorkflowView::Definition { definition_id, .. }
-            | WorkflowView::Runs { definition_id, .. } => Some(definition_id.clone()),
-            WorkflowView::RunDetail { .. } => self
-                .workflows
-                .selected_run
-                .as_ref()
-                .map(|run| run.definition_id.clone()),
-        }
+        self.selected_workflow_definition().map(|d| d.id.clone())
     }
 
     pub fn selected_workflow_name(&self) -> String {
@@ -561,150 +544,114 @@ impl ScreenState {
 
     pub fn workflow_cursor_down(&mut self) {
         if !self.workflows.definitions.is_empty()
-            && self.workflows.cursor < self.workflows.definitions.len() - 1
+            && self.workflows.def_cursor < self.workflows.definitions.len() - 1
         {
-            self.workflows.cursor += 1;
+            self.workflows.def_cursor += 1;
+            self.workflows.run_cursor = 0;
+            self.workflows.detail_scroll = 0;
         }
     }
 
     pub fn workflow_cursor_up(&mut self) {
-        self.workflows.cursor = self.workflows.cursor.saturating_sub(1);
+        if self.workflows.def_cursor > 0 {
+            self.workflows.def_cursor = self.workflows.def_cursor.saturating_sub(1);
+            self.workflows.run_cursor = 0;
+            self.workflows.detail_scroll = 0;
+        }
     }
 
     pub fn workflow_runs_cursor_down(&mut self) {
-        if let WorkflowView::Runs { cursor, .. } = &mut self.workflows.view {
-            if !self.workflows.runs.is_empty() && *cursor < self.workflows.runs.len() - 1 {
-                *cursor += 1;
-            }
+        if !self.workflows.runs.is_empty()
+            && self.workflows.run_cursor < self.workflows.runs.len() - 1
+        {
+            self.workflows.run_cursor += 1;
+            self.workflows.detail_scroll = 0;
         }
     }
 
     pub fn workflow_runs_cursor_up(&mut self) {
-        if let WorkflowView::Runs { cursor, .. } = &mut self.workflows.view {
-            *cursor = cursor.saturating_sub(1);
+        if self.workflows.run_cursor > 0 {
+            self.workflows.run_cursor = self.workflows.run_cursor.saturating_sub(1);
+            self.workflows.detail_scroll = 0;
         }
     }
 
     pub fn selected_workflow_run_id(&self) -> Option<String> {
-        match &self.workflows.view {
-            WorkflowView::Runs { cursor, .. } => {
-                self.workflows.runs.get(*cursor).map(|r| r.id.clone())
-            }
-            WorkflowView::RunDetail { run_id, .. } => Some(run_id.clone()),
-            _ => None,
-        }
+        self.workflows
+            .runs
+            .get(self.workflows.run_cursor)
+            .map(|r| r.id.clone())
     }
 
     pub fn workflow_step_cursor_down(&mut self) {
-        if let WorkflowView::RunDetail { step_cursor, .. } = &mut self.workflows.view {
-            let len = self
-                .workflows
-                .selected_run
-                .as_ref()
-                .map(|r| r.steps_snapshot.len().max(r.step_results.len()))
-                .unwrap_or(0);
-            if len > 0 && *step_cursor < len - 1 {
-                *step_cursor += 1;
-            }
+        let len = self
+            .workflows
+            .selected_run
+            .as_ref()
+            .map(|r| r.steps_snapshot.len().max(r.step_results.len()))
+            .unwrap_or(0);
+        if len > 0 && self.workflows.step_cursor < len - 1 {
+            self.workflows.step_cursor += 1;
+            self.workflows.expanded = false;
         }
     }
 
     pub fn workflow_step_cursor_up(&mut self) {
-        if let WorkflowView::RunDetail { step_cursor, .. } = &mut self.workflows.view {
-            *step_cursor = step_cursor.saturating_sub(1);
+        if self.workflows.step_cursor > 0 {
+            self.workflows.step_cursor = self.workflows.step_cursor.saturating_sub(1);
+            self.workflows.expanded = false;
         }
     }
 
-    pub fn workflow_scroll_yaml_down(&mut self) {
-        if let WorkflowView::Definition { yaml_scroll, .. } = &mut self.workflows.view {
-            *yaml_scroll = yaml_scroll.saturating_add(1);
-        }
+    pub fn workflow_detail_scroll_down(&mut self) {
+        self.workflows.detail_scroll = self.workflows.detail_scroll.saturating_add(1);
     }
 
-    pub fn workflow_scroll_yaml_up(&mut self) {
-        if let WorkflowView::Definition { yaml_scroll, .. } = &mut self.workflows.view {
-            *yaml_scroll = yaml_scroll.saturating_sub(1);
-        }
-    }
-
-    pub fn workflow_set_panel(&mut self, next: RunDetailPanel) {
-        if let WorkflowView::RunDetail { panel, .. } = &mut self.workflows.view {
-            *panel = next;
-        }
+    pub fn workflow_detail_scroll_up(&mut self) {
+        self.workflows.detail_scroll = self.workflows.detail_scroll.saturating_sub(1);
     }
 
     pub fn workflow_toggle_expanded(&mut self) {
-        if let WorkflowView::RunDetail { expanded, .. } = &mut self.workflows.view {
-            *expanded = !*expanded;
-        }
+        self.workflows.expanded = !self.workflows.expanded;
     }
 
-    pub fn open_workflow_definition(&mut self, definition_id: String) {
-        self.workflows.view = WorkflowView::Definition {
-            definition_id,
-            yaml_scroll: 0,
-        };
-        self.workflows.error = None;
-    }
-
-    pub fn open_workflow_runs(&mut self, definition_id: String) {
-        self.workflows.view = WorkflowView::Runs {
-            definition_id,
-            cursor: 0,
-        };
-        self.workflows.error = None;
-    }
-
-    pub fn open_workflow_run_detail(&mut self, run_id: String) {
-        self.workflows.view = WorkflowView::RunDetail {
-            run_id,
-            step_cursor: 0,
-            panel: RunDetailPanel::Step,
-            expanded: false,
-        };
-        self.workflows.error = None;
-    }
-
-    pub fn workflow_back(&mut self) {
-        self.workflows.error = None;
-        self.workflows.view = match &self.workflows.view {
-            WorkflowView::Catalog => {
-                self.focus = Focus::Chat;
-                WorkflowView::Catalog
-            }
-            WorkflowView::Definition { .. } => WorkflowView::Catalog,
-            WorkflowView::Runs { definition_id, .. } => WorkflowView::Definition {
-                definition_id: definition_id.clone(),
-                yaml_scroll: 0,
-            },
-            WorkflowView::RunDetail { run_id, .. } => match self.workflows.selected_run.as_ref() {
-                Some(run) => {
-                    let cursor = self
-                        .workflows
-                        .runs
-                        .iter()
-                        .position(|r| r.id == *run_id)
-                        .unwrap_or(0);
-                    WorkflowView::Runs {
-                        definition_id: run.definition_id.clone(),
-                        cursor,
-                    }
+    pub fn workflow_focus_right(&mut self) {
+        self.workflows.focus = match self.workflows.focus {
+            MillerFocus::Definitions => {
+                if self.workflows.runs.is_empty() {
+                    return;
                 }
-                None => WorkflowView::Catalog,
-            },
+                MillerFocus::Runs
+            }
+            MillerFocus::Runs => {
+                if self.workflows.selected_run.is_none() {
+                    return;
+                }
+                MillerFocus::StepDetail
+            }
+            MillerFocus::StepDetail => return,
         };
+        self.workflows.detail_scroll = 0;
+        self.workflows.error = None;
+    }
+
+    pub fn workflow_focus_left(&mut self) {
+        self.workflows.focus = match self.workflows.focus {
+            MillerFocus::Definitions => return,
+            MillerFocus::Runs => MillerFocus::Definitions,
+            MillerFocus::StepDetail => MillerFocus::Runs,
+        };
+        self.workflows.detail_scroll = 0;
+        self.workflows.error = None;
     }
 
     pub fn workflow_poll_run_id(&self) -> Option<String> {
         if self.focus != Focus::Workflows {
             return None;
         }
-        let WorkflowView::RunDetail { run_id, .. } = &self.workflows.view else {
-            return None;
-        };
         let run = self.workflows.selected_run.as_ref()?;
-        if run.id == *run_id && !run.is_terminal() {
-            Some(run_id.clone())
+        if !run.is_terminal() {
+            Some(run.id.clone())
         } else {
             None
         }
@@ -1188,43 +1135,70 @@ mod tests {
     }
 
     #[test]
-    fn enter_workflows_sets_catalog_focus() {
+    fn enter_workflows_sets_definitions_focus() {
         let mut state = make_state(vec![proj("a", "Alpha")], None);
 
         state.enter_workflows();
 
         assert_eq!(state.focus, Focus::Workflows);
-        assert!(matches!(state.workflows.view, WorkflowView::Catalog));
+        assert_eq!(state.workflows.focus, MillerFocus::Definitions);
     }
 
     #[test]
-    fn workflow_navigation_preserves_definition_context() {
+    fn workflow_focus_right_left_navigation() {
         let mut state = make_state(vec![proj("a", "Alpha")], None);
+        state.enter_workflows();
 
-        state.open_workflow_definition("wf-1".into());
-        assert!(matches!(
-            state.workflows.view,
-            WorkflowView::Definition { ref definition_id, .. } if definition_id == "wf-1"
-        ));
+        // Can't move right with empty runs
+        state.workflow_focus_right();
+        assert_eq!(state.workflows.focus, MillerFocus::Definitions);
 
-        state.open_workflow_runs("wf-1".into());
-        assert!(matches!(
-            state.workflows.view,
-            WorkflowView::Runs { ref definition_id, cursor } if definition_id == "wf-1" && cursor == 0
-        ));
+        // Add a run so we can move right
+        state.workflows.runs = vec![WorkflowRunItem {
+            id: "run-1".into(),
+            state: "SUCCEEDED".into(),
+            started_at: "now".into(),
+            completed_at: None,
+            step_results: vec![],
+        }];
+        state.replace_workflow_run_detail(WorkflowRunDetail {
+            id: "run-1".into(),
+            definition_id: "wf-1".into(),
+            project_id: "p-1".into(),
+            state: "SUCCEEDED".into(),
+            started_at: "now".into(),
+            completed_at: None,
+            trigger_context: serde_json::json!({}),
+            steps_snapshot: vec![],
+            step_results: vec![],
+            agents: vec![],
+        });
 
-        state.open_workflow_run_detail("run-1".into());
-        assert!(matches!(
-            state.workflows.view,
-            WorkflowView::RunDetail { ref run_id, step_cursor, .. } if run_id == "run-1" && step_cursor == 0
-        ));
+        state.workflow_focus_right();
+        assert_eq!(state.workflows.focus, MillerFocus::Runs);
+
+        state.workflow_focus_right();
+        assert_eq!(state.workflows.focus, MillerFocus::StepDetail);
+
+        // Can't go further right
+        state.workflow_focus_right();
+        assert_eq!(state.workflows.focus, MillerFocus::StepDetail);
+
+        state.workflow_focus_left();
+        assert_eq!(state.workflows.focus, MillerFocus::Runs);
+
+        state.workflow_focus_left();
+        assert_eq!(state.workflows.focus, MillerFocus::Definitions);
+
+        // Can't go further left
+        state.workflow_focus_left();
+        assert_eq!(state.workflows.focus, MillerFocus::Definitions);
     }
 
     #[test]
     fn workflow_polling_only_for_non_terminal_selected_run() {
         let mut state = make_state(vec![proj("a", "Alpha")], None);
         state.enter_workflows();
-        state.open_workflow_run_detail("run-1".into());
         state.replace_workflow_run_detail(WorkflowRunDetail {
             id: "run-1".into(),
             definition_id: "wf-1".into(),
@@ -1245,5 +1219,34 @@ mod tests {
         state.focus = Focus::Workflows;
         state.workflows.selected_run.as_mut().unwrap().state = "SUCCEEDED".into();
         assert_eq!(state.workflow_poll_run_id(), None);
+    }
+
+    #[test]
+    fn workflow_def_cursor_resets_run_cursor() {
+        let mut state = make_state(vec![proj("a", "Alpha")], None);
+        state.enter_workflows();
+        state.workflows.definitions = vec![
+            WorkflowDefinitionItem {
+                id: "wf-1".into(),
+                name: "first".into(),
+                description: None,
+                trigger: WorkflowTriggerInfo::default(),
+                steps: vec![],
+                recent_runs: vec![],
+            },
+            WorkflowDefinitionItem {
+                id: "wf-2".into(),
+                name: "second".into(),
+                description: None,
+                trigger: WorkflowTriggerInfo::default(),
+                steps: vec![],
+                recent_runs: vec![],
+            },
+        ];
+        state.workflows.run_cursor = 3;
+
+        state.workflow_cursor_down();
+        assert_eq!(state.workflows.def_cursor, 1);
+        assert_eq!(state.workflows.run_cursor, 0);
     }
 }
