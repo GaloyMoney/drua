@@ -38,6 +38,12 @@ pub use entity::*;
 pub use error::*;
 pub use run::{StepResult, WorkflowRun, WorkflowRunRepo, WorkflowRunState, WorkflowStepState};
 
+pub struct ProviderFanOutResult {
+    pub triggered: usize,
+    pub filtered: usize,
+    pub errored: usize,
+}
+
 use cron_job::{cron_queue_id, TriggerCronConfig, TriggerCronJobInitializer};
 use job::{ExecuteRunConfig, ExecuteRunJobInitializer};
 use repo::WorkflowDefinitionRepo;
@@ -794,7 +800,7 @@ impl Workflows {
     }
 
     #[instrument(name = "core.workflow.list_webhook_definitions_for_provider", skip_all)]
-    pub async fn list_webhook_definitions_for_provider(
+    async fn list_webhook_definitions_for_provider(
         &self,
         provider: &str,
     ) -> Result<Vec<WorkflowDefinition>, WorkflowError> {
@@ -819,6 +825,46 @@ impl Workflows {
             }
         }
         Ok(all)
+    }
+
+    #[instrument(name = "core.workflow.trigger_all_for_provider", skip_all)]
+    pub async fn trigger_all_for_provider(
+        &self,
+        provider: &str,
+        trigger_context: serde_json::Value,
+    ) -> Result<ProviderFanOutResult, WorkflowError> {
+        let definitions = self.list_webhook_definitions_for_provider(provider).await?;
+
+        let mut triggered = 0usize;
+        let mut filtered = 0usize;
+        let mut errored = 0usize;
+
+        for defn in definitions {
+            let def_id = defn.id;
+            match self
+                .trigger_run_for_definition(defn, trigger_context.clone())
+                .await
+            {
+                Ok(Some(run)) => {
+                    tracing::info!(%def_id, run_id = %run.id, "provider fan-out: run triggered");
+                    triggered += 1;
+                }
+                Ok(None) => {
+                    tracing::debug!(%def_id, "provider fan-out: filtered by condition");
+                    filtered += 1;
+                }
+                Err(e) => {
+                    tracing::warn!(%def_id, error = %e, "provider fan-out: trigger errored");
+                    errored += 1;
+                }
+            }
+        }
+
+        Ok(ProviderFanOutResult {
+            triggered,
+            filtered,
+            errored,
+        })
     }
 
     async fn spawn_run(

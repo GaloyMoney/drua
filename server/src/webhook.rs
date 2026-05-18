@@ -112,7 +112,7 @@ pub async fn handle_webhook(
 }
 
 #[derive(Serialize)]
-struct ProviderFanOutResult {
+struct ProviderFanOutResponse {
     triggered: usize,
     filtered: usize,
     errored: usize,
@@ -163,55 +163,26 @@ pub async fn handle_provider_webhook(
         }
     };
 
-    let definitions = match state
+    match state
         .app
         .workflows()
-        .list_webhook_definitions_for_provider(&provider)
+        .trigger_all_for_provider(&provider, trigger_context)
         .await
     {
-        Ok(defs) => defs,
+        Ok(result) => (
+            StatusCode::OK,
+            Json(ProviderFanOutResponse {
+                triggered: result.triggered,
+                filtered: result.filtered,
+                errored: result.errored,
+            }),
+        )
+            .into_response(),
         Err(e) => {
-            tracing::error!(error = %e, "provider webhook: failed to load definitions");
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
-
-    let mut triggered = 0usize;
-    let mut filtered = 0usize;
-    let mut errored = 0usize;
-
-    for defn in definitions {
-        let def_id = defn.id;
-        match state
-            .app
-            .workflows()
-            .trigger_run_for_definition(defn, trigger_context.clone())
-            .await
-        {
-            Ok(Some(run)) => {
-                tracing::info!(%def_id, run_id = %run.id, "provider fan-out: run triggered");
-                triggered += 1;
-            }
-            Ok(None) => {
-                tracing::debug!(%def_id, "provider fan-out: filtered by condition");
-                filtered += 1;
-            }
-            Err(e) => {
-                tracing::warn!(%def_id, error = %e, "provider fan-out: trigger errored");
-                errored += 1;
-            }
+            tracing::error!(error = %e, "provider webhook: fan-out failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
-
-    (
-        StatusCode::OK,
-        Json(ProviderFanOutResult {
-            triggered,
-            filtered,
-            errored,
-        }),
-    )
-        .into_response()
 }
 
 fn header_name_for_provider(provider: Option<&str>) -> &'static str {
