@@ -28,17 +28,24 @@ pub fn draw_workflows(frame: &mut Frame, state: &ScreenState, area: Rect) {
 pub fn status_keys(state: &ScreenState) -> &'static str {
     match state.workflows.focus {
         MillerFocus::Definitions => {
-            " │ ↑/↓:nav  J/K:scroll  →:runs  T:trigger  r:refresh  Esc:chat "
+            " │ ↑/↓:nav  Enter:yaml  →:runs  ^R:trigger  r:refresh  Esc:chat "
         }
-        MillerFocus::Runs => " │ ↑/↓:nav  J/K:scroll  ←:defs  →:steps  r:refresh  Esc:chat ",
+        MillerFocus::YamlDetail => " │ ↑/↓:scroll  →:runs  ←/Esc:back ",
+        MillerFocus::Runs => {
+            " │ ↑/↓:nav  J/K:scroll  ←:defs  →:steps  ^R:trigger  r:refresh  Esc:chat "
+        }
         MillerFocus::StepDetail => {
-            " │ ↑/↓:step  ←:runs  Enter:expand  r:refresh  Esc:chat "
+            " │ ↑/↓:step  ←:runs  Enter:expand  ^R:trigger  r:refresh  Esc:chat "
         }
     }
 }
 
 fn col_border(state: &ScreenState, col: MillerFocus) -> Color {
-    if state.workflows.focus == col {
+    let focused = match state.workflows.focus {
+        MillerFocus::YamlDetail => col == MillerFocus::Definitions,
+        other => other == col,
+    };
+    if focused {
         Color::Yellow
     } else {
         Color::DarkGray
@@ -128,7 +135,9 @@ fn draw_col_runs(frame: &mut Frame, state: &ScreenState, area: Rect) {
 
 fn draw_col_detail(frame: &mut Frame, state: &ScreenState, area: Rect) {
     match state.workflows.focus {
-        MillerFocus::Definitions => draw_definition_detail(frame, state, area),
+        MillerFocus::Definitions | MillerFocus::YamlDetail => {
+            draw_definition_detail(frame, state, area)
+        }
         MillerFocus::Runs | MillerFocus::StepDetail => draw_run_split(frame, state, area),
     }
 }
@@ -140,9 +149,15 @@ fn draw_definition_detail(frame: &mut Frame, state: &ScreenState, area: Rect) {
         .as_ref()
         .map(|d| format!(" {} ", d.name))
         .unwrap_or_else(|| " Definition ".to_string());
+    let focused = state.workflows.focus == MillerFocus::YamlDetail;
+    let border_color = if focused {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
+        .border_style(Style::default().fg(border_color))
         .title(title);
 
     let yaml = state

@@ -6,6 +6,7 @@ use super::SandboxInfo;
 pub enum MillerFocus {
     #[default]
     Definitions,
+    YamlDetail,
     Runs,
     StepDetail,
 }

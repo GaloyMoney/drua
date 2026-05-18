@@ -53,6 +53,9 @@ pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
                     state.select_lead_and_focus_chat();
                     return Action::None;
                 }
+                KeyCode::Char('r') if state.focus == Focus::Workflows => {
+                    return enter_trigger_for_selected_workflow(state);
+                }
                 KeyCode::Char('r') => return Action::Refresh,
                 KeyCode::Char('h') => {
                     state.focus_left();
@@ -92,6 +95,7 @@ fn handle_workflows_key(state: &mut ScreenState, key: KeyEvent) -> Action {
     state.status_message = None;
     match state.workflows.focus {
         MillerFocus::Definitions => handle_workflow_definitions_key(state, key),
+        MillerFocus::YamlDetail => handle_workflow_yaml_key(state, key),
         MillerFocus::Runs => handle_workflow_runs_key(state, key),
         MillerFocus::StepDetail => handle_workflow_step_detail_key(state, key),
     }
@@ -107,22 +111,39 @@ fn handle_workflow_definitions_key(state: &mut ScreenState, key: KeyEvent) -> Ac
             state.workflow_cursor_up();
             Action::None
         }
-        KeyCode::Char('J') | KeyCode::PageDown => {
-            state.workflow_detail_scroll_down();
+        KeyCode::Enter => {
+            state.workflow_focus_yaml();
             Action::None
         }
-        KeyCode::Char('K') | KeyCode::PageUp => {
-            state.workflow_detail_scroll_up();
-            Action::None
-        }
-        KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+        KeyCode::Right | KeyCode::Char('l') => {
             state.workflow_focus_right();
             Action::None
         }
-        KeyCode::Char('T') => enter_trigger_for_selected_workflow(state),
         KeyCode::Char('r') => Action::RefreshWorkflows,
         KeyCode::Esc => {
             state.focus = Focus::Chat;
+            Action::None
+        }
+        _ => Action::None,
+    }
+}
+
+fn handle_workflow_yaml_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.workflow_detail_scroll_down();
+            Action::None
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.workflow_detail_scroll_up();
+            Action::None
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            state.workflow_focus_right();
+            Action::None
+        }
+        KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc => {
+            state.workflow_focus_left();
             Action::None
         }
         _ => Action::None,

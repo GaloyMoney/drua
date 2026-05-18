@@ -624,7 +624,7 @@ impl ScreenState {
 
     pub fn workflow_focus_right(&mut self) {
         self.workflows.focus = match self.workflows.focus {
-            MillerFocus::Definitions => {
+            MillerFocus::Definitions | MillerFocus::YamlDetail => {
                 if self.workflows.runs.is_empty() {
                     return;
                 }
@@ -642,9 +642,15 @@ impl ScreenState {
         self.workflows.error = None;
     }
 
+    pub fn workflow_focus_yaml(&mut self) {
+        self.workflows.focus = MillerFocus::YamlDetail;
+        self.workflows.detail_scroll = 0;
+    }
+
     pub fn workflow_focus_left(&mut self) {
         self.workflows.focus = match self.workflows.focus {
             MillerFocus::Definitions => return,
+            MillerFocus::YamlDetail => MillerFocus::Definitions,
             MillerFocus::Runs => MillerFocus::Definitions,
             MillerFocus::StepDetail => MillerFocus::Runs,
         };
