@@ -425,6 +425,10 @@ impl TopLevelTool for CallCatalogTool {
         false
     }
 
+    fn composable(&self) -> bool {
+        false
+    }
+
     async fn call(
         &self,
         subject: &AuthSubject,
