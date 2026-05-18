@@ -22,7 +22,7 @@ galoyAgents:
     repository: us.gcr.io/galoyorg/galoy-agents
     digest: "sha256:69a3157b6ad60c04e5514e1c6fcad69cf234fff2a644b42fc3e1f3df24525fcd"
     tag: edge
-  replicas: 1
+  replicas: 2
   annotations:
   config:
     server:
