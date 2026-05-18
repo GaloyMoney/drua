@@ -203,7 +203,15 @@ pub async fn handle_provider_webhook(
         }
     }
 
-    (StatusCode::OK, Json(ProviderFanOutResult { triggered, filtered, errored })).into_response()
+    (
+        StatusCode::OK,
+        Json(ProviderFanOutResult {
+            triggered,
+            filtered,
+            errored,
+        }),
+    )
+        .into_response()
 }
 
 fn header_name_for_provider(provider: Option<&str>) -> &'static str {
@@ -217,11 +225,11 @@ fn header_name_for_provider(provider: Option<&str>) -> &'static str {
 
 fn extract_secret(header_value: &str, provider: Option<&str>) -> String {
     match provider {
-        Some("concourse") | None => header_value
+        Some("honeycomb") => header_value.to_string(),
+        _ => header_value
             .strip_prefix("Bearer ")
             .unwrap_or(header_value)
             .to_string(),
-        _ => header_value.to_string(),
     }
 }
 
@@ -277,5 +285,13 @@ mod tests {
     fn extract_secret_returns_value_unchanged_when_no_bearer_prefix() {
         assert_eq!(extract_secret("whsec_abc", None), "whsec_abc");
         assert_eq!(extract_secret("whsec_abc", Some("concourse")), "whsec_abc");
+    }
+
+    #[test]
+    fn extract_secret_strips_bearer_for_unknown_provider() {
+        assert_eq!(
+            extract_secret("Bearer my-secret", Some("github")),
+            "my-secret"
+        );
     }
 }

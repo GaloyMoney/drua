@@ -13,11 +13,11 @@ setup_file() {
   reset_library_tables \
     workflow_run_events workflow_runs \
     workflow_definition_events workflow_definitions
+
+  export WEBHOOK_SECRET_CONCOURSE="test-concourse-secret"
+
   setup_isolated_library runtime/workflows
   create_test_agent
-
-  # Provider-level secret for the fan-out endpoint.
-  export WEBHOOK_SECRET_CONCOURSE="test-concourse-secret"
 }
 
 teardown_file() {
