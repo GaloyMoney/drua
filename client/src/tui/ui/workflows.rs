@@ -27,9 +27,13 @@ pub fn draw_workflows(frame: &mut Frame, state: &ScreenState, area: Rect) {
 
 pub fn status_keys(state: &ScreenState) -> &'static str {
     match state.workflows.focus {
-        MillerFocus::Definitions => " │ ↑/↓:nav  →:runs  T:trigger  r:refresh  Esc:chat ",
-        MillerFocus::Runs => " │ ↑/↓:nav  ←:defs  →:steps  r:refresh  Esc:chat ",
-        MillerFocus::StepDetail => " │ ↑/↓:step  ←:runs  Enter:expand  r:refresh  Esc:chat ",
+        MillerFocus::Definitions => {
+            " │ ↑/↓:nav  J/K:scroll  →:runs  T:trigger  r:refresh  Esc:chat "
+        }
+        MillerFocus::Runs => " │ ↑/↓:nav  J/K:scroll  ←:defs  →:steps  r:refresh  Esc:chat ",
+        MillerFocus::StepDetail => {
+            " │ ↑/↓:step  ←:runs  Enter:expand  r:refresh  Esc:chat "
+        }
     }
 }
 

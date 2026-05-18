@@ -506,9 +506,16 @@ impl ScreenState {
     }
 
     pub fn replace_workflow_run_detail(&mut self, run: WorkflowRunDetail) {
+        let is_new_run = self
+            .workflows
+            .selected_run
+            .as_ref()
+            .is_none_or(|prev| prev.id != run.id);
         self.workflows.selected_run = Some(run);
-        self.workflows.step_cursor = 0;
-        self.workflows.expanded = false;
+        if is_new_run {
+            self.workflows.step_cursor = 0;
+            self.workflows.expanded = false;
+        }
         self.workflows.loading = false;
         self.workflows.error = None;
     }

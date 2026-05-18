@@ -107,6 +107,14 @@ fn handle_workflow_definitions_key(state: &mut ScreenState, key: KeyEvent) -> Ac
             state.workflow_cursor_up();
             Action::None
         }
+        KeyCode::Char('J') | KeyCode::PageDown => {
+            state.workflow_detail_scroll_down();
+            Action::None
+        }
+        KeyCode::Char('K') | KeyCode::PageUp => {
+            state.workflow_detail_scroll_up();
+            Action::None
+        }
         KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
             state.workflow_focus_right();
             Action::None
@@ -129,6 +137,14 @@ fn handle_workflow_runs_key(state: &mut ScreenState, key: KeyEvent) -> Action {
         }
         KeyCode::Char('k') | KeyCode::Up => {
             state.workflow_runs_cursor_up();
+            Action::None
+        }
+        KeyCode::Char('J') | KeyCode::PageDown => {
+            state.workflow_detail_scroll_down();
+            Action::None
+        }
+        KeyCode::Char('K') | KeyCode::PageUp => {
+            state.workflow_detail_scroll_up();
             Action::None
         }
         KeyCode::Left | KeyCode::Char('h') => {
