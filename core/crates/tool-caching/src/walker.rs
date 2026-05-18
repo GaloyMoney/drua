@@ -1148,13 +1148,12 @@ mod tests {
             agg.recover.get("scope_path").and_then(Value::as_str),
             Some("$")
         );
-        assert!(
-            agg.recover
-                .get("note")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .contains("narrower recovery paths")
-        );
+        assert!(agg
+            .recover
+            .get("note")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .contains("narrower recovery paths"));
     }
 
     /// When the whole tail exceeds max_fetch_response_bytes but a smaller
