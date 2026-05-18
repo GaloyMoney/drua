@@ -2,7 +2,7 @@
 //! through `auth_middleware`; identity is a `deployment_id` verified
 //! via [`verify_handshake`] against `config.server.tunnel.deployments`.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use axum::{
     extract::{
@@ -27,6 +27,7 @@ use crate::AppState;
 
 /// Replay-window for the handshake timestamp, in either direction.
 const HANDSHAKE_MAX_SKEW_MS: i64 = 60_000;
+const TUNNEL_WS_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Decode every config entry to a [`VerifyingKey`] at boot; fail loudly
 /// on any bad entry rather than silently rejecting its handshakes.
@@ -268,6 +269,12 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
         None => (None, None),
     };
 
+    let mut ws_heartbeat = tokio::time::interval_at(
+        tokio::time::Instant::now() + TUNNEL_WS_HEARTBEAT_INTERVAL,
+        TUNNEL_WS_HEARTBEAT_INTERVAL,
+    );
+    ws_heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     loop {
         let displaced_fut = async {
             match displaced_rx.as_mut() {
@@ -329,6 +336,12 @@ async fn handle_tunnel(mut socket: WebSocket, state: AppState, deployment_id: St
                         }
                     }
                     None => break, // all senders dropped
+                }
+            }
+            _ = ws_heartbeat.tick() => {
+                if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    tracing::error!(deployment_id = %deployment_id, "tunnel heartbeat write error");
+                    break;
                 }
             }
         }
