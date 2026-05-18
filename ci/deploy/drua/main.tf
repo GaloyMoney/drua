@@ -88,6 +88,11 @@ resource "kubernetes_namespace" "sandbox_controller" {
   }
 }
 
+resource "random_password" "tunnel_internal_secret" {
+  length  = 48
+  special = false
+}
+
 resource "kubernetes_secret" "galoy_agents" {
   metadata {
     name      = "galoy-agents"
@@ -112,6 +117,7 @@ resource "kubernetes_secret" "galoy_agents" {
     "openai-api-key"                   = var.openrouter_api_key
     "zenduty-api-token"                = var.zenduty_api_token
     "github-app-private-key"           = local.github_app_private_key
+    "tunnel-internal-secret"           = random_password.tunnel_internal_secret.result
   }
 
   depends_on = [kubernetes_namespace.galoy_agents]
