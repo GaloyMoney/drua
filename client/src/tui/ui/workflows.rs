@@ -125,106 +125,37 @@ fn draw_col_runs(frame: &mut Frame, state: &ScreenState, area: Rect) {
 fn draw_col_detail(frame: &mut Frame, state: &ScreenState, area: Rect) {
     match state.workflows.focus {
         MillerFocus::Definitions => draw_definition_detail(frame, state, area),
-        MillerFocus::Runs => draw_run_overview(frame, state, area),
-        MillerFocus::StepDetail => draw_step_detail_view(frame, state, area),
+        MillerFocus::Runs | MillerFocus::StepDetail => draw_run_split(frame, state, area),
     }
 }
 
 fn draw_definition_detail(frame: &mut Frame, state: &ScreenState, area: Rect) {
+    let title = state
+        .workflows
+        .selected_definition
+        .as_ref()
+        .map(|d| format!(" {} ", d.name))
+        .unwrap_or_else(|| " Definition ".to_string());
     let block = Block::default()
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray))
-        .title(" Definition ");
+        .title(title);
 
-    let Some(definition) = &state.workflows.selected_definition else {
-        let msg = if state.workflows.definitions.is_empty() {
-            "No workflow selected"
-        } else {
-            "Loading..."
-        };
-        frame.render_widget(Paragraph::new(msg).block(block), area);
-        return;
-    };
-
-    let mut lines: Vec<Line> = Vec::new();
-
-    lines.push(Line::from(vec![
-        Span::styled("Trigger  ", Style::default().fg(Color::DarkGray)),
-        Span::raw(trigger_label(
-            &definition.trigger.kind,
-            definition.trigger.provider.as_deref(),
-        )),
-    ]));
-
-    lines.push(Line::from(vec![
-        Span::styled("Steps    ", Style::default().fg(Color::DarkGray)),
-        Span::raw(definition.steps.len().to_string()),
-    ]));
-
-    if let Some(condition) = &definition.trigger.condition {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Condition",
-            Style::default().fg(Color::DarkGray),
-        )));
-        lines.push(Line::from(condition.as_str()));
-    }
-
-    if let Some(next) = &definition.trigger.next_run_at {
-        lines.push(Line::from(vec![
-            Span::styled("Next run ", Style::default().fg(Color::DarkGray)),
-            Span::raw(short_time(next)),
-        ]));
-    }
-
-    // Step summary
-    lines.push(Line::from(""));
-    for step in &definition.steps {
-        let skill_or_tool = step
-            .skill
-            .as_deref()
-            .or(step.tool.as_deref())
-            .unwrap_or("—");
-        lines.push(Line::from(vec![
-            Span::styled("  • ", Style::default().fg(Color::DarkGray)),
-            Span::raw(&step.name),
-            Span::styled(
-                format!("  ({skill_or_tool})"),
-                Style::default().fg(Color::Cyan),
-            ),
-        ]));
-    }
-
-    // Recent runs
-    if !definition.recent_runs.is_empty() {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(
-            "Recent runs",
-            Style::default().fg(Color::DarkGray),
-        )));
-        for run in &definition.recent_runs {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!("  {}", state_label(&run.state)),
-                    Style::default().fg(state_color(&run.state)),
-                ),
-                Span::raw(format!("  {}", short_time(&run.started_at))),
-            ]));
-        }
-    }
-
-    // YAML
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "─── YAML ───",
-        Style::default().fg(Color::DarkGray),
-    )));
-    for yaml_line in definition.yaml.lines() {
-        lines.push(Line::from(yaml_line.to_string()));
-    }
+    let yaml = state
+        .workflows
+        .selected_definition
+        .as_ref()
+        .map(|d| d.yaml.as_str())
+        .unwrap_or_else(|| {
+            if state.workflows.definitions.is_empty() {
+                "No workflow selected"
+            } else {
+                "Loading..."
+            }
+        });
 
     frame.render_widget(
-        Paragraph::new(lines)
+        Paragraph::new(yaml)
             .block(block)
             .scroll((state.workflows.detail_scroll, 0))
             .wrap(Wrap { trim: false }),
@@ -232,27 +163,55 @@ fn draw_definition_detail(frame: &mut Frame, state: &ScreenState, area: Rect) {
     );
 }
 
-fn draw_run_overview(frame: &mut Frame, state: &ScreenState, area: Rect) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(" Run Detail ");
-
+fn draw_run_split(frame: &mut Frame, state: &ScreenState, area: Rect) {
     let Some(run) = &state.workflows.selected_run else {
         let msg = if state.workflows.runs.is_empty() {
             "No run selected"
         } else {
             "Loading..."
         };
-        frame.render_widget(Paragraph::new(msg).block(block), area);
+        frame.render_widget(
+            Paragraph::new(msg).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::DarkGray)),
+            ),
+            area,
+        );
         return;
     };
 
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
+        .split(area);
+
+    let step_focused = state.workflows.focus == MillerFocus::StepDetail;
+    draw_step_list(frame, state, run, chunks[0], step_focused);
+
+    if step_focused {
+        draw_step_body(
+            frame,
+            run,
+            state.workflows.step_cursor,
+            state.workflows.expanded,
+            chunks[1],
+        );
+    } else {
+        draw_run_overview(frame, run, state.workflows.detail_scroll, chunks[1]);
+    }
+}
+
+fn draw_run_overview(frame: &mut Frame, run: &WorkflowRunDetail, scroll: u16, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title(" Run Detail ");
+
     let mut lines: Vec<Line> = Vec::new();
 
-    // Header
     lines.push(Line::from(vec![
-        Span::styled("Run  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("Run      ", Style::default().fg(Color::DarkGray)),
         Span::raw(short_id(&run.id)),
         Span::raw("  "),
         Span::styled(
@@ -268,28 +227,6 @@ fn draw_run_overview(frame: &mut Frame, state: &ScreenState, area: Rect) {
         lines.push(Line::from(vec![
             Span::styled("Ended    ", Style::default().fg(Color::DarkGray)),
             Span::raw(short_time(completed)),
-        ]));
-    }
-
-    // Steps
-    lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled(
-        "Steps",
-        Style::default().fg(Color::DarkGray),
-    )));
-    let count = run.steps_snapshot.len().max(run.step_results.len());
-    for idx in 0..count {
-        let step = run.steps_snapshot.get(idx);
-        let result = result_for_step(run, idx, step);
-        let name = step
-            .map(|s| s.name.as_str())
-            .or_else(|| result.map(|r| r.name.as_str()))
-            .unwrap_or("step");
-        let st = result.map(|r| r.state.as_str()).unwrap_or("PENDING");
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled(format!("{:<20}", truncate(name, 20)), Style::default()),
-            Span::styled(state_label(st), Style::default().fg(state_color(st))),
         ]));
     }
 
@@ -332,48 +269,30 @@ fn draw_run_overview(frame: &mut Frame, state: &ScreenState, area: Rect) {
     frame.render_widget(
         Paragraph::new(lines)
             .block(block)
-            .scroll((state.workflows.detail_scroll, 0))
+            .scroll((scroll, 0))
             .wrap(Wrap { trim: false }),
         area,
     );
 }
 
-fn draw_step_detail_view(frame: &mut Frame, state: &ScreenState, area: Rect) {
-    let Some(run) = &state.workflows.selected_run else {
-        frame.render_widget(
-            Paragraph::new("No run selected").block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Yellow))
-                    .title(" Steps "),
-            ),
-            area,
-        );
-        return;
+fn draw_step_list(
+    frame: &mut Frame,
+    state: &ScreenState,
+    run: &WorkflowRunDetail,
+    area: Rect,
+    focused: bool,
+) {
+    let border_color = if focused {
+        Color::Yellow
+    } else {
+        Color::DarkGray
     };
-
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(35), Constraint::Percentage(65)])
-        .split(area);
-
-    draw_step_list(frame, state, run, chunks[0]);
-    draw_step_body(
-        frame,
-        run,
-        state.workflows.step_cursor,
-        state.workflows.expanded,
-        chunks[1],
-    );
-}
-
-fn draw_step_list(frame: &mut Frame, state: &ScreenState, run: &WorkflowRunDetail, area: Rect) {
     let mut items = Vec::new();
     let count = run.steps_snapshot.len().max(run.step_results.len());
     for idx in 0..count {
         let step = run.steps_snapshot.get(idx);
         let result = result_for_step(run, idx, step);
-        let selected = idx == state.workflows.step_cursor;
+        let selected = focused && idx == state.workflows.step_cursor;
         let marker = if selected { ">" } else { " " };
         let name = step
             .map(|s| s.name.as_str())
@@ -392,7 +311,7 @@ fn draw_step_list(frame: &mut Frame, state: &ScreenState, run: &WorkflowRunDetai
         List::new(items).block(
             Block::default()
                 .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Yellow))
+                .border_style(Style::default().fg(border_color))
                 .title(format!(
                     " Run {} - {} ",
                     short_id(&run.id),
@@ -484,13 +403,6 @@ fn result_for_step<'a>(
 ) -> Option<&'a WorkflowStepResultItem> {
     step.and_then(|s| run.step_results.iter().find(|r| r.name == s.name))
         .or_else(|| run.step_results.get(idx))
-}
-
-fn trigger_label(kind: &str, provider: Option<&str>) -> String {
-    match provider {
-        Some(provider) if !provider.is_empty() => format!("{}:{provider}", kind.to_lowercase()),
-        _ => kind.to_lowercase(),
-    }
 }
 
 fn state_label(state: &str) -> &'static str {
