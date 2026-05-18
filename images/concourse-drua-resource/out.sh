@@ -2,10 +2,16 @@ PAYLOAD=$(cat)
 
 URL=$(echo "$PAYLOAD" | jq -r '.source.url // empty')
 WORKFLOW_ID=$(echo "$PAYLOAD" | jq -r '.source.workflow_id // empty')
+PROVIDER=$(echo "$PAYLOAD" | jq -r '.source.provider // empty')
 SECRET=$(echo "$PAYLOAD" | jq -r '.source.secret // empty')
 
-if [ -z "$URL" ] || [ -z "$WORKFLOW_ID" ] || [ -z "$SECRET" ]; then
-  echo "concourse-drua-resource: source.url, source.workflow_id and source.secret are required" >&2
+if [ -z "$URL" ] || [ -z "$SECRET" ]; then
+  echo "concourse-drua-resource: source.url and source.secret are required" >&2
+  exit 1
+fi
+
+if [ -z "$WORKFLOW_ID" ] && [ -z "$PROVIDER" ]; then
+  echo "concourse-drua-resource: one of source.workflow_id or source.provider is required" >&2
   exit 1
 fi
 
@@ -45,23 +51,23 @@ BODY=$(jq -n \
 RESP_FILE=$(mktemp)
 trap 'rm -f "$RESP_FILE"' EXIT
 
-# `-w '%{http_code}'` writes only the status to stdout (captured into
-# HTTP_CODE); the response body lands in $RESP_FILE. Diagnostics flow
-# to stderr below so the version JSON on stdout stays clean.
+if [ -n "$PROVIDER" ]; then
+  TARGET_URL="${URL%/}/webhooks/providers/${PROVIDER}"
+else
+  TARGET_URL="${URL%/}/webhooks/${WORKFLOW_ID}"
+fi
+
 HTTP_CODE=$(curl --silent --show-error \
   --output "$RESP_FILE" \
   --write-out '%{http_code}' \
-  --request POST "${URL%/}/webhooks/${WORKFLOW_ID}" \
+  --request POST "$TARGET_URL" \
   --header "Authorization: Bearer ${SECRET}" \
   --header 'Content-Type: application/json' \
   --data "$BODY")
 
-RUN_ID=$(cat "$RESP_FILE" 2>/dev/null || true)
-if [ -z "$RUN_ID" ]; then
-  RUN_ID="unknown"
-fi
+RESP_BODY=$(cat "$RESP_FILE" 2>/dev/null || true)
 
-echo "concourse-drua-resource: POST ${URL%/}/webhooks/${WORKFLOW_ID} -> ${HTTP_CODE} (run_id=${RUN_ID})" >&2
+echo "concourse-drua-resource: POST ${TARGET_URL} -> ${HTTP_CODE}" >&2
 
 # Loud failure when the trigger itself is broken. Concourse marks the
 # `put` step failed and the operator sees the diagnostic above.
@@ -70,17 +76,40 @@ case "$HTTP_CODE" in
   *) exit 1 ;;
 esac
 
-jq -n \
-  --arg ref "$RUN_ID" \
-  --arg code "$HTTP_CODE" \
-  --arg url "$JOB_URL" \
-  --arg correlation_id "$CORRELATION_ID" \
-  '{
-    version: { ref: $ref },
-    metadata: [
-      { name: "http_code", value: $code },
-      { name: "run_id", value: $ref },
-      { name: "build_url", value: $url },
-      { name: "correlation_id", value: $correlation_id }
-    ]
-  }'
+if [ -n "$PROVIDER" ]; then
+  TRIGGERED=$(echo "$RESP_BODY" | jq -r '.triggered // 0')
+  REF="${CORRELATION_ID}"
+  echo "concourse-drua-resource: fan-out triggered=${TRIGGERED}" >&2
+  jq -n \
+    --arg ref "$REF" \
+    --arg code "$HTTP_CODE" \
+    --arg url "$JOB_URL" \
+    --arg correlation_id "$CORRELATION_ID" \
+    --arg triggered "$TRIGGERED" \
+    '{
+      version: { ref: $ref },
+      metadata: [
+        { name: "http_code", value: $code },
+        { name: "triggered", value: $triggered },
+        { name: "build_url", value: $url },
+        { name: "correlation_id", value: $correlation_id }
+      ]
+    }'
+else
+  RUN_ID="${RESP_BODY:-unknown}"
+  echo "concourse-drua-resource: run_id=${RUN_ID}" >&2
+  jq -n \
+    --arg ref "$RUN_ID" \
+    --arg code "$HTTP_CODE" \
+    --arg url "$JOB_URL" \
+    --arg correlation_id "$CORRELATION_ID" \
+    '{
+      version: { ref: $ref },
+      metadata: [
+        { name: "http_code", value: $code },
+        { name: "run_id", value: $ref },
+        { name: "build_url", value: $url },
+        { name: "correlation_id", value: $correlation_id }
+      ]
+    }'
+fi

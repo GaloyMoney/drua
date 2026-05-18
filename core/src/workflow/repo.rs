@@ -13,6 +13,12 @@ use super::yaml::canonical_workflow_path;
     columns(
         project_id(ty = "ProjectId", list_for(by(created_at))),
         name(ty = "String"),
+        provider(
+            ty = "Option<String>",
+            list_for(by(created_at)),
+            create(accessor = "provider()"),
+            update(accessor = "provider()")
+        ),
     ),
     delete = "soft_without_queries",
     post_persist_hook(method = "sync_to_library", error = "drua_library::LibraryError")

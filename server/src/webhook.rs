@@ -1,12 +1,11 @@
 //! Outside the auth middleware — authn via the trigger's stored secret.
 //!
-//! Recognised `provider` values on `WorkflowTrigger::Webhook`:
-//! - `None` / `Some("concourse")` — `Authorization: Bearer <secret>`.
-//!   The `concourse` arm is documentation-only; it tags workflows
-//!   meant to be fired by the `concourse-drua-resource` so the
-//!   dashboard and library YAML carry intent.
-//! - `Some("honeycomb")` — `X-Honeycomb-Webhook-Token: <secret>`
-//!   (Honeycomb's non-standard header, no `Bearer` prefix).
+//! Two dispatch surfaces:
+//! - `POST /webhooks/{definition_id}` — per-definition endpoint (1:1).
+//! - `POST /webhooks/providers/{provider}` — fan-out: evaluates every
+//!   definition tagged with this provider and spawns runs for those
+//!   whose `trigger.condition` passes. Auth via env var
+//!   `WEBHOOK_SECRET_{PROVIDER_UPPER}`.
 
 use axum::{
     body::Bytes,
@@ -14,8 +13,9 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::post,
-    Router,
+    Json, Router,
 };
+use serde::Serialize;
 use tracing::instrument;
 
 use drua_core as domain;
@@ -26,7 +26,12 @@ use domain::workflow::WorkflowTrigger;
 use crate::AppState;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/webhooks/{definition_id}", post(handle_webhook))
+    Router::new()
+        .route("/webhooks/{definition_id}", post(handle_webhook))
+        .route(
+            "/webhooks/providers/{provider}",
+            post(handle_provider_webhook),
+        )
 }
 
 #[instrument(name = "web.webhook.handle", skip_all, fields(%definition_id))]
@@ -106,6 +111,81 @@ pub async fn handle_webhook(
     }
 }
 
+#[derive(Serialize)]
+struct ProviderFanOutResponse {
+    triggered: usize,
+    filtered: usize,
+    errored: usize,
+}
+
+#[instrument(name = "web.webhook.handle_provider", skip_all, fields(%provider))]
+pub async fn handle_provider_webhook(
+    State(state): State<AppState>,
+    Path(provider): Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> impl IntoResponse {
+    let provider = provider.to_lowercase();
+    let env_key = format!(
+        "WEBHOOK_SECRET_{}",
+        provider.to_uppercase().replace('-', "_")
+    );
+    let expected_secret = match std::env::var(&env_key) {
+        Ok(s) if !s.is_empty() => s,
+        _ => {
+            tracing::warn!(%provider, env_key, "provider webhook secret not configured");
+            return StatusCode::NOT_IMPLEMENTED.into_response();
+        }
+    };
+
+    let header_name = header_name_for_provider(Some(&provider));
+    let presented = match headers.get(header_name).and_then(|v| v.to_str().ok()) {
+        Some(value) => extract_secret(value, Some(&provider)),
+        None => {
+            tracing::warn!(header_name, "provider webhook: missing verification header");
+            return StatusCode::UNAUTHORIZED.into_response();
+        }
+    };
+
+    if presented != expected_secret {
+        tracing::warn!("provider webhook: secret mismatch");
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+
+    let trigger_context = if body.is_empty() {
+        serde_json::Value::Null
+    } else {
+        match serde_json::from_slice::<serde_json::Value>(&body) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "provider webhook: invalid JSON body");
+                return (StatusCode::BAD_REQUEST, "invalid JSON").into_response();
+            }
+        }
+    };
+
+    match state
+        .app
+        .workflows()
+        .trigger_all_for_provider(&provider, trigger_context)
+        .await
+    {
+        Ok(result) => (
+            StatusCode::OK,
+            Json(ProviderFanOutResponse {
+                triggered: result.triggered,
+                filtered: result.filtered,
+                errored: result.errored,
+            }),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "provider webhook: fan-out failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
 fn header_name_for_provider(provider: Option<&str>) -> &'static str {
     match provider {
         Some("honeycomb") => "x-honeycomb-webhook-token",
@@ -117,11 +197,11 @@ fn header_name_for_provider(provider: Option<&str>) -> &'static str {
 
 fn extract_secret(header_value: &str, provider: Option<&str>) -> String {
     match provider {
-        Some("concourse") | None => header_value
+        Some("honeycomb") => header_value.to_string(),
+        _ => header_value
             .strip_prefix("Bearer ")
             .unwrap_or(header_value)
             .to_string(),
-        _ => header_value.to_string(),
     }
 }
 
@@ -177,5 +257,13 @@ mod tests {
     fn extract_secret_returns_value_unchanged_when_no_bearer_prefix() {
         assert_eq!(extract_secret("whsec_abc", None), "whsec_abc");
         assert_eq!(extract_secret("whsec_abc", Some("concourse")), "whsec_abc");
+    }
+
+    #[test]
+    fn extract_secret_strips_bearer_for_unknown_provider() {
+        assert_eq!(
+            extract_secret("Bearer my-secret", Some("github")),
+            "my-secret"
+        );
     }
 }

@@ -73,6 +73,15 @@ pub struct WorkflowDefinition {
 }
 
 impl WorkflowDefinition {
+    pub fn provider(&self) -> Option<String> {
+        match &self.trigger {
+            WorkflowTrigger::Webhook {
+                provider: Some(p), ..
+            } => Some(p.clone()),
+            _ => None,
+        }
+    }
+
     pub fn created_at(&self) -> chrono::DateTime<chrono::Utc> {
         self.events
             .entity_first_persisted_at()
@@ -401,6 +410,15 @@ pub struct NewWorkflowDefinition {
 impl NewWorkflowDefinition {
     pub fn builder() -> NewWorkflowDefinitionBuilder {
         NewWorkflowDefinitionBuilder::default().id(WorkflowDefinitionId::new())
+    }
+
+    pub fn provider(&self) -> Option<String> {
+        match &self.trigger {
+            WorkflowTrigger::Webhook {
+                provider: Some(p), ..
+            } => Some(p.clone()),
+            _ => None,
+        }
     }
 }
 
