@@ -94,6 +94,11 @@ resource "random_password" "tunnel_internal_secret" {
   special = false
 }
 
+resource "random_password" "github_app_webhook_secret" {
+  length  = 48
+  special = false
+}
+
 resource "kubernetes_secret" "galoy_agents" {
   metadata {
     name      = "galoy-agents"
@@ -118,6 +123,7 @@ resource "kubernetes_secret" "galoy_agents" {
     "openai-api-key"                   = var.openrouter_api_key
     "zenduty-api-token"                = var.zenduty_api_token
     "github-app-private-key"           = local.github_app_private_key
+    "github-app-webhook-secret"        = random_password.github_app_webhook_secret.result
     "tunnel-internal-secret"           = random_password.tunnel_internal_secret.result
   }
 
@@ -304,4 +310,9 @@ provider "helm" {
     token                  = data.google_client_config.default.access_token
     cluster_ca_certificate = base64decode(data.google_container_cluster.primary.master_auth.0.cluster_ca_certificate)
   }
+}
+
+output "github_app_webhook_secret" {
+  value     = random_password.github_app_webhook_secret.result
+  sensitive = true
 }
