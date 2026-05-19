@@ -1730,6 +1730,7 @@ async fn run_event_loop(
                     state.workflows.selected_definition = None;
                     state.workflows.runs.clear();
                 }
+                state.workflows.selected_run = None;
                 fetched_run_id = None;
             }
 
