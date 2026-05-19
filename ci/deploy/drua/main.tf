@@ -119,6 +119,7 @@ resource "kubernetes_secret" "galoy_agents" {
     "github-auth-header"               = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
     "github_actions-auth-header"       = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
     "github_pull_requests-auth-header" = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
+    "github_issues-auth-header"        = var.github_pat != "" ? "Bearer ${var.github_pat}" : ""
     "anthropic-api-key"                = var.anthropic_api_key
     "openai-api-key"                   = var.openrouter_api_key
     "zenduty-api-token"                = var.zenduty_api_token
