@@ -1,7 +1,5 @@
 use serde_json::Value;
 
-use super::SandboxInfo;
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MillerFocus {
     #[default]
@@ -99,7 +97,7 @@ pub struct WorkflowRunDetail {
     pub trigger_context: Value,
     pub steps_snapshot: Vec<WorkflowStepItem>,
     pub step_results: Vec<WorkflowStepResultItem>,
-    pub agents: Vec<WorkflowAgentItem>,
+    pub agents: Vec<super::AgentItem>,
 }
 
 impl WorkflowRunDetail {
@@ -120,11 +118,3 @@ pub struct WorkflowStepResultItem {
     pub completed_at: Option<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct WorkflowAgentItem {
-    pub id: String,
-    pub name: String,
-    pub role: String,
-    pub model: String,
-    pub sandbox: Option<SandboxInfo>,
-}

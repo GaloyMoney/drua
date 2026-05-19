@@ -18,8 +18,8 @@ use crate::graphql::GraphqlClient;
 use crate::tui::chat::{ChatMessage, ChatRole, ContentBlock};
 use crate::tui::state::{
     AgentItem, BlockDetail, CellKind, Focus, GridSection, ProjectItem, SandboxInfo, ScreenState,
-    SystemBlockDetail, ThreadGridState, ThreadInfo, UsageDetail, WorkflowAgentItem,
-    WorkflowDefinitionDetail, WorkflowDefinitionItem, WorkflowRunDetail, WorkflowRunItem,
+    SystemBlockDetail, ThreadGridState, ThreadInfo, UsageDetail, WorkflowDefinitionDetail,
+    WorkflowDefinitionItem, WorkflowRunDetail, WorkflowRunItem,
     WorkflowSandboxItem, WorkflowStepItem, WorkflowStepResultItem, WorkflowTriggerInfo,
 };
 use crate::tui::{handlers, ui};
@@ -723,19 +723,6 @@ fn agent_node_to_item(a: AgentNode) -> AgentItem {
     }
 }
 
-fn agent_node_to_workflow_item(a: AgentNode) -> WorkflowAgentItem {
-    WorkflowAgentItem {
-        id: a.id,
-        name: a.name,
-        role: a.role,
-        model: a.session.model,
-        sandbox: a.attached_sandbox.map(|s| SandboxInfo {
-            name: s.name,
-            mode: s.mode,
-        }),
-    }
-}
-
 fn workflow_trigger_node_to_info(t: WorkflowTriggerNode) -> WorkflowTriggerInfo {
     WorkflowTriggerInfo {
         kind: t.kind,
@@ -816,7 +803,7 @@ fn workflow_run_node_to_detail(r: WorkflowRunNode) -> WorkflowRunDetail {
         agents: r
             .agents
             .into_iter()
-            .map(agent_node_to_workflow_item)
+            .map(agent_node_to_item)
             .collect(),
     }
 }

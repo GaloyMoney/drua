@@ -22,6 +22,7 @@ pub struct SandboxInfo {
     pub mode: String,
 }
 
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct AgentItem {
     pub id: String,
