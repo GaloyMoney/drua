@@ -191,6 +191,12 @@ spec:
         {{- if .Values.galoyAgents.config.githubApp.enabled }}
         - name: GITHUB_APP_PRIVATE_KEY_PATH
           value: "/secrets/github-app/private-key.pem"
+        - name: WEBHOOK_SECRET_GITHUB_APP
+          valueFrom:
+            secretKeyRef:
+              name: {{ template "galoyAgents.fullname" . }}
+              key: "github-app-webhook-secret"
+              optional: true
         {{- end }}
         - name: KUBE_NODE_NAME
           valueFrom:
