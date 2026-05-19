@@ -66,6 +66,7 @@ module "postgresql" {
   destroyable      = true
   highly_available = false
   tier             = "db-f1-micro"
+  max_connections  = 50
   replication      = false
   readonly_users   = ["mcp"]
 }
