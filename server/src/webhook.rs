@@ -6,6 +6,9 @@
 //!   definition tagged with this provider and spawns runs for those
 //!   whose `trigger.condition` passes. Auth via env var
 //!   `WEBHOOK_SECRET_{PROVIDER_UPPER}`.
+//!
+//! Provider `github_app` uses HMAC-SHA256 verification
+//! (`X-Hub-Signature-256: sha256=<hex>`) instead of bearer tokens.
 
 use axum::{
     body::Bytes,
@@ -15,7 +18,9 @@ use axum::{
     routing::post,
     Json, Router,
 };
+use hmac::{Hmac, Mac};
 use serde::Serialize;
+use sha2::Sha256;
 use tracing::instrument;
 
 use drua_core as domain;
@@ -63,18 +68,7 @@ pub async fn handle_webhook(
         }
     };
 
-    let header_name = header_name_for_provider(provider.as_deref());
-
-    let presented = match headers.get(header_name).and_then(|v| v.to_str().ok()) {
-        Some(value) => extract_secret(value, provider.as_deref()),
-        None => {
-            tracing::warn!(header_name, "webhook: missing verification header");
-            return StatusCode::UNAUTHORIZED.into_response();
-        }
-    };
-
-    if presented != expected_secret {
-        tracing::warn!("webhook: secret mismatch");
+    if !verify_webhook(provider.as_deref(), &expected_secret, &headers, &body) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
@@ -138,17 +132,7 @@ pub async fn handle_provider_webhook(
         }
     };
 
-    let header_name = header_name_for_provider(Some(&provider));
-    let presented = match headers.get(header_name).and_then(|v| v.to_str().ok()) {
-        Some(value) => extract_secret(value, Some(&provider)),
-        None => {
-            tracing::warn!(header_name, "provider webhook: missing verification header");
-            return StatusCode::UNAUTHORIZED.into_response();
-        }
-    };
-
-    if presented != expected_secret {
-        tracing::warn!("provider webhook: secret mismatch");
+    if !verify_webhook(Some(&provider), &expected_secret, &headers, &body) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 
@@ -186,23 +170,84 @@ pub async fn handle_provider_webhook(
     }
 }
 
-fn header_name_for_provider(provider: Option<&str>) -> &'static str {
+fn verify_webhook(
+    provider: Option<&str>,
+    expected_secret: &str,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> bool {
     match provider {
-        Some("honeycomb") => "x-honeycomb-webhook-token",
-        // `concourse` is documentation-only — same wire shape as `None`.
-        Some("concourse") | None => "authorization",
-        _ => "authorization",
+        Some("github_app") => verify_github_hmac(expected_secret, headers, body),
+        other => verify_bearer_or_token(other, expected_secret, headers),
     }
 }
 
-fn extract_secret(header_value: &str, provider: Option<&str>) -> String {
-    match provider {
-        Some("honeycomb") => header_value.to_string(),
-        _ => header_value
-            .strip_prefix("Bearer ")
-            .unwrap_or(header_value)
-            .to_string(),
+/// HMAC-SHA256 verification per GitHub's webhook spec: the
+/// `X-Hub-Signature-256` header carries `sha256=<hex>` computed
+/// over the raw body with the webhook secret as key.
+fn verify_github_hmac(secret: &str, headers: &HeaderMap, body: &[u8]) -> bool {
+    let signature = match headers
+        .get("x-hub-signature-256")
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(s) => s,
+        None => {
+            tracing::warn!("webhook: missing X-Hub-Signature-256 header");
+            return false;
+        }
+    };
+
+    let hex_sig = match signature.strip_prefix("sha256=") {
+        Some(s) => s,
+        None => {
+            tracing::warn!("webhook: X-Hub-Signature-256 missing sha256= prefix");
+            return false;
+        }
+    };
+
+    let expected_bytes = match hex::decode(hex_sig) {
+        Ok(b) => b,
+        Err(_) => {
+            tracing::warn!("webhook: X-Hub-Signature-256 contains invalid hex");
+            return false;
+        }
+    };
+
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(body);
+
+    // `verify_slice` is constant-time.
+    mac.verify_slice(&expected_bytes).is_ok()
+}
+
+fn verify_bearer_or_token(
+    provider: Option<&str>,
+    expected_secret: &str,
+    headers: &HeaderMap,
+) -> bool {
+    let header_name = match provider {
+        Some("honeycomb") => "x-honeycomb-webhook-token",
+        Some("concourse") | None => "authorization",
+        _ => "authorization",
+    };
+
+    let presented = match headers.get(header_name).and_then(|v| v.to_str().ok()) {
+        Some(value) => match provider {
+            Some("honeycomb") => value.to_string(),
+            _ => value.strip_prefix("Bearer ").unwrap_or(value).to_string(),
+        },
+        None => {
+            tracing::warn!(header_name, "webhook: missing verification header");
+            return false;
+        }
+    };
+
+    if presented != expected_secret {
+        tracing::warn!("webhook: secret mismatch");
+        return false;
     }
+    true
 }
 
 #[cfg(test)]
@@ -210,60 +255,136 @@ mod tests {
     use super::*;
 
     #[test]
-    fn header_name_default_is_authorization() {
-        assert_eq!(header_name_for_provider(None), "authorization");
+    fn bearer_default_provider() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer whsec_abc".parse().unwrap());
+        assert!(verify_webhook(None, "whsec_abc", &headers, b""));
     }
 
     #[test]
-    fn header_name_honeycomb_uses_custom_header() {
-        assert_eq!(
-            header_name_for_provider(Some("honeycomb")),
-            "x-honeycomb-webhook-token"
+    fn bearer_concourse_provider() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer whsec_abc".parse().unwrap());
+        assert!(verify_webhook(
+            Some("concourse"),
+            "whsec_abc",
+            &headers,
+            b""
+        ));
+    }
+
+    #[test]
+    fn honeycomb_custom_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-honeycomb-webhook-token", "whsec_abc".parse().unwrap());
+        assert!(verify_webhook(
+            Some("honeycomb"),
+            "whsec_abc",
+            &headers,
+            b""
+        ));
+    }
+
+    #[test]
+    fn bearer_mismatch_rejects() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer wrong".parse().unwrap());
+        assert!(!verify_webhook(None, "whsec_abc", &headers, b""));
+    }
+
+    #[test]
+    fn missing_header_rejects() {
+        let headers = HeaderMap::new();
+        assert!(!verify_webhook(None, "whsec_abc", &headers, b""));
+    }
+
+    #[test]
+    fn unknown_provider_falls_back_to_authorization() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "whsec_abc".parse().unwrap());
+        assert!(verify_webhook(Some("unknown"), "whsec_abc", &headers, b""));
+    }
+
+    #[test]
+    fn unknown_provider_strips_bearer() {
+        assert!(verify_bearer_or_token(Some("github"), "my-secret", &{
+            let mut h = HeaderMap::new();
+            h.insert("authorization", "Bearer my-secret".parse().unwrap());
+            h
+        }));
+    }
+
+    #[test]
+    fn github_app_hmac_valid_signature() {
+        let secret = "whsec_test_secret";
+        let body = b"{\"action\":\"opened\"}";
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let signature = hex::encode(mac.finalize().into_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-hub-signature-256",
+            format!("sha256={signature}").parse().unwrap(),
         );
+        assert!(verify_webhook(Some("github_app"), secret, &headers, body));
     }
 
     #[test]
-    fn header_name_concourse_uses_authorization() {
-        assert_eq!(header_name_for_provider(Some("concourse")), "authorization");
+    fn github_app_hmac_wrong_signature_rejects() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-hub-signature-256", "sha256=deadbeef".parse().unwrap());
+        assert!(!verify_webhook(
+            Some("github_app"),
+            "whsec_abc",
+            &headers,
+            b"{}"
+        ));
     }
 
     #[test]
-    fn header_name_unknown_provider_falls_back_to_authorization() {
-        assert_eq!(
-            header_name_for_provider(Some("not-a-known-provider")),
-            "authorization"
+    fn github_app_hmac_missing_header_rejects() {
+        let headers = HeaderMap::new();
+        assert!(!verify_webhook(
+            Some("github_app"),
+            "whsec_abc",
+            &headers,
+            b"{}"
+        ));
+    }
+
+    #[test]
+    fn github_app_hmac_missing_prefix_rejects() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-hub-signature-256", "deadbeef".parse().unwrap());
+        assert!(!verify_webhook(
+            Some("github_app"),
+            "whsec_abc",
+            &headers,
+            b"{}"
+        ));
+    }
+
+    #[test]
+    fn github_app_hmac_invalid_hex_rejects() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-hub-signature-256",
+            "sha256=not_valid_hex!".parse().unwrap(),
         );
+        assert!(!verify_webhook(
+            Some("github_app"),
+            "whsec_abc",
+            &headers,
+            b"{}"
+        ));
     }
 
     #[test]
-    fn extract_secret_strips_bearer_for_default_provider() {
-        assert_eq!(extract_secret("Bearer whsec_abc", None), "whsec_abc");
-    }
-
-    #[test]
-    fn extract_secret_strips_bearer_for_concourse() {
-        assert_eq!(
-            extract_secret("Bearer whsec_abc", Some("concourse")),
-            "whsec_abc"
-        );
-    }
-
-    #[test]
-    fn extract_secret_passes_raw_for_honeycomb() {
-        assert_eq!(extract_secret("whsec_abc", Some("honeycomb")), "whsec_abc");
-    }
-
-    #[test]
-    fn extract_secret_returns_value_unchanged_when_no_bearer_prefix() {
-        assert_eq!(extract_secret("whsec_abc", None), "whsec_abc");
-        assert_eq!(extract_secret("whsec_abc", Some("concourse")), "whsec_abc");
-    }
-
-    #[test]
-    fn extract_secret_strips_bearer_for_unknown_provider() {
-        assert_eq!(
-            extract_secret("Bearer my-secret", Some("github")),
-            "my-secret"
-        );
+    fn bearer_without_prefix_still_matches() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "whsec_abc".parse().unwrap());
+        assert!(verify_webhook(None, "whsec_abc", &headers, b""));
     }
 }
