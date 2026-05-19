@@ -265,7 +265,7 @@ pub(crate) fn fetch_text_size_at_path(
     Ok(fetch_text_for_raw(&value).len())
 }
 
-fn fetch_text_for_raw(value: &Value) -> String {
+pub fn fetch_text_for_raw(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
         other => serde_json::to_string(other).unwrap_or_default(),

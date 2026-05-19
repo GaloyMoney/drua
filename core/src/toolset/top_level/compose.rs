@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Duration;
 
-use drua_tool_caching::{extract_text, tool_result_value, ToolCaching};
+use drua_tool_caching::{extract_text, fetch_text_for_raw, tool_result_value, ToolCaching};
 use es_entity::context::{EventContext, WithEventContext};
 use rmcp::model::{CallToolResult, JsonObject};
 use serde::Deserialize;
@@ -600,17 +600,10 @@ fn tool_output_fetch_compose_value(
     }
 
     let inner = obj.remove("result").unwrap_or(serde_json::Value::Null);
-    if array_root_path || fetch_text_for_compose_value(&inner) == extract_text(result) {
+    if array_root_path || fetch_text_for_raw(&inner) == extract_text(result) {
         inner
     } else {
         serde_json::json!({ "result": inner })
-    }
-}
-
-fn fetch_text_for_compose_value(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::String(s) => s.clone(),
-        other => serde_json::to_string(other).unwrap_or_default(),
     }
 }
 
