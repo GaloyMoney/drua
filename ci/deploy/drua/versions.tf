@@ -36,7 +36,7 @@ terraform {
       version = "1.24.0"
     }
     kubectl = {
-      source  = "alekc/kubectl"
+      source = "alekc/kubectl"
       # 2.3.0 has a broken combined provider schema under OpenTofu.
       version = "2.3.1"
     }
