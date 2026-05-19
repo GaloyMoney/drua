@@ -145,6 +145,15 @@ galoyAgents:
         internalOnly: true
         allowedTools:
           - create_pull_request
+      - name: github_issues
+        url: https://api.githubcopilot.com/mcp/x/issues
+        toolPrefix: github_issues
+        authMode: github_app
+        category: source-control-write
+        categoryDescription: "GitHub issue mutations — comments"
+        internalOnly: true
+        allowedTools:
+          - add_issue_comment
   postgresMcp:
     enabled: true
     databaseUrlSecret:
