@@ -1955,6 +1955,7 @@ async fn run_event_loop(
             if cur_def != fetched_def_id {
                 fetched_def_id = cur_def.clone();
                 state.workflows.error = None;
+                state.workflows.runs.clear();
                 if let Some(def_id) = &cur_def {
                     spawn_workflow_def_detail_fetch(
                         config.server_url.clone(),
@@ -1964,7 +1965,6 @@ async fn run_event_loop(
                     );
                 } else {
                     state.workflows.selected_definition = None;
-                    state.workflows.runs.clear();
                 }
                 state.workflows.selected_run = None;
                 fetched_run_id = None;
