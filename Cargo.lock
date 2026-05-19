@@ -1605,6 +1605,8 @@ dependencies = [
  "drua-tunnel",
  "ed25519-dalek",
  "es-entity",
+ "hex",
+ "hmac",
  "http-body-util",
  "k8s-openapi",
  "kube",
