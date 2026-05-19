@@ -104,7 +104,7 @@ galoyAgents:
         category: observability
         categoryDescription: "Distributed traces, SLOs, and query analysis"
       - name: github
-        url: https://api.githubcopilot.com/mcp/readonly
+        url: https://api.githubcopilot.com/mcp/
         toolPrefix: github
         authMode: github_app
         category: source-control
@@ -123,7 +123,7 @@ galoyAgents:
           - list_issues
           - search_issues
       - name: github_actions
-        url: https://api.githubcopilot.com/mcp/x/actions/readonly
+        url: https://api.githubcopilot.com/mcp/
         toolPrefix: github_actions
         authMode: github_app
         category: ci
@@ -137,7 +137,7 @@ galoyAgents:
       # don't see it. `merge_pull_request` deliberately excluded — the
       # heal-flow guardrail forbids merges.
       - name: github_pull_requests
-        url: https://api.githubcopilot.com/mcp/x/pull_requests
+        url: https://api.githubcopilot.com/mcp/
         toolPrefix: github_pr
         authMode: github_app
         category: source-control-write
@@ -146,7 +146,7 @@ galoyAgents:
         allowedTools:
           - create_pull_request
       - name: github_issues
-        url: https://api.githubcopilot.com/mcp/x/issues
+        url: https://api.githubcopilot.com/mcp/
         toolPrefix: github_issues
         authMode: github_app
         category: source-control-write
