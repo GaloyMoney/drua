@@ -19,8 +19,8 @@ use crate::tui::chat::{ChatMessage, ChatRole, ContentBlock};
 use crate::tui::state::{
     AgentItem, BlockDetail, CellKind, Focus, GridSection, ProjectItem, SandboxInfo, ScreenState,
     SystemBlockDetail, ThreadGridState, ThreadInfo, UsageDetail, WorkflowDefinitionDetail,
-    WorkflowDefinitionItem, WorkflowRunDetail, WorkflowRunItem,
-    WorkflowSandboxItem, WorkflowStepItem, WorkflowStepResultItem, WorkflowTriggerInfo,
+    WorkflowDefinitionItem, WorkflowRunDetail, WorkflowRunItem, WorkflowSandboxItem,
+    WorkflowStepItem, WorkflowStepResultItem, WorkflowTriggerInfo,
 };
 use crate::tui::{handlers, ui};
 
@@ -800,11 +800,7 @@ fn workflow_run_node_to_detail(r: WorkflowRunNode) -> WorkflowRunDetail {
             .into_iter()
             .map(workflow_step_result_node_to_item)
             .collect(),
-        agents: r
-            .agents
-            .into_iter()
-            .map(agent_node_to_item)
-            .collect(),
+        agents: r.agents.into_iter().map(agent_node_to_item).collect(),
     }
 }
 

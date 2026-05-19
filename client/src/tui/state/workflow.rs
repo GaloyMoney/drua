@@ -117,4 +117,3 @@ pub struct WorkflowStepResultItem {
     pub skipped: Option<String>,
     pub completed_at: Option<String>,
 }
-
