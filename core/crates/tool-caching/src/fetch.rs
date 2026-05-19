@@ -130,10 +130,10 @@ pub(crate) fn ceil_char_boundary(s: &str, idx: usize) -> usize {
 }
 
 /// What `ToolCaching::fetch` hands back to the caller. `result` is the
-/// agent-facing `CallToolResult`; `structured` is the wrapped json
-/// value at `path` (e.g. `{"a": {"b": <slice>}}` for `path="$.a.b"`),
-/// surfaced separately so the dispatch layer / compose can consume it
-/// without re-parsing the text channel.
+/// agent-facing `CallToolResult`; `structured` is the path-wrapped json
+/// value (e.g. `{"a": {"b": <slice>}}` for `path="$.a.b"`), surfaced
+/// separately so the dispatch layer / compose can consume it without
+/// re-parsing the text channel.
 pub struct FetchResult {
     pub result: CallToolResult,
     pub structured: Value,
@@ -160,8 +160,10 @@ impl StoredInvocation {
             Some(q) => q.apply(resolved)?,
             None => resolved,
         };
+        // Text channel shows the resolved value raw — strings stay
+        // human-readable instead of becoming JSON-escaped `"..."`.
+        let text = fetch_text_for_raw(&sliced);
         let wrapped = wrap_at_path(path, sliced)?;
-        let text = fetch_text_for_wrapped(&wrapped);
         if text.len() > max_bytes {
             return Err(ToolCachingError::FetchResponseTooLarge {
                 size: text.len(),
@@ -256,24 +258,27 @@ enum PathSegment {
     Index(usize),
 }
 
-pub(crate) fn fetch_text_size_at_path(path: &str, value: Value) -> Result<usize, ToolCachingError> {
-    Ok(fetch_text_for_wrapped(&wrap_at_path(path, value)?).len())
+pub(crate) fn fetch_text_size_at_path(
+    _path: &str,
+    value: Value,
+) -> Result<usize, ToolCachingError> {
+    Ok(fetch_text_for_raw(&value).len())
 }
 
-fn fetch_text_for_wrapped(wrapped: &Value) -> String {
-    match wrapped {
+pub fn fetch_text_for_raw(value: &Value) -> String {
+    match value {
         Value::String(s) => s.clone(),
         other => serde_json::to_string(other).unwrap_or_default(),
     }
 }
 
-/// Rebuild the structure implied by `path` around `value`. For
-/// `path == "$"` returns `value` directly. Object-key segments nest
-/// into `{key: …}`; array-index segments wrap into a single-element
-/// array (`$[3]` → `[value]`) — callers can read `result[0]` and
-/// recover the original index from the recovery template's `path`
-/// field. Leading `null` padding scales linearly with the index and
-/// would burn tokens at every higher position without adding info.
+/// Rebuild the structure implied by `path` around `value`. Object-key
+/// segments nest into `{key: …}`; array-index segments wrap into a
+/// single-element array (`$[3]` → `[value]`) — callers can read
+/// `result[0]` and recover the original index from the recovery
+/// template's `path` field. Leading `null` padding scales linearly
+/// with the index and would burn tokens at every higher position
+/// without adding info.
 fn wrap_at_path(path: &str, value: Value) -> Result<Value, ToolCachingError> {
     let segments = parse_path(path)?;
     let mut acc = value;
@@ -288,6 +293,21 @@ fn wrap_at_path(path: &str, value: Value) -> Result<Value, ToolCachingError> {
         };
     }
     Ok(acc)
+}
+
+/// MCP spec requires `structuredContent` to be a JSON object. When the
+/// wrapped value is a scalar or array (string-rooted tools like
+/// `k8s_pods_list`, array-rooted upstreams, `$[N]` slices), wrap it in
+/// `{"result": <value>}` so MCP clients that validate the envelope as
+/// an object don't reject it.
+pub fn ensure_object(value: Value) -> Value {
+    if matches!(value, Value::Object(_)) {
+        value
+    } else {
+        let mut obj = serde_json::Map::new();
+        obj.insert("result".to_string(), value);
+        Value::Object(obj)
+    }
 }
 
 fn parse_path(path: &str) -> Result<Vec<PathSegment>, ToolCachingError> {
@@ -389,7 +409,21 @@ mod tests {
     #[test]
     fn wrap_at_path_root_is_identity() {
         let v = Value::String("hi".into());
-        assert_eq!(wrap_at_path("$", v.clone()).unwrap(), v,);
+        assert_eq!(wrap_at_path("$", v.clone()).unwrap(), v);
+    }
+
+    #[test]
+    fn ensure_object_wraps_non_objects() {
+        assert_eq!(
+            ensure_object(Value::String("hi".into())),
+            serde_json::json!({"result": "hi"}),
+        );
+        assert_eq!(
+            ensure_object(serde_json::json!(["a", "b"])),
+            serde_json::json!({"result": ["a", "b"]}),
+        );
+        let obj = serde_json::json!({"logs": "x"});
+        assert_eq!(ensure_object(obj.clone()), obj);
     }
 
     #[test]

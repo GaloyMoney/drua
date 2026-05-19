@@ -10,7 +10,7 @@ mod walker;
 
 pub use config::ToolCachingConfig;
 pub use error::ToolCachingError;
-pub use fetch::{FetchQuery, FetchResult};
+pub use fetch::{ensure_object, fetch_text_for_raw, FetchQuery, FetchResult};
 pub use primitives::{
     ElidedPath, QueryStructure, SummaryFetchInfo, ToolCacheResponse, ToolCallOwnerId,
     ToolCallSummary, ToolInvocationId,

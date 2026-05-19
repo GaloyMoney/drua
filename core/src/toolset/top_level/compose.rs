@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Duration;
 
-use drua_tool_caching::{extract_text, tool_result_value, ToolCaching};
+use drua_tool_caching::{extract_text, fetch_text_for_raw, tool_result_value, ToolCaching};
 use es_entity::context::{EventContext, WithEventContext};
 use rmcp::model::{CallToolResult, JsonObject};
 use serde::Deserialize;
@@ -534,6 +534,7 @@ async fn run_top_level_call(
     subject: &AuthSubject,
     args: serde_json::Value,
 ) -> Result<(CallToolResult, serde_json::Value), String> {
+    let raw_args = args.clone();
     let inner_args = match args {
         serde_json::Value::Object(obj) => Some(obj),
         serde_json::Value::Null => None,
@@ -557,7 +558,11 @@ async fn run_top_level_call(
         return Err(format_tool_error(tool.name(), &result));
     }
 
-    let value = result_to_value(&result);
+    let value = if tool.name() == "tool_output_fetch" {
+        tool_output_fetch_compose_value(&raw_args, &result)
+    } else {
+        result_to_value(&result)
+    };
     Ok((result, value))
 }
 
@@ -566,6 +571,40 @@ async fn run_top_level_call(
 /// used by tool caching. No `{value|items, _shape}` envelope ever leaks into JS.
 fn result_to_value(result: &CallToolResult) -> serde_json::Value {
     tool_result_value(result)
+}
+
+/// `tool_output_fetch` must expose object-shaped `structuredContent` to MCP
+/// clients, so scalar and array roots are wrapped as `{result: ...}` at the
+/// tool boundary. Compose scripts should still receive root scalar/array
+/// recoveries directly, matching other tool calls' upstream-shaped `T`.
+fn tool_output_fetch_compose_value(
+    args: &serde_json::Value,
+    result: &CallToolResult,
+) -> serde_json::Value {
+    let value = result_to_value(result);
+
+    let fetch_path = args
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("$");
+    let array_root_path = fetch_path.starts_with("$[");
+    if fetch_path != "$" && !array_root_path {
+        return value;
+    }
+
+    let serde_json::Value::Object(mut obj) = value else {
+        return value;
+    };
+    if obj.len() != 1 || !obj.contains_key("result") {
+        return serde_json::Value::Object(obj);
+    }
+
+    let inner = obj.remove("result").unwrap_or(serde_json::Value::Null);
+    if array_root_path || fetch_text_for_raw(&inner) == extract_text(result) {
+        inner
+    } else {
+        serde_json::json!({ "result": inner })
+    }
 }
 
 fn format_tool_error(tool_name: &str, result: &CallToolResult) -> String {
@@ -682,6 +721,54 @@ mod tests {
         let out = with_hint("concourse_list_builds", "Tool not found".to_string());
         assert!(out.contains("compose_types"));
         assert!(out.contains("concourse_*"));
+    }
+
+    #[test]
+    fn tool_output_fetch_compose_value_unwraps_mcp_result_envelope() {
+        let mut result =
+            CallToolResult::success(vec![rmcp::model::Content::text("kube-system row")]);
+        result.structured_content = Some(serde_json::json!({"result": "kube-system row"}));
+
+        assert_eq!(
+            tool_output_fetch_compose_value(&serde_json::json!({"path": "$"}), &result),
+            serde_json::json!("kube-system row"),
+        );
+    }
+
+    #[test]
+    fn tool_output_fetch_compose_value_keeps_path_wrapped_objects() {
+        let mut result = CallToolResult::success(Vec::new());
+        result.structured_content = Some(serde_json::json!({"logs": "kube-system row"}));
+
+        assert_eq!(
+            tool_output_fetch_compose_value(&serde_json::json!({"path": "$.logs"}), &result),
+            serde_json::json!({"logs": "kube-system row"}),
+        );
+    }
+
+    #[test]
+    fn tool_output_fetch_compose_value_keeps_real_result_path_wrapper() {
+        let mut result = CallToolResult::success(vec![rmcp::model::Content::text("inner")]);
+        result.structured_content = Some(serde_json::json!({"result": "inner"}));
+
+        assert_eq!(
+            tool_output_fetch_compose_value(&serde_json::json!({"path": "$.result"}), &result),
+            serde_json::json!({"result": "inner"}),
+        );
+    }
+
+    #[test]
+    fn tool_output_fetch_compose_value_unwraps_array_root_path_wrapper() {
+        let mut result =
+            CallToolResult::success(vec![rmcp::model::Content::text(r#"{"body":"inner"}"#)]);
+        result.structured_content = Some(serde_json::json!({
+            "result": [{"body": "inner"}],
+        }));
+
+        assert_eq!(
+            tool_output_fetch_compose_value(&serde_json::json!({"path": "$[2].body"}), &result),
+            serde_json::json!([{"body": "inner"}]),
+        );
     }
 
     #[test]

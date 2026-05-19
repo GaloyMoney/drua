@@ -7,7 +7,9 @@ use std::sync::{Arc, LazyLock};
 
 use rmcp::model::{CallToolResult, JsonObject};
 
-use drua_tool_caching::{FetchQuery, ToolCaching, ToolCallOwnerId, ToolInvocationId};
+use drua_tool_caching::{
+    ensure_object, FetchQuery, ToolCaching, ToolCallOwnerId, ToolInvocationId,
+};
 
 use crate::auth::AuthSubject;
 
@@ -114,7 +116,7 @@ impl TopLevelTool for ToolOutputFetch {
             .fetch(owner_id, invocation_id, &args.path, args.query.as_ref())
             .await?;
         let mut result = fetched.result;
-        result.structured_content = Some(fetched.structured);
+        result.structured_content = Some(ensure_object(fetched.structured));
         Ok(result)
     }
 }

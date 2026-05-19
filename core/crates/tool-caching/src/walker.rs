@@ -936,17 +936,21 @@ fn max_safe_array_slice_len(
     lo
 }
 
-/// Aggregate fallback marker for elisions whose direct slice would
-/// exceed `max_fetch_response_bytes`. This is intentionally not
-/// path-scoped: `mode:"summary"` replays the invocation's root summary
-/// so callers that only have the structured manifest can inspect the
-/// narrower `<elided>` pointers and drill down individually.
+/// Aggregate fallback marker for elisions whose full-tail slice would
+/// exceed `max_fetch_response_bytes`. Windowed queries at the same path
+/// (e.g. `json_array_slice` with a small `len`) still work — only the
+/// all-at-once recovery is too large. `mode:"summary"` replays the
+/// invocation's root summary so callers can inspect narrower `<elided>`
+/// pointers and drill down individually.
 fn make_summary_recover(invocation_id: ToolInvocationId, scope_path: &str) -> Value {
     serde_json::json!({
         "tool": "tool_output_fetch",
         "kind": "aggregate_summary",
         "scope_path": scope_path,
-        "note": "Direct recovery for this aggregate would exceed the fetch response cap; use the narrower recovery paths listed in this envelope. Summary mode only replays this overview.",
+        "note": "Recovering the full tail at once would exceed the fetch response cap. \
+                 Windowed queries still work — use `json_array_slice` with a smaller `len` \
+                 at the same path, or use `mode: \"summary\"` to inspect the narrower \
+                 per-item recovery paths.",
         "args_template": {
             "invocation_id": invocation_id.to_string(),
             "query": { "mode": "summary" },
@@ -1153,7 +1157,7 @@ mod tests {
             .get("note")
             .and_then(Value::as_str)
             .unwrap_or_default()
-            .contains("narrower recovery paths"));
+            .contains("json_array_slice"));
     }
 
     /// When the whole tail exceeds max_fetch_response_bytes but a smaller
