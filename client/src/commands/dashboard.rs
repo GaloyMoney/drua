@@ -1693,7 +1693,7 @@ async fn run_event_loop(
                                                     state.replace_workflow_runs(runs);
                                                 }
                                             }
-                                            fetched_run_id = None;
+                                            fetched_run_id = Some(run_id);
                                         } else {
                                             state.status_message = Some("Workflow trigger returned no run".to_string());
                                         }
