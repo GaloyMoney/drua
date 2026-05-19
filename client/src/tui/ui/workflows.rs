@@ -257,7 +257,7 @@ fn draw_run_overview(frame: &mut Frame, run: &WorkflowRunDetail, scroll: u16, ar
 
     // Trigger context
     let trigger_json = pretty_json(&run.trigger_context);
-    if trigger_json != "{}" {
+    if trigger_json != "{}" && trigger_json != "null" {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "Trigger Payload",
