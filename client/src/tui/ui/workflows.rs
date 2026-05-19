@@ -409,8 +409,10 @@ fn selected_step_body(run: &WorkflowRunDetail, cursor: usize, expanded: bool) ->
             if expanded {
                 lines.push(output);
             } else {
-                lines.extend(output.lines().take(18).map(str::to_string));
-                if output.lines().count() > 18 {
+                let preview: Vec<String> = output.lines().take(19).map(str::to_string).collect();
+                let truncated = preview.len() > 18;
+                lines.extend(preview.into_iter().take(18));
+                if truncated {
                     lines.push("...".to_string());
                 }
             }
