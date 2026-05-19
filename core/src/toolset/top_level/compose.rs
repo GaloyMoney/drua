@@ -557,7 +557,11 @@ async fn run_top_level_call(
         return Err(format_tool_error(tool.name(), &result));
     }
 
-    let value = result_to_value(&result);
+    let value = if tool.name() == "tool_output_fetch" {
+        tool_output_fetch_compose_value(&result)
+    } else {
+        result_to_value(&result)
+    };
     Ok((result, value))
 }
 
@@ -566,6 +570,20 @@ async fn run_top_level_call(
 /// used by tool caching. No `{value|items, _shape}` envelope ever leaks into JS.
 fn result_to_value(result: &CallToolResult) -> serde_json::Value {
     tool_result_value(result)
+}
+
+/// `tool_output_fetch` must expose object-shaped `structuredContent` to MCP
+/// clients, so scalar and array roots are wrapped as `{result: ...}` at the
+/// tool boundary. Compose scripts should still receive the recovered value
+/// directly, matching other tool calls' upstream-shaped `T`.
+fn tool_output_fetch_compose_value(result: &CallToolResult) -> serde_json::Value {
+    let value = result_to_value(result);
+    match value {
+        serde_json::Value::Object(mut obj) if obj.len() == 1 && obj.contains_key("result") => {
+            obj.remove("result").unwrap_or(serde_json::Value::Null)
+        }
+        other => other,
+    }
 }
 
 fn format_tool_error(tool_name: &str, result: &CallToolResult) -> String {
@@ -682,6 +700,28 @@ mod tests {
         let out = with_hint("concourse_list_builds", "Tool not found".to_string());
         assert!(out.contains("compose_types"));
         assert!(out.contains("concourse_*"));
+    }
+
+    #[test]
+    fn tool_output_fetch_compose_value_unwraps_mcp_result_envelope() {
+        let mut result = CallToolResult::success(Vec::new());
+        result.structured_content = Some(serde_json::json!({"result": "kube-system row"}));
+
+        assert_eq!(
+            tool_output_fetch_compose_value(&result),
+            serde_json::json!("kube-system row"),
+        );
+    }
+
+    #[test]
+    fn tool_output_fetch_compose_value_keeps_path_wrapped_objects() {
+        let mut result = CallToolResult::success(Vec::new());
+        result.structured_content = Some(serde_json::json!({"logs": "kube-system row"}));
+
+        assert_eq!(
+            tool_output_fetch_compose_value(&result),
+            serde_json::json!({"logs": "kube-system row"}),
+        );
     }
 
     #[test]
