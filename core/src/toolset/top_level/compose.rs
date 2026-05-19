@@ -587,7 +587,8 @@ fn tool_output_fetch_compose_value(
         .get("path")
         .and_then(serde_json::Value::as_str)
         .unwrap_or("$");
-    if fetch_path != "$" {
+    let array_root_path = fetch_path.starts_with("$[");
+    if fetch_path != "$" && !array_root_path {
         return value;
     }
 
@@ -599,7 +600,7 @@ fn tool_output_fetch_compose_value(
     }
 
     let inner = obj.remove("result").unwrap_or(serde_json::Value::Null);
-    if fetch_text_for_compose_value(&inner) == extract_text(result) {
+    if array_root_path || fetch_text_for_compose_value(&inner) == extract_text(result) {
         inner
     } else {
         serde_json::json!({ "result": inner })
@@ -760,6 +761,20 @@ mod tests {
         assert_eq!(
             tool_output_fetch_compose_value(&serde_json::json!({"path": "$.result"}), &result),
             serde_json::json!({"result": "inner"}),
+        );
+    }
+
+    #[test]
+    fn tool_output_fetch_compose_value_unwraps_array_root_path_wrapper() {
+        let mut result =
+            CallToolResult::success(vec![rmcp::model::Content::text(r#"{"body":"inner"}"#)]);
+        result.structured_content = Some(serde_json::json!({
+            "result": [{"body": "inner"}],
+        }));
+
+        assert_eq!(
+            tool_output_fetch_compose_value(&serde_json::json!({"path": "$[2].body"}), &result),
+            serde_json::json!([{"body": "inner"}]),
         );
     }
 
