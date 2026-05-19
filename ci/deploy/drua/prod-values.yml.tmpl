@@ -135,20 +135,19 @@ galoyAgents:
       # PR-mutation upstream — gated to internal agents (project_lead /
       # agent / workflow_step_agent) only. Users and ExportedAgents
       # don't see it. `merge_pull_request` deliberately excluded — the
-      # heal-flow guardrail forbids merges.
+      # heal-flow guardrail forbids merges. Mutation upstreams use static
+      # PAT auth from the provisioned *_AUTH_HEADER secrets.
       - name: github_pull_requests
-        url: https://api.githubcopilot.com/mcp/
+        url: https://api.githubcopilot.com/mcp/x/pull_requests
         toolPrefix: github_pr
-        authMode: github_app
         category: source-control-write
         categoryDescription: "GitHub PR mutations — create"
         internalOnly: true
         allowedTools:
           - create_pull_request
       - name: github_issues
-        url: https://api.githubcopilot.com/mcp/
+        url: https://api.githubcopilot.com/mcp/x/issues
         toolPrefix: github_issues
-        authMode: github_app
         category: source-control-write
         categoryDescription: "GitHub issue mutations — comments"
         internalOnly: true
