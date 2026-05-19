@@ -534,6 +534,7 @@ async fn run_top_level_call(
     subject: &AuthSubject,
     args: serde_json::Value,
 ) -> Result<(CallToolResult, serde_json::Value), String> {
+    let raw_args = args.clone();
     let inner_args = match args {
         serde_json::Value::Object(obj) => Some(obj),
         serde_json::Value::Null => None,
@@ -558,7 +559,7 @@ async fn run_top_level_call(
     }
 
     let value = if tool.name() == "tool_output_fetch" {
-        tool_output_fetch_compose_value(&result)
+        tool_output_fetch_compose_value(&raw_args, &result)
     } else {
         result_to_value(&result)
     };
@@ -574,15 +575,41 @@ fn result_to_value(result: &CallToolResult) -> serde_json::Value {
 
 /// `tool_output_fetch` must expose object-shaped `structuredContent` to MCP
 /// clients, so scalar and array roots are wrapped as `{result: ...}` at the
-/// tool boundary. Compose scripts should still receive the recovered value
-/// directly, matching other tool calls' upstream-shaped `T`.
-fn tool_output_fetch_compose_value(result: &CallToolResult) -> serde_json::Value {
+/// tool boundary. Compose scripts should still receive root scalar/array
+/// recoveries directly, matching other tool calls' upstream-shaped `T`.
+fn tool_output_fetch_compose_value(
+    args: &serde_json::Value,
+    result: &CallToolResult,
+) -> serde_json::Value {
     let value = result_to_value(result);
+
+    let fetch_path = args
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("$");
+    if fetch_path != "$" {
+        return value;
+    }
+
+    let serde_json::Value::Object(mut obj) = value else {
+        return value;
+    };
+    if obj.len() != 1 || !obj.contains_key("result") {
+        return serde_json::Value::Object(obj);
+    }
+
+    let inner = obj.remove("result").unwrap_or(serde_json::Value::Null);
+    if fetch_text_for_compose_value(&inner) == extract_text(result) {
+        inner
+    } else {
+        serde_json::json!({ "result": inner })
+    }
+}
+
+fn fetch_text_for_compose_value(value: &serde_json::Value) -> String {
     match value {
-        serde_json::Value::Object(mut obj) if obj.len() == 1 && obj.contains_key("result") => {
-            obj.remove("result").unwrap_or(serde_json::Value::Null)
-        }
-        other => other,
+        serde_json::Value::String(s) => s.clone(),
+        other => serde_json::to_string(other).unwrap_or_default(),
     }
 }
 
@@ -704,11 +731,12 @@ mod tests {
 
     #[test]
     fn tool_output_fetch_compose_value_unwraps_mcp_result_envelope() {
-        let mut result = CallToolResult::success(Vec::new());
+        let mut result =
+            CallToolResult::success(vec![rmcp::model::Content::text("kube-system row")]);
         result.structured_content = Some(serde_json::json!({"result": "kube-system row"}));
 
         assert_eq!(
-            tool_output_fetch_compose_value(&result),
+            tool_output_fetch_compose_value(&serde_json::json!({"path": "$"}), &result),
             serde_json::json!("kube-system row"),
         );
     }
@@ -719,8 +747,19 @@ mod tests {
         result.structured_content = Some(serde_json::json!({"logs": "kube-system row"}));
 
         assert_eq!(
-            tool_output_fetch_compose_value(&result),
+            tool_output_fetch_compose_value(&serde_json::json!({"path": "$.logs"}), &result),
             serde_json::json!({"logs": "kube-system row"}),
+        );
+    }
+
+    #[test]
+    fn tool_output_fetch_compose_value_keeps_real_result_path_wrapper() {
+        let mut result = CallToolResult::success(vec![rmcp::model::Content::text("inner")]);
+        result.structured_content = Some(serde_json::json!({"result": "inner"}));
+
+        assert_eq!(
+            tool_output_fetch_compose_value(&serde_json::json!({"path": "$.result"}), &result),
+            serde_json::json!({"result": "inner"}),
         );
     }
 
