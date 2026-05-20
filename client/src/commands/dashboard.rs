@@ -1949,20 +1949,16 @@ async fn run_event_loop(
                                 }
                             }
                             handlers::Action::ToggleThreadsForAgent { agent_id } => {
-                                if state.thread_view.is_some() {
-                                    state.thread_view = None;
-                                    state.focus = state.thread_return_focus.take().unwrap_or(Focus::Workflows);
-                                } else {
-                                    state.thread_return_focus = Some(Focus::Workflows);
-                                    state.status_message = Some("Loading threads…".to_string());
-                                    spawn_threads_fetch(
-                                        config.server_url.clone(),
-                                        config.auth_token.clone(),
-                                        agent_id,
-                                        false,
-                                        stream_tx.clone(),
-                                    );
-                                }
+                                state.thread_return_focus = Some(Focus::Workflows);
+                                state.status_message =
+                                    Some("Loading threads…".to_string());
+                                spawn_threads_fetch(
+                                    config.server_url.clone(),
+                                    config.auth_token.clone(),
+                                    agent_id,
+                                    false,
+                                    stream_tx.clone(),
+                                );
                             }
                             handlers::Action::OpenWorkflows => {
                                 state.enter_workflows();
