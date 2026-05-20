@@ -1702,7 +1702,14 @@ fn handle_workflow_event(
             agent_name,
             messages,
         } => {
-            state.show_step_conversation(agent_id, agent_name, messages);
+            let still_selected = state
+                .selected_step_agent_id()
+                .map(|(id, _)| id == agent_id)
+                .unwrap_or(false);
+            if still_selected {
+                state.status_message = None;
+                state.show_step_conversation(agent_id, agent_name, messages);
+            }
         }
         WorkflowEvent::ConversationError(e) => {
             state.status_message = Some(e);
