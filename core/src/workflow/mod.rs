@@ -922,7 +922,7 @@ impl Workflows {
         provider: &str,
         event: &serde_json::Value,
     ) -> Result<usize, WorkflowError> {
-        let mut all_waiting = Vec::new();
+        let mut resumed = 0usize;
         let mut query = es_entity::PaginatedQueryArgs {
             first: 100,
             after: None,
@@ -936,85 +936,85 @@ impl Workflows {
                     es_entity::ListDirection::Descending,
                 )
                 .await?;
-            all_waiting.append(&mut result.entities);
+
+            for mut run in result.entities.drain(..) {
+                let wait_step_name = match run.current_wait_step() {
+                    Some(sr) => sr.name.clone(),
+                    None => continue,
+                };
+
+                let wait_def = run
+                    .steps_snapshot
+                    .iter()
+                    .find(|s| s.name() == wait_step_name);
+
+                let (step_provider, resume_condition, output_schema) = match wait_def {
+                    Some(WorkflowStepDef::Wait {
+                        provider: p,
+                        resume_condition,
+                        output_schema,
+                        ..
+                    }) => (
+                        p.as_str(),
+                        resume_condition.as_str(),
+                        output_schema as &serde_json::Value,
+                    ),
+                    _ => continue,
+                };
+
+                if !step_provider.eq_ignore_ascii_case(provider) {
+                    continue;
+                }
+
+                let step_outputs: std::collections::HashMap<String, serde_json::Value> = run
+                    .step_results
+                    .iter()
+                    .map(|r| {
+                        let val = r.output.clone().unwrap_or(serde_json::Value::Null);
+                        (r.name.clone(), val)
+                    })
+                    .collect();
+
+                let ctx = template::ResumeContext {
+                    trigger: &run.trigger_context,
+                    steps: &step_outputs,
+                    resume_payload: event,
+                };
+
+                match ctx.evaluate_condition(resume_condition) {
+                    Ok(template::ConditionOutcome::True) => {}
+                    Ok(outcome) => {
+                        tracing::debug!(run_id = %run.id, ?outcome, "resume_condition not satisfied");
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(run_id = %run.id, err = %e, "resume_condition evaluation failed");
+                        continue;
+                    }
+                }
+
+                let extracted = extract_wait_output(&ctx, output_schema);
+
+                let source = format!("provider:{provider}");
+                if run
+                    .step_resumed(wait_step_name, extracted, source)
+                    .did_execute()
+                {
+                    match self.commit_resume(&mut run).await {
+                        Ok(()) => {
+                            tracing::info!(run_id = %run.id, "resumed parked run");
+                            resumed += 1;
+                        }
+                        Err(e) => {
+                            tracing::warn!(run_id = %run.id, err = %e, "failed to commit resume");
+                        }
+                    }
+                }
+            }
+
             match result.into_next_query() {
                 Some(next) => query = next,
                 None => break,
-            }
-        }
-        let mut resumed = 0usize;
-        for mut run in all_waiting {
-            let wait_step_name = match run.current_wait_step() {
-                Some(sr) => sr.name.clone(),
-                None => continue,
-            };
-
-            let wait_def = run
-                .steps_snapshot
-                .iter()
-                .find(|s| s.name() == wait_step_name);
-
-            let (step_provider, resume_condition, output_schema) = match wait_def {
-                Some(WorkflowStepDef::Wait {
-                    provider: p,
-                    resume_condition,
-                    output_schema,
-                    ..
-                }) => (
-                    p.as_str(),
-                    resume_condition.as_str(),
-                    output_schema as &serde_json::Value,
-                ),
-                _ => continue,
-            };
-
-            if !step_provider.eq_ignore_ascii_case(provider) {
-                continue;
-            }
-
-            let step_outputs: std::collections::HashMap<String, serde_json::Value> = run
-                .step_results
-                .iter()
-                .map(|r| {
-                    let val = r.output.clone().unwrap_or(serde_json::Value::Null);
-                    (r.name.clone(), val)
-                })
-                .collect();
-
-            let ctx = template::ResumeContext {
-                trigger: &run.trigger_context,
-                steps: &step_outputs,
-                resume_payload: event,
-            };
-
-            match ctx.evaluate_condition(resume_condition) {
-                Ok(template::ConditionOutcome::True) => {}
-                Ok(outcome) => {
-                    tracing::debug!(run_id = %run.id, ?outcome, "resume_condition not satisfied");
-                    continue;
-                }
-                Err(e) => {
-                    tracing::warn!(run_id = %run.id, err = %e, "resume_condition evaluation failed");
-                    continue;
-                }
-            }
-
-            let extracted = extract_wait_output(&ctx, output_schema);
-
-            let source = format!("provider:{provider}");
-            if run
-                .step_resumed(wait_step_name, extracted, source)
-                .did_execute()
-            {
-                match self.commit_resume(&mut run).await {
-                    Ok(()) => {
-                        tracing::info!(run_id = %run.id, "resumed parked run");
-                        resumed += 1;
-                    }
-                    Err(e) => {
-                        tracing::warn!(run_id = %run.id, err = %e, "failed to commit resume");
-                    }
-                }
             }
         }
         Ok(resumed)
