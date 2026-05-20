@@ -100,7 +100,9 @@ galoyAgents:
               - refs/heads/bot/*
           - owner: GaloyMoney
             repo: citadelbanking-portal
-            modes: [pull]
+            modes: [pull, push]
+            allowedPushRefs:
+              - refs/heads/bot/*
     mcpUpstreams:
       - name: honeycomb
         url: https://mcp.honeycomb.io/mcp
