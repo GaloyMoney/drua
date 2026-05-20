@@ -1438,16 +1438,14 @@ fn spawn_threads_fetch(
         let client = GraphqlClient::new(&base_url, &token);
         match fetch_threads(&client, &agent_id).await {
             Ok(grid) => {
-                let _ = tx.send(TaggedEvent::for_agent(
-                    &agent_id,
-                    ChatStreamEvent::ThreadsLoaded(Box::new(grid)),
-                ));
+                let _ = tx.send(TaggedEvent::untagged(ChatStreamEvent::ThreadsLoaded(
+                    Box::new(grid),
+                )));
             }
             Err(e) => {
-                let _ = tx.send(TaggedEvent::for_agent(
-                    &agent_id,
-                    ChatStreamEvent::Error(format!("Failed to load threads: {e}")),
-                ));
+                let _ = tx.send(TaggedEvent::untagged(ChatStreamEvent::Error(format!(
+                    "Failed to load threads: {e}"
+                ))));
             }
         }
     });
