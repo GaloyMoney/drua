@@ -707,6 +707,8 @@ impl AgentSession {
 
     /// Synthesizes error tool results for a thread stuck in ToolUse turn
     /// after a dispatcher restart. Called lazily from `next_prompt`.
+    /// No-ops when the thread is not in ToolUse or the dispatch is
+    /// younger than `STALE_TOOL_USE_THRESHOLD`.
     fn recover_stale_tool_use(
         &mut self,
         thread_id: SessionThreadId,
@@ -715,7 +717,7 @@ impl AgentSession {
             .threads
             .get_persisted(&thread_id)
             .is_some_and(|t| t.is_tool_use_turn());
-        if !is_tool_use {
+        if !is_tool_use || !self.is_tool_use_stale(thread_id) {
             return Ok(());
         }
         let tool_use_ids = self.pending_tool_use_ids(thread_id);
