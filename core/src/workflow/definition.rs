@@ -7,7 +7,7 @@ use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
 use llm::ModelChain;
-use schemars::schema::{InstanceType, RootSchema, SingleOrVec};
+use schemars::schema::{InstanceType, RootSchema, Schema, SingleOrVec};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
@@ -31,14 +31,42 @@ pub enum OutputSchemaError {
 }
 
 impl OutputSchema {
-    pub fn new(schema: RootSchema) -> Result<Self, OutputSchemaError> {
+    pub fn new(mut schema: RootSchema) -> Result<Self, OutputSchemaError> {
         match &schema.schema.instance_type {
             Some(SingleOrVec::Single(t)) if **t == InstanceType::Object => {}
             Some(SingleOrVec::Vec(types))
                 if types.len() == 1 && types[0] == InstanceType::Object => {}
             _ => return Err(OutputSchemaError::NotObjectRoot),
         }
+        Self::ensure_control_flow_fields(&mut schema);
         Ok(Self(schema))
+    }
+
+    /// Injects `success` (boolean, required) and `reason` (string,
+    /// optional) when missing. These fields drive workflow run-state
+    /// classification — without them the executor cannot distinguish
+    /// step success from failure (memo `019e019e`).
+    fn ensure_control_flow_fields(schema: &mut RootSchema) {
+        let obj = schema.schema.object.get_or_insert_with(Default::default);
+
+        if !obj.properties.contains_key("success") {
+            let prop: Schema = serde_json::from_value(serde_json::json!({
+                "type": "boolean",
+                "description": "Did the step achieve its goal?"
+            }))
+            .expect("static schema is valid");
+            obj.properties.insert("success".to_string(), prop);
+        }
+        obj.required.insert("success".to_string());
+
+        if !obj.properties.contains_key("reason") {
+            let prop: Schema = serde_json::from_value(serde_json::json!({
+                "type": "string",
+                "description": "Optional one-paragraph meta-explanation of the outcome — typically used on failure to cite evidence."
+            }))
+            .expect("static schema is valid");
+            obj.properties.insert("reason".to_string(), prop);
+        }
     }
 
     pub fn into_root_schema(self) -> RootSchema {
@@ -398,13 +426,13 @@ mod tests {
     }
 
     #[test]
-    fn output_schema_accessor_returns_declared() {
+    fn output_schema_accessor_returns_declared_with_control_flow_fields() {
         let custom_value = serde_json::json!({
             "type": "object",
             "required": ["verdict"],
             "properties": { "verdict": {"type": "string"} }
         });
-        let custom: OutputSchema = serde_json::from_value(custom_value.clone()).unwrap();
+        let custom: OutputSchema = serde_json::from_value(custom_value).unwrap();
         let step = WorkflowStepDef::AgentStep {
             name: "judge".into(),
             skill: "judge".into(),
@@ -416,7 +444,18 @@ mod tests {
             condition: None,
         };
         let actual = serde_json::to_value(step.output_schema().expect("AgentStep")).unwrap();
-        assert_eq!(actual, custom_value);
+        let props = actual["properties"].as_object().unwrap();
+        assert!(props.contains_key("verdict"), "user field preserved");
+        assert!(props.contains_key("success"), "success injected");
+        assert!(props.contains_key("reason"), "reason injected");
+        let required: Vec<&str> = actual["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(required.contains(&"verdict"));
+        assert!(required.contains(&"success"));
     }
 
     #[test]
@@ -616,6 +655,61 @@ mod tests {
         let trigger = WorkflowTrigger::Manual { condition: None };
         let s = serde_yaml::to_string(&trigger).unwrap();
         assert!(!s.contains("condition"));
+    }
+
+    #[test]
+    fn custom_schema_gets_control_flow_fields_injected() {
+        let schema: OutputSchema = serde_json::from_value(serde_json::json!({
+            "type": "object",
+            "required": ["verdict"],
+            "properties": {
+                "verdict": { "type": "string", "enum": ["pass", "fail"] }
+            }
+        }))
+        .unwrap();
+        let value = serde_json::to_value(&schema).unwrap();
+        let props = value["properties"].as_object().unwrap();
+        assert!(props.contains_key("verdict"), "user field kept");
+        assert!(props.contains_key("success"), "success injected");
+        assert!(props.contains_key("reason"), "reason injected");
+        assert_eq!(props["success"]["type"], "boolean");
+        assert_eq!(props["reason"]["type"], "string");
+
+        let required: Vec<&str> = value["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(required.contains(&"success"), "success is required");
+        assert!(required.contains(&"verdict"), "user required field kept");
+        assert!(
+            !required.contains(&"reason"),
+            "reason stays optional (not in required)"
+        );
+    }
+
+    #[test]
+    fn schema_already_containing_success_reason_is_unchanged() {
+        let input = serde_json::json!({
+            "type": "object",
+            "required": ["success", "data"],
+            "properties": {
+                "success": { "type": "boolean", "description": "custom desc" },
+                "reason": { "type": "string", "description": "custom reason desc" },
+                "data": { "type": "object" }
+            }
+        });
+        let schema: OutputSchema = serde_json::from_value(input.clone()).unwrap();
+        let output = serde_json::to_value(&schema).unwrap();
+        assert_eq!(
+            output["properties"]["success"]["description"], "custom desc",
+            "existing success description preserved"
+        );
+        assert_eq!(
+            output["properties"]["reason"]["description"], "custom reason desc",
+            "existing reason description preserved"
+        );
     }
 
     /// Old serialized triggers without the `condition` field must

@@ -709,7 +709,7 @@ steps:
                 "verdict": { "type": "string", "enum": ["pass", "fail"] }
             }
         });
-        let schema: OutputSchema = serde_json::from_value(schema_value.clone()).unwrap();
+        let schema: OutputSchema = serde_json::from_value(schema_value).unwrap();
         let steps = vec![WorkflowStepDef::AgentStep {
             name: "judge".to_string(),
             skill: "judge".to_string(),
@@ -741,7 +741,10 @@ steps:
         match &parsed.steps[0] {
             WorkflowStepDef::AgentStep { output_schema, .. } => {
                 let actual = serde_json::to_value(output_schema).unwrap();
-                assert_eq!(actual, schema_value);
+                let props = actual["properties"].as_object().unwrap();
+                assert!(props.contains_key("verdict"), "user field preserved");
+                assert!(props.contains_key("success"), "success injected");
+                assert!(props.contains_key("reason"), "reason injected");
             }
             other => panic!("expected AgentStep, got {other:?}"),
         }

@@ -148,7 +148,7 @@ mod tests {
                 "b": { "type": "boolean" }
             }
         }));
-        let value = serde_json::json!({ "a": "hi", "b": true });
+        let value = serde_json::json!({ "a": "hi", "b": true, "success": true });
         validate_against_schema(&s, &value).unwrap();
     }
 
@@ -171,8 +171,13 @@ mod tests {
     }
 
     #[test]
-    fn skips_when_no_required_array() {
+    fn minimal_schema_still_requires_success() {
         let s = schema(serde_json::json!({ "type": "object" }));
-        validate_against_schema(&s, &serde_json::json!({})).unwrap();
+        let err = validate_against_schema(&s, &serde_json::json!({})).unwrap_err();
+        assert!(
+            err.contains("success"),
+            "success is always injected as required"
+        );
+        validate_against_schema(&s, &serde_json::json!({ "success": true })).unwrap();
     }
 }
