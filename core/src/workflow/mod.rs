@@ -483,11 +483,13 @@ impl Workflows {
                             "wait step '{name}': `provider` must be a non-empty string"
                         )));
                     }
-                    if let Err(e) = template::parse_path(resume_condition.trim()) {
-                        return Err(WorkflowError::InvalidCondition(format!(
-                            "wait step '{name}': resume_condition: {e}"
-                        )));
-                    }
+                    let r =
+                        template::parse_resume_condition(resume_condition.trim()).map_err(|e| {
+                            WorkflowError::InvalidCondition(format!(
+                                "wait step '{name}': resume_condition: {e}"
+                            ))
+                        })?;
+                    validate_ref_against_prior_steps(name, &r, &seen_step_names)?;
                 }
                 WorkflowStepDef::ToolStep {
                     name, tool, params, ..
@@ -979,7 +981,14 @@ impl Workflows {
 
             match ctx.evaluate_condition(resume_condition) {
                 Ok(template::ConditionOutcome::True) => {}
-                Ok(_) | Err(_) => continue,
+                Ok(outcome) => {
+                    tracing::debug!(run_id = %run.id, ?outcome, "resume_condition not satisfied");
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(run_id = %run.id, err = %e, "resume_condition evaluation failed");
+                    continue;
+                }
             }
 
             let extracted = extract_wait_output(&ctx, output_schema);

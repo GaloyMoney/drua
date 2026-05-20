@@ -372,19 +372,35 @@ pub fn evaluate_trigger_condition(
     ctx.evaluate_condition(body)
 }
 
-/// Reject expressions that reference identifiers other than the two
-/// bound namespaces (`trigger`, `steps`). Stops mistakes like
-/// `${{ env.HOME }}` from compiling cleanly only to silently resolve
-/// to nothing at runtime.
-pub fn validate_root(r: &TemplateRef) -> Result<(), TemplateError> {
+/// Reject expressions that reference identifiers other than the
+/// bound namespaces. `allowed` lists every legal root for the
+/// context (`trigger`, `steps`, optionally `resume_payload`).
+fn validate_root_inner(r: &TemplateRef, allowed: &[&str]) -> Result<(), TemplateError> {
     let program = Program::compile(&r.body)
         .map_err(|e| TemplateError::Compile(r.raw.clone(), e.to_string()))?;
     for ident in program.references().variables() {
-        if ident != "trigger" && ident != "steps" {
+        if !allowed.contains(&ident) {
             return Err(TemplateError::UnknownRoot(r.raw.clone(), ident.to_string()));
         }
     }
     Ok(())
+}
+
+pub fn validate_root(r: &TemplateRef) -> Result<(), TemplateError> {
+    validate_root_inner(r, &["trigger", "steps"])
+}
+
+pub fn validate_resume_root(r: &TemplateRef) -> Result<(), TemplateError> {
+    validate_root_inner(r, &["trigger", "steps", "resume_payload"])
+}
+
+/// Compile-time parse + root validation for a wait step
+/// `resume_condition`. Like [`parse_condition`] but additionally
+/// allows `resume_payload` as a root.
+pub fn parse_resume_condition(body: &str) -> Result<TemplateRef, TemplateError> {
+    let r = parse_path(body)?;
+    validate_resume_root(&r)?;
+    Ok(r)
 }
 
 /// Names of every step referenced via `steps.<name>` in the
