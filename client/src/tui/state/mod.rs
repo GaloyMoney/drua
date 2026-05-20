@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use super::chat::{AssistantChat, ChatRole, ContentBlock};
+use super::chat::{AssistantChat, ChatMessage, ChatRole, ContentBlock};
 
 mod workflow;
 
@@ -514,6 +514,7 @@ impl ScreenState {
         if is_new_run {
             self.workflows.step_cursor = 0;
             self.workflows.expanded = false;
+            self.workflows.conversation = None;
         }
         self.workflows.loading = false;
     }
@@ -598,6 +599,7 @@ impl ScreenState {
         if len > 0 && self.workflows.step_cursor < len - 1 {
             self.workflows.step_cursor += 1;
             self.workflows.expanded = false;
+            self.workflows.conversation = None;
         }
     }
 
@@ -605,6 +607,7 @@ impl ScreenState {
         if self.workflows.step_cursor > 0 {
             self.workflows.step_cursor = self.workflows.step_cursor.saturating_sub(1);
             self.workflows.expanded = false;
+            self.workflows.conversation = None;
         }
     }
 
@@ -618,6 +621,43 @@ impl ScreenState {
 
     pub fn workflow_toggle_expanded(&mut self) {
         self.workflows.expanded = !self.workflows.expanded;
+    }
+
+    pub fn selected_step_agent_id(&self) -> Option<(String, String)> {
+        let run = self.workflows.selected_run.as_ref()?;
+        let step = run.steps_snapshot.get(self.workflows.step_cursor)?;
+        let agent = run.agent_for_step(&step.name)?;
+        Some((agent.id.clone(), agent.name.clone()))
+    }
+
+    pub fn show_step_conversation(
+        &mut self,
+        agent_id: String,
+        agent_name: String,
+        messages: Vec<ChatMessage>,
+    ) {
+        self.workflows.conversation = Some(StepConversation {
+            agent_id,
+            agent_name,
+            messages,
+            scroll: 0,
+        });
+    }
+
+    pub fn hide_step_conversation(&mut self) {
+        self.workflows.conversation = None;
+    }
+
+    pub fn conversation_scroll_down(&mut self) {
+        if let Some(conv) = &mut self.workflows.conversation {
+            conv.scroll = conv.scroll.saturating_add(1);
+        }
+    }
+
+    pub fn conversation_scroll_up(&mut self) {
+        if let Some(conv) = &mut self.workflows.conversation {
+            conv.scroll = conv.scroll.saturating_sub(1);
+        }
     }
 
     pub fn workflow_focus_right(&mut self) {

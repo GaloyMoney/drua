@@ -1,5 +1,7 @@
 use serde_json::Value;
 
+use super::super::chat::ChatMessage;
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MillerFocus {
     #[default]
@@ -23,6 +25,15 @@ pub struct WorkflowState {
     pub detail_scroll: u16,
     pub loading: bool,
     pub error: Option<String>,
+    pub conversation: Option<StepConversation>,
+}
+
+#[derive(Debug, Clone)]
+pub struct StepConversation {
+    pub agent_id: String,
+    pub agent_name: String,
+    pub messages: Vec<ChatMessage>,
+    pub scroll: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -101,10 +112,14 @@ pub struct WorkflowRunDetail {
 }
 
 impl WorkflowRunDetail {
-    // Treat any non-pending/non-running state as terminal so unknown
-    // future states (e.g. CANCELLED) stop polling instead of looping.
     pub fn is_terminal(&self) -> bool {
         !matches!(self.state.as_str(), "PENDING" | "RUNNING")
+    }
+
+    pub fn agent_for_step(&self, step_name: &str) -> Option<&super::AgentItem> {
+        let run_short: String = self.id.chars().take(8).collect();
+        let expected = format!("workflow-{run_short}-{step_name}");
+        self.agents.iter().find(|a| a.name == expected)
     }
 }
 
