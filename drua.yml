@@ -149,3 +149,4 @@ toolsets:
       # and we don't want any agent flow ever discovering it.
       allowed_tools:
         - create_pull_request
+        - create_and_submit_pull_request_review
