@@ -6,8 +6,10 @@ use ratatui::{
     Frame,
 };
 
+use super::super::chat::{ChatRole, ContentBlock};
 use super::super::state::{
-    MillerFocus, ScreenState, WorkflowRunDetail, WorkflowStepItem, WorkflowStepResultItem,
+    MillerFocus, ScreenState, StepConversation, WorkflowRunDetail, WorkflowStepItem,
+    WorkflowStepResultItem,
 };
 
 pub fn draw_workflows(frame: &mut Frame, state: &ScreenState, area: Rect) {
@@ -34,9 +36,10 @@ pub fn status_keys(state: &ScreenState) -> &'static str {
         MillerFocus::Runs => {
             " │ ↑/↓:nav  J/K:scroll  ←:defs  →:steps  ^R:trigger  r:refresh  Esc:chat "
         }
-        MillerFocus::StepDetail => {
-            " │ ↑/↓:step  ←:runs  Enter:expand  ^R:trigger  r:refresh  Esc:chat "
+        MillerFocus::StepDetail if state.workflows.conversation.is_some() => {
+            " │ ↑/↓:scroll  c/←/Esc:back "
         }
+        MillerFocus::StepDetail => " │ ↑/↓:step  ←:runs  Enter:expand  c:conversation  Esc:chat ",
     }
 }
 
@@ -217,6 +220,7 @@ fn draw_run_split(frame: &mut Frame, state: &ScreenState, area: Rect) {
     if step_focused {
         draw_step_body(
             frame,
+            state,
             run,
             state.workflows.step_cursor,
             state.workflows.expanded,
@@ -349,11 +353,16 @@ fn draw_step_list(
 
 fn draw_step_body(
     frame: &mut Frame,
+    state: &ScreenState,
     run: &WorkflowRunDetail,
     cursor: usize,
     expanded: bool,
     area: Rect,
 ) {
+    if let Some(conv) = &state.workflows.conversation {
+        draw_conversation(frame, conv, area);
+        return;
+    }
     let body = selected_step_body(run, cursor, expanded);
     frame.render_widget(
         Paragraph::new(body)
@@ -363,6 +372,90 @@ fn draw_step_body(
                     .border_style(Style::default().fg(Color::Yellow))
                     .title(" Step Detail "),
             )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
+fn draw_conversation(frame: &mut Frame, conv: &StepConversation, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(format!(" {} — Conversation ", conv.agent_name));
+
+    if conv.messages.is_empty() {
+        frame.render_widget(
+            Paragraph::new("No messages")
+                .block(block)
+                .style(Style::default().fg(Color::DarkGray)),
+            area,
+        );
+        return;
+    }
+
+    let mut lines: Vec<Line> = Vec::new();
+    for msg in &conv.messages {
+        let (role_label, role_color) = match msg.role {
+            ChatRole::User => ("▶ user", Color::Cyan),
+            ChatRole::Assistant => ("◀ assistant", Color::Green),
+            ChatRole::System => ("● system", Color::Red),
+        };
+        lines.push(Line::from(Span::styled(
+            role_label,
+            Style::default().fg(role_color).add_modifier(Modifier::BOLD),
+        )));
+
+        for block_item in &msg.blocks {
+            match block_item {
+                ContentBlock::Text(text) => {
+                    for l in text.lines() {
+                        lines.push(Line::from(format!("  {l}")));
+                    }
+                }
+                ContentBlock::ToolUse { name, .. } => {
+                    lines.push(Line::from(Span::styled(
+                        format!("  ⚙ {name}"),
+                        Style::default().fg(Color::Yellow),
+                    )));
+                }
+                ContentBlock::ToolResult(result) => {
+                    let preview: String = result
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(80)
+                        .collect();
+                    lines.push(Line::from(Span::styled(
+                        format!("  ← {preview}"),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+                ContentBlock::Thinking(_) => {
+                    lines.push(Line::from(Span::styled(
+                        "  (thinking…)",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+                ContentBlock::Sandbox {
+                    sandbox_name,
+                    operation,
+                    ..
+                } => {
+                    lines.push(Line::from(Span::styled(
+                        format!("  ⊞ {operation} {sandbox_name}"),
+                        Style::default().fg(Color::Magenta),
+                    )));
+                }
+            }
+        }
+        lines.push(Line::from(""));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .scroll((conv.scroll, 0))
             .wrap(Wrap { trim: false }),
         area,
     );

@@ -27,6 +27,10 @@ pub enum Action {
         agent_id: String,
         path: String,
     },
+    FetchStepConversation {
+        agent_id: String,
+        agent_name: String,
+    },
 }
 
 pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
@@ -186,6 +190,9 @@ fn handle_workflow_runs_key(state: &mut ScreenState, key: KeyEvent) -> Action {
 }
 
 fn handle_workflow_step_detail_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    if state.workflows.conversation.is_some() {
+        return handle_workflow_conversation_key(state, key);
+    }
     match key.code {
         KeyCode::Char('j') | KeyCode::Down => {
             state.workflow_step_cursor_down();
@@ -203,9 +210,42 @@ fn handle_workflow_step_detail_key(state: &mut ScreenState, key: KeyEvent) -> Ac
             state.workflow_toggle_expanded();
             Action::None
         }
+        KeyCode::Char('c') => {
+            if let Some((agent_id, agent_name)) = state.selected_step_agent_id() {
+                Action::FetchStepConversation {
+                    agent_id,
+                    agent_name,
+                }
+            } else {
+                state.status_message = Some("No agent for this step".to_string());
+                Action::None
+            }
+        }
         KeyCode::Char('r') => Action::RefreshWorkflows,
         KeyCode::Esc => {
             state.focus = Focus::Chat;
+            Action::None
+        }
+        _ => Action::None,
+    }
+}
+
+fn handle_workflow_conversation_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.conversation_scroll_down();
+            Action::None
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.conversation_scroll_up();
+            Action::None
+        }
+        KeyCode::Char('c') | KeyCode::Left | KeyCode::Char('h') => {
+            state.hide_step_conversation();
+            Action::None
+        }
+        KeyCode::Esc => {
+            state.hide_step_conversation();
             Action::None
         }
         _ => Action::None,

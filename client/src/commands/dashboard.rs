@@ -627,6 +627,12 @@ enum WorkflowEvent {
         is_poll: bool,
     },
     TriggerComplete(Box<WorkflowTriggerOutcome>),
+    ConversationLoaded {
+        agent_id: String,
+        agent_name: String,
+        messages: Vec<ChatMessage>,
+    },
+    ConversationError(String),
 }
 
 struct WorkflowTriggerOutcome {
@@ -1588,6 +1594,32 @@ fn spawn_workflow_trigger(
     });
 }
 
+fn spawn_step_conversation_fetch(
+    base_url: String,
+    token: String,
+    agent_id: String,
+    agent_name: String,
+    tx: mpsc::UnboundedSender<WorkflowEvent>,
+) {
+    tokio::spawn(async move {
+        let client = GraphqlClient::new(&base_url, &token);
+        match fetch_chat_history(&client, &agent_id).await {
+            Ok(messages) => {
+                let _ = tx.send(WorkflowEvent::ConversationLoaded {
+                    agent_id,
+                    agent_name,
+                    messages,
+                });
+            }
+            Err(e) => {
+                let _ = tx.send(WorkflowEvent::ConversationError(format!(
+                    "Failed to load conversation: {e}"
+                )));
+            }
+        }
+    });
+}
+
 fn handle_workflow_event(
     state: &mut ScreenState,
     event: WorkflowEvent,
@@ -1664,6 +1696,16 @@ fn handle_workflow_event(
             } else {
                 state.status_message = Some("Workflow trigger returned no run".to_string());
             }
+        }
+        WorkflowEvent::ConversationLoaded {
+            agent_id,
+            agent_name,
+            messages,
+        } => {
+            state.show_step_conversation(agent_id, agent_name, messages);
+        }
+        WorkflowEvent::ConversationError(e) => {
+            state.status_message = Some(e);
         }
     }
 }
@@ -1917,6 +1959,16 @@ async fn run_event_loop(
                                     config.auth_token.clone(),
                                     definition_id,
                                     payload,
+                                    workflow_tx.clone(),
+                                );
+                            }
+                            handlers::Action::FetchStepConversation { agent_id, agent_name } => {
+                                state.status_message = Some("Loading conversation…".to_string());
+                                spawn_step_conversation_fetch(
+                                    config.server_url.clone(),
+                                    config.auth_token.clone(),
+                                    agent_id,
+                                    agent_name,
                                     workflow_tx.clone(),
                                 );
                             }
