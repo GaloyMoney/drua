@@ -762,11 +762,7 @@ mod tests {
         let mut state = state();
         state.enter_workflows();
         state.workflows.focus = MillerFocus::StepDetail;
-        state.show_step_conversation(
-            "agent-1".into(),
-            "test-agent".into(),
-            vec![],
-        );
+        state.show_step_conversation("agent-1".into(), "test-agent".into(), vec![]);
         state.update_conversation_viewport_height(40);
         state
     }
