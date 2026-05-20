@@ -24,7 +24,7 @@ pub fn draw(frame: &mut Frame, state: &mut ScreenState) {
     let status_area = chunks[1];
 
     if state.focus == Focus::Workflows {
-        workflows::draw_workflows(frame, state, main_area);
+        workflows::draw_workflows(frame, &mut *state, main_area);
     } else {
         let panels = Layout::default()
             .direction(Direction::Horizontal)

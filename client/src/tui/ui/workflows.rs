@@ -12,7 +12,7 @@ use super::super::state::{
     WorkflowStepResultItem,
 };
 
-pub fn draw_workflows(frame: &mut Frame, state: &ScreenState, area: Rect) {
+pub fn draw_workflows(frame: &mut Frame, state: &mut ScreenState, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
@@ -37,7 +37,7 @@ pub fn status_keys(state: &ScreenState) -> &'static str {
             " │ ↑/↓:nav  J/K:scroll  ←:defs  →:steps  ^R:trigger  r:refresh  Esc:chat "
         }
         MillerFocus::StepDetail if state.workflows.conversation.is_some() => {
-            " │ ↑/↓:scroll  c/←/Esc:back "
+            " │ ↑/↓:scroll  ^D/^U:fast  ^T:threads  c/←/Esc:back "
         }
         MillerFocus::StepDetail => " │ ↑/↓:step  ←:runs  Enter:expand  c:conversation  Esc:chat ",
     }
@@ -142,10 +142,10 @@ fn draw_col_runs(frame: &mut Frame, state: &ScreenState, area: Rect) {
     frame.render_widget(List::new(items).block(block), area);
 }
 
-fn draw_col_detail(frame: &mut Frame, state: &ScreenState, area: Rect) {
+fn draw_col_detail(frame: &mut Frame, state: &mut ScreenState, area: Rect) {
     match state.workflows.focus {
         MillerFocus::Definitions | MillerFocus::YamlDetail => {
-            draw_definition_detail(frame, state, area)
+            draw_definition_detail(frame, state, area);
         }
         MillerFocus::Runs | MillerFocus::StepDetail => draw_run_split(frame, state, area),
     }
@@ -191,8 +191,8 @@ fn draw_definition_detail(frame: &mut Frame, state: &ScreenState, area: Rect) {
     );
 }
 
-fn draw_run_split(frame: &mut Frame, state: &ScreenState, area: Rect) {
-    let Some(run) = &state.workflows.selected_run else {
+fn draw_run_split(frame: &mut Frame, state: &mut ScreenState, area: Rect) {
+    if state.workflows.selected_run.is_none() {
         let msg = if state.workflows.runs.is_empty() {
             "No run selected"
         } else {
@@ -207,7 +207,7 @@ fn draw_run_split(frame: &mut Frame, state: &ScreenState, area: Rect) {
             area,
         );
         return;
-    };
+    }
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -215,6 +215,12 @@ fn draw_run_split(frame: &mut Frame, state: &ScreenState, area: Rect) {
         .split(area);
 
     let step_focused = state.workflows.focus == MillerFocus::StepDetail;
+
+    if step_focused && state.workflows.conversation.is_some() {
+        state.update_conversation_viewport_height(chunks[1].height.saturating_sub(2));
+    }
+
+    let run = state.workflows.selected_run.as_ref().unwrap();
     draw_step_list(frame, state, run, chunks[0], step_focused);
 
     if step_focused {
