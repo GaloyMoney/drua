@@ -8,6 +8,15 @@ use super::super::view::{MessageBlockIndex, MessageView, PromptDefinition};
 use super::{estimation, event_belongs_to_thread};
 
 const MASK_PLACEHOLDER: &str = "[Tool output cleared — re-invoke tool if needed]";
+const MASK_PLACEHOLDER_ERROR: &str = "[Tool error output cleared — do not retry without new inputs]";
+
+fn mask_placeholder_for(is_error: bool) -> &'static str {
+    if is_error {
+        MASK_PLACEHOLDER_ERROR
+    } else {
+        MASK_PLACEHOLDER
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct PruningPlan {
@@ -119,8 +128,9 @@ fn plan_tool_result_masking<'a>(
             continue;
         }
 
+        let placeholder = mask_placeholder_for(result.is_error);
         let content_len = result.content.len();
-        if content_len <= MASK_PLACEHOLDER.len() + 50 {
+        if content_len <= placeholder.len() + 50 {
             continue;
         }
 
@@ -129,7 +139,7 @@ fn plan_tool_result_masking<'a>(
             .map(|s| format!("[sandbox:{s}] "))
             .unwrap_or_default();
 
-        let masked_content = format!("{sandbox_prefix}{MASK_PLACEHOLDER}");
+        let masked_content = format!("{sandbox_prefix}{placeholder}");
         let tokens_before = estimation::estimate_event_tokens_for_content(content_len);
         let tokens_after = estimation::estimate_event_tokens_for_content(masked_content.len());
         tokens_saved += tokens_before.saturating_sub(tokens_after);
