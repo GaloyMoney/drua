@@ -76,12 +76,10 @@ pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
                     if state.focus == Focus::Workflows
                         && state.workflows.conversation.is_some() =>
                 {
-                    if let Some(conv) = &state.workflows.conversation {
-                        return Action::ToggleThreadsForAgent {
-                            agent_id: conv.agent_id.clone(),
-                        };
-                    }
-                    return Action::None;
+                    let conv = state.workflows.conversation.as_ref().unwrap();
+                    return Action::ToggleThreadsForAgent {
+                        agent_id: conv.agent_id.clone(),
+                    };
                 }
                 KeyCode::Char('t') => return Action::ToggleThreads,
                 KeyCode::Char('w')
