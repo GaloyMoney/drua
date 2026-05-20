@@ -1002,10 +1002,9 @@ impl Workflows {
                     .await
                     .map_err(|e| WorkflowError::Job(e.to_string()))?;
                 op.commit().await?;
+                tracing::info!(run_id = %run.id, "resumed parked run");
+                resumed += 1;
             }
-
-            tracing::info!(run_id = %run.id, "resumed parked run");
-            resumed += 1;
         }
         Ok(resumed)
     }
