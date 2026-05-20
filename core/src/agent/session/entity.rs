@@ -656,10 +656,43 @@ impl AgentSession {
         })
     }
 
-    /// 15 minutes — longer than any non-await tool timeout (sandbox.create = 6 min).
-    const STALE_TOOL_USE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(900);
+    const DEFAULT_STALE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(900);
+    /// Buffer on top of the longest declared `timeout_ms` to cover
+    /// network latency, result-persistence gap, and deploy window.
+    const STALE_BUFFER: std::time::Duration = std::time::Duration::from_secs(300);
+
+    fn stale_threshold_for_tool_uses(&self, thread_id: SessionThreadId) -> std::time::Duration {
+        let max_timeout_ms = self
+            .events
+            .iter_all()
+            .rev()
+            .find_map(|e| match e {
+                AgentSessionEvent::AssistantResponseReceived {
+                    thread_id: tid,
+                    content,
+                    ..
+                } if *tid == thread_id => Some(
+                    content
+                        .iter()
+                        .filter_map(|b| match b {
+                            AssistantBlock::ToolUse { input, .. } => {
+                                input.get("timeout_ms").and_then(|v| v.as_u64())
+                            }
+                            _ => None,
+                        })
+                        .max(),
+                ),
+                _ => None,
+            })
+            .flatten();
+        match max_timeout_ms {
+            Some(ms) => std::time::Duration::from_millis(ms) + Self::STALE_BUFFER,
+            None => Self::DEFAULT_STALE_THRESHOLD,
+        }
+    }
 
     fn is_tool_use_stale(&self, thread_id: SessionThreadId) -> bool {
+        let threshold = self.stale_threshold_for_tool_uses(thread_id);
         let last_ts = self
             .events
             .iter_persisted()
@@ -675,8 +708,7 @@ impl AgentSession {
         match last_ts {
             Some(ts) => {
                 let elapsed = chrono::Utc::now() - ts;
-                elapsed.to_std().unwrap_or(std::time::Duration::ZERO)
-                    > Self::STALE_TOOL_USE_THRESHOLD
+                elapsed.to_std().unwrap_or(std::time::Duration::ZERO) > threshold
             }
             None => false,
         }
@@ -708,7 +740,8 @@ impl AgentSession {
     /// Synthesizes error tool results for a thread stuck in ToolUse turn
     /// after a dispatcher restart. Called lazily from `next_prompt`.
     /// No-ops when the thread is not in ToolUse or the dispatch is
-    /// younger than `STALE_TOOL_USE_THRESHOLD`.
+    /// younger than `max(timeout_ms) + STALE_BUFFER` (or
+    /// `DEFAULT_STALE_THRESHOLD` when no tool declares a timeout).
     fn recover_stale_tool_use(
         &mut self,
         thread_id: SessionThreadId,
