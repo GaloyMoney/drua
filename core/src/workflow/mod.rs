@@ -163,13 +163,11 @@ fn is_cel_identifier(s: &str) -> bool {
 /// Reject `${{ steps.X.outputs.… }}` refs whose `X` hasn't been
 /// validated yet. Trigger refs always pass (provider payload schema
 /// validation deferred — memo `019e01a4` open Q6).
-fn validate_ref_against_prior_steps(
+fn reject_forward_step_refs(
     step_name: &str,
     r: &TemplateRef,
     seen: &std::collections::HashSet<String>,
 ) -> Result<(), WorkflowError> {
-    template::validate_root(r)
-        .map_err(|e| WorkflowError::InvalidTemplateRef(format!("step '{step_name}': {e}")))?;
     for target in template::referenced_step_names(r) {
         if !seen.contains(&target) {
             return Err(WorkflowError::InvalidTemplateRef(format!(
@@ -179,6 +177,16 @@ fn validate_ref_against_prior_steps(
         }
     }
     Ok(())
+}
+
+fn validate_ref_against_prior_steps(
+    step_name: &str,
+    r: &TemplateRef,
+    seen: &std::collections::HashSet<String>,
+) -> Result<(), WorkflowError> {
+    template::validate_root(r)
+        .map_err(|e| WorkflowError::InvalidTemplateRef(format!("step '{step_name}': {e}")))?;
+    reject_forward_step_refs(step_name, r, seen)
 }
 
 #[derive(Clone)]
@@ -489,7 +497,7 @@ impl Workflows {
                                 "wait step '{name}': resume_condition: {e}"
                             ))
                         })?;
-                    validate_ref_against_prior_steps(name, &r, &seen_step_names)?;
+                    reject_forward_step_refs(name, &r, &seen_step_names)?;
                 }
                 WorkflowStepDef::ToolStep {
                     name, tool, params, ..
