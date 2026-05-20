@@ -991,7 +991,7 @@ impl Workflows {
             {
                 let mut op = self.run_repo.begin_op().await?;
                 self.run_repo.update_in_op(&mut op, &mut run).await?;
-                let queue_id = format!("workflow-run:{}", run.id);
+                let queue_id = format!("workflow:{}", run.definition_id);
                 self.execute_run_spawner
                     .spawn_with_queue_id_in_op(
                         &mut op,
@@ -1075,7 +1075,7 @@ impl Workflows {
 
         let run = run_repo.create(new).await?;
 
-        let queue_id = format!("workflow-run:{}", run.id);
+        let queue_id = format!("workflow:{}", definition.id);
         execute_run_spawner
             .spawn_with_queue_id(run.id, ExecuteRunConfig { run_id: run.id }, &queue_id)
             .await

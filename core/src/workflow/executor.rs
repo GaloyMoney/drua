@@ -232,7 +232,6 @@ impl Executor {
                 }
             }
 
-            // Wait steps park the run instead of executing.
             if let WorkflowStepDef::Wait { provider, .. } = step {
                 if run
                     .step_waiting(step_name.clone(), provider.clone())
@@ -240,6 +239,8 @@ impl Executor {
                 {
                     self.runs.update(&mut run).await?;
                 }
+                self.suspend_workflow_sandboxes(project_id, workflow_id, &borrowed_preexisting)
+                    .await;
                 return Ok(());
             }
 
@@ -276,12 +277,6 @@ impl Executor {
                     break;
                 }
             }
-        }
-
-        // Don't finalise or suspend sandboxes when the run is parked
-        // on a wait step — the executor will re-enter after resume.
-        if run.state == WorkflowRunState::WaitingForEvent {
-            return Ok(());
         }
 
         if run.run_completed().did_execute() {
