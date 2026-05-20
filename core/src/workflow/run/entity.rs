@@ -14,8 +14,9 @@ use crate::workflow::definition::WorkflowStepDef;
 /// - `Errored`: at least one step hit an infrastructure-level error
 ///   (sandbox not ready, idle timeout, executor / agent error, etc.).
 ///   Errored takes precedence over Failed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "VARCHAR", rename_all = "snake_case")]
 pub enum WorkflowRunState {
     Pending,
     Running,
@@ -672,6 +673,10 @@ pub struct NewWorkflowRun {
 impl NewWorkflowRun {
     pub fn builder() -> NewWorkflowRunBuilder {
         NewWorkflowRunBuilder::default().id(WorkflowRunId::new())
+    }
+
+    pub(crate) fn initial_state(&self) -> WorkflowRunState {
+        WorkflowRunState::Pending
     }
 }
 

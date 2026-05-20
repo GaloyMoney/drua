@@ -907,9 +907,28 @@ impl Workflows {
         provider: &str,
         event: &serde_json::Value,
     ) -> Result<usize, WorkflowError> {
-        let waiting_runs = self.run_repo.list_waiting_for_event().await?;
+        let mut all_waiting = Vec::new();
+        let mut query = es_entity::PaginatedQueryArgs {
+            first: 100,
+            after: None,
+        };
+        loop {
+            let mut result = self
+                .run_repo
+                .list_for_state_by_created_at(
+                    WorkflowRunState::WaitingForEvent,
+                    query,
+                    es_entity::ListDirection::Descending,
+                )
+                .await?;
+            all_waiting.append(&mut result.entities);
+            match result.into_next_query() {
+                Some(next) => query = next,
+                None => break,
+            }
+        }
         let mut resumed = 0usize;
-        for mut run in waiting_runs {
+        for mut run in all_waiting {
             let wait_step_name = match run.current_wait_step() {
                 Some(sr) => sr.name.clone(),
                 None => continue,
