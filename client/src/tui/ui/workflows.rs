@@ -412,24 +412,33 @@ fn draw_conversation(frame: &mut Frame, conv: &StepConversation, area: Rect) {
                         lines.push(Line::from(format!("  {l}")));
                     }
                 }
-                ContentBlock::ToolUse { name, .. } => {
+                ContentBlock::ToolUse { name, input } => {
                     lines.push(Line::from(Span::styled(
                         format!("  ⚙ {name}"),
                         Style::default().fg(Color::Yellow),
                     )));
+                    if !input.is_empty() {
+                        let pretty = try_pretty_json(input);
+                        for l in pretty.lines() {
+                            lines.push(Line::from(Span::styled(
+                                format!("    {l}"),
+                                Style::default().fg(Color::DarkGray),
+                            )));
+                        }
+                    }
                 }
                 ContentBlock::ToolResult(result) => {
-                    let preview: String = result
-                        .lines()
-                        .next()
-                        .unwrap_or("")
-                        .chars()
-                        .take(80)
-                        .collect();
                     lines.push(Line::from(Span::styled(
-                        format!("  ← {preview}"),
+                        "  ← result",
                         Style::default().fg(Color::DarkGray),
                     )));
+                    let pretty = try_pretty_json(result);
+                    for l in pretty.lines() {
+                        lines.push(Line::from(Span::styled(
+                            format!("    {l}"),
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                    }
                 }
                 ContentBlock::Thinking(_) => {
                     lines.push(Line::from(Span::styled(
@@ -573,4 +582,11 @@ fn truncate(value: &str, max: usize) -> String {
 
 fn pretty_json(value: &serde_json::Value) -> String {
     serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn try_pretty_json(s: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(s)
+        .ok()
+        .and_then(|v| serde_json::to_string_pretty(&v).ok())
+        .unwrap_or_else(|| s.to_string())
 }
