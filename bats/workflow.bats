@@ -9,8 +9,8 @@
 #      single tool_step calling `whoami` (composable, declares an
 #      `output_schema`, returns deterministic structured content).
 #   2. admin `workflow trigger` spawns a run with a payload.
-#   3. admin `workflow await_run` blocks until terminal and surfaces
-#      the per-step structured outputs.
+#   3. poll `workflow run` until terminal and inspect per-step
+#      structured outputs.
 #
 # The executor mints `AuthSubject::WorkflowExecutor(project_id, run_id)`
 # at dispatch time; `whoami` introspects the subject and writes the
@@ -65,6 +65,23 @@ _wait_for_audit_log() {
       return 0
     fi
     sleep 0.1
+  done
+  return 1
+}
+
+_poll_run() {
+  local run_id="$1"
+  local max_wait="${2:-60}"
+  for _i in $(seq 1 "$max_wait"); do
+    run admin_call "workflow" "$(jq -nc --arg rid "$run_id" '{
+      command: "run", run_id: $rid
+    }')"
+    if [[ "$output" == *"state: succeeded"* ]] \
+      || [[ "$output" == *"state: failed"* ]] \
+      || [[ "$output" == *"state: errored"* ]]; then
+      return 0
+    fi
+    sleep 1
   done
   return 1
 }
@@ -131,12 +148,8 @@ _wait_for_audit_log() {
   run_id="$(extract_id_field "$output")"
   [ -n "$run_id" ] || { echo "could not extract run id"; return 1; }
 
-  # 4. Block until terminal and surface step outputs in the response.
-  run admin_call "workflow" "$(jq -nc --arg rid "$run_id" '{
-    command: "await_run",
-    run_id: $rid,
-    timeout_seconds: 60
-  }')"
+  # 4. Poll until terminal and surface step outputs in the response.
+  _poll_run "$run_id" 60
   echo "$output"
   [[ "$output" == *"state: succeeded"* ]]
 
@@ -255,11 +268,7 @@ _wait_for_audit_log() {
   run_id="$(extract_id_field "$output")"
   [ -n "$run_id" ] || { echo "could not extract run id"; return 1; }
 
-  run admin_call "workflow" "$(jq -nc --arg rid "$run_id" '{
-    command: "await_run",
-    run_id: $rid,
-    timeout_seconds: 60
-  }')"
+  _poll_run "$run_id" 60
   echo "$output"
   # Step 1 (whoami, no payload deps) should succeed. Step 2
   # (notes, depends on missing payload fields) errors — but
@@ -337,9 +346,7 @@ _wait_for_audit_log() {
   run_id="$(extract_id_field "$output")"
   [ -n "$run_id" ] || { echo "expected run to be created when condition true"; return 1; }
 
-  run admin_call "workflow" "$(jq -nc --arg rid "$run_id" '{
-    command: "await_run", run_id: $rid, timeout_seconds: 60
-  }')"
+  _poll_run "$run_id" 60
   echo "$output"
   [[ "$output" == *"state: succeeded"* ]]
 

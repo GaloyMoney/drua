@@ -68,12 +68,6 @@ enum WorkflowParams {
         #[serde(default)]
         payload: Option<serde_json::Value>,
     },
-    AwaitRun {
-        run_id: WorkflowRunId,
-        /// Wait budget. Defaults to 360 seconds.
-        #[serde(default)]
-        timeout_seconds: Option<u64>,
-    },
     Runs {
         definition_id: WorkflowDefinitionId,
     },
@@ -311,7 +305,6 @@ impl WorkflowParams {
             Self::List => "workflow.list",
             Self::Get { .. } => "workflow.get",
             Self::Trigger { .. } => "workflow.trigger",
-            Self::AwaitRun { .. } => "workflow.await_run",
             Self::Runs { .. } => "workflow.runs",
             Self::Run { .. } => "workflow.run",
             Self::Update { .. } => "workflow.update",
@@ -478,8 +471,8 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
         "properties": {
             "command": {
                 "type": "string",
-                "enum": ["create", "list", "get", "trigger", "await_run", "runs", "run", "update", "delete"],
-                "description": "Which workflow operation to perform. `trigger` returns immediately with the freshly-spawned run; pair with `await_run` to block until terminal. `runs` lists runs (truncated outputs); `run` returns a single run with full per-step output."
+                "enum": ["create", "list", "get", "trigger", "runs", "run", "update", "delete"],
+                "description": "Which workflow operation to perform. `trigger` returns immediately with the freshly-spawned run. `runs` lists runs (truncated outputs); `run` returns a single run with full per-step output."
             },
             "name": {
                 "type": "string",
@@ -518,7 +511,7 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             "timeout_seconds": {
                 "type": "integer",
                 "minimum": 1,
-                "description": "Per-step timeout in seconds (create); wait budget in seconds (await_run). Defaults: create=300, await_run=360."
+                "description": "Per-step timeout in seconds (create). Default: 300."
             },
             "definition_id": {
                 "type": "string",
@@ -616,9 +609,7 @@ impl TopLevelTool for WorkflowTool {
          optional `provider`, `sandboxes`, `manual`, `model_chain`), \
          `list`, `get` (requires `definition_id`), `trigger` (requires \
          `definition_id`, optional `payload`; returns immediately with \
-         the spawned run), `await_run` (requires `run_id`; blocks until \
-         terminal — pair with `trigger` when you need the final state \
-         inline), `runs` (requires `definition_id`; truncated step \
+         the spawned run), `runs` (requires `definition_id`; truncated step \
          outputs), `run` (requires `run_id`; full per-step outputs), \
          `update` (requires `definition_id`; optional `name`, \
          `description`+`clear_description`, `steps`+`update_steps`, \
@@ -804,25 +795,6 @@ impl TopLevelTool for WorkflowTool {
                 let out = WorkflowOutput {
                     command: "trigger".to_string(),
                     run: run_out,
-                    ..Default::default()
-                };
-                (text, out)
-            }
-
-            WorkflowParams::AwaitRun {
-                run_id,
-                timeout_seconds,
-            } => {
-                let timeout = std::time::Duration::from_secs(timeout_seconds.unwrap_or(360));
-                let run = self
-                    .workflows
-                    .await_run_completion(subject, run_id, Some(timeout))
-                    .await
-                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
-                let text = format_run_text(&run);
-                let out = WorkflowOutput {
-                    command: "await_run".to_string(),
-                    run: Some(run_to_output(&run)),
                     ..Default::default()
                 };
                 (text, out)
@@ -1338,7 +1310,7 @@ fn format_run_text(r: &WorkflowRun) -> String {
         WorkflowRunState::Pending | WorkflowRunState::Running
     ) {
         out.push_str(&format!(
-            "Block until terminal: workflow command=await_run run_id={}\n\n",
+            "Poll status: workflow command=run run_id={}\n\n",
             r.id
         ));
     }

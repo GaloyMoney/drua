@@ -38,6 +38,7 @@ spec:
         checksum/external-secret: {{ .Values.galoyAgents.secretChecksum | quote }}
         {{- end }}
     spec:
+      terminationGracePeriodSeconds: 60
       {{- if .Values.sandbox.enabled }}
       serviceAccountName: {{ template "galoyAgents.fullname" . }}-sandbox
       {{- end }}

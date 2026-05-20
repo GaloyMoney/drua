@@ -311,9 +311,6 @@ enum WorkflowCommand {
     Delete,
     /// Spawn a run with the given trigger payload. Returns the run id.
     Trigger,
-    /// Block until a run reaches a terminal state, then surface the
-    /// per-step outputs verbatim (full JSON, not truncated).
-    AwaitRun,
     /// Read a single run with full per-step outputs.
     Run,
 }
@@ -503,7 +500,7 @@ struct WorkflowParams {
     #[schemars(with = "Option<uuid::Uuid>")]
     definition_id: Option<WorkflowDefinitionId>,
 
-    /// Required for `await_run`, `run`.
+    /// Required for `run`.
     #[schemars(with = "Option<uuid::Uuid>")]
     run_id: Option<WorkflowRunId>,
 
@@ -511,10 +508,6 @@ struct WorkflowParams {
     /// `trigger.*` template namespace. Defaults to `{}`.
     #[serde(default)]
     payload: Option<serde_json::Value>,
-
-    /// `await_run`: wait budget in seconds. Defaults to 360.
-    #[serde(default)]
-    timeout_seconds: Option<u64>,
 
     /// `create`: required. `update`: optional rename.
     name: Option<String>,
@@ -1452,22 +1445,6 @@ impl AdminToolSet {
                     None => "Trigger condition evaluated to false; no run created.".to_string(),
                 };
                 Ok(CallToolResult::success(vec![Content::text(body)]))
-            }
-
-            WorkflowCommand::AwaitRun => {
-                let run_id = params.run_id.ok_or_else(|| {
-                    ToolSetsError::MissingArgument("run_id is required for await_run".to_string())
-                })?;
-                Audit::record_action("workflow.await_run");
-                let timeout = std::time::Duration::from_secs(params.timeout_seconds.unwrap_or(360));
-                let run = self
-                    .workflows
-                    .await_run_completion(subject, run_id, Some(timeout))
-                    .await
-                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
-                Ok(CallToolResult::success(vec![Content::text(format_run(
-                    &run,
-                ))]))
             }
 
             WorkflowCommand::Run => {

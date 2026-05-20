@@ -271,7 +271,11 @@ impl AgentSession {
         if thread.is_user_turn() {
             Ok(AgentSessionResponse::PromptPending { target })
         } else if thread.is_tool_use_turn() {
-            Ok(AgentSessionResponse::AwaitingToolUsageComplete)
+            if self.is_tool_use_stale(thread_id) {
+                Ok(AgentSessionResponse::PromptPending { target })
+            } else {
+                Ok(AgentSessionResponse::AwaitingToolUsageComplete)
+            }
         } else {
             Ok(AgentSessionResponse::AwaitingAssistantResponse)
         }
@@ -294,6 +298,8 @@ impl AgentSession {
             return self.build_prompt(target, prompt_definition);
         }
         let thread_id = thread_id.unwrap();
+
+        self.recover_stale_tool_use(thread_id)?;
 
         let total_blocks = self.events.iter_all().fold(0usize, |acc, e| match e {
             AgentSessionEvent::UserInputAdded { .. }
@@ -648,6 +654,86 @@ impl AgentSession {
             }),
             _ => None,
         })
+    }
+
+    /// 15 minutes — longer than any non-await tool timeout (sandbox.create = 6 min).
+    const STALE_TOOL_USE_THRESHOLD: std::time::Duration = std::time::Duration::from_secs(900);
+
+    fn is_tool_use_stale(&self, thread_id: SessionThreadId) -> bool {
+        let last_ts = self
+            .events
+            .iter_persisted()
+            .rev()
+            .find_map(|pe| match &pe.event {
+                AgentSessionEvent::AssistantResponseReceived { thread_id: tid, .. }
+                    if *tid == thread_id =>
+                {
+                    Some(pe.recorded_at)
+                }
+                _ => None,
+            });
+        match last_ts {
+            Some(ts) => {
+                let elapsed = chrono::Utc::now() - ts;
+                elapsed.to_std().unwrap_or(std::time::Duration::ZERO)
+                    > Self::STALE_TOOL_USE_THRESHOLD
+            }
+            None => false,
+        }
+    }
+
+    fn pending_tool_use_ids(&self, thread_id: SessionThreadId) -> Vec<String> {
+        self.events
+            .iter_all()
+            .rev()
+            .find_map(|e| match e {
+                AgentSessionEvent::AssistantResponseReceived {
+                    thread_id: tid,
+                    content,
+                    ..
+                } if *tid == thread_id => Some(
+                    content
+                        .iter()
+                        .filter_map(|b| match b {
+                            AssistantBlock::ToolUse { id, .. } => Some(id.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    /// Synthesizes error tool results for a thread stuck in ToolUse turn
+    /// after a dispatcher restart. Called lazily from `next_prompt`.
+    /// No-ops when the thread is not in ToolUse or the dispatch is
+    /// younger than `STALE_TOOL_USE_THRESHOLD`.
+    fn recover_stale_tool_use(
+        &mut self,
+        thread_id: SessionThreadId,
+    ) -> Result<(), AgentSessionError> {
+        let is_tool_use = self
+            .threads
+            .get_persisted(&thread_id)
+            .is_some_and(|t| t.is_tool_use_turn());
+        if !is_tool_use || !self.is_tool_use_stale(thread_id) {
+            return Ok(());
+        }
+        let tool_use_ids = self.pending_tool_use_ids(thread_id);
+        if tool_use_ids.is_empty() {
+            return Ok(());
+        }
+        let results = tool_use_ids
+            .into_iter()
+            .map(|id| ToolResultInput {
+                tool_use_id: id,
+                content: "tool_execution_interrupted: dispatcher restarted".into(),
+                is_error: true,
+            })
+            .collect();
+        let _ = self.add_tool_results(thread_id, results)?;
+        Ok(())
     }
 
     pub fn assistant_response_received(
