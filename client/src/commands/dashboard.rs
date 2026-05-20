@@ -632,7 +632,10 @@ enum WorkflowEvent {
         agent_name: String,
         messages: Vec<ChatMessage>,
     },
-    ConversationError(String),
+    ConversationError {
+        agent_id: String,
+        error: String,
+    },
 }
 
 struct WorkflowTriggerOutcome {
@@ -1612,9 +1615,10 @@ fn spawn_step_conversation_fetch(
                 });
             }
             Err(e) => {
-                let _ = tx.send(WorkflowEvent::ConversationError(format!(
-                    "Failed to load conversation: {e}"
-                )));
+                let _ = tx.send(WorkflowEvent::ConversationError {
+                    agent_id,
+                    error: format!("Failed to load conversation: {e}"),
+                });
             }
         }
     });
@@ -1702,17 +1706,25 @@ fn handle_workflow_event(
             agent_name,
             messages,
         } => {
+            state.status_message = None;
             let still_selected = state
                 .selected_step_agent_id()
                 .map(|(id, _)| id == agent_id)
                 .unwrap_or(false);
             if still_selected {
-                state.status_message = None;
                 state.show_step_conversation(agent_id, agent_name, messages);
             }
         }
-        WorkflowEvent::ConversationError(e) => {
-            state.status_message = Some(e);
+        WorkflowEvent::ConversationError { agent_id, error } => {
+            let still_selected = state
+                .selected_step_agent_id()
+                .map(|(id, _)| id == agent_id)
+                .unwrap_or(false);
+            if still_selected {
+                state.status_message = Some(error);
+            } else {
+                state.status_message = None;
+            }
         }
     }
 }

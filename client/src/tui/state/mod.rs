@@ -514,6 +514,7 @@ impl ScreenState {
         if is_new_run {
             self.workflows.step_cursor = 0;
             self.workflows.expanded = false;
+            self.workflows.conversation = None;
         }
         self.workflows.loading = false;
     }
