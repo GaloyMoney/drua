@@ -8,7 +8,8 @@ use super::super::view::{MessageBlockIndex, MessageView, PromptDefinition};
 use super::{estimation, event_belongs_to_thread};
 
 const MASK_PLACEHOLDER: &str = "[Tool output cleared — re-invoke tool if needed]";
-const MASK_PLACEHOLDER_ERROR: &str = "[Tool error output cleared — do not retry without new inputs]";
+const MASK_PLACEHOLDER_ERROR: &str =
+    "[Tool error output cleared — do not retry without new inputs]";
 
 fn mask_placeholder_for(is_error: bool) -> &'static str {
     if is_error {
