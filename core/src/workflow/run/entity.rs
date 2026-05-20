@@ -131,7 +131,6 @@ pub enum WorkflowRunEvent {
         step_name: String,
         provider: String,
         started_at: DateTime<Utc>,
-        expires_at: Option<DateTime<Utc>>,
     },
     StepResumed {
         step_name: String,
@@ -390,12 +389,7 @@ impl WorkflowRun {
 
     /// Transitions Running → WaitingForEvent when the executor
     /// reaches a Wait step.
-    pub fn step_waiting(
-        &mut self,
-        step_name: String,
-        provider: String,
-        expires_at: Option<DateTime<Utc>>,
-    ) -> Idempotent<()> {
+    pub fn step_waiting(&mut self, step_name: String, provider: String) -> Idempotent<()> {
         idempotency_guard!(
             self.events.iter_all().rev(),
             already_applied:
@@ -430,7 +424,6 @@ impl WorkflowRun {
             step_name,
             provider,
             started_at: now,
-            expires_at,
         });
         Idempotent::Executed(())
     }
@@ -1062,7 +1055,7 @@ mod tests {
         complete(&mut run, "a", json!({ "success": true }));
         assert_eq!(run.state, WorkflowRunState::Running);
 
-        run.step_waiting("wait_step".into(), "github_app".into(), None)
+        run.step_waiting("wait_step".into(), "github_app".into())
             .did_execute();
         assert_eq!(run.state, WorkflowRunState::WaitingForEvent);
         assert_eq!(run.step_results.len(), 2);
@@ -1077,7 +1070,7 @@ mod tests {
     #[test]
     fn step_waiting_transitions_pending_to_waiting_for_event() {
         let mut run = fresh_run(&["wait_step"]);
-        run.step_waiting("wait_step".into(), "github_app".into(), None)
+        run.step_waiting("wait_step".into(), "github_app".into())
             .did_execute();
         assert_eq!(run.state, WorkflowRunState::WaitingForEvent);
     }
@@ -1085,7 +1078,7 @@ mod tests {
     #[test]
     fn step_resumed_transitions_waiting_to_running() {
         let mut run = fresh_run(&["wait_step", "after"]);
-        run.step_waiting("wait_step".into(), "github_app".into(), None)
+        run.step_waiting("wait_step".into(), "github_app".into())
             .did_execute();
         assert_eq!(run.state, WorkflowRunState::WaitingForEvent);
 
@@ -1106,16 +1099,16 @@ mod tests {
     #[test]
     fn step_waiting_is_idempotent() {
         let mut run = fresh_run(&["wait_step"]);
-        run.step_waiting("wait_step".into(), "github_app".into(), None)
+        run.step_waiting("wait_step".into(), "github_app".into())
             .did_execute();
-        let outcome = run.step_waiting("wait_step".into(), "github_app".into(), None);
+        let outcome = run.step_waiting("wait_step".into(), "github_app".into());
         assert!(matches!(outcome, Idempotent::AlreadyApplied));
     }
 
     #[test]
     fn step_resumed_is_idempotent() {
         let mut run = fresh_run(&["wait_step"]);
-        run.step_waiting("wait_step".into(), "github_app".into(), None)
+        run.step_waiting("wait_step".into(), "github_app".into())
             .did_execute();
         run.step_resumed("wait_step".into(), json!({}), "provider:github_app".into())
             .did_execute();
@@ -1126,7 +1119,7 @@ mod tests {
     #[test]
     fn step_waiting_and_resumed_hydrate_from_events() {
         let mut run = fresh_run(&["wait_step"]);
-        run.step_waiting("wait_step".into(), "github_app".into(), None)
+        run.step_waiting("wait_step".into(), "github_app".into())
             .did_execute();
         let output = json!({ "reviewer": "bob" });
         run.step_resumed(
@@ -1149,7 +1142,7 @@ mod tests {
     #[test]
     fn step_waiting_hydrates_as_waiting_for_event() {
         let mut run = fresh_run(&["wait_step"]);
-        run.step_waiting("wait_step".into(), "github_app".into(), None)
+        run.step_waiting("wait_step".into(), "github_app".into())
             .did_execute();
 
         let events = run.events;
@@ -1166,7 +1159,7 @@ mod tests {
     #[test]
     fn run_completed_is_noop_when_waiting_for_event() {
         let mut run = fresh_run(&["wait_step"]);
-        run.step_waiting("wait_step".into(), "github_app".into(), None)
+        run.step_waiting("wait_step".into(), "github_app".into())
             .did_execute();
         let outcome = run.run_completed();
         assert!(matches!(outcome, Idempotent::AlreadyApplied));
@@ -1179,7 +1172,7 @@ mod tests {
         let mut run = fresh_run(&["a", "wait_step"]);
         start(&mut run, "a");
         complete(&mut run, "a", json!({ "success": true }));
-        run.step_waiting("wait_step".into(), "github_app".into(), None)
+        run.step_waiting("wait_step".into(), "github_app".into())
             .did_execute();
 
         let ws = run.current_wait_step().expect("should find waiting step");
@@ -1203,7 +1196,7 @@ mod tests {
         complete(&mut run, "pre", json!({ "success": true }));
         assert_eq!(run.state, WorkflowRunState::Running);
 
-        run.step_waiting("wait_step".into(), "github_app".into(), None)
+        run.step_waiting("wait_step".into(), "github_app".into())
             .did_execute();
         assert_eq!(run.state, WorkflowRunState::WaitingForEvent);
 
@@ -1226,7 +1219,6 @@ mod tests {
             step_name: "approval".into(),
             provider: "github_app".into(),
             started_at: Utc::now(),
-            expires_at: None,
         };
         let v = serde_json::to_value(&ev).unwrap();
         assert_eq!(v.get("type").and_then(|t| t.as_str()), Some("step_waiting"));

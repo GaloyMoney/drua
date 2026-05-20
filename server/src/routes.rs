@@ -1827,17 +1827,13 @@ fn workflow_step_to_view(s: &domain::workflow::WorkflowStepDef) -> WorkflowStepV
             sandbox: None,
             timeout_seconds: *timeout_seconds,
         },
-        domain::workflow::WorkflowStepDef::Wait {
-            name,
-            timeout_seconds,
-            ..
-        } => WorkflowStepView {
+        domain::workflow::WorkflowStepDef::Wait { name, .. } => WorkflowStepView {
             name: name.clone(),
             step_type: "wait".to_string(),
             skill: String::new(),
             tool: None,
             sandbox: None,
-            timeout_seconds: *timeout_seconds,
+            timeout_seconds: None,
         },
     }
 }

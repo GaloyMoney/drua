@@ -204,12 +204,12 @@ impl TemplateContext<'_> {
 }
 
 /// Extended context for evaluating wait step `resume_condition` and
-/// `extract` expressions. Adds an `event` root variable bound to the
-/// inbound webhook payload.
+/// `extract` expressions. Adds a `resume_payload` root variable bound
+/// to the inbound webhook body that matched the wait step.
 pub struct ResumeContext<'a> {
     pub trigger: &'a Value,
     pub steps: &'a std::collections::HashMap<String, Value>,
-    pub event: &'a Value,
+    pub resume_payload: &'a Value,
 }
 
 impl ResumeContext<'_> {
@@ -235,8 +235,10 @@ impl ResumeContext<'_> {
         );
         ctx.add_variable("steps", steps_value)
             .map_err(|e| TemplateError::Resolve("<context>".to_string(), format!("steps: {e}")))?;
-        ctx.add_variable("event", self.event.clone())
-            .map_err(|e| TemplateError::Resolve("<context>".to_string(), format!("event: {e}")))?;
+        ctx.add_variable("resume_payload", self.resume_payload.clone())
+            .map_err(|e| {
+                TemplateError::Resolve("<context>".to_string(), format!("resume_payload: {e}"))
+            })?;
         Ok(BuiltContext { cel: ctx })
     }
 

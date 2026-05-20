@@ -228,16 +228,15 @@ pub enum WorkflowStepDef {
         /// provider.
         provider: String,
         /// CEL boolean expression. Context has three roots:
-        /// `event` (inbound webhook payload), `trigger` (original
-        /// trigger context of this run), `steps` (prior step outputs).
+        /// `resume_payload` (inbound webhook payload), `trigger`
+        /// (original trigger context of this run), `steps` (prior
+        /// step outputs).
         resume_condition: String,
         /// JSON Schema describing this step's output. Each property
         /// MAY include an `extract` field (CEL expression against
-        /// `event`) that populates the value from the inbound event.
-        /// Properties without `extract` get `null`.
+        /// `resume_payload`) that populates the value from the inbound
+        /// event. Properties without `extract` get `null`.
         output_schema: serde_json::Value,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        timeout_seconds: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         condition: Option<String>,
     },

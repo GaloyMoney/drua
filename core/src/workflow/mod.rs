@@ -71,11 +71,16 @@ fn extract_wait_output(
     };
     let mut out = serde_json::Map::with_capacity(properties.len());
     for (key, prop) in properties {
-        let value = prop
-            .get("extract")
-            .and_then(|e| e.as_str())
-            .and_then(|expr| ctx.evaluate_extract(expr).ok())
-            .unwrap_or(serde_json::Value::Null);
+        let value = match prop.get("extract").and_then(|e| e.as_str()) {
+            Some(expr) => match ctx.evaluate_extract(expr) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(key, expr, error = %e, "extract CEL evaluation failed");
+                    serde_json::Value::Null
+                }
+            },
+            None => serde_json::Value::Null,
+        };
         out.insert(key.clone(), value);
     }
     serde_json::Value::Object(out)
@@ -953,20 +958,23 @@ impl Workflows {
                 _ => continue,
             };
 
-            if step_provider != provider {
+            if !step_provider.eq_ignore_ascii_case(provider) {
                 continue;
             }
 
             let step_outputs: std::collections::HashMap<String, serde_json::Value> = run
                 .step_results
                 .iter()
-                .filter_map(|r| r.output.as_ref().map(|o| (r.name.clone(), o.clone())))
+                .map(|r| {
+                    let val = r.output.clone().unwrap_or(serde_json::Value::Null);
+                    (r.name.clone(), val)
+                })
                 .collect();
 
             let ctx = template::ResumeContext {
                 trigger: &run.trigger_context,
                 steps: &step_outputs,
-                event,
+                resume_payload: event,
             };
 
             match ctx.evaluate_condition(resume_condition) {
@@ -981,14 +989,20 @@ impl Workflows {
                 .step_resumed(wait_step_name, extracted, source)
                 .did_execute()
             {
-                self.run_repo.update(&mut run).await?;
+                let mut op = self.run_repo.begin_op().await?;
+                self.run_repo.update_in_op(&mut op, &mut run).await?;
+                let queue_id = format!("workflow-run:{}", run.id);
+                self.execute_run_spawner
+                    .spawn_with_queue_id_in_op(
+                        &mut op,
+                        run.id,
+                        ExecuteRunConfig { run_id: run.id },
+                        &queue_id,
+                    )
+                    .await
+                    .map_err(|e| WorkflowError::Job(e.to_string()))?;
+                op.commit().await?;
             }
-
-            let queue_id = format!("workflow-run:{}", run.id);
-            self.execute_run_spawner
-                .spawn_with_queue_id(run.id, ExecuteRunConfig { run_id: run.id }, &queue_id)
-                .await
-                .map_err(|e| WorkflowError::Job(e.to_string()))?;
 
             tracing::info!(run_id = %run.id, "resumed parked run");
             resumed += 1;

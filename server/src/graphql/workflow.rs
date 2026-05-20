@@ -205,7 +205,6 @@ impl From<&DomainWorkflowStepDef> for WorkflowStep {
             },
             DomainWorkflowStepDef::Wait {
                 name,
-                timeout_seconds,
                 condition,
                 output_schema,
                 ..
@@ -216,7 +215,7 @@ impl From<&DomainWorkflowStepDef> for WorkflowStep {
                 tool: None,
                 sandbox: None,
                 sandbox_mode: None,
-                timeout_seconds: timeout_seconds.map(|s| s.min(i32::MAX as u64) as i32),
+                timeout_seconds: None,
                 condition: condition.clone(),
                 output_schema: Some(output_schema.clone().into()),
             },

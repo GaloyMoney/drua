@@ -261,8 +261,6 @@ enum WorkflowStepYaml {
         resume_condition: String,
         output_schema: serde_json::Value,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        timeout_seconds: Option<u64>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         condition: Option<String>,
     },
 }
@@ -307,14 +305,12 @@ impl WorkflowStepYaml {
                 provider,
                 resume_condition,
                 output_schema,
-                timeout_seconds,
                 condition,
             } => WorkflowStepYaml::Wait {
                 name: name.clone(),
                 provider: provider.clone(),
                 resume_condition: resume_condition.clone(),
                 output_schema: output_schema.clone(),
-                timeout_seconds: *timeout_seconds,
                 condition: condition.clone(),
             },
         }
@@ -359,14 +355,12 @@ impl WorkflowStepYaml {
                 provider,
                 resume_condition,
                 output_schema,
-                timeout_seconds,
                 condition,
             } => WorkflowStepDef::Wait {
                 name,
                 provider,
                 resume_condition,
                 output_schema,
-                timeout_seconds,
                 condition,
             },
         }

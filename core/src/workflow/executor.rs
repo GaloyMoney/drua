@@ -3,8 +3,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
-
 use crate::agent::session::message::SUBMIT_OUTPUT_TOOL_NAME;
 use crate::agent::{Agent, Agents};
 use crate::auth::AuthSubject;
@@ -235,16 +233,9 @@ impl Executor {
             }
 
             // Wait steps park the run instead of executing.
-            if let WorkflowStepDef::Wait {
-                provider,
-                timeout_seconds,
-                ..
-            } = step
-            {
-                let expires_at =
-                    timeout_seconds.map(|s| Utc::now() + chrono::Duration::seconds(s as i64));
+            if let WorkflowStepDef::Wait { provider, .. } = step {
                 if run
-                    .step_waiting(step_name.clone(), provider.clone(), expires_at)
+                    .step_waiting(step_name.clone(), provider.clone())
                     .did_execute()
                 {
                     self.runs.update(&mut run).await?;
