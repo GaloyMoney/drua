@@ -416,9 +416,6 @@ impl WorkflowRun {
                 waiting_provider: Some(provider.clone()),
             });
         }
-        if self.state == WorkflowRunState::Pending {
-            self.state = WorkflowRunState::Running;
-        }
         self.state = WorkflowRunState::WaitingForEvent;
         self.events.push(WorkflowRunEvent::StepWaiting {
             step_name,
