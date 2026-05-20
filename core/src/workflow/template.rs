@@ -203,6 +203,87 @@ impl TemplateContext<'_> {
     }
 }
 
+/// Extended context for evaluating wait step `resume_condition` and
+/// `extract` expressions. Adds an `event` root variable bound to the
+/// inbound webhook payload.
+pub struct ResumeContext<'a> {
+    pub trigger: &'a Value,
+    pub steps: &'a std::collections::HashMap<String, Value>,
+    pub event: &'a Value,
+}
+
+impl ResumeContext<'_> {
+    fn build_cel_context(&self) -> Result<BuiltContext, TemplateError> {
+        let mut ctx = Context::default();
+        let payload = match &self.trigger {
+            Value::Object(_) => self.trigger.clone(),
+            _ => Value::Object(serde_json::Map::new()),
+        };
+        let trigger_value = serde_json::json!({ "payload": payload });
+        ctx.add_variable("trigger", trigger_value).map_err(|e| {
+            TemplateError::Resolve("<context>".to_string(), format!("trigger: {e}"))
+        })?;
+        let steps_value = Value::Object(
+            self.steps
+                .iter()
+                .map(|(k, v)| {
+                    let mut wrapper = serde_json::Map::with_capacity(1);
+                    wrapper.insert("outputs".to_string(), v.clone());
+                    (k.clone(), Value::Object(wrapper))
+                })
+                .collect(),
+        );
+        ctx.add_variable("steps", steps_value)
+            .map_err(|e| TemplateError::Resolve("<context>".to_string(), format!("steps: {e}")))?;
+        ctx.add_variable("event", self.event.clone())
+            .map_err(|e| TemplateError::Resolve("<context>".to_string(), format!("event: {e}")))?;
+        Ok(BuiltContext { cel: ctx })
+    }
+
+    pub fn evaluate_condition(&self, body: &str) -> Result<ConditionOutcome, TemplateError> {
+        let trimmed = body.trim();
+        let raw = format!("{OPEN} {trimmed} {CLOSE}");
+        if trimmed.is_empty() {
+            return Err(TemplateError::EmptyPath(raw));
+        }
+        let built = self.build_cel_context()?;
+        let program = Program::compile(trimmed)
+            .map_err(|e| TemplateError::Compile(raw.clone(), e.to_string()))?;
+        let value = program
+            .execute(&built.cel)
+            .map_err(|e| TemplateError::Resolve(raw.clone(), e.to_string()))?;
+        let json = value
+            .json()
+            .map_err(|e| TemplateError::JsonConvert(raw.clone(), e.to_string()))?;
+        Ok(match json {
+            Value::Bool(true) => ConditionOutcome::True,
+            Value::Bool(false) => ConditionOutcome::False,
+            other => ConditionOutcome::NotBoolean(
+                serde_json::to_string(&other).unwrap_or_else(|_| "<?>".to_string()),
+            ),
+        })
+    }
+
+    /// Evaluate a CEL expression in the resume context and return
+    /// the result as a JSON value.
+    pub fn evaluate_extract(&self, expr: &str) -> Result<Value, TemplateError> {
+        let trimmed = expr.trim();
+        let raw = format!("{OPEN} {trimmed} {CLOSE}");
+        if trimmed.is_empty() {
+            return Err(TemplateError::EmptyPath(raw));
+        }
+        let built = self.build_cel_context()?;
+        let program = Program::compile(trimmed)
+            .map_err(|e| TemplateError::Compile(raw.clone(), e.to_string()))?;
+        let value = program
+            .execute(&built.cel)
+            .map_err(|e| TemplateError::Resolve(raw.clone(), e.to_string()))?;
+        value
+            .json()
+            .map_err(|e| TemplateError::JsonConvert(raw.clone(), e.to_string()))
+    }
+}
+
 fn resolve_with_built(built: &BuiltContext, r: &TemplateRef) -> Option<Value> {
     let program = Program::compile(&r.body).ok()?;
     let value = program.execute(&built.cel).ok()?;

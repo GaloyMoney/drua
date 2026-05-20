@@ -1827,6 +1827,18 @@ fn workflow_step_to_view(s: &domain::workflow::WorkflowStepDef) -> WorkflowStepV
             sandbox: None,
             timeout_seconds: *timeout_seconds,
         },
+        domain::workflow::WorkflowStepDef::Wait {
+            name,
+            timeout_seconds,
+            ..
+        } => WorkflowStepView {
+            name: name.clone(),
+            step_type: "wait".to_string(),
+            skill: String::new(),
+            tool: None,
+            sandbox: None,
+            timeout_seconds: *timeout_seconds,
+        },
     }
 }
 
@@ -1834,6 +1846,7 @@ fn workflow_run_state_str(state: domain::workflow::WorkflowRunState) -> &'static
     match state {
         domain::workflow::WorkflowRunState::Pending => "pending",
         domain::workflow::WorkflowRunState::Running => "running",
+        domain::workflow::WorkflowRunState::WaitingForEvent => "waiting_for_event",
         domain::workflow::WorkflowRunState::Succeeded => "succeeded",
         domain::workflow::WorkflowRunState::Failed => "failed",
         domain::workflow::WorkflowRunState::Errored => "errored",

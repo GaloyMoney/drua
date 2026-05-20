@@ -42,6 +42,7 @@ pub struct ProviderFanOutResult {
     pub triggered: usize,
     pub filtered: usize,
     pub errored: usize,
+    pub resumed: usize,
 }
 
 use cron_job::{cron_queue_id, TriggerCronConfig, TriggerCronJobInitializer};
@@ -56,6 +57,29 @@ const AUDIT_ACTION_TRIGGER_FILTERED: &str = "workflow.trigger_filtered";
 /// Audit action recorded when a `trigger.condition:` errors at
 /// runtime (compile, runtime, non-boolean result).
 const AUDIT_ACTION_TRIGGER_CONDITION_ERRORED: &str = "workflow.trigger_condition_errored";
+
+/// Walk the `output_schema` properties and evaluate each `extract`
+/// CEL expression against the event. Assembles the output JSON
+/// object with extracted values.
+fn extract_wait_output(
+    ctx: &template::ResumeContext<'_>,
+    output_schema: &serde_json::Value,
+) -> serde_json::Value {
+    let properties = output_schema.get("properties").and_then(|v| v.as_object());
+    let Some(properties) = properties else {
+        return serde_json::Value::Object(serde_json::Map::new());
+    };
+    let mut out = serde_json::Map::with_capacity(properties.len());
+    for (key, prop) in properties {
+        let value = prop
+            .get("extract")
+            .and_then(|e| e.as_str())
+            .and_then(|expr| ctx.evaluate_extract(expr).ok())
+            .unwrap_or(serde_json::Value::Null);
+        out.insert(key.clone(), value);
+    }
+    serde_json::Value::Object(out)
+}
 
 /// SHA-256 hex digest of the JSON-encoded trigger context. Stored
 /// in audit metadata so operators can correlate filtered events
@@ -442,6 +466,23 @@ impl Workflows {
                     // `OutputSchema` enforces the `type: "object"` root
                     // invariant at construction/deserialization
                     // (memo 019dfc8c). Bad schemas can't reach here.
+                }
+                WorkflowStepDef::Wait {
+                    name,
+                    provider,
+                    resume_condition,
+                    ..
+                } => {
+                    if provider.is_empty() {
+                        return Err(WorkflowError::InvalidStep(format!(
+                            "wait step '{name}': `provider` must be a non-empty string"
+                        )));
+                    }
+                    if let Err(e) = template::parse_path(resume_condition.trim()) {
+                        return Err(WorkflowError::InvalidCondition(format!(
+                            "wait step '{name}': resume_condition: {e}"
+                        )));
+                    }
                 }
                 WorkflowStepDef::ToolStep {
                     name, tool, params, ..
@@ -854,7 +895,86 @@ impl Workflows {
             triggered,
             filtered,
             errored,
+            resumed: 0,
         })
+    }
+
+    /// Try to resume parked runs whose wait step matches the inbound
+    /// event. Returns the number of runs resumed.
+    #[instrument(name = "core.workflow.try_resume_by_provider", skip_all)]
+    pub async fn try_resume_by_provider(
+        &self,
+        provider: &str,
+        event: &serde_json::Value,
+    ) -> Result<usize, WorkflowError> {
+        let waiting_runs = self.run_repo.list_waiting_for_event().await?;
+        let mut resumed = 0usize;
+        for mut run in waiting_runs {
+            let wait_step_name = match run.current_wait_step() {
+                Some(sr) => sr.name.clone(),
+                None => continue,
+            };
+
+            let wait_def = run
+                .steps_snapshot
+                .iter()
+                .find(|s| s.name() == wait_step_name);
+
+            let (step_provider, resume_condition, output_schema) = match wait_def {
+                Some(WorkflowStepDef::Wait {
+                    provider: p,
+                    resume_condition,
+                    output_schema,
+                    ..
+                }) => (
+                    p.as_str(),
+                    resume_condition.as_str(),
+                    output_schema as &serde_json::Value,
+                ),
+                _ => continue,
+            };
+
+            if step_provider != provider {
+                continue;
+            }
+
+            let step_outputs: std::collections::HashMap<String, serde_json::Value> = run
+                .step_results
+                .iter()
+                .filter_map(|r| r.output.as_ref().map(|o| (r.name.clone(), o.clone())))
+                .collect();
+
+            let ctx = template::ResumeContext {
+                trigger: &run.trigger_context,
+                steps: &step_outputs,
+                event,
+            };
+
+            match ctx.evaluate_condition(resume_condition) {
+                Ok(template::ConditionOutcome::True) => {}
+                Ok(_) | Err(_) => continue,
+            }
+
+            let extracted = extract_wait_output(&ctx, output_schema);
+
+            let source = format!("provider:{provider}");
+            if run
+                .step_resumed(wait_step_name, extracted, source)
+                .did_execute()
+            {
+                self.run_repo.update(&mut run).await?;
+            }
+
+            let queue_id = format!("workflow-run:{}", run.id);
+            self.execute_run_spawner
+                .spawn_with_queue_id(run.id, ExecuteRunConfig { run_id: run.id }, &queue_id)
+                .await
+                .map_err(|e| WorkflowError::Job(e.to_string()))?;
+
+            tracing::info!(run_id = %run.id, "resumed parked run");
+            resumed += 1;
+        }
+        Ok(resumed)
     }
 
     async fn spawn_run(
@@ -923,7 +1043,7 @@ impl Workflows {
 
         let run = run_repo.create(new).await?;
 
-        let queue_id = format!("workflow:{}", definition.id);
+        let queue_id = format!("workflow-run:{}", run.id);
         execute_run_spawner
             .spawn_with_queue_id(run.id, ExecuteRunConfig { run_id: run.id }, &queue_id)
             .await

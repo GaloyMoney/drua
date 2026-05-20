@@ -218,20 +218,44 @@ pub enum WorkflowStepDef {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         condition: Option<String>,
     },
+    /// Parks the run until an inbound webhook event matches
+    /// `resume_condition`. The webhook infrastructure resumes the
+    /// run by evaluating inbound events against parked runs.
+    Wait {
+        name: String,
+        /// Which webhook provider to listen on (e.g. "github_app",
+        /// "concourse"). Independent of the workflow's own trigger
+        /// provider.
+        provider: String,
+        /// CEL boolean expression. Context has three roots:
+        /// `event` (inbound webhook payload), `trigger` (original
+        /// trigger context of this run), `steps` (prior step outputs).
+        resume_condition: String,
+        /// JSON Schema describing this step's output. Each property
+        /// MAY include an `extract` field (CEL expression against
+        /// `event`) that populates the value from the inbound event.
+        /// Properties without `extract` get `null`.
+        output_schema: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_seconds: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        condition: Option<String>,
+    },
 }
 
 impl WorkflowStepDef {
     pub fn name(&self) -> &str {
         match self {
-            WorkflowStepDef::AgentStep { name, .. } => name,
-            WorkflowStepDef::ToolStep { name, .. } => name,
+            WorkflowStepDef::AgentStep { name, .. }
+            | WorkflowStepDef::ToolStep { name, .. }
+            | WorkflowStepDef::Wait { name, .. } => name,
         }
     }
 
     pub fn model_chain(&self) -> Option<&ModelChain> {
         match self {
             WorkflowStepDef::AgentStep { model_chain, .. } => model_chain.as_ref(),
-            WorkflowStepDef::ToolStep { .. } => None,
+            WorkflowStepDef::ToolStep { .. } | WorkflowStepDef::Wait { .. } => None,
         }
     }
 
@@ -241,7 +265,7 @@ impl WorkflowStepDef {
     pub fn output_schema(&self) -> Option<&OutputSchema> {
         match self {
             WorkflowStepDef::AgentStep { output_schema, .. } => Some(output_schema.as_ref()),
-            WorkflowStepDef::ToolStep { .. } => None,
+            WorkflowStepDef::ToolStep { .. } | WorkflowStepDef::Wait { .. } => None,
         }
     }
 
@@ -250,7 +274,8 @@ impl WorkflowStepDef {
     pub fn condition(&self) -> Option<&str> {
         match self {
             WorkflowStepDef::AgentStep { condition, .. }
-            | WorkflowStepDef::ToolStep { condition, .. } => condition.as_deref(),
+            | WorkflowStepDef::ToolStep { condition, .. }
+            | WorkflowStepDef::Wait { condition, .. } => condition.as_deref(),
         }
     }
 }

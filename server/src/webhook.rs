@@ -110,6 +110,7 @@ struct ProviderFanOutResponse {
     triggered: usize,
     filtered: usize,
     errored: usize,
+    resumed: usize,
 }
 
 #[instrument(name = "web.webhook.handle_provider", skip_all, fields(%provider))]
@@ -148,6 +149,24 @@ pub async fn handle_provider_webhook(
         }
     };
 
+    let resumed = match state
+        .app
+        .workflows()
+        .try_resume_by_provider(&provider, &trigger_context)
+        .await
+    {
+        Ok(n) => {
+            if n > 0 {
+                tracing::info!(count = n, "provider webhook: resumed parked runs");
+            }
+            n
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "provider webhook: resume check failed; falling through to trigger");
+            0
+        }
+    };
+
     match state
         .app
         .workflows()
@@ -160,6 +179,7 @@ pub async fn handle_provider_webhook(
                 triggered: result.triggered,
                 filtered: result.filtered,
                 errored: result.errored,
+                resumed,
             }),
         )
             .into_response(),

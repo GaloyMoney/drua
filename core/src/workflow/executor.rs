@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::Utc;
+
 use crate::agent::session::message::SUBMIT_OUTPUT_TOOL_NAME;
 use crate::agent::{Agent, Agents};
 use crate::auth::AuthSubject;
@@ -232,6 +234,24 @@ impl Executor {
                 }
             }
 
+            // Wait steps park the run instead of executing.
+            if let WorkflowStepDef::Wait {
+                provider,
+                timeout_seconds,
+                ..
+            } = step
+            {
+                let expires_at =
+                    timeout_seconds.map(|s| Utc::now() + chrono::Duration::seconds(s as i64));
+                if run
+                    .step_waiting(step_name.clone(), provider.clone(), expires_at)
+                    .did_execute()
+                {
+                    self.runs.update(&mut run).await?;
+                }
+                return Ok(());
+            }
+
             if run.step_started(step_name.clone()).did_execute() {
                 self.runs.update(&mut run).await?;
             }
@@ -265,6 +285,12 @@ impl Executor {
                     break;
                 }
             }
+        }
+
+        // Don't finalise or suspend sandboxes when the run is parked
+        // on a wait step — the executor will re-enter after resume.
+        if run.state == WorkflowRunState::WaitingForEvent {
+            return Ok(());
         }
 
         if run.run_completed().did_execute() {
@@ -635,6 +661,12 @@ impl Executor {
                 )
                 .await
             }
+            // Wait steps are handled in the main loop before reaching
+            // execute_step; this arm should be unreachable.
+            WorkflowStepDef::Wait { name, .. } => Err(WorkflowError::StepErrored {
+                step: name.clone(),
+                reason: "wait step reached execute_step unexpectedly".into(),
+            }),
         }
     }
 

@@ -2073,6 +2073,7 @@ fn format_run(r: &WorkflowRun) -> String {
     let state = match r.state {
         WorkflowRunState::Pending => "pending",
         WorkflowRunState::Running => "running",
+        WorkflowRunState::WaitingForEvent => "waiting_for_event",
         WorkflowRunState::Succeeded => "succeeded",
         WorkflowRunState::Failed => "failed",
         WorkflowRunState::Errored => "errored",

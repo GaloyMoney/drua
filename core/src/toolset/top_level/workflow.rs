@@ -1060,6 +1060,18 @@ fn step_to_output(s: &WorkflowStepDef) -> WorkflowStepOutput {
             timeout_seconds: *timeout_seconds,
             tool: Some(tool.clone()),
         },
+        WorkflowStepDef::Wait {
+            name,
+            timeout_seconds,
+            ..
+        } => WorkflowStepOutput {
+            name: name.clone(),
+            step_type: "wait".to_string(),
+            skill: String::new(),
+            sandbox: None,
+            timeout_seconds: *timeout_seconds,
+            tool: None,
+        },
     }
 }
 
@@ -1089,6 +1101,7 @@ fn run_state_str(state: WorkflowRunState) -> &'static str {
     match state {
         WorkflowRunState::Pending => "pending",
         WorkflowRunState::Running => "running",
+        WorkflowRunState::WaitingForEvent => "waiting_for_event",
         WorkflowRunState::Succeeded => "succeeded",
         WorkflowRunState::Failed => "failed",
         WorkflowRunState::Errored => "errored",
@@ -1265,6 +1278,16 @@ fn format_get_text(d: &WorkflowDefinition) -> String {
             } => {
                 out.push_str(&format!(
                     "  - tool_step name={name} tool={tool} timeout_s={timeout_seconds:?}\n"
+                ));
+            }
+            WorkflowStepDef::Wait {
+                name,
+                provider,
+                timeout_seconds,
+                ..
+            } => {
+                out.push_str(&format!(
+                    "  - wait name={name} provider={provider} timeout_s={timeout_seconds:?}\n"
                 ));
             }
         }
