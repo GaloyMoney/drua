@@ -169,30 +169,24 @@ async fn run_tunnel(
     let mut registrations: Vec<RegisteredToolSet> = Vec::new();
 
     for upstream in upstreams {
-        tracing::info!(name = %upstream.name, url = %upstream.url, "connecting to local MCP server");
+        match discover_upstream(upstream, &cli.deployment_id).await {
+            Ok((name, client, registration)) => {
+                registrations.push(registration);
+                mcp_clients.insert(name, client);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    name = %upstream.name,
+                    url = %upstream.url,
+                    error = %e,
+                    "skipping unavailable MCP upstream"
+                );
+            }
+        }
+    }
 
-        let config = StreamableHttpClientTransportConfig::with_uri(upstream.url.as_str());
-        let worker = StreamableHttpClientWorker::new(reqwest::Client::new(), config);
-        let client: RunningService<RoleClient, ()> = ().serve(worker).await?;
-
-        let tools: Vec<serde_json::Value> = client
-            .list_all_tools()
-            .await?
-            .into_iter()
-            .filter_map(|t| serde_json::to_value(t).ok())
-            .collect();
-
-        tracing::info!(name = %upstream.name, tools = tools.len(), "discovered tools");
-
-        registrations.push(RegisteredToolSet {
-            name: upstream.name.clone(),
-            prefix: upstream.name.clone(),
-            category: "deployment".to_string(),
-            category_description: format!("{} deployment", cli.deployment_id),
-            tools,
-        });
-
-        mcp_clients.insert(upstream.name.clone(), client);
+    if registrations.is_empty() {
+        anyhow::bail!("all configured MCP upstreams are unavailable");
     }
 
     // ── 2. Connect WebSocket to drua ──────────────────────────────────────
@@ -279,6 +273,36 @@ async fn run_tunnel(
     }
 
     Ok(())
+}
+
+async fn discover_upstream(
+    upstream: &UpstreamConfig,
+    deployment_id: &str,
+) -> anyhow::Result<(String, RunningService<RoleClient, ()>, RegisteredToolSet)> {
+    tracing::info!(name = %upstream.name, url = %upstream.url, "connecting to local MCP server");
+
+    let config = StreamableHttpClientTransportConfig::with_uri(upstream.url.as_str());
+    let worker = StreamableHttpClientWorker::new(reqwest::Client::new(), config);
+    let client: RunningService<RoleClient, ()> = ().serve(worker).await?;
+
+    let tools: Vec<serde_json::Value> = client
+        .list_all_tools()
+        .await?
+        .into_iter()
+        .filter_map(|t| serde_json::to_value(t).ok())
+        .collect();
+
+    tracing::info!(name = %upstream.name, tools = tools.len(), "discovered tools");
+
+    let registration = RegisteredToolSet {
+        name: upstream.name.clone(),
+        prefix: upstream.name.clone(),
+        category: "deployment".to_string(),
+        category_description: format!("{deployment_id} deployment"),
+        tools,
+    };
+
+    Ok((upstream.name.clone(), client, registration))
 }
 
 async fn handle_call(
