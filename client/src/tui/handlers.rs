@@ -425,6 +425,9 @@ fn handle_threads_key(state: &mut ScreenState, key: KeyEvent) -> Action {
         KeyCode::Esc => {
             state.thread_view = None;
             state.focus = state.thread_return_focus.take().unwrap_or(Focus::Chat);
+            if state.focus != Focus::Workflows {
+                state.loaded_agent_id = None;
+            }
             Action::None
         }
         _ => Action::None,
