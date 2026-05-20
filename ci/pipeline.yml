@@ -13,6 +13,7 @@ groups:
   - build-edge-image
   - build-sandbox-image
   - build-tunnel-connector-image
+  - build-keycloak-mcp-image
   - build-concourse-drua-resource-image
   - bump-galoy-charts-tunnel-connector-image
   - deploy-to-prod
@@ -433,6 +434,37 @@ jobs:
     get_params:
       skip_download: true
 
+- name: build-keycloak-mcp-image
+  serial: true
+  plan:
+  - get: repo-keycloak-mcp
+    trigger: true
+  - task: build-image
+    config:
+      platform: linux
+      image_resource: #@ nix_flake_image_config()
+      inputs:
+      - name: repo-keycloak-mcp
+        path: repo
+      outputs:
+      - name: image
+      caches:
+      - path: /nix-cache
+      run:
+        path: repo/ci/tasks/with-nix-cache.sh
+        args:
+          - sh
+          - -exc
+          - |
+            cd repo
+            nix build .#keycloak-mcp-image
+            gunzip -c result > ../image/image.tar
+  - put: keycloak-mcp-edge-image
+    params:
+      image: image/image.tar
+    get_params:
+      skip_download: true
+
 #! Builds the OCI image used as a Concourse `resource_type` to fire
 #! drua workflow runs from any pipeline's `on_failure:` (or anywhere
 #! else). Image source lives in `images/concourse-drua-resource/`.
@@ -592,6 +624,18 @@ resources:
     - Cargo.toml
     - Cargo.lock
 
+- name: repo-keycloak-mcp
+  type: git
+  source:
+    uri: #@ data.values.git_uri
+    branch: #@ data.values.git_branch
+    private_key: #@ data.values.github_private_key
+    paths:
+    - images/keycloak-mcp/
+    - flake.nix
+    - Cargo.toml
+    - Cargo.lock
+
 - name: repo-concourse-drua-resource
   type: git
   source:
@@ -699,6 +743,14 @@ resources:
     username: #@ data.values.gar_registry_user
     password: #@ data.values.gar_registry_password
     repository: #@ data.values.gar_registry + "/tunnel-connector"
+
+- name: keycloak-mcp-edge-image
+  type: registry-image
+  source:
+    tag: edge
+    username: #@ data.values.gar_registry_user
+    password: #@ data.values.gar_registry_password
+    repository: #@ data.values.gar_registry + "/keycloak-mcp"
 
 - name: concourse-drua-resource-edge-image
   type: registry-image

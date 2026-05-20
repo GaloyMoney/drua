@@ -23,6 +23,7 @@ members = [
   "code-assistant/crates/core",
   "code-assistant/crates/cli",
   "images/sandbox/server",
+  "images/keycloak-mcp",
   "images/tunnel-connector",
 ]
 resolver = "2"

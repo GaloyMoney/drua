@@ -444,6 +444,17 @@
           sandbox-tool-server = self.packages.${system}.sandbox-tool-server;
         };
 
+        packages.keycloak-mcp = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+          pname = "keycloak-mcp";
+          cargoExtraArgs = "-p keycloak-mcp";
+        });
+
+        packages.keycloak-mcp-image = import ./images/keycloak-mcp/default.nix {
+          inherit pkgs;
+          keycloak-mcp = self.packages.${system}.keycloak-mcp;
+        };
+
         packages.tunnel-connector = craneLib.buildPackage (commonArgs // {
           inherit cargoArtifacts;
           pname = "tunnel-connector";

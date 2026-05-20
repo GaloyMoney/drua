@@ -3037,6 +3037,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "keycloak-mcp"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "reqwest 0.12.28",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "kube"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
