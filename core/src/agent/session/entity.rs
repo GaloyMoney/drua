@@ -660,6 +660,8 @@ impl AgentSession {
     /// Buffer on top of the longest declared `timeout_ms` to cover
     /// network latency, result-persistence gap, and deploy window.
     const STALE_BUFFER: std::time::Duration = std::time::Duration::from_secs(300);
+    /// Cap on `timeout_ms` read from tool input — matches bash MAX_TIMEOUT_MS.
+    const MAX_TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(10_800_000);
 
     fn stale_threshold_for_tool_uses(&self, thread_id: SessionThreadId) -> std::time::Duration {
         let max_timeout_ms = self
@@ -686,7 +688,10 @@ impl AgentSession {
             })
             .flatten();
         match max_timeout_ms {
-            Some(ms) => std::time::Duration::from_millis(ms) + Self::STALE_BUFFER,
+            Some(ms) => {
+                std::time::Duration::from_millis(ms).min(Self::MAX_TOOL_TIMEOUT)
+                    + Self::STALE_BUFFER
+            }
             None => Self::DEFAULT_STALE_THRESHOLD,
         }
     }
