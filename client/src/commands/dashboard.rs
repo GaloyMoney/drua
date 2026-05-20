@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::io;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use crossterm::{
@@ -18,7 +18,9 @@ use crate::graphql::GraphqlClient;
 use crate::tui::chat::{ChatMessage, ChatRole, ContentBlock};
 use crate::tui::state::{
     AgentItem, BlockDetail, CellKind, Focus, GridSection, ProjectItem, SandboxInfo, ScreenState,
-    SystemBlockDetail, ThreadGridState, ThreadInfo, UsageDetail,
+    SystemBlockDetail, ThreadGridState, ThreadInfo, UsageDetail, WorkflowDefinitionDetail,
+    WorkflowDefinitionItem, WorkflowRunDetail, WorkflowRunItem, WorkflowSandboxItem,
+    WorkflowStepItem, WorkflowStepResultItem, WorkflowTriggerInfo,
 };
 use crate::tui::{handlers, ui};
 
@@ -81,6 +83,204 @@ struct AgentSessionNode {
 struct SandboxAttachmentNode {
     name: String,
     mode: String,
+}
+
+const WORKFLOW_DEFINITIONS_QUERY: &str = r#"
+    query WorkflowDefinitions($projectId: ProjectId!) {
+        workflowDefinitions(projectId: $projectId) {
+            id
+            name
+            description
+            trigger { kind provider cronSchedule cronTimezone nextRunAt condition webhookUrl }
+            steps { name stepType skill tool sandbox sandboxMode condition }
+            recentRuns(first: 1) {
+                id
+                state
+                startedAt
+                completedAt
+                stepResults { name state output error skipped completedAt }
+            }
+        }
+    }
+"#;
+
+const WORKFLOW_DEFINITION_QUERY: &str = r#"
+    query WorkflowDefinition($id: WorkflowDefinitionId!) {
+        workflowDefinition(id: $id) {
+            id
+            name
+            description
+            yaml
+            trigger { kind provider cronSchedule cronTimezone nextRunAt condition webhookUrl }
+            steps { name stepType skill tool sandbox sandboxMode condition }
+            sandboxes { name kind branch repoUrl }
+            recentRuns(first: 10) { id state startedAt completedAt stepResults { name state output error skipped completedAt } }
+        }
+    }
+"#;
+
+const WORKFLOW_RUNS_QUERY: &str = r#"
+    query WorkflowRuns($definitionId: WorkflowDefinitionId!, $first: Int!) {
+        workflowRuns(definitionId: $definitionId, first: $first) {
+            id
+            state
+            startedAt
+            completedAt
+            stepResults { name state output error skipped completedAt }
+        }
+    }
+"#;
+
+const WORKFLOW_RUN_QUERY: &str = r#"
+    query WorkflowRun($id: WorkflowRunId!) {
+        workflowRun(id: $id) {
+            id
+            definitionId
+            projectId
+            state
+            startedAt
+            completedAt
+            triggerContext
+            stepsSnapshot { name stepType skill tool sandbox sandboxMode condition }
+            stepResults { name state output error skipped completedAt }
+            agents { id name role session { model } attachedSandbox { name mode } }
+        }
+    }
+"#;
+
+const WORKFLOW_TRIGGER_MUTATION: &str = r#"
+    mutation WorkflowTrigger($input: WorkflowTriggerInput!) {
+        workflowTrigger(input: $input) {
+            filtered
+            run {
+                id
+                definitionId
+                projectId
+                state
+                startedAt
+                completedAt
+                stepResults { name state output error skipped completedAt }
+            }
+        }
+    }
+"#;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowDefinitionsResponse {
+    workflow_definitions: Vec<WorkflowDefinitionNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowDefinitionResponse {
+    workflow_definition: Option<WorkflowDefinitionNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowRunsResponse {
+    workflow_runs: Vec<WorkflowRunNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowRunResponse {
+    workflow_run: Option<WorkflowRunNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowTriggerResponse {
+    workflow_trigger: WorkflowTriggerPayloadNode,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowTriggerPayloadNode {
+    filtered: bool,
+    run: Option<WorkflowRunNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowDefinitionNode {
+    id: String,
+    name: String,
+    description: Option<String>,
+    #[serde(default)]
+    yaml: String,
+    trigger: WorkflowTriggerNode,
+    #[serde(default)]
+    steps: Vec<WorkflowStepNode>,
+    #[serde(default)]
+    sandboxes: Vec<WorkflowSandboxNode>,
+    #[serde(default)]
+    recent_runs: Vec<WorkflowRunNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowTriggerNode {
+    kind: String,
+    provider: Option<String>,
+    cron_schedule: Option<String>,
+    cron_timezone: Option<String>,
+    next_run_at: Option<String>,
+    condition: Option<String>,
+    webhook_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowStepNode {
+    name: String,
+    step_type: String,
+    skill: Option<String>,
+    tool: Option<String>,
+    sandbox: Option<String>,
+    sandbox_mode: Option<String>,
+    condition: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowSandboxNode {
+    name: String,
+    kind: String,
+    branch: Option<String>,
+    repo_url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowRunNode {
+    id: String,
+    #[serde(default)]
+    definition_id: String,
+    #[serde(default)]
+    project_id: String,
+    state: String,
+    started_at: String,
+    completed_at: Option<String>,
+    #[serde(default)]
+    trigger_context: serde_json::Value,
+    #[serde(default)]
+    steps_snapshot: Vec<WorkflowStepNode>,
+    #[serde(default)]
+    step_results: Vec<WorkflowStepResultNode>,
+    #[serde(default)]
+    agents: Vec<AgentNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowStepResultNode {
+    name: String,
+    state: String,
+    output: Option<serde_json::Value>,
+    error: Option<String>,
+    skipped: Option<String>,
+    completed_at: Option<String>,
 }
 
 const PROJECTS_QUERY: &str = r#"
@@ -411,6 +611,32 @@ impl TaggedEvent {
     }
 }
 
+enum WorkflowEvent {
+    DefinitionsLoaded(Vec<WorkflowDefinitionItem>),
+    DefinitionsError(String),
+    DefDetailAndRuns {
+        def_id: String,
+        definition: Option<WorkflowDefinitionDetail>,
+        runs: Option<Vec<WorkflowRunItem>>,
+        error: Option<String>,
+    },
+    RunDetail {
+        run_id: String,
+        detail: Option<WorkflowRunDetail>,
+        error: Option<String>,
+        is_poll: bool,
+    },
+    TriggerComplete(Box<WorkflowTriggerOutcome>),
+}
+
+struct WorkflowTriggerOutcome {
+    filtered: bool,
+    run_id: Option<String>,
+    run_detail: Option<WorkflowRunDetail>,
+    updated_runs: Option<Vec<WorkflowRunItem>>,
+    error: Option<String>,
+}
+
 fn spawn_chat_stream(
     base_url: String,
     token: String,
@@ -523,6 +749,131 @@ fn agent_node_to_item(a: AgentNode) -> AgentItem {
     }
 }
 
+fn workflow_trigger_node_to_info(t: WorkflowTriggerNode) -> WorkflowTriggerInfo {
+    WorkflowTriggerInfo {
+        kind: t.kind,
+        provider: t.provider,
+        cron_schedule: t.cron_schedule,
+        cron_timezone: t.cron_timezone,
+        next_run_at: t.next_run_at,
+        condition: t.condition,
+        webhook_url: t.webhook_url,
+    }
+}
+
+fn workflow_step_node_to_item(s: WorkflowStepNode) -> WorkflowStepItem {
+    WorkflowStepItem {
+        name: s.name,
+        step_type: s.step_type,
+        skill: s.skill,
+        tool: s.tool,
+        sandbox: s.sandbox,
+        sandbox_mode: s.sandbox_mode,
+        condition: s.condition,
+    }
+}
+
+fn workflow_sandbox_node_to_item(s: WorkflowSandboxNode) -> WorkflowSandboxItem {
+    WorkflowSandboxItem {
+        name: s.name,
+        kind: s.kind,
+        branch: s.branch,
+        repo_url: s.repo_url,
+    }
+}
+
+fn workflow_step_result_node_to_item(r: WorkflowStepResultNode) -> WorkflowStepResultItem {
+    WorkflowStepResultItem {
+        name: r.name,
+        state: r.state,
+        output: r.output,
+        error: r.error,
+        skipped: r.skipped,
+        completed_at: r.completed_at,
+    }
+}
+
+fn workflow_run_node_to_item(r: WorkflowRunNode) -> WorkflowRunItem {
+    WorkflowRunItem {
+        id: r.id,
+        state: r.state,
+        started_at: r.started_at,
+        completed_at: r.completed_at,
+        step_results: r
+            .step_results
+            .into_iter()
+            .map(workflow_step_result_node_to_item)
+            .collect(),
+    }
+}
+
+fn workflow_run_node_to_detail(r: WorkflowRunNode) -> WorkflowRunDetail {
+    WorkflowRunDetail {
+        id: r.id,
+        definition_id: r.definition_id,
+        project_id: r.project_id,
+        state: r.state,
+        started_at: r.started_at,
+        completed_at: r.completed_at,
+        trigger_context: r.trigger_context,
+        steps_snapshot: r
+            .steps_snapshot
+            .into_iter()
+            .map(workflow_step_node_to_item)
+            .collect(),
+        step_results: r
+            .step_results
+            .into_iter()
+            .map(workflow_step_result_node_to_item)
+            .collect(),
+        agents: r.agents.into_iter().map(agent_node_to_item).collect(),
+    }
+}
+
+fn workflow_definition_node_to_item(d: WorkflowDefinitionNode) -> WorkflowDefinitionItem {
+    WorkflowDefinitionItem {
+        id: d.id,
+        name: d.name,
+        description: d.description,
+        trigger: workflow_trigger_node_to_info(d.trigger),
+        steps: d
+            .steps
+            .into_iter()
+            .map(workflow_step_node_to_item)
+            .collect(),
+        recent_runs: d
+            .recent_runs
+            .into_iter()
+            .map(workflow_run_node_to_item)
+            .collect(),
+    }
+}
+
+fn workflow_definition_node_to_detail(d: WorkflowDefinitionNode) -> WorkflowDefinitionDetail {
+    WorkflowDefinitionDetail {
+        id: d.id,
+        name: d.name,
+        description: d.description,
+        yaml: d.yaml,
+        trigger: workflow_trigger_node_to_info(d.trigger),
+        steps: d
+            .steps
+            .into_iter()
+            .map(workflow_step_node_to_item)
+            .collect(),
+        sandboxes: d
+            .sandboxes
+            .into_iter()
+            .map(workflow_sandbox_node_to_item)
+            .collect(),
+        recent_runs: d
+            .recent_runs
+            .into_iter()
+            .map(workflow_run_node_to_item)
+            .collect(),
+    }
+}
+
 async fn fetch_projects(client: &GraphqlClient) -> Result<Vec<ProjectItem>> {
     let resp: ProjectsResponse = client.query(PROJECTS_QUERY, serde_json::json!({})).await?;
 
@@ -544,6 +895,87 @@ async fn fetch_projects(client: &GraphqlClient) -> Result<Vec<ProjectItem>> {
         .collect();
 
     Ok(items)
+}
+
+async fn fetch_workflow_definitions(
+    client: &GraphqlClient,
+    project_id: &str,
+) -> Result<Vec<WorkflowDefinitionItem>> {
+    let resp: WorkflowDefinitionsResponse = client
+        .query(
+            WORKFLOW_DEFINITIONS_QUERY,
+            serde_json::json!({ "projectId": project_id }),
+        )
+        .await?;
+
+    Ok(resp
+        .workflow_definitions
+        .into_iter()
+        .map(workflow_definition_node_to_item)
+        .collect())
+}
+
+async fn fetch_workflow_definition(
+    client: &GraphqlClient,
+    definition_id: &str,
+) -> Result<WorkflowDefinitionDetail> {
+    let resp: WorkflowDefinitionResponse = client
+        .query(
+            WORKFLOW_DEFINITION_QUERY,
+            serde_json::json!({ "id": definition_id }),
+        )
+        .await?;
+
+    resp.workflow_definition
+        .map(workflow_definition_node_to_detail)
+        .ok_or_else(|| anyhow::anyhow!("workflow definition not found"))
+}
+
+async fn fetch_workflow_runs(
+    client: &GraphqlClient,
+    definition_id: &str,
+) -> Result<Vec<WorkflowRunItem>> {
+    let resp: WorkflowRunsResponse = client
+        .query(
+            WORKFLOW_RUNS_QUERY,
+            serde_json::json!({ "definitionId": definition_id, "first": 50 }),
+        )
+        .await?;
+
+    Ok(resp
+        .workflow_runs
+        .into_iter()
+        .map(workflow_run_node_to_item)
+        .collect())
+}
+
+async fn fetch_workflow_run(client: &GraphqlClient, run_id: &str) -> Result<WorkflowRunDetail> {
+    let resp: WorkflowRunResponse = client
+        .query(WORKFLOW_RUN_QUERY, serde_json::json!({ "id": run_id }))
+        .await?;
+
+    resp.workflow_run
+        .map(workflow_run_node_to_detail)
+        .ok_or_else(|| anyhow::anyhow!("workflow run not found"))
+}
+
+async fn trigger_workflow(
+    client: &GraphqlClient,
+    definition_id: &str,
+    payload: serde_json::Value,
+) -> Result<WorkflowTriggerPayloadNode> {
+    let resp: WorkflowTriggerResponse = client
+        .query(
+            WORKFLOW_TRIGGER_MUTATION,
+            serde_json::json!({
+                "input": {
+                    "definitionId": definition_id,
+                    "payload": payload,
+                }
+            }),
+        )
+        .await?;
+    Ok(resp.workflow_trigger)
 }
 
 async fn fetch_user_name(client: &GraphqlClient) -> Result<String> {
@@ -1012,6 +1444,230 @@ fn spawn_threads_fetch(
     });
 }
 
+fn spawn_workflow_definitions_fetch(
+    base_url: String,
+    token: String,
+    project_id: String,
+    tx: mpsc::UnboundedSender<WorkflowEvent>,
+) {
+    tokio::spawn(async move {
+        let client = GraphqlClient::new(&base_url, &token);
+        match fetch_workflow_definitions(&client, &project_id).await {
+            Ok(defs) => {
+                let _ = tx.send(WorkflowEvent::DefinitionsLoaded(defs));
+            }
+            Err(e) => {
+                let _ = tx.send(WorkflowEvent::DefinitionsError(format!(
+                    "Failed to load workflows: {e}"
+                )));
+            }
+        }
+    });
+}
+
+fn spawn_workflow_def_detail_fetch(
+    base_url: String,
+    token: String,
+    def_id: String,
+    tx: mpsc::UnboundedSender<WorkflowEvent>,
+) {
+    tokio::spawn(async move {
+        let client = GraphqlClient::new(&base_url, &token);
+        let (def_result, runs_result) = tokio::join!(
+            fetch_workflow_definition(&client, &def_id),
+            fetch_workflow_runs(&client, &def_id),
+        );
+        let mut error = None;
+        let definition = match def_result {
+            Ok(d) => Some(d),
+            Err(e) => {
+                error = Some(format!("Failed to load definition: {e}"));
+                None
+            }
+        };
+        let runs = match runs_result {
+            Ok(r) => Some(r),
+            Err(e) => {
+                error = Some(format!("Failed to load runs: {e}"));
+                None
+            }
+        };
+        let _ = tx.send(WorkflowEvent::DefDetailAndRuns {
+            def_id,
+            definition,
+            runs,
+            error,
+        });
+    });
+}
+
+fn spawn_workflow_run_fetch(
+    base_url: String,
+    token: String,
+    run_id: String,
+    is_poll: bool,
+    tx: mpsc::UnboundedSender<WorkflowEvent>,
+) {
+    tokio::spawn(async move {
+        let client = GraphqlClient::new(&base_url, &token);
+        let (detail, error) = match fetch_workflow_run(&client, &run_id).await {
+            Ok(d) => (Some(d), None),
+            Err(e) => (None, Some(format!("Failed to load run: {e}"))),
+        };
+        let _ = tx.send(WorkflowEvent::RunDetail {
+            run_id,
+            detail,
+            error,
+            is_poll,
+        });
+    });
+}
+
+fn spawn_workflow_trigger(
+    base_url: String,
+    token: String,
+    definition_id: String,
+    payload: serde_json::Value,
+    tx: mpsc::UnboundedSender<WorkflowEvent>,
+) {
+    tokio::spawn(async move {
+        let client = GraphqlClient::new(&base_url, &token);
+        match trigger_workflow(&client, &definition_id, payload).await {
+            Ok(result) if result.filtered => {
+                let _ = tx.send(WorkflowEvent::TriggerComplete(Box::new(
+                    WorkflowTriggerOutcome {
+                        filtered: true,
+                        run_id: None,
+                        run_detail: None,
+                        updated_runs: None,
+                        error: None,
+                    },
+                )));
+            }
+            Ok(result) => {
+                if let Some(run) = result.run {
+                    let run_id = run.id.clone();
+                    let run_detail = match fetch_workflow_run(&client, &run_id).await {
+                        Ok(detail) => detail,
+                        Err(_) => workflow_run_node_to_detail(run),
+                    };
+                    let updated_runs = fetch_workflow_runs(&client, &definition_id).await.ok();
+                    let _ = tx.send(WorkflowEvent::TriggerComplete(Box::new(
+                        WorkflowTriggerOutcome {
+                            filtered: false,
+                            run_id: Some(run_id),
+                            run_detail: Some(run_detail),
+                            updated_runs,
+                            error: None,
+                        },
+                    )));
+                } else {
+                    let _ = tx.send(WorkflowEvent::TriggerComplete(Box::new(
+                        WorkflowTriggerOutcome {
+                            filtered: false,
+                            run_id: None,
+                            run_detail: None,
+                            updated_runs: None,
+                            error: None,
+                        },
+                    )));
+                }
+            }
+            Err(e) => {
+                let _ = tx.send(WorkflowEvent::TriggerComplete(Box::new(
+                    WorkflowTriggerOutcome {
+                        filtered: false,
+                        run_id: None,
+                        run_detail: None,
+                        updated_runs: None,
+                        error: Some(format!("Trigger failed: {e}")),
+                    },
+                )));
+            }
+        }
+    });
+}
+
+fn handle_workflow_event(
+    state: &mut ScreenState,
+    event: WorkflowEvent,
+    fetched_def_id: &mut Option<String>,
+    fetched_run_id: &mut Option<String>,
+    poll_in_flight: &mut bool,
+) {
+    match event {
+        WorkflowEvent::DefinitionsLoaded(defs) => {
+            state.replace_workflow_definitions(defs);
+        }
+        WorkflowEvent::DefinitionsError(e) => {
+            state.set_workflow_error(e);
+        }
+        WorkflowEvent::DefDetailAndRuns {
+            def_id,
+            definition,
+            runs,
+            error,
+        } => {
+            if fetched_def_id.as_deref() != Some(&def_id) {
+                return;
+            }
+            if let Some(detail) = definition {
+                state.replace_workflow_definition_detail(detail);
+            }
+            if let Some(runs) = runs {
+                state.replace_workflow_runs(runs);
+            }
+            if let Some(e) = error {
+                state.set_workflow_error(e);
+            }
+        }
+        WorkflowEvent::RunDetail {
+            run_id,
+            detail,
+            error,
+            is_poll,
+        } => {
+            if is_poll {
+                *poll_in_flight = false;
+            }
+            if fetched_run_id.as_deref() != Some(&run_id) {
+                return;
+            }
+            if let Some(detail) = detail {
+                state.replace_workflow_run_detail(detail);
+            }
+            if let Some(e) = error {
+                state.set_workflow_error(e);
+            }
+        }
+        WorkflowEvent::TriggerComplete(outcome) => {
+            if let Some(error) = outcome.error {
+                state.set_workflow_error(error);
+                return;
+            }
+            if outcome.filtered {
+                state.status_message =
+                    Some("Trigger condition filtered; no run created".to_string());
+                return;
+            }
+            if let Some(ref run_id) = outcome.run_id {
+                state.status_message = Some(format!("Workflow run {run_id} created"));
+                state.workflows.run_cursor = 0;
+                state.workflows.focus = crate::tui::state::MillerFocus::Runs;
+                if let Some(detail) = outcome.run_detail {
+                    state.replace_workflow_run_detail(detail);
+                }
+                if let Some(runs) = outcome.updated_runs {
+                    state.replace_workflow_runs(runs);
+                }
+                *fetched_run_id = outcome.run_id;
+            } else {
+                state.status_message = Some("Workflow trigger returned no run".to_string());
+            }
+        }
+    }
+}
+
 fn dispatch_stream_event(state: &mut ScreenState, tagged: TaggedEvent) {
     // Drop tagged events whose originating agent no longer matches the
     // user's selection — e.g. in-flight deltas from a chat stream
@@ -1134,8 +1790,13 @@ async fn run_event_loop(
     config: &Config,
 ) -> Result<()> {
     let (stream_tx, mut stream_rx) = mpsc::unbounded_channel::<TaggedEvent>();
+    let (workflow_tx, mut workflow_rx) = mpsc::unbounded_channel::<WorkflowEvent>();
     let mut event_stream = EventStream::new();
     let mut persisted_project_id: Option<String> = state.selected_project().map(|p| p.id.clone());
+    let mut last_workflow_poll = Instant::now();
+    let mut workflow_poll_in_flight = false;
+    let mut fetched_def_id: Option<String> = None;
+    let mut fetched_run_id: Option<String> = None;
     loop {
         terminal.draw(|frame| ui::draw(frame, state))?;
 
@@ -1218,6 +1879,47 @@ async fn run_event_loop(
                                     );
                                 }
                             }
+                            handlers::Action::OpenWorkflows => {
+                                state.enter_workflows();
+                                state.workflows.loading = true;
+                                fetched_def_id = None;
+                                fetched_run_id = None;
+                                if let Some(project_id) = state.selected_project().map(|p| p.id.clone()) {
+                                    spawn_workflow_definitions_fetch(
+                                        config.server_url.clone(),
+                                        config.auth_token.clone(),
+                                        project_id,
+                                        workflow_tx.clone(),
+                                    );
+                                } else {
+                                    state.set_workflow_error("No project selected".to_string());
+                                }
+                            }
+                            handlers::Action::RefreshWorkflows => {
+                                state.workflows.loading = true;
+                                fetched_def_id = None;
+                                fetched_run_id = None;
+                                if let Some(project_id) = state.selected_project().map(|p| p.id.clone()) {
+                                    spawn_workflow_definitions_fetch(
+                                        config.server_url.clone(),
+                                        config.auth_token.clone(),
+                                        project_id,
+                                        workflow_tx.clone(),
+                                    );
+                                } else {
+                                    state.workflows.loading = false;
+                                }
+                            }
+                            handlers::Action::TriggerWorkflow { definition_id, payload } => {
+                                state.status_message = Some("Triggering workflow...".to_string());
+                                spawn_workflow_trigger(
+                                    config.server_url.clone(),
+                                    config.auth_token.clone(),
+                                    definition_id,
+                                    payload,
+                                    workflow_tx.clone(),
+                                );
+                            }
                             handlers::Action::None => {}
                         }
                     }
@@ -1226,6 +1928,15 @@ async fn run_event_loop(
             event = stream_rx.recv() => {
                 if let Some(evt) = event {
                     dispatch_stream_event(state, evt);
+                }
+            }
+            event = workflow_rx.recv() => {
+                if let Some(evt) = event {
+                    handle_workflow_event(
+                        state, evt,
+                        &mut fetched_def_id, &mut fetched_run_id,
+                        &mut workflow_poll_in_flight,
+                    );
                 }
             }
             _ = tokio::time::sleep(timeout) => {}
@@ -1237,6 +1948,60 @@ async fn run_event_loop(
                 let _ = Config::save_last_project(id);
             }
             persisted_project_id = current_project_id;
+        }
+
+        if state.focus == Focus::Workflows {
+            let cur_def = state.selected_workflow_definition_id();
+            if cur_def != fetched_def_id {
+                fetched_def_id = cur_def.clone();
+                state.workflows.error = None;
+                state.workflows.runs.clear();
+                if let Some(def_id) = &cur_def {
+                    spawn_workflow_def_detail_fetch(
+                        config.server_url.clone(),
+                        config.auth_token.clone(),
+                        def_id.clone(),
+                        workflow_tx.clone(),
+                    );
+                } else {
+                    state.workflows.selected_definition = None;
+                }
+                state.workflows.selected_run = None;
+                fetched_run_id = None;
+            }
+
+            let cur_run = state.selected_workflow_run_id();
+            if cur_run != fetched_run_id {
+                fetched_run_id = cur_run.clone();
+                state.workflows.error = None;
+                if let Some(run_id) = &cur_run {
+                    spawn_workflow_run_fetch(
+                        config.server_url.clone(),
+                        config.auth_token.clone(),
+                        run_id.clone(),
+                        false,
+                        workflow_tx.clone(),
+                    );
+                } else {
+                    state.workflows.selected_run = None;
+                }
+            }
+        }
+
+        if last_workflow_poll.elapsed() >= Duration::from_secs(1) {
+            last_workflow_poll = Instant::now();
+            if !workflow_poll_in_flight {
+                if let Some(run_id) = state.workflow_poll_run_id() {
+                    workflow_poll_in_flight = true;
+                    spawn_workflow_run_fetch(
+                        config.server_url.clone(),
+                        config.auth_token.clone(),
+                        run_id,
+                        true,
+                        workflow_tx.clone(),
+                    );
+                }
+            }
         }
 
         // Fetch history when the selected agent changes (and we're not streaming).

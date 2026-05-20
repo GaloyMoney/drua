@@ -1,6 +1,6 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use super::state::{Focus, Mode, ScreenState};
+use super::state::{Focus, MillerFocus, Mode, ScreenState};
 
 /// Async side-effects returned from key handlers for the event loop to execute.
 pub enum Action {
@@ -8,10 +8,25 @@ pub enum Action {
     Quit,
     Suspend,
     Refresh,
-    CreateProject { name: String, description: String },
-    SendChat { agent_id: String, prompt: String },
+    CreateProject {
+        name: String,
+        description: String,
+    },
+    SendChat {
+        agent_id: String,
+        prompt: String,
+    },
     ToggleThreads,
-    ExportThread { agent_id: String, path: String },
+    OpenWorkflows,
+    RefreshWorkflows,
+    TriggerWorkflow {
+        definition_id: String,
+        payload: serde_json::Value,
+    },
+    ExportThread {
+        agent_id: String,
+        path: String,
+    },
 }
 
 pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
@@ -38,6 +53,9 @@ pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
                     state.select_lead_and_focus_chat();
                     return Action::None;
                 }
+                KeyCode::Char('r') if state.focus == Focus::Workflows => {
+                    return enter_trigger_for_selected_workflow(state);
+                }
                 KeyCode::Char('r') => return Action::Refresh,
                 KeyCode::Char('h') => {
                     state.focus_left();
@@ -48,6 +66,12 @@ pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
                     return Action::None;
                 }
                 KeyCode::Char('t') => return Action::ToggleThreads,
+                KeyCode::Char('w')
+                    if state.focus != Focus::Workflows
+                        && (state.focus != Focus::Chat || state.chat_input.is_empty()) =>
+                {
+                    return Action::OpenWorkflows;
+                }
                 _ => {}
             }
         }
@@ -58,10 +82,144 @@ pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             Focus::Agents => handle_agents_key(state, key),
             Focus::Chat => handle_chat_key(state, key),
             Focus::Threads => handle_threads_key(state, key),
+            Focus::Workflows => handle_workflows_key(state, key),
         },
         Mode::CreateProject => handle_create_key(state, key),
         Mode::ExportThread => handle_export_key(state, key),
         Mode::ProjectPicker { .. } => handle_picker_key(state, key),
+        Mode::TriggerWorkflow { .. } => handle_trigger_workflow_key(state, key),
+    }
+}
+
+fn handle_workflows_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    state.status_message = None;
+    match state.workflows.focus {
+        MillerFocus::Definitions => handle_workflow_definitions_key(state, key),
+        MillerFocus::YamlDetail => handle_workflow_yaml_key(state, key),
+        MillerFocus::Runs => handle_workflow_runs_key(state, key),
+        MillerFocus::StepDetail => handle_workflow_step_detail_key(state, key),
+    }
+}
+
+fn handle_workflow_definitions_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.workflow_cursor_down();
+            Action::None
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.workflow_cursor_up();
+            Action::None
+        }
+        KeyCode::Enter => {
+            state.workflow_focus_yaml();
+            Action::None
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            state.workflow_focus_right();
+            Action::None
+        }
+        KeyCode::Char('r') => Action::RefreshWorkflows,
+        KeyCode::Esc => {
+            state.focus = Focus::Chat;
+            Action::None
+        }
+        _ => Action::None,
+    }
+}
+
+fn handle_workflow_yaml_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.workflow_detail_scroll_down();
+            Action::None
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.workflow_detail_scroll_up();
+            Action::None
+        }
+        KeyCode::Right | KeyCode::Char('l') => {
+            state.workflow_focus_right();
+            Action::None
+        }
+        KeyCode::Left | KeyCode::Char('h') | KeyCode::Esc => {
+            state.workflow_focus_left();
+            Action::None
+        }
+        _ => Action::None,
+    }
+}
+
+fn handle_workflow_runs_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.workflow_runs_cursor_down();
+            Action::None
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.workflow_runs_cursor_up();
+            Action::None
+        }
+        KeyCode::Char('J') | KeyCode::PageDown => {
+            state.workflow_detail_scroll_down();
+            Action::None
+        }
+        KeyCode::Char('K') | KeyCode::PageUp => {
+            state.workflow_detail_scroll_up();
+            Action::None
+        }
+        KeyCode::Left | KeyCode::Char('h') => {
+            state.workflow_focus_left();
+            Action::None
+        }
+        KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+            state.workflow_focus_right();
+            Action::None
+        }
+        KeyCode::Char('r') => Action::RefreshWorkflows,
+        KeyCode::Esc => {
+            state.focus = Focus::Chat;
+            Action::None
+        }
+        _ => Action::None,
+    }
+}
+
+fn handle_workflow_step_detail_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Char('j') | KeyCode::Down => {
+            state.workflow_step_cursor_down();
+            Action::None
+        }
+        KeyCode::Char('k') | KeyCode::Up => {
+            state.workflow_step_cursor_up();
+            Action::None
+        }
+        KeyCode::Left | KeyCode::Char('h') => {
+            state.workflow_focus_left();
+            Action::None
+        }
+        KeyCode::Enter => {
+            state.workflow_toggle_expanded();
+            Action::None
+        }
+        KeyCode::Char('r') => Action::RefreshWorkflows,
+        KeyCode::Esc => {
+            state.focus = Focus::Chat;
+            Action::None
+        }
+        _ => Action::None,
+    }
+}
+
+fn enter_trigger_for_selected_workflow(state: &mut ScreenState) -> Action {
+    match state.selected_workflow_definition_id() {
+        Some(definition_id) => {
+            let name = state.selected_workflow_name();
+            state.enter_trigger_workflow(definition_id, name);
+            Action::None
+        }
+        None => Action::None,
     }
 }
 
@@ -293,6 +451,68 @@ fn handle_export_key(state: &mut ScreenState, key: KeyEvent) -> Action {
     }
 }
 
+fn handle_trigger_workflow_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Esc => {
+            state.exit_trigger_workflow();
+            Action::None
+        }
+        KeyCode::Backspace => {
+            if let Mode::TriggerWorkflow { payload, error, .. } = &mut state.mode {
+                payload.pop();
+                *error = None;
+            }
+            Action::None
+        }
+        KeyCode::Char('u') if ctrl => {
+            if let Mode::TriggerWorkflow { payload, error, .. } = &mut state.mode {
+                payload.clear();
+                *error = None;
+            }
+            Action::None
+        }
+        KeyCode::Char(c) if !ctrl => {
+            if let Mode::TriggerWorkflow { payload, error, .. } = &mut state.mode {
+                payload.push(c);
+                *error = None;
+            }
+            Action::None
+        }
+        KeyCode::Enter => {
+            let (definition_id, payload_text) = match &state.mode {
+                Mode::TriggerWorkflow {
+                    definition_id,
+                    payload,
+                    ..
+                } => (definition_id.clone(), payload.trim().to_string()),
+                _ => return Action::None,
+            };
+            let payload_text = if payload_text.is_empty() {
+                "{}".to_string()
+            } else {
+                payload_text
+            };
+            match serde_json::from_str(&payload_text) {
+                Ok(payload) => {
+                    state.exit_trigger_workflow();
+                    Action::TriggerWorkflow {
+                        definition_id,
+                        payload,
+                    }
+                }
+                Err(e) => {
+                    if let Mode::TriggerWorkflow { error, .. } = &mut state.mode {
+                        *error = Some(format!("Invalid JSON: {e}"));
+                    }
+                    Action::None
+                }
+            }
+        }
+        _ => Action::None,
+    }
+}
+
 fn send_chat_to_selected_agent(state: &mut ScreenState, input: String) -> Action {
     match state.selected_agent_id() {
         Some(agent_id) => {
@@ -307,6 +527,166 @@ fn send_chat_to_selected_agent(state: &mut ScreenState, input: String) -> Action
         None => {
             state.status_message = Some("No agent selected".to_string());
             Action::None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    use super::*;
+    use crate::tui::state::{AgentItem, MillerFocus, ProjectItem};
+
+    fn project() -> ProjectItem {
+        ProjectItem {
+            id: "p-1".into(),
+            name: "Project".into(),
+            description: None,
+            created_at: None,
+            lead: None,
+            agents: vec![AgentItem {
+                id: "a-1".into(),
+                name: "lead".into(),
+                role: "PROJECT_LEAD".into(),
+                model: "test".into(),
+                sandbox: None,
+            }],
+        }
+    }
+
+    fn state() -> ScreenState {
+        ScreenState::new(vec![project()], "http://s".into(), "u".into(), None)
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::empty())
+    }
+
+    #[test]
+    fn ctrl_w_opens_workflows() {
+        let mut state = state();
+        let action = handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+        );
+        assert!(matches!(action, Action::OpenWorkflows));
+    }
+
+    #[test]
+    fn ctrl_w_is_noop_when_already_focused_on_workflows() {
+        let mut state = state();
+        state.enter_workflows();
+        state.workflows.focus = MillerFocus::Runs;
+
+        let action = handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+        );
+
+        assert!(matches!(action, Action::None));
+        assert_eq!(state.workflows.focus, MillerFocus::Runs);
+    }
+
+    #[test]
+    fn ctrl_w_still_deletes_chat_word_when_input_has_text() {
+        let mut state = state();
+        state.chat_input = "hello world".into();
+        state.input_cursor = state.chat_input.len();
+
+        let action = handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL),
+        );
+
+        assert!(matches!(action, Action::None));
+        assert_eq!(state.chat_input, "hello ");
+    }
+
+    #[test]
+    fn trigger_modal_empty_payload_submits_empty_object() {
+        let mut state = state();
+        state.enter_trigger_workflow("wf-1".into(), "wf".into());
+        if let Mode::TriggerWorkflow { payload, .. } = &mut state.mode {
+            payload.clear();
+        }
+
+        let action = handle_key(&mut state, key(KeyCode::Enter));
+
+        match action {
+            Action::TriggerWorkflow {
+                definition_id,
+                payload,
+            } => {
+                assert_eq!(definition_id, "wf-1");
+                assert_eq!(payload, serde_json::json!({}));
+            }
+            _ => panic!("expected trigger action"),
+        }
+    }
+
+    #[test]
+    fn trigger_modal_invalid_json_stays_open_with_error() {
+        let mut state = state();
+        state.enter_trigger_workflow("wf-1".into(), "wf".into());
+        if let Mode::TriggerWorkflow { payload, .. } = &mut state.mode {
+            *payload = "{".into();
+        }
+
+        let action = handle_key(&mut state, key(KeyCode::Enter));
+
+        assert!(matches!(action, Action::None));
+        assert!(matches!(
+            state.mode,
+            Mode::TriggerWorkflow { error: Some(_), .. }
+        ));
+    }
+
+    #[test]
+    fn arrow_right_moves_focus_from_definitions_to_runs() {
+        let mut state = state();
+        state.enter_workflows();
+        state.workflows.runs = vec![crate::tui::state::WorkflowRunItem {
+            id: "r-1".into(),
+            state: "SUCCEEDED".into(),
+            started_at: "now".into(),
+            completed_at: None,
+            step_results: vec![],
+        }];
+
+        let action = handle_key(&mut state, key(KeyCode::Right));
+
+        assert!(matches!(action, Action::None));
+        assert_eq!(state.workflows.focus, MillerFocus::Runs);
+    }
+
+    #[test]
+    fn arrow_left_moves_focus_from_runs_to_definitions() {
+        let mut state = state();
+        state.enter_workflows();
+        state.workflows.focus = MillerFocus::Runs;
+
+        let action = handle_key(&mut state, key(KeyCode::Left));
+
+        assert!(matches!(action, Action::None));
+        assert_eq!(state.workflows.focus, MillerFocus::Definitions);
+    }
+
+    #[test]
+    fn esc_exits_workflows_from_any_focus() {
+        for focus in [
+            MillerFocus::Definitions,
+            MillerFocus::Runs,
+            MillerFocus::StepDetail,
+        ] {
+            let mut state = state();
+            state.enter_workflows();
+            state.workflows.focus = focus;
+
+            let action = handle_key(&mut state, key(KeyCode::Esc));
+
+            assert!(matches!(action, Action::None));
+            assert_eq!(state.focus, Focus::Chat);
         }
     }
 }

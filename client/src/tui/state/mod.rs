@@ -2,6 +2,10 @@ use std::collections::HashMap;
 
 use super::chat::{AssistantChat, ChatRole, ContentBlock};
 
+mod workflow;
+
+pub use workflow::*;
+
 #[allow(dead_code)]
 pub struct ProjectItem {
     pub id: String,
@@ -12,11 +16,13 @@ pub struct ProjectItem {
     pub agents: Vec<AgentItem>,
 }
 
+#[derive(Debug, Clone)]
 pub struct SandboxInfo {
     pub name: String,
     pub mode: String,
 }
 
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct AgentItem {
     pub id: String,
@@ -39,6 +45,12 @@ pub enum Mode {
         input: String,
         list_cursor: usize,
     },
+    TriggerWorkflow {
+        definition_id: String,
+        name: String,
+        payload: String,
+        error: Option<String>,
+    },
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -54,6 +66,7 @@ pub enum Focus {
     Chat,
     Agents,
     Threads,
+    Workflows,
 }
 
 #[derive(Default)]
@@ -270,6 +283,7 @@ pub struct ScreenState {
     pub loaded_agent_id: Option<String>,
 
     pub thread_view: Option<ThreadGridState>,
+    pub workflows: WorkflowState,
 
     pub mode: Mode,
     pub input_name: String,
@@ -311,6 +325,7 @@ impl ScreenState {
             loaded_agent_id: None,
 
             thread_view: None,
+            workflows: WorkflowState::default(),
 
             mode: Mode::default(),
             input_name: String::new(),
@@ -412,6 +427,19 @@ impl ScreenState {
         self.mode = Mode::Browse;
     }
 
+    pub fn enter_trigger_workflow(&mut self, definition_id: String, name: String) {
+        self.mode = Mode::TriggerWorkflow {
+            definition_id,
+            name,
+            payload: "{}".to_string(),
+            error: None,
+        };
+    }
+
+    pub fn exit_trigger_workflow(&mut self) {
+        self.mode = Mode::Browse;
+    }
+
     /// Case-insensitive substring match in original-order; returns `(idx, name)`.
     pub fn picker_matches(&self, query: &str) -> Vec<(usize, String)> {
         let q = query.to_lowercase();
@@ -454,6 +482,192 @@ impl ScreenState {
         self.focus = Focus::Chat;
     }
 
+    pub fn replace_workflow_definitions(&mut self, definitions: Vec<WorkflowDefinitionItem>) {
+        self.workflows.definitions = definitions;
+        if self.workflows.def_cursor >= self.workflows.definitions.len() {
+            self.workflows.def_cursor = self.workflows.definitions.len().saturating_sub(1);
+        }
+        self.workflows.loading = false;
+        self.workflows.error = None;
+    }
+
+    pub fn replace_workflow_definition_detail(&mut self, detail: WorkflowDefinitionDetail) {
+        self.workflows.selected_definition = Some(detail);
+        self.workflows.loading = false;
+    }
+
+    pub fn replace_workflow_runs(&mut self, runs: Vec<WorkflowRunItem>) {
+        self.workflows.runs = runs;
+        if self.workflows.run_cursor >= self.workflows.runs.len() {
+            self.workflows.run_cursor = self.workflows.runs.len().saturating_sub(1);
+        }
+        self.workflows.loading = false;
+    }
+
+    pub fn replace_workflow_run_detail(&mut self, run: WorkflowRunDetail) {
+        let is_new_run = self
+            .workflows
+            .selected_run
+            .as_ref()
+            .is_none_or(|prev| prev.id != run.id);
+        self.workflows.selected_run = Some(run);
+        if is_new_run {
+            self.workflows.step_cursor = 0;
+            self.workflows.expanded = false;
+        }
+        self.workflows.loading = false;
+    }
+
+    pub fn set_workflow_error(&mut self, error: String) {
+        self.workflows.loading = false;
+        self.workflows.error = Some(error);
+    }
+
+    pub fn enter_workflows(&mut self) {
+        self.focus = Focus::Workflows;
+        self.thread_view = None;
+        self.workflows.focus = MillerFocus::Definitions;
+        self.workflows.error = None;
+    }
+
+    pub fn selected_workflow_definition(&self) -> Option<&WorkflowDefinitionItem> {
+        self.workflows.definitions.get(self.workflows.def_cursor)
+    }
+
+    pub fn selected_workflow_definition_id(&self) -> Option<String> {
+        self.selected_workflow_definition().map(|d| d.id.clone())
+    }
+
+    pub fn selected_workflow_name(&self) -> String {
+        self.workflows
+            .selected_definition
+            .as_ref()
+            .map(|d| d.name.clone())
+            .or_else(|| self.selected_workflow_definition().map(|d| d.name.clone()))
+            .unwrap_or_else(|| "workflow".to_string())
+    }
+
+    pub fn workflow_cursor_down(&mut self) {
+        if !self.workflows.definitions.is_empty()
+            && self.workflows.def_cursor < self.workflows.definitions.len() - 1
+        {
+            self.workflows.def_cursor += 1;
+            self.workflows.run_cursor = 0;
+            self.workflows.detail_scroll = 0;
+        }
+    }
+
+    pub fn workflow_cursor_up(&mut self) {
+        if self.workflows.def_cursor > 0 {
+            self.workflows.def_cursor = self.workflows.def_cursor.saturating_sub(1);
+            self.workflows.run_cursor = 0;
+            self.workflows.detail_scroll = 0;
+        }
+    }
+
+    pub fn workflow_runs_cursor_down(&mut self) {
+        if !self.workflows.runs.is_empty()
+            && self.workflows.run_cursor < self.workflows.runs.len() - 1
+        {
+            self.workflows.run_cursor += 1;
+            self.workflows.detail_scroll = 0;
+        }
+    }
+
+    pub fn workflow_runs_cursor_up(&mut self) {
+        if self.workflows.run_cursor > 0 {
+            self.workflows.run_cursor = self.workflows.run_cursor.saturating_sub(1);
+            self.workflows.detail_scroll = 0;
+        }
+    }
+
+    pub fn selected_workflow_run_id(&self) -> Option<String> {
+        self.workflows
+            .runs
+            .get(self.workflows.run_cursor)
+            .map(|r| r.id.clone())
+    }
+
+    pub fn workflow_step_cursor_down(&mut self) {
+        let len = self
+            .workflows
+            .selected_run
+            .as_ref()
+            .map(|r| r.steps_snapshot.len().max(r.step_results.len()))
+            .unwrap_or(0);
+        if len > 0 && self.workflows.step_cursor < len - 1 {
+            self.workflows.step_cursor += 1;
+            self.workflows.expanded = false;
+        }
+    }
+
+    pub fn workflow_step_cursor_up(&mut self) {
+        if self.workflows.step_cursor > 0 {
+            self.workflows.step_cursor = self.workflows.step_cursor.saturating_sub(1);
+            self.workflows.expanded = false;
+        }
+    }
+
+    pub fn workflow_detail_scroll_down(&mut self) {
+        self.workflows.detail_scroll = self.workflows.detail_scroll.saturating_add(1);
+    }
+
+    pub fn workflow_detail_scroll_up(&mut self) {
+        self.workflows.detail_scroll = self.workflows.detail_scroll.saturating_sub(1);
+    }
+
+    pub fn workflow_toggle_expanded(&mut self) {
+        self.workflows.expanded = !self.workflows.expanded;
+    }
+
+    pub fn workflow_focus_right(&mut self) {
+        self.workflows.focus = match self.workflows.focus {
+            MillerFocus::Definitions | MillerFocus::YamlDetail => {
+                if self.workflows.runs.is_empty() {
+                    return;
+                }
+                MillerFocus::Runs
+            }
+            MillerFocus::Runs => {
+                if self.workflows.selected_run.is_none() {
+                    return;
+                }
+                MillerFocus::StepDetail
+            }
+            MillerFocus::StepDetail => return,
+        };
+        self.workflows.detail_scroll = 0;
+        self.workflows.error = None;
+    }
+
+    pub fn workflow_focus_yaml(&mut self) {
+        self.workflows.focus = MillerFocus::YamlDetail;
+        self.workflows.detail_scroll = 0;
+    }
+
+    pub fn workflow_focus_left(&mut self) {
+        self.workflows.focus = match self.workflows.focus {
+            MillerFocus::Definitions => return,
+            MillerFocus::YamlDetail => MillerFocus::Definitions,
+            MillerFocus::Runs => MillerFocus::Definitions,
+            MillerFocus::StepDetail => MillerFocus::Runs,
+        };
+        self.workflows.detail_scroll = 0;
+        self.workflows.error = None;
+    }
+
+    pub fn workflow_poll_run_id(&self) -> Option<String> {
+        if self.focus != Focus::Workflows {
+            return None;
+        }
+        let run = self.workflows.selected_run.as_ref()?;
+        if !run.is_terminal() {
+            Some(run.id.clone())
+        } else {
+            None
+        }
+    }
+
     pub fn active_input_mut(&mut self) -> &mut String {
         if self.input_field == 0 {
             &mut self.input_name
@@ -466,21 +680,21 @@ impl ScreenState {
     pub fn toggle_focus(&mut self) {
         self.focus = match self.focus {
             Focus::Chat => Focus::Agents,
-            Focus::Agents | Focus::Threads => Focus::Chat,
+            Focus::Agents | Focus::Threads | Focus::Workflows => Focus::Chat,
         };
     }
 
     pub fn focus_left(&mut self) {
         self.focus = match self.focus {
             Focus::Agents => Focus::Chat,
-            Focus::Chat | Focus::Threads => Focus::Chat,
+            Focus::Chat | Focus::Threads | Focus::Workflows => Focus::Chat,
         };
     }
 
     pub fn focus_right(&mut self) {
         self.focus = match self.focus {
             Focus::Chat => Focus::Agents,
-            Focus::Agents | Focus::Threads => Focus::Agents,
+            Focus::Agents | Focus::Threads | Focus::Workflows => Focus::Agents,
         };
     }
 
@@ -929,5 +1143,121 @@ mod tests {
 
         assert!(!state.chat_view.assistant.streaming);
         assert!(state.chat_view.assistant.messages.is_empty());
+    }
+
+    #[test]
+    fn enter_workflows_sets_definitions_focus() {
+        let mut state = make_state(vec![proj("a", "Alpha")], None);
+
+        state.enter_workflows();
+
+        assert_eq!(state.focus, Focus::Workflows);
+        assert_eq!(state.workflows.focus, MillerFocus::Definitions);
+    }
+
+    #[test]
+    fn workflow_focus_right_left_navigation() {
+        let mut state = make_state(vec![proj("a", "Alpha")], None);
+        state.enter_workflows();
+
+        // Can't move right with empty runs
+        state.workflow_focus_right();
+        assert_eq!(state.workflows.focus, MillerFocus::Definitions);
+
+        // Add a run so we can move right
+        state.workflows.runs = vec![WorkflowRunItem {
+            id: "run-1".into(),
+            state: "SUCCEEDED".into(),
+            started_at: "now".into(),
+            completed_at: None,
+            step_results: vec![],
+        }];
+        state.replace_workflow_run_detail(WorkflowRunDetail {
+            id: "run-1".into(),
+            definition_id: "wf-1".into(),
+            project_id: "p-1".into(),
+            state: "SUCCEEDED".into(),
+            started_at: "now".into(),
+            completed_at: None,
+            trigger_context: serde_json::json!({}),
+            steps_snapshot: vec![],
+            step_results: vec![],
+            agents: vec![],
+        });
+
+        state.workflow_focus_right();
+        assert_eq!(state.workflows.focus, MillerFocus::Runs);
+
+        state.workflow_focus_right();
+        assert_eq!(state.workflows.focus, MillerFocus::StepDetail);
+
+        // Can't go further right
+        state.workflow_focus_right();
+        assert_eq!(state.workflows.focus, MillerFocus::StepDetail);
+
+        state.workflow_focus_left();
+        assert_eq!(state.workflows.focus, MillerFocus::Runs);
+
+        state.workflow_focus_left();
+        assert_eq!(state.workflows.focus, MillerFocus::Definitions);
+
+        // Can't go further left
+        state.workflow_focus_left();
+        assert_eq!(state.workflows.focus, MillerFocus::Definitions);
+    }
+
+    #[test]
+    fn workflow_polling_only_for_non_terminal_selected_run() {
+        let mut state = make_state(vec![proj("a", "Alpha")], None);
+        state.enter_workflows();
+        state.replace_workflow_run_detail(WorkflowRunDetail {
+            id: "run-1".into(),
+            definition_id: "wf-1".into(),
+            project_id: "p-1".into(),
+            state: "RUNNING".into(),
+            started_at: "now".into(),
+            completed_at: None,
+            trigger_context: serde_json::json!({}),
+            steps_snapshot: vec![],
+            step_results: vec![],
+            agents: vec![],
+        });
+        assert_eq!(state.workflow_poll_run_id().as_deref(), Some("run-1"));
+
+        state.focus = Focus::Chat;
+        assert_eq!(state.workflow_poll_run_id(), None);
+
+        state.focus = Focus::Workflows;
+        state.workflows.selected_run.as_mut().unwrap().state = "SUCCEEDED".into();
+        assert_eq!(state.workflow_poll_run_id(), None);
+    }
+
+    #[test]
+    fn workflow_def_cursor_resets_run_cursor() {
+        let mut state = make_state(vec![proj("a", "Alpha")], None);
+        state.enter_workflows();
+        state.workflows.definitions = vec![
+            WorkflowDefinitionItem {
+                id: "wf-1".into(),
+                name: "first".into(),
+                description: None,
+                trigger: WorkflowTriggerInfo::default(),
+                steps: vec![],
+                recent_runs: vec![],
+            },
+            WorkflowDefinitionItem {
+                id: "wf-2".into(),
+                name: "second".into(),
+                description: None,
+                trigger: WorkflowTriggerInfo::default(),
+                steps: vec![],
+                recent_runs: vec![],
+            },
+        ];
+        state.workflows.run_cursor = 3;
+
+        state.workflow_cursor_down();
+        assert_eq!(state.workflows.def_cursor, 1);
+        assert_eq!(state.workflows.run_cursor, 0);
     }
 }
