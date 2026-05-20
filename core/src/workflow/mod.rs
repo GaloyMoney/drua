@@ -1006,24 +1006,35 @@ impl Workflows {
                 .step_resumed(wait_step_name, extracted, source)
                 .did_execute()
             {
-                let mut op = self.run_repo.begin_op().await?;
-                self.run_repo.update_in_op(&mut op, &mut run).await?;
-                let queue_id = format!("workflow:{}", run.definition_id);
-                self.execute_run_spawner
-                    .spawn_with_queue_id_in_op(
-                        &mut op,
-                        run.id,
-                        ExecuteRunConfig { run_id: run.id },
-                        &queue_id,
-                    )
-                    .await
-                    .map_err(|e| WorkflowError::Job(e.to_string()))?;
-                op.commit().await?;
-                tracing::info!(run_id = %run.id, "resumed parked run");
-                resumed += 1;
+                match self.commit_resume(&mut run).await {
+                    Ok(()) => {
+                        tracing::info!(run_id = %run.id, "resumed parked run");
+                        resumed += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!(run_id = %run.id, err = %e, "failed to commit resume");
+                    }
+                }
             }
         }
         Ok(resumed)
+    }
+
+    async fn commit_resume(&self, run: &mut WorkflowRun) -> Result<(), WorkflowError> {
+        let mut op = self.run_repo.begin_op().await?;
+        self.run_repo.update_in_op(&mut op, run).await?;
+        let queue_id = format!("workflow:{}", run.definition_id);
+        self.execute_run_spawner
+            .spawn_with_queue_id_in_op(
+                &mut op,
+                run.id,
+                ExecuteRunConfig { run_id: run.id },
+                &queue_id,
+            )
+            .await
+            .map_err(|e| WorkflowError::Job(e.to_string()))?;
+        op.commit().await?;
+        Ok(())
     }
 
     async fn spawn_run(
