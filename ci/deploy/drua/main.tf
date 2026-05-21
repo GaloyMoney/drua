@@ -42,6 +42,11 @@ locals {
 
   tunnel_deployments = fileexists("${path.module}/tunnel-deployments-public-keys.json") ? jsondecode(file("${path.module}/tunnel-deployments-public-keys.json")) : {}
 
+  lana_bank_cachix_nginx_auth = format(
+    "proxy_set_header Authorization \"Basic %s\";\n",
+    base64encode(format(":%s", var.lana_bank_cachix_auth_token)),
+  )
+
   # The helm provider diffs `helm_release` on chart name + version + values,
   # NOT on the chart's file contents. With `chart = "./chart"` and
   # `Chart.yaml` pinned to a static version, edits to the bundled chart
@@ -152,6 +157,29 @@ resource "kubernetes_secret" "sandbox_nix_netrc" {
   depends_on = [kubernetes_namespace.sandbox]
 }
 
+resource "kubernetes_secret" "sandbox_nix_cache_proxy_auth" {
+  count = var.lana_bank_cachix_enabled ? 1 : 0
+
+  metadata {
+    name      = "sandbox-nix-cache-proxy-auth"
+    namespace = local.namespace
+  }
+
+  data = {
+    "lana-bank-github-actions.conf" = local.lana_bank_cachix_nginx_auth
+  }
+
+  depends_on = [kubernetes_namespace.galoy_agents]
+}
+
+locals {
+  nix_cache_proxy_auth_secret_checksum = (
+    var.lana_bank_cachix_enabled
+    ? sha256(jsonencode(kubernetes_secret.sandbox_nix_cache_proxy_auth[0].data))
+    : ""
+  )
+}
+
 resource "google_container_node_pool" "gvisor" {
   provider = google-beta
   project  = local.gcp_project
@@ -248,12 +276,13 @@ resource "helm_release" "galoy_agents" {
 
   values = [
     templatefile("${path.module}/prod-values.yml.tmpl", {
-      image_digest                = var.image_digest
-      sandbox_image_digest        = var.sandbox_image_digest
-      secret_checksum             = sha256(jsonencode(kubernetes_secret.galoy_agents.data))
-      tunnel_deployments          = local.tunnel_deployments
-      lana_bank_cachix_enabled    = var.lana_bank_cachix_enabled
-      lana_bank_cachix_public_key = var.lana_bank_cachix_public_key
+      image_digest                         = var.image_digest
+      sandbox_image_digest                 = var.sandbox_image_digest
+      secret_checksum                      = sha256(jsonencode(kubernetes_secret.galoy_agents.data))
+      tunnel_deployments                   = local.tunnel_deployments
+      lana_bank_cachix_enabled             = var.lana_bank_cachix_enabled
+      lana_bank_cachix_public_key          = var.lana_bank_cachix_public_key
+      nix_cache_proxy_auth_secret_checksum = local.nix_cache_proxy_auth_secret_checksum
     })
   ]
 

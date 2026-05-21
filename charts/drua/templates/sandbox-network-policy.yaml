@@ -68,13 +68,20 @@ spec:
         matchLabels:
           kubernetes.io/metadata.name: {{ .Values.sandbox.otelCollectorNamespace }}
   {{- end }}
-  # No general non-RFC1918 egress. Memo `019dfebc` M5 kill-switch:
-  # all GitHub traffic flows through `drua-internal/git/...` (covered
-  # by rule 2 above). Anything outside the allow-listed paths
-  # (kube-dns, drua-server, OTel) is denied.
-  #
-  # Workflows that still need external HTTP for non-git tasks (test
-  # fixtures hitting third-party APIs, npm install) require a
-  # per-domain proxy in the drua namespace. Audit run logs from M3/M4
-  # before flipping the upgrade for a project.
+  {{- if .Values.sandbox.nixCacheProxy.enabled }}
+  # 4. Nix binary cache proxy — sandboxes fetch substitutes from the
+  # in-cluster reverse cache, not directly from public Cachix/NixOS hosts.
+  - ports:
+    - protocol: TCP
+      port: {{ .Values.sandbox.nixCacheProxy.service.port }}
+    to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ .Release.Namespace }}
+      podSelector:
+        matchLabels:
+          app: {{ template "galoyAgents.fullname" . }}
+          release: {{ .Release.Name }}
+          app.kubernetes.io/component: sandbox-nix-cache-proxy
+  {{- end }}
 {{- end }}

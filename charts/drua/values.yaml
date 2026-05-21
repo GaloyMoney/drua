@@ -340,7 +340,10 @@ sandbox:
   installController: true
   templateName: agent-sandbox
   runtimeClassName: gvisor
-  networkPolicyManagement: Managed
+  ## Drua owns sandbox network isolation through sandbox-network-policy.yaml.
+  ## Direct Sandbox resources do not carry the SandboxTemplate ref label used by
+  ## the upstream managed policy, so keep the upstream template policy disabled.
+  networkPolicyManagement: Unmanaged
   ## MCP gateway URL for sandbox pods (e.g. "http://drua.drua.svc.cluster.local:5254/mcp")
   mcpGatewayUrl: ""
   ## drua git-proxy URL for sandbox pods. When set, the sandbox image's
@@ -348,8 +351,6 @@ sandbox:
   ## rewrite + a `drua-sa` credential helper so all `git clone` /
   ## `git push` traffic flows through drua, not directly to github.com.
   ## Pair with `sandbox.saTokenAudience = "galoy-agents-git"` (default).
-  ## Required for M5 — without this, the kill-switch NetworkPolicy
-  ## leaves the sandbox unable to reach github.com.
   gitProxyUrl: ""
   ## Audience claim for the projected SA token (must match drua's
   ## SaTokenValidator audience). Repurposed from the prior
@@ -376,14 +377,61 @@ sandbox:
   ## should normally come from `nixSubstituters` below, not here.
   env: []
   ## Namespace of the OTel collector for trace export.
-  ## When set, adds an egress rule allowing port 4318 (OTLP HTTP).
+  ## When set, adds an egress rule allowing ports 4317 and 4318.
   otelCollectorNamespace: ""
   ## Nix substituters placed before cache.nixos.org in the sandbox's
-  ## NIX_CONFIG. Point this at a private Cachix or in-cluster nix-serve
-  ## so sandbox flakes pull from the local/project cache first.
+  ## NIX_CONFIG when nixCacheProxy.enabled=false. Proxy mode uses
+  ## nixCacheProxy.upstreams instead.
   nixSubstituters:
     - url: https://galoy-agents.cachix.org
       publicKey: galoy-agents.cachix.org-1:wGb5wYMLJ3yPYoOvf2O5vt9gEZEJ7hHsqDCNPMELGPY=
+  ## Internal reverse cache for public Nix binary caches. Sandboxes talk only
+  ## to this ClusterIP service; the proxy fetches and caches approved upstreams.
+  ## Authenticated upstreams can mount Secret-backed Nginx snippets via
+  ## upstreams[].auth, keeping tokens out of the ConfigMap and sandbox pods.
+  nixCacheProxy:
+    enabled: true
+    authSecretChecksum: ""
+    replicas: 1
+    image:
+      repository: nginxinc/nginx-unprivileged
+      tag: 1.27-alpine
+      pullPolicy: IfNotPresent
+    service:
+      port: 8080
+    cache:
+      maxSize: 10g
+      inactive: 30d
+      keysZoneSize: 20m
+      validTtl: 30d
+      notFoundTtl: 10m
+    proxy:
+      readTimeout: 300s
+      sendTimeout: 300s
+    persistence:
+      enabled: false
+      size: 20Gi
+      storageClassName: ""
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 500m
+        memory: 512Mi
+    upstreams:
+      - name: galoy-agents
+        url: https://galoy-agents.cachix.org
+        publicKey: galoy-agents.cachix.org-1:wGb5wYMLJ3yPYoOvf2O5vt9gEZEJ7hHsqDCNPMELGPY=
+        ## Optional Nginx snippet Secret for authenticated caches.
+        ## The Secret key content should be a location-safe directive such as:
+        ##   proxy_set_header Authorization "Basic <base64(:token)>";
+        # auth:
+        #   secretName: sandbox-nix-cache-proxy-auth
+        #   secretKey: my-cache.conf
+      - name: nixos
+        url: https://cache.nixos.org
+        publicKey: cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
   ## Optional Nix netrc file for authenticated binary caches, such as a
   ## private Cachix cache. When enabled, `netrc-file = <mountPath>` is added
   ## to sandbox NIX_CONFIG and the Secret is mounted into the sandbox
