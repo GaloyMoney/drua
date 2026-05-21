@@ -109,6 +109,11 @@ resource "random_password" "concourse_webhook_secret" {
   special = false
 }
 
+resource "random_password" "zenduty_webhook_secret" {
+  length  = 48
+  special = false
+}
+
 resource "kubernetes_secret" "galoy_agents" {
   metadata {
     name      = "galoy-agents"
@@ -136,6 +141,7 @@ resource "kubernetes_secret" "galoy_agents" {
     "github-app-private-key"           = local.github_app_private_key
     "github-app-webhook-secret"        = random_password.github_app_webhook_secret.result
     "concourse-webhook-secret"         = random_password.concourse_webhook_secret.result
+    "zenduty-webhook-secret"           = random_password.zenduty_webhook_secret.result
     "tunnel-internal-secret"           = random_password.tunnel_internal_secret.result
   }
 
@@ -355,5 +361,10 @@ output "github_app_webhook_secret" {
 
 output "concourse_webhook_secret" {
   value     = random_password.concourse_webhook_secret.result
+  sensitive = true
+}
+
+output "zenduty_webhook_secret" {
+  value     = random_password.zenduty_webhook_secret.result
   sensitive = true
 }
