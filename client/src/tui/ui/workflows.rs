@@ -548,6 +548,7 @@ fn state_label(state: &str) -> &'static str {
         "RUNNING" => "running",
         "PENDING" => "pending",
         "SKIPPED" => "skipped",
+        "WAITING_FOR_EVENT" => "waiting",
         _ => "unknown",
     }
 }
@@ -558,6 +559,7 @@ fn state_color(state: &str) -> Color {
         "FAILED" | "failed" | "ERRORED" | "errored" => Color::Red,
         "RUNNING" | "running" => Color::Yellow,
         "SKIPPED" | "skipped" => Color::DarkGray,
+        "WAITING_FOR_EVENT" | "waiting" => Color::Cyan,
         _ => Color::White,
     }
 }
