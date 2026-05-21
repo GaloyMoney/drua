@@ -208,21 +208,46 @@ impl ResumeContext<'_> {
     /// Evaluate a CEL expression in the resume context and return
     /// the result as a JSON value.
     pub fn evaluate_extract(&self, expr: &str) -> Result<Value, TemplateError> {
-        let trimmed = expr.trim();
-        let raw = format!("{OPEN} {trimmed} {CLOSE}");
-        if trimmed.is_empty() {
-            return Err(TemplateError::EmptyPath(raw));
-        }
         let built = self.build_cel_context()?;
-        let program = Program::compile(trimmed)
-            .map_err(|e| TemplateError::Compile(raw.clone(), e.to_string()))?;
-        let value = program
-            .execute(&built.cel)
-            .map_err(|e| TemplateError::Resolve(raw.clone(), e.to_string()))?;
-        value
-            .json()
-            .map_err(|e| TemplateError::JsonConvert(raw.clone(), e.to_string()))
+        evaluate_extract_with_built(&built, expr)
     }
+
+    /// Build the CEL context once and return it for callers that
+    /// evaluate multiple expressions against the same context —
+    /// avoids cloning trigger/steps/resume_payload per expression.
+    pub fn build(&self) -> Result<BuiltResumeContext, TemplateError> {
+        Ok(BuiltResumeContext {
+            built: self.build_cel_context()?,
+        })
+    }
+}
+
+/// CEL context built from a [`ResumeContext`], reusable across
+/// multiple evaluations. Hides the internal `BuiltContext` type.
+pub struct BuiltResumeContext {
+    built: BuiltContext,
+}
+
+impl BuiltResumeContext {
+    pub fn evaluate_extract(&self, expr: &str) -> Result<Value, TemplateError> {
+        evaluate_extract_with_built(&self.built, expr)
+    }
+}
+
+fn evaluate_extract_with_built(built: &BuiltContext, expr: &str) -> Result<Value, TemplateError> {
+    let trimmed = expr.trim();
+    let raw = format!("{OPEN} {trimmed} {CLOSE}");
+    if trimmed.is_empty() {
+        return Err(TemplateError::EmptyPath(raw));
+    }
+    let program = Program::compile(trimmed)
+        .map_err(|e| TemplateError::Compile(raw.clone(), e.to_string()))?;
+    let value = program
+        .execute(&built.cel)
+        .map_err(|e| TemplateError::Resolve(raw.clone(), e.to_string()))?;
+    value
+        .json()
+        .map_err(|e| TemplateError::JsonConvert(raw.clone(), e.to_string()))
 }
 
 fn resolve_with_built(built: &BuiltContext, r: &TemplateRef) -> Option<Value> {
