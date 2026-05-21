@@ -264,6 +264,9 @@ pkgs.dockerTools.buildLayeredImage {
     pkgs.gnused
     pkgs.gnugrep
     pkgs.ripgrep
+    pkgs.cargo
+    pkgs.cargo-nextest
+    pkgs.gnumake
     nix
     gitCredentialHelper
     gitconfig
