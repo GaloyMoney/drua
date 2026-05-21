@@ -180,6 +180,12 @@ spec:
               name: {{ template "galoyAgents.fullname" . }}
               key: "zenduty-api-token"
               optional: true
+        - name: WEBHOOK_SECRET_ZENDUTY
+          valueFrom:
+            secretKeyRef:
+              name: {{ template "galoyAgents.fullname" . }}
+              key: "zenduty-webhook-secret"
+              optional: true
         {{- range .Values.galoyAgents.config.mcpUpstreams }}
         - name: {{ .name | upper }}_AUTH_HEADER
           valueFrom:
