@@ -37,10 +37,9 @@ deploy_openrouter_api_key: ((openrouter-api-key.key))
 deploy_github_app_private_key: ((galoy-agents-prod-secrets.github_app_private_key))
 tunnel_deployments_public_keys: ((tunnel-deployments.public_keys))
 
-#! drua self-management — `heal-check-code` workflow trigger.
-#! Hard-coded (not vault-backed) for v1 since this workflow is internal
-#! and only fires on this pipeline's own `check-code` failures. To rotate:
-#! edit this file and update the workflow's secret in the drua dashboard.
 drua_url: https://dashboard.agents.galoy.io
-drua_heal_check_code_workflow_id: 019e21b5-4557-7720-aa05-18984ece8aee
-drua_heal_check_code_secret: whsec_2ac753b454a989681fdb50cd1de18d54
+
+#! Provider fan-out secret for `POST /webhooks/providers/concourse`.
+#! Value comes from `terraform output -raw concourse_webhook_secret`
+#! after the deploy that creates the random_password resource.
+drua_concourse_provider_secret: ialbVZQgFXbELQQFcao8Paolv1QQemy6rzLFjRhvKZVPMGIy

@@ -42,7 +42,7 @@ jobs:
             cd repo
             nix flake check
   on_failure:
-    put: drua-on-check-code-failure
+    put: drua-concourse-provider
     params:
       alert_type: ci_failure
 
@@ -708,17 +708,15 @@ resources:
     password: #@ data.values.gar_registry_password
     repository: #@ data.values.gar_registry + "/concourse-drua-resource"
 
-#! Fires drua's `heal-check-code` workflow when the local `check-code`
-#! job fails. The workflow's agent reads the failing build's logs,
-#! attempts a narrow fix, and opens a PR. Never merges, never
-#! force-pushes. Workflow definition + skill live in the run-drua
-#! project on `dashboard.agents.galoy.io`.
-- name: drua-on-check-code-failure
+#! Provider fan-out: fires every workflow whose trigger has
+#! `provider: concourse`. Any job can `put` this on `on_failure:`
+#! (or `on_success:`, `ensure:`, etc.) to notify drua.
+- name: drua-concourse-provider
   type: drua-workflow
   source:
     url: #@ data.values.drua_url
-    workflow_id: #@ data.values.drua_heal_check_code_workflow_id
-    secret: #@ data.values.drua_heal_check_code_secret
+    provider: concourse
+    secret: #@ data.values.drua_concourse_provider_secret
 
 - name: tf-galoy-agents-prod
   type: terraform
