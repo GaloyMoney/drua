@@ -19,7 +19,7 @@ use tracing::instrument;
 use self::types::*;
 use crate::admin_client::AdminClient;
 use crate::error::AdminError;
-use crate::types::{Sandbox as SandboxView, SandboxSpecs};
+use crate::types::{parse_k8s_quantity, Sandbox as SandboxView, SandboxSpecs};
 
 const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
 const MANAGED_BY_VALUE: &str = "drua";
@@ -450,11 +450,26 @@ impl K8sAdminClient {
             .and_then(|r| r.requests.as_ref())
             .and_then(|m| m.get("storage"))
             .map(|q| q.0.clone());
-        if current.as_deref() == Some(new_size) {
+        // Compare numerically so a no-op resize against a PVC that was
+        // grown ahead of the entity record (e.g. operator scaled disk
+        // by hand) doesn't issue a shrink patch — k8s rejects shrinks
+        // outright and the patch would leave entity vs cluster state
+        // inconsistent. Fall back to string equality only when either
+        // side fails to parse, so a malformed quantity still
+        // short-circuits the identical case.
+        let skip = match (
+            current.as_deref().and_then(parse_k8s_quantity),
+            parse_k8s_quantity(new_size),
+        ) {
+            (Some(c), Some(n)) => c >= n,
+            _ => current.as_deref() == Some(new_size),
+        };
+        if skip {
             tracing::info!(
                 pvc = %pvc_name,
-                size = %new_size,
-                "PVC resize is a no-op — storage already at requested size"
+                current = ?current,
+                requested = %new_size,
+                "PVC resize is a no-op — storage already at or above requested size"
             );
             return Ok(());
         }

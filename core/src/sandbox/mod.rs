@@ -13,7 +13,7 @@ use sandbox::admin_client::{AdminClient, K8sAdminClient, LocalAdminClient, Local
 use sandbox::instance_client::{
     AttachRequest, InitializeRequest, InitializeResponse, InstanceClient,
 };
-pub use sandbox::{SandboxMode, SandboxSpecs};
+pub use sandbox::{parse_k8s_quantity, SandboxMode, SandboxSpecs};
 
 use crate::audit::Audit;
 
@@ -1187,44 +1187,11 @@ impl Sandboxes {
     }
 }
 
-/// Parses K8s-style quantity strings (e.g. `"10Gi"`, `"500m"`,
-/// `"2"`) into raw bytes. Returns `None` for unrecognised units so
-/// the caller can fall back to a string-equality check rather than
-/// silently misinterpret a typo. Suffix support is intentionally
-/// narrow — we only ever set disk size from `SandboxSpecs::disk_size`
-/// which K8s itself validates against the same vocabulary.
-fn parse_k8s_quantity(s: &str) -> Option<u128> {
-    let trimmed = s.trim();
-    let (num_str, mult): (&str, u128) = if let Some(prefix) = trimmed.strip_suffix("Ki") {
-        (prefix, 1024)
-    } else if let Some(prefix) = trimmed.strip_suffix("Mi") {
-        (prefix, 1024u128.pow(2))
-    } else if let Some(prefix) = trimmed.strip_suffix("Gi") {
-        (prefix, 1024u128.pow(3))
-    } else if let Some(prefix) = trimmed.strip_suffix("Ti") {
-        (prefix, 1024u128.pow(4))
-    } else if let Some(prefix) = trimmed.strip_suffix("Pi") {
-        (prefix, 1024u128.pow(5))
-    } else if let Some(prefix) = trimmed.strip_suffix('K') {
-        (prefix, 1_000)
-    } else if let Some(prefix) = trimmed.strip_suffix('M') {
-        (prefix, 1_000_000)
-    } else if let Some(prefix) = trimmed.strip_suffix('G') {
-        (prefix, 1_000_000_000)
-    } else if let Some(prefix) = trimmed.strip_suffix('T') {
-        (prefix, 1_000_000_000_000)
-    } else if let Some(prefix) = trimmed.strip_suffix('P') {
-        (prefix, 1_000_000_000_000_000)
-    } else {
-        (trimmed, 1)
-    };
-    let n: u128 = num_str.trim().parse().ok()?;
-    n.checked_mul(mult)
-}
-
-/// `true` when `new` is strictly larger than or equal to `current`.
-/// Falls back to string equality when either side fails to parse, so a
-/// typo doesn't silently reject a no-op resize.
+/// `true` when `new` is larger than or equal to `current`. Falls back
+/// to string equality when either side fails to parse, so a typo
+/// doesn't silently reject a no-op resize. Uses the same parser as
+/// the k8s admin client's PVC patch idempotency check so both layers
+/// agree on what counts as a shrink.
 fn disk_size_grows(current: &str, new: &str) -> bool {
     match (parse_k8s_quantity(current), parse_k8s_quantity(new)) {
         (Some(c), Some(n)) => n >= c,
