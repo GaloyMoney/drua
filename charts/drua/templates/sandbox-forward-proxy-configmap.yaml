@@ -23,7 +23,8 @@ data:
     FilterDefaultDeny Yes
     LogLevel Info
     Syslog Off
-    LogFile "/dev/stdout"
+    LogFile "/proc/self/fd/1"
+    DisableViaHeader Yes
   filter: |-
     {{- range .Values.sandbox.forwardProxy.allowedDomains }}
     {{ . }}
