@@ -359,6 +359,19 @@ enum WorkflowStepParams {
         #[serde(default)]
         condition: Option<String>,
     },
+    Wait {
+        name: String,
+        /// Webhook provider to listen on (e.g. `"concourse"`,
+        /// `"github_app"`).
+        provider: String,
+        /// CEL boolean evaluated against `resume_payload`, `trigger`,
+        /// and `steps`.
+        resume_condition: String,
+        #[serde(default)]
+        outputs: std::collections::BTreeMap<String, String>,
+        #[serde(default)]
+        condition: Option<String>,
+    },
 }
 
 impl WorkflowStepParams {
@@ -404,6 +417,19 @@ impl WorkflowStepParams {
                 tool,
                 params,
                 timeout_seconds,
+                condition,
+            }),
+            WorkflowStepParams::Wait {
+                name,
+                provider,
+                resume_condition,
+                outputs,
+                condition,
+            } => Ok(WorkflowStepDef::Wait {
+                name,
+                provider,
+                resume_condition,
+                outputs,
                 condition,
             }),
         }
