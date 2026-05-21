@@ -59,14 +59,27 @@ const AUDIT_ACTION_TRIGGER_FILTERED: &str = "workflow.trigger_filtered";
 const AUDIT_ACTION_TRIGGER_CONDITION_ERRORED: &str = "workflow.trigger_condition_errored";
 
 /// Evaluate each output's CEL expression against the resume context.
+/// Builds the CEL context once and reuses it across all expressions.
 /// Failed expressions log a warning and produce `null` for that key.
 fn extract_wait_output(
     ctx: &template::ResumeContext<'_>,
     outputs: &std::collections::BTreeMap<String, String>,
 ) -> serde_json::Value {
+    let built = match ctx.build() {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to build resume CEL context; outputs default to null");
+            return serde_json::Value::Object(
+                outputs
+                    .keys()
+                    .map(|k| (k.clone(), serde_json::Value::Null))
+                    .collect(),
+            );
+        }
+    };
     let mut out = serde_json::Map::with_capacity(outputs.len());
     for (key, expr) in outputs {
-        let value = match ctx.evaluate_extract(expr) {
+        let value = match built.evaluate_extract(expr) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(key, expr, error = %e, "output CEL evaluation failed");
