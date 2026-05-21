@@ -27,14 +27,19 @@ pub struct SandboxSpecs {
     pub disk_size: String,
 }
 
-/// Parses K8s-style quantity strings (e.g. `"10Gi"`, `"500m"`, `"2"`)
-/// into raw bytes. Returns `None` for unrecognised units so callers
-/// can fall back to a string-equality check rather than silently
-/// misinterpret a typo. Suffix support is intentionally narrow — we
-/// only ever set disk sizes from `SandboxSpecs::disk_size`, which
-/// K8s itself validates against the same vocabulary. Shared between
-/// the core service layer (resize guardrails) and the k8s admin
-/// client (PVC patch idempotency) so both compare sizes identically.
+/// Parses K8s-style quantity strings (e.g. `"10Gi"`, `"1.5Gi"`,
+/// `"500m"`, `"2"`) into raw bytes. Returns `None` for unrecognised
+/// units so callers can fall back to a string-equality check rather
+/// than silently misinterpret a typo. Suffix support is intentionally
+/// narrow — we only ever set disk sizes from `SandboxSpecs::disk_size`,
+/// which K8s itself validates against the same vocabulary. Mantissas
+/// may be integer or decimal (`1.5Gi` is a valid K8s quantity); we
+/// route through `f64` for the multiplication since byte counts well
+/// below `2^53` (the f64 integer-precision ceiling, ~8 PiB) are
+/// exact, comfortably above any realistic sandbox disk request.
+/// Shared between the core service layer (resize guardrails) and the
+/// k8s admin client (PVC patch idempotency) so both compare sizes
+/// identically.
 pub fn parse_k8s_quantity(s: &str) -> Option<u128> {
     let trimmed = s.trim();
     let (num_str, mult): (&str, u128) = if let Some(prefix) = trimmed.strip_suffix("Ki") {
@@ -60,8 +65,15 @@ pub fn parse_k8s_quantity(s: &str) -> Option<u128> {
     } else {
         (trimmed, 1)
     };
-    let n: u128 = num_str.trim().parse().ok()?;
-    n.checked_mul(mult)
+    let n: f64 = num_str.trim().parse().ok()?;
+    if !n.is_finite() || n < 0.0 {
+        return None;
+    }
+    let bytes = n * mult as f64;
+    if !bytes.is_finite() || bytes < 0.0 {
+        return None;
+    }
+    Some(bytes as u128)
 }
 
 /// Mirrors the Kubernetes view; the local backend fills `None` for
@@ -122,5 +134,32 @@ mod tests {
         let g = parse_k8s_quantity("10G").unwrap();
         let gi = parse_k8s_quantity("10Gi").unwrap();
         assert!(gi > g);
+    }
+
+    #[test]
+    fn parse_k8s_quantity_handles_fractional_mantissa() {
+        // K8s accepts `1.5Gi`; rejecting it would misclassify a valid
+        // disk grow as a shrink via the string-equality fallback.
+        let one_and_a_half_gi = parse_k8s_quantity("1.5Gi").unwrap();
+        let one_gi = parse_k8s_quantity("1Gi").unwrap();
+        let two_gi = parse_k8s_quantity("2Gi").unwrap();
+        assert!(one_and_a_half_gi > one_gi);
+        assert!(one_and_a_half_gi < two_gi);
+        assert_eq!(one_and_a_half_gi, 1024u128 * 1024 * 1024 * 3 / 2);
+    }
+
+    #[test]
+    fn parse_k8s_quantity_handles_sub_unit_fractions() {
+        // `0.5G` → 500_000_000 bytes; this used to fall through to the
+        // string-fallback path because the integer parser rejected
+        // anything with a decimal point.
+        assert_eq!(parse_k8s_quantity("0.5G"), Some(500_000_000));
+    }
+
+    #[test]
+    fn parse_k8s_quantity_rejects_negative_mantissa() {
+        // K8s quantities are non-negative; reject so disk_size_grows
+        // doesn't treat a typo as a legitimate shrink-from-negative.
+        assert_eq!(parse_k8s_quantity("-1Gi"), None);
     }
 }
