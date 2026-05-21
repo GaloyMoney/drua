@@ -31,6 +31,8 @@ enum SandboxCommand {
     Inspect,
     Restart,
     Suspend,
+    Resize,
+    Delete,
 }
 
 impl SandboxCommand {
@@ -42,6 +44,8 @@ impl SandboxCommand {
             Self::Inspect => "sandbox.inspect",
             Self::Restart => "sandbox.restart",
             Self::Suspend => "sandbox.suspend",
+            Self::Resize => "sandbox.resize",
+            Self::Delete => "sandbox.delete",
         }
     }
 }
@@ -132,7 +136,13 @@ impl TopLevelTool for ProjectSandbox {
          `restart` (requires `sandbox_id`; blocks until state=ready unless \
          `wait: false` — wakes a suspended or errored sandbox; cannot run \
          while a sandbox is still provisioning), \
-         `suspend` (requires `sandbox_id`)."
+         `suspend` (requires `sandbox_id`), \
+         `resize` (requires `sandbox_id` and at least one of `cpu`, `memory`, \
+         `disk_size`; disk can only grow, never shrink. CPU/memory changes \
+         take effect on the next `restart`; disk growth is applied to the \
+         backing PVC immediately), \
+         `delete` (requires `sandbox_id`; tears down pod + PVCs and \
+         soft-deletes the row — terminal, not the same as `suspend`)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -279,6 +289,40 @@ impl TopLevelTool for ProjectSandbox {
                 Ok(CallToolResult::success(vec![Content::text(
                     format_sandbox(&sandbox),
                 )]))
+            }
+
+            SandboxCommand::Resize => {
+                let sandbox_id = params.sandbox_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("sandbox_id is required for resize".to_string())
+                })?;
+                if params.cpu.is_none() && params.memory.is_none() && params.disk_size.is_none() {
+                    return Err(ToolSetsError::MissingArgument(
+                        "resize: at least one of cpu, memory, disk_size is required".to_string(),
+                    ));
+                }
+                let existing = self.sandboxes.find_by_id(subject, sandbox_id).await?;
+                let specs = sandbox::SandboxSpecs {
+                    cpu: params.cpu.unwrap_or(existing.specs.cpu.clone()),
+                    memory: params.memory.unwrap_or(existing.specs.memory.clone()),
+                    disk_size: params.disk_size.unwrap_or(existing.specs.disk_size.clone()),
+                };
+                let resized = self.sandboxes.resize(subject, sandbox_id, specs).await?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Sandbox resized. CPU/memory changes apply on next `restart`; \
+                     disk growth was applied to the backing PVC.\n\n{}",
+                    format_sandbox(&resized)
+                ))]))
+            }
+
+            SandboxCommand::Delete => {
+                let sandbox_id = params.sandbox_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("sandbox_id is required for delete".to_string())
+                })?;
+                self.sandboxes.delete(subject, sandbox_id).await?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Sandbox {sandbox_id} deleted. Pod + PVCs torn down; \
+                     the row is soft-deleted and no longer addressable."
+                ))]))
             }
         }
     }

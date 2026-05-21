@@ -141,6 +141,8 @@ enum SandboxCommand {
     List,
     Get,
     Inspect,
+    Resize,
+    Delete,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -682,7 +684,11 @@ static TOOLS: &[ToolDef] = &[
                        `mode`, optional `repo_url`, `branch`, `cpu`, `memory`, `disk_size`), \
                        `list` (requires `project_id`), \
                        `get` (requires `sandbox_id`), \
-                       `inspect` (requires `sandbox_id`, `tool` (grep/glob/read/ls), `tool_args`).",
+                       `inspect` (requires `sandbox_id`, `tool` (grep/glob/read/ls), `tool_args`), \
+                       `resize` (requires `sandbox_id` and at least one of `cpu`, \
+                       `memory`, `disk_size`; disk can only grow), \
+                       `delete` (requires `sandbox_id`; tears down pod + PVCs and \
+                       soft-deletes the row).",
         schema: &SANDBOX_SCHEMA,
     },
     ToolDef {
@@ -1080,6 +1086,37 @@ impl AdminToolSet {
 
                 Audit::record_sandbox_id(sandbox_id);
                 execute_inspect(subject, &self.sandboxes, sandbox_id, op, op_args).await
+            }
+
+            SandboxCommand::Resize => {
+                let sandbox_id = params.sandbox_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("sandbox_id is required for resize".to_string())
+                })?;
+                if params.cpu.is_none() && params.memory.is_none() && params.disk_size.is_none() {
+                    return Err(ToolSetsError::MissingArgument(
+                        "resize: at least one of cpu, memory, disk_size is required".to_string(),
+                    ));
+                }
+                let existing = self.sandboxes.find_by_id(subject, sandbox_id).await?;
+                let specs = SandboxSpecs {
+                    cpu: params.cpu.unwrap_or(existing.specs.cpu.clone()),
+                    memory: params.memory.unwrap_or(existing.specs.memory.clone()),
+                    disk_size: params.disk_size.unwrap_or(existing.specs.disk_size.clone()),
+                };
+                let resized = self.sandboxes.resize(subject, sandbox_id, specs).await?;
+                Ok(CallToolResult::success(vec![Content::text(
+                    format_sandbox(&resized),
+                )]))
+            }
+
+            SandboxCommand::Delete => {
+                let sandbox_id = params.sandbox_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("sandbox_id is required for delete".to_string())
+                })?;
+                self.sandboxes.delete(subject, sandbox_id).await?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Sandbox {sandbox_id} deleted."
+                ))]))
             }
         }
     }

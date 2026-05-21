@@ -1004,6 +1004,141 @@ impl Sandboxes {
         Ok(all)
     }
 
+    /// Re-allocate CPU / memory / disk for a single sandbox. Pod-level
+    /// fields (cpu, memory) only take effect on the next `restart`;
+    /// disk growth is applied immediately to the backing PVC. Disk
+    /// shrinks are rejected — k8s storage providers don't support it
+    /// and the local backend doesn't enforce sizes anyway.
+    #[instrument(name = "domain.sandbox.resize", skip(self, sub))]
+    pub async fn resize(
+        &self,
+        sub: &AuthSubject,
+        id: impl Into<SandboxId> + std::fmt::Debug,
+        specs: SandboxSpecs,
+    ) -> Result<Sandbox, SandboxError> {
+        let id = id.into();
+        let sandbox = self.repo.find_by_id(id).await?;
+        sub.can(
+            AuthVerb::Update,
+            AuthResource::Sandbox(sandbox.project_id, Some(sandbox.id)),
+        )?;
+        Audit::record_action_if_unset("sandbox.resize");
+        Audit::record_project_id(sandbox.project_id);
+        let mut op = self.repo.begin_op().await?;
+        let sandbox = self.resize_in_op(&mut op, id, specs).await?;
+        op.commit().await?;
+        Ok(sandbox)
+    }
+
+    /// PVC growth is best-effort: a failure logs a warning but still
+    /// records the new entity-level allocation, mirroring the
+    /// admin-delete branch in `suspend_in_op`. Callers should
+    /// `restart` to apply CPU/memory changes.
+    #[instrument(name = "domain.sandbox.resize_in_op", skip(self, op))]
+    pub async fn resize_in_op(
+        &self,
+        op: &mut DbOp<'_>,
+        id: impl Into<SandboxId> + std::fmt::Debug,
+        specs: SandboxSpecs,
+    ) -> Result<Sandbox, SandboxError> {
+        let id = id.into();
+        Audit::record_sandbox_id(id);
+        let mut sandbox = self.repo.find_by_id_in_op(&mut *op, id).await?;
+
+        if !disk_size_grows(&sandbox.specs.disk_size, &specs.disk_size) {
+            return Err(SandboxError::DiskShrinkNotSupported {
+                current: sandbox.specs.disk_size.clone(),
+                requested: specs.disk_size.clone(),
+            });
+        }
+
+        if !sandbox.resize(specs.clone()).did_execute() {
+            return Ok(sandbox);
+        }
+        self.repo.update_in_op(op, &mut sandbox).await?;
+
+        let resource_name = sandbox.resource_name();
+        if let Err(e) = self
+            .admin
+            .resize_pvc(&resource_name, &specs.disk_size)
+            .await
+        {
+            tracing::warn!(
+                sandbox = %resource_name,
+                error = %e,
+                "Admin client resize_pvc failed; entity specs still updated — \
+                 restart will recreate the pod with new CPU/memory"
+            );
+        }
+        Ok(sandbox)
+    }
+
+    /// Per-sandbox delete: tears down pod + PVCs via the admin client,
+    /// pushes a `Deleted` event, and soft-deletes the row. Unlike
+    /// [`Self::cascade_delete_for_project_in_op`], this path is the
+    /// auditable single-sandbox tombstone.
+    #[instrument(name = "domain.sandbox.delete", skip(self, sub))]
+    pub async fn delete(
+        &self,
+        sub: &AuthSubject,
+        id: impl Into<SandboxId> + std::fmt::Debug,
+    ) -> Result<(), SandboxError> {
+        let id = id.into();
+        let sandbox = self.repo.find_by_id(id).await?;
+        sub.can(
+            AuthVerb::Delete,
+            AuthResource::Sandbox(sandbox.project_id, Some(sandbox.id)),
+        )?;
+        Audit::record_action_if_unset("sandbox.delete");
+        Audit::record_project_id(sandbox.project_id);
+        let mut op = self.repo.begin_op().await?;
+        self.delete_in_op(&mut op, id).await?;
+        op.commit().await?;
+        Ok(())
+    }
+
+    /// Admin teardown is best-effort: a stuck pod or PVC can't strand
+    /// the row, otherwise the entity becomes un-deletable and the
+    /// project cascade later picks up a tombstone anyway.
+    #[instrument(name = "domain.sandbox.delete_in_op", skip(self, op))]
+    pub async fn delete_in_op(
+        &self,
+        op: &mut DbOp<'_>,
+        id: impl Into<SandboxId> + std::fmt::Debug,
+    ) -> Result<(), SandboxError> {
+        let id = id.into();
+        Audit::record_sandbox_id(id);
+        let mut sandbox = self.repo.find_by_id_in_op(&mut *op, id).await?;
+
+        let resource_name = sandbox.resource_name();
+        if sandbox.state != SandboxState::Suspended {
+            if let Err(e) = self.admin.delete_sandbox(&resource_name).await {
+                match e {
+                    sandbox::AdminError::NotFound(_) => {}
+                    other => tracing::warn!(
+                        sandbox = %resource_name,
+                        error = %other,
+                        "admin delete_sandbox failed during single-sandbox delete"
+                    ),
+                }
+            }
+        }
+        if let Err(e) = self.admin.delete_pvcs(&resource_name).await {
+            tracing::warn!(
+                sandbox = %resource_name,
+                error = %e,
+                "admin delete_pvcs failed during single-sandbox delete"
+            );
+        }
+
+        if sandbox.delete().did_execute() {
+            self.repo.update_in_op(&mut *op, &mut sandbox).await?;
+        }
+        let to_delete = self.repo.find_by_id_in_op(&mut *op, id).await?;
+        self.repo.delete_in_op(op, to_delete).await?;
+        Ok(())
+    }
+
     #[instrument(name = "domain.sandbox.suspend", skip(self, sub))]
     pub async fn suspend(
         &self,
@@ -1049,5 +1184,74 @@ impl Sandboxes {
             self.repo.update_in_op(op, &mut sandbox).await?;
         }
         Ok(sandbox)
+    }
+}
+
+/// Parses K8s-style quantity strings (e.g. `"10Gi"`, `"500m"`,
+/// `"2"`) into raw bytes. Returns `None` for unrecognised units so
+/// the caller can fall back to a string-equality check rather than
+/// silently misinterpret a typo. Suffix support is intentionally
+/// narrow — we only ever set disk size from `SandboxSpecs::disk_size`
+/// which K8s itself validates against the same vocabulary.
+fn parse_k8s_quantity(s: &str) -> Option<u128> {
+    let trimmed = s.trim();
+    let (num_str, mult): (&str, u128) = if let Some(prefix) = trimmed.strip_suffix("Ki") {
+        (prefix, 1024)
+    } else if let Some(prefix) = trimmed.strip_suffix("Mi") {
+        (prefix, 1024u128.pow(2))
+    } else if let Some(prefix) = trimmed.strip_suffix("Gi") {
+        (prefix, 1024u128.pow(3))
+    } else if let Some(prefix) = trimmed.strip_suffix("Ti") {
+        (prefix, 1024u128.pow(4))
+    } else if let Some(prefix) = trimmed.strip_suffix("Pi") {
+        (prefix, 1024u128.pow(5))
+    } else if let Some(prefix) = trimmed.strip_suffix('K') {
+        (prefix, 1_000)
+    } else if let Some(prefix) = trimmed.strip_suffix('M') {
+        (prefix, 1_000_000)
+    } else if let Some(prefix) = trimmed.strip_suffix('G') {
+        (prefix, 1_000_000_000)
+    } else if let Some(prefix) = trimmed.strip_suffix('T') {
+        (prefix, 1_000_000_000_000)
+    } else if let Some(prefix) = trimmed.strip_suffix('P') {
+        (prefix, 1_000_000_000_000_000)
+    } else {
+        (trimmed, 1)
+    };
+    let n: u128 = num_str.trim().parse().ok()?;
+    n.checked_mul(mult)
+}
+
+/// `true` when `new` is strictly larger than or equal to `current`.
+/// Falls back to string equality when either side fails to parse, so a
+/// typo doesn't silently reject a no-op resize.
+fn disk_size_grows(current: &str, new: &str) -> bool {
+    match (parse_k8s_quantity(current), parse_k8s_quantity(new)) {
+        (Some(c), Some(n)) => n >= c,
+        _ => current == new,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disk_size_grows_accepts_growth() {
+        assert!(disk_size_grows("10Gi", "20Gi"));
+        assert!(disk_size_grows("1Gi", "1024Mi"));
+        assert!(disk_size_grows("10Gi", "10Gi"));
+    }
+
+    #[test]
+    fn disk_size_grows_rejects_shrink() {
+        assert!(!disk_size_grows("20Gi", "10Gi"));
+        assert!(!disk_size_grows("1Gi", "500Mi"));
+    }
+
+    #[test]
+    fn disk_size_grows_unparseable_falls_back_to_string_eq() {
+        assert!(disk_size_grows("weird", "weird"));
+        assert!(!disk_size_grows("weird", "other"));
     }
 }

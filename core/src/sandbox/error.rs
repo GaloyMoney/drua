@@ -50,4 +50,11 @@ pub enum SandboxError {
     /// tool-server children out of the picture entirely.
     #[error("SandboxError - RepoNotAllowed: {url} is not permitted by the git-proxy allow-list ({reason})")]
     RepoNotAllowed { url: String, reason: String },
+    /// K8s storage providers don't support PVC shrinks; rejecting at
+    /// the service layer keeps the entity row consistent with the
+    /// backing PVC's effective size.
+    #[error(
+        "SandboxError - DiskShrinkNotSupported: cannot shrink disk from {current} to {requested}"
+    )]
+    DiskShrinkNotSupported { current: String, requested: String },
 }
