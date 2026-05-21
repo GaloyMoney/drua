@@ -22,7 +22,9 @@ use crate::primitives::{
     AgentId, NoteId, ProjectId, SandboxId, SkillId, UserId, WorkflowDefinitionId, WorkflowRunId,
 };
 use crate::project::{Project, Projects};
-use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandboxes};
+use crate::sandbox::{
+    Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, SandboxState, Sandboxes,
+};
 use crate::skill::{ScopedSkill, Skill, SkillSource, Skills};
 use crate::space_fs::SpaceFs;
 use crate::workflow::template::{self, ConditionOutcome, TemplateContext};
@@ -923,6 +925,31 @@ fn evaluate_step_routing(
     }
 }
 
+fn record_preexisting_sandbox_state(
+    name: &str,
+    state: SandboxState,
+    path: &str,
+    diagnostics: &mut WorkflowDiagnostics,
+) {
+    match state {
+        SandboxState::Ready => {}
+        SandboxState::Suspended | SandboxState::Errored => diagnostics.info(
+            "sandbox.preexisting_restartable",
+            path,
+            format!(
+                "preexisting sandbox `{name}` is currently `{state}`; workflow runtime preflight will restart dormant sandboxes before waiting for readiness"
+            ),
+        ),
+        SandboxState::Provisioning | SandboxState::Initializing => diagnostics.warning(
+            "sandbox.preexisting_not_ready",
+            path,
+            format!(
+                "preexisting sandbox `{name}` is currently `{state}`; workflow runtime preflight will wait for readiness but validate does not wait or mutate sandbox state"
+            ),
+        ),
+    }
+}
+
 #[derive(Deserialize, schemars::JsonSchema)]
 struct WorkflowParams {
     command: WorkflowCommand,
@@ -1390,16 +1417,12 @@ impl AdminToolSet {
                     {
                         Ok(sandbox) => {
                             preexisting_ids.insert(name.clone(), sandbox.id);
-                            if sandbox.state.to_string() != "ready" {
-                                diagnostics.warning(
-                                    "sandbox.preexisting_not_ready",
-                                    format!("/sandboxes/{idx}"),
-                                    format!(
-                                        "preexisting sandbox `{name}` is currently `{}`; validation does not create or restart sandboxes",
-                                        sandbox.state
-                                    ),
-                                );
-                            }
+                            record_preexisting_sandbox_state(
+                                name,
+                                sandbox.state,
+                                &format!("/sandboxes/{idx}"),
+                                &mut diagnostics,
+                            );
                         }
                         Err(e) => diagnostics.error(
                             "sandbox.preexisting_missing",
@@ -3664,6 +3687,52 @@ mod tests {
             }),
             "prior-output condition must not be reported as a concrete skip"
         );
+    }
+
+    #[test]
+    fn workflow_validate_preexisting_suspended_sandbox_is_info() {
+        let mut diagnostics = WorkflowDiagnostics::default();
+        record_preexisting_sandbox_state(
+            "devbox",
+            SandboxState::Suspended,
+            "/sandboxes/0",
+            &mut diagnostics,
+        );
+        assert!(has_diag(
+            &diagnostics,
+            "sandbox.preexisting_restartable",
+            "/sandboxes/0"
+        ));
+        assert_eq!(
+            diagnostics.items[0].severity,
+            WorkflowDiagnosticSeverity::Info
+        );
+        assert!(diagnostics.items[0]
+            .message
+            .contains("runtime preflight will restart"));
+    }
+
+    #[test]
+    fn workflow_validate_preexisting_initializing_sandbox_stays_warning() {
+        let mut diagnostics = WorkflowDiagnostics::default();
+        record_preexisting_sandbox_state(
+            "devbox",
+            SandboxState::Initializing,
+            "/sandboxes/0",
+            &mut diagnostics,
+        );
+        assert!(has_diag(
+            &diagnostics,
+            "sandbox.preexisting_not_ready",
+            "/sandboxes/0"
+        ));
+        assert_eq!(
+            diagnostics.items[0].severity,
+            WorkflowDiagnosticSeverity::Warning
+        );
+        assert!(diagnostics.items[0]
+            .message
+            .contains("validate does not wait or mutate"));
     }
 
     #[test]
