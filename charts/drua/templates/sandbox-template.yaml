@@ -66,6 +66,10 @@ spec:
           value: |-
 {{ include "galoyAgents.sandbox.nixConfig" . | indent 12 }}
         {{- end }}
+        {{- if .Values.sandbox.forwardProxy.enabled }}
+        - name: DRUA_FORWARD_PROXY_URL
+          value: {{ include "galoyAgents.sandbox.forwardProxy.url" . | quote }}
+        {{- end }}
         volumeMounts:
         # Repurposed from the previous MCP-only volume (memo `019dfebc`
         # §3.2). Audience is now the git-proxy audience; same projected

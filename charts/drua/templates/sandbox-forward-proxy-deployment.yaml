@@ -1,0 +1,66 @@
+{{- if and .Values.sandbox.enabled .Values.sandbox.forwardProxy.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "galoyAgents.sandbox.forwardProxy.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ template "galoyAgents.fullname" . }}
+    chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+    release: "{{ .Release.Name }}"
+    app.kubernetes.io/component: sandbox-forward-proxy
+spec:
+  replicas: {{ .Values.sandbox.forwardProxy.replicas }}
+  selector:
+    matchLabels:
+      app: {{ template "galoyAgents.fullname" . }}
+      release: {{ .Release.Name }}
+      app.kubernetes.io/component: sandbox-forward-proxy
+  template:
+    metadata:
+      labels:
+        app: {{ template "galoyAgents.fullname" . }}
+        chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+        release: "{{ .Release.Name }}"
+        app.kubernetes.io/component: sandbox-forward-proxy
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/sandbox-forward-proxy-configmap.yaml") . | sha256sum }}
+    spec:
+      containers:
+      - name: forward-proxy
+        image: "{{ .Values.sandbox.forwardProxy.image.repository }}:{{ .Values.sandbox.forwardProxy.image.tag }}"
+        imagePullPolicy: {{ .Values.sandbox.forwardProxy.image.pullPolicy }}
+        command: ["sh", "-c"]
+        args:
+          - apk add --no-cache tinyproxy && exec tinyproxy -d -c /etc/tinyproxy/tinyproxy.conf
+        ports:
+        - name: http
+          containerPort: {{ .Values.sandbox.forwardProxy.service.port }}
+          protocol: TCP
+        livenessProbe:
+          tcpSocket:
+            port: http
+        readinessProbe:
+          tcpSocket:
+            port: http
+        resources:
+          {{- toYaml .Values.sandbox.forwardProxy.resources | nindent 10 }}
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        volumeMounts:
+        - name: config
+          mountPath: /etc/tinyproxy/tinyproxy.conf
+          subPath: tinyproxy.conf
+          readOnly: true
+        - name: config
+          mountPath: /etc/tinyproxy/filter
+          subPath: filter
+          readOnly: true
+      volumes:
+      - name: config
+        configMap:
+          name: {{ include "galoyAgents.sandbox.forwardProxy.fullname" . }}-config
+{{- end }}
