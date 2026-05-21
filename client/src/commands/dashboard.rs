@@ -1931,11 +1931,7 @@ async fn run_event_loop(
                             }
                             handlers::Action::ToggleThreads => {
                                 if state.thread_view.is_some() {
-                                    state.thread_view = None;
-                                    state.focus = state.thread_return_focus.take().unwrap_or(Focus::Chat);
-                                    if state.focus != Focus::Workflows {
-                                        state.loaded_agent_id = None;
-                                    }
+                                    state.dismiss_threads();
                                 } else if let Some(agent_id) = state.selected_agent_id() {
                                     state.thread_return_focus = None;
                                     state.status_message = Some("Loading threads…".to_string());

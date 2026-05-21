@@ -409,6 +409,14 @@ impl ScreenState {
         self.input_field = 0;
     }
 
+    pub fn dismiss_threads(&mut self) {
+        self.thread_view = None;
+        self.focus = self.thread_return_focus.take().unwrap_or(Focus::Chat);
+        if self.focus != Focus::Workflows {
+            self.loaded_agent_id = None;
+        }
+    }
+
     pub fn enter_export_mode(&mut self) {
         self.export_path = "export.jsonl".to_string();
         self.mode = Mode::ExportThread;
