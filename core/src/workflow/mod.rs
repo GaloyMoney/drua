@@ -1030,10 +1030,16 @@ impl Workflows {
         let mut op = self.run_repo.begin_op().await?;
         self.run_repo.update_in_op(&mut op, run).await?;
         let queue_id = format!("workflow:{}", run.definition_id);
+        // Re-spawn under a fresh JobId: the run's original ExecuteRun job (id =
+        // run.id) still occupies the `jobs` row, so reusing it would hit the
+        // primary-key constraint and roll the whole resume back. Parenting on
+        // run.id keeps the lineage queryable via list_by_parent_job_id.
         self.execute_run_spawner
+            .clone()
+            .with_parent(run.id.into())
             .spawn_with_queue_id_in_op(
                 &mut op,
-                run.id,
+                ::job::JobId::new(),
                 ExecuteRunConfig { run_id: run.id },
                 &queue_id,
             )
