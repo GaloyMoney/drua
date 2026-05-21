@@ -58,28 +58,20 @@ const AUDIT_ACTION_TRIGGER_FILTERED: &str = "workflow.trigger_filtered";
 /// runtime (compile, runtime, non-boolean result).
 const AUDIT_ACTION_TRIGGER_CONDITION_ERRORED: &str = "workflow.trigger_condition_errored";
 
-/// Walk the `output_schema` properties and evaluate each `extract`
-/// CEL expression against the event. Assembles the output JSON
-/// object with extracted values.
+/// Evaluate each output's CEL expression against the resume context.
+/// Failed expressions log a warning and produce `null` for that key.
 fn extract_wait_output(
     ctx: &template::ResumeContext<'_>,
-    output_schema: &serde_json::Value,
+    outputs: &std::collections::BTreeMap<String, String>,
 ) -> serde_json::Value {
-    let properties = output_schema.get("properties").and_then(|v| v.as_object());
-    let Some(properties) = properties else {
-        return serde_json::Value::Object(serde_json::Map::new());
-    };
-    let mut out = serde_json::Map::with_capacity(properties.len());
-    for (key, prop) in properties {
-        let value = match prop.get("extract").and_then(|e| e.as_str()) {
-            Some(expr) => match ctx.evaluate_extract(expr) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!(key, expr, error = %e, "extract CEL evaluation failed");
-                    serde_json::Value::Null
-                }
-            },
-            None => serde_json::Value::Null,
+    let mut out = serde_json::Map::with_capacity(outputs.len());
+    for (key, expr) in outputs {
+        let value = match ctx.evaluate_extract(expr) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(key, expr, error = %e, "output CEL evaluation failed");
+                serde_json::Value::Null
+            }
         };
         out.insert(key.clone(), value);
     }
@@ -484,6 +476,7 @@ impl Workflows {
                     name,
                     provider,
                     resume_condition,
+                    outputs,
                     ..
                 } => {
                     if provider.is_empty() {
@@ -498,6 +491,14 @@ impl Workflows {
                             ))
                         })?;
                     reject_forward_step_refs(name, &r, &seen_step_names)?;
+                    for (key, expr) in outputs {
+                        let r = template::parse_resume_condition(expr.trim()).map_err(|e| {
+                            WorkflowError::InvalidTemplateRef(format!(
+                                "wait step '{name}': outputs.{key}: {e}"
+                            ))
+                        })?;
+                        reject_forward_step_refs(name, &r, &seen_step_names)?;
+                    }
                 }
                 WorkflowStepDef::ToolStep {
                     name, tool, params, ..
@@ -948,17 +949,13 @@ impl Workflows {
                     .iter()
                     .find(|s| s.name() == wait_step_name);
 
-                let (step_provider, resume_condition, output_schema) = match wait_def {
+                let (step_provider, resume_condition, outputs) = match wait_def {
                     Some(WorkflowStepDef::Wait {
                         provider: p,
                         resume_condition,
-                        output_schema,
+                        outputs,
                         ..
-                    }) => (
-                        p.as_str(),
-                        resume_condition.as_str(),
-                        output_schema as &serde_json::Value,
-                    ),
+                    }) => (p.as_str(), resume_condition.as_str(), outputs),
                     _ => continue,
                 };
 
@@ -993,7 +990,7 @@ impl Workflows {
                     }
                 }
 
-                let extracted = extract_wait_output(&ctx, output_schema);
+                let extracted = extract_wait_output(&ctx, outputs);
 
                 let source = format!("provider:{provider}");
                 if run

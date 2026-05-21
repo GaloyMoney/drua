@@ -830,6 +830,10 @@ type WorkflowStep {
 	condition: String
 	name: String!
 	outputSchema: Json
+	"""
+	Wait-step `outputs` map serialized as `{ name: cel_expr }`.
+	"""
+	outputs: Json
 	sandbox: String
 	sandboxMode: SandboxAttachmentMode
 	skill: String

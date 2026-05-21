@@ -232,11 +232,12 @@ pub enum WorkflowStepDef {
         /// (original trigger context of this run), `steps` (prior
         /// step outputs).
         resume_condition: String,
-        /// JSON Schema describing this step's output. Each property
-        /// MAY include an `extract` field (CEL expression against
-        /// `resume_payload`) that populates the value from the inbound
-        /// event. Properties without `extract` get `null`.
-        output_schema: serde_json::Value,
+        /// Map of `output_name` → CEL expression. Each expression is
+        /// evaluated against the resume context on event match and
+        /// the resulting value becomes `steps.<wait>.outputs.<name>`
+        /// for downstream steps. Empty map → step produces `{}`.
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        outputs: std::collections::BTreeMap<String, String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         condition: Option<String>,
     },

@@ -259,7 +259,8 @@ enum WorkflowStepYaml {
         name: String,
         provider: String,
         resume_condition: String,
-        output_schema: serde_json::Value,
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        outputs: std::collections::BTreeMap<String, String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         condition: Option<String>,
     },
@@ -304,13 +305,13 @@ impl WorkflowStepYaml {
                 name,
                 provider,
                 resume_condition,
-                output_schema,
+                outputs,
                 condition,
             } => WorkflowStepYaml::Wait {
                 name: name.clone(),
                 provider: provider.clone(),
                 resume_condition: resume_condition.clone(),
-                output_schema: output_schema.clone(),
+                outputs: outputs.clone(),
                 condition: condition.clone(),
             },
         }
@@ -354,13 +355,13 @@ impl WorkflowStepYaml {
                 name,
                 provider,
                 resume_condition,
-                output_schema,
+                outputs,
                 condition,
             } => WorkflowStepDef::Wait {
                 name,
                 provider,
                 resume_condition,
-                output_schema,
+                outputs,
                 condition,
             },
         }
