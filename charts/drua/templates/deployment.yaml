@@ -18,6 +18,11 @@ spec:
       app: {{ template "galoyAgents.fullname" . }}
       release: {{ .Release.Name }}
   replicas: {{ .Values.galoyAgents.replicas }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
   template:
     metadata:
       labels:
