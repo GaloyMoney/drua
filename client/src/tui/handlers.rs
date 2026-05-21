@@ -31,6 +31,9 @@ pub enum Action {
         agent_id: String,
         agent_name: String,
     },
+    ToggleThreadsForAgent {
+        agent_id: String,
+    },
 }
 
 pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
@@ -68,6 +71,15 @@ pub fn handle_key(state: &mut ScreenState, key: KeyEvent) -> Action {
                 KeyCode::Char('l') => {
                     state.focus_right();
                     return Action::None;
+                }
+                KeyCode::Char('t')
+                    if state.focus == Focus::Workflows
+                        && state.workflows.conversation.is_some() =>
+                {
+                    let conv = state.workflows.conversation.as_ref().unwrap();
+                    return Action::ToggleThreadsForAgent {
+                        agent_id: conv.agent_id.clone(),
+                    };
                 }
                 KeyCode::Char('t') => return Action::ToggleThreads,
                 KeyCode::Char('w')
@@ -231,6 +243,20 @@ fn handle_workflow_step_detail_key(state: &mut ScreenState, key: KeyEvent) -> Ac
 }
 
 fn handle_workflow_conversation_key(state: &mut ScreenState, key: KeyEvent) -> Action {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    if ctrl {
+        match key.code {
+            KeyCode::Char('d') => {
+                state.conversation_fast_scroll_down();
+                return Action::None;
+            }
+            KeyCode::Char('u') => {
+                state.conversation_fast_scroll_up();
+                return Action::None;
+            }
+            _ => {}
+        }
+    }
     match key.code {
         KeyCode::Char('j') | KeyCode::Down => {
             state.conversation_scroll_down();
@@ -388,7 +414,6 @@ fn handle_threads_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             state.grid_cycle_section();
             Action::None
         }
-        // Shift+Tab — jump to next unique/summary cell within current section
         KeyCode::BackTab => {
             state.grid_tab_next();
             Action::None
@@ -398,7 +423,7 @@ fn handle_threads_key(state: &mut ScreenState, key: KeyEvent) -> Action {
             Action::None
         }
         KeyCode::Esc => {
-            state.focus = Focus::Chat;
+            state.dismiss_threads();
             Action::None
         }
         _ => Action::None,
@@ -728,5 +753,82 @@ mod tests {
             assert!(matches!(action, Action::None));
             assert_eq!(state.focus, Focus::Chat);
         }
+    }
+
+    fn state_with_conversation() -> ScreenState {
+        let mut state = state();
+        state.enter_workflows();
+        state.workflows.focus = MillerFocus::StepDetail;
+        state.show_step_conversation("agent-1".into(), "test-agent".into(), vec![]);
+        state.update_conversation_viewport_height(40);
+        state
+    }
+
+    #[test]
+    fn ctrl_d_fast_scrolls_conversation_down() {
+        let mut state = state_with_conversation();
+        let action = handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+        );
+        assert!(matches!(action, Action::None));
+        assert_eq!(state.workflows.conversation.as_ref().unwrap().scroll, 20);
+    }
+
+    #[test]
+    fn ctrl_u_fast_scrolls_conversation_up() {
+        let mut state = state_with_conversation();
+        if let Some(conv) = &mut state.workflows.conversation {
+            conv.scroll = 30;
+        }
+        let action = handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
+        );
+        assert!(matches!(action, Action::None));
+        assert_eq!(state.workflows.conversation.as_ref().unwrap().scroll, 10);
+    }
+
+    #[test]
+    fn ctrl_t_in_conversation_returns_toggle_threads_for_agent() {
+        let mut state = state_with_conversation();
+        let action = handle_key(
+            &mut state,
+            KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL),
+        );
+        match action {
+            Action::ToggleThreadsForAgent { agent_id } => {
+                assert_eq!(agent_id, "agent-1");
+            }
+            _ => panic!("expected ToggleThreadsForAgent"),
+        }
+    }
+
+    #[test]
+    fn esc_on_threads_returns_to_workflow_when_return_focus_set() {
+        let mut state = state();
+        state.focus = Focus::Threads;
+        state.thread_return_focus = Some(Focus::Workflows);
+        state.thread_view = Some(crate::tui::state::ThreadGridState {
+            threads: vec![],
+            positions: vec![],
+            grid: vec![],
+            details: std::collections::HashMap::new(),
+            cursor_col: 0,
+            cursor_row: 0,
+            scroll_col: 0,
+            visible_cols: 0,
+            system_positions: vec![],
+            system_grid: vec![],
+            tool_def_counts: vec![],
+            cursor_section: crate::tui::state::GridSection::Messages,
+            system_details: std::collections::HashMap::new(),
+        });
+
+        let action = handle_key(&mut state, key(KeyCode::Esc));
+
+        assert!(matches!(action, Action::None));
+        assert_eq!(state.focus, Focus::Workflows);
+        assert!(state.thread_view.is_none());
     }
 }

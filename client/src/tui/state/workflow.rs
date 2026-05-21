@@ -34,6 +34,7 @@ pub struct StepConversation {
     pub agent_name: String,
     pub messages: Vec<ChatMessage>,
     pub scroll: u16,
+    pub viewport_height: u16,
 }
 
 #[derive(Debug, Clone)]

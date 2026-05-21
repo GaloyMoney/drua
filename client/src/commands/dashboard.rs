@@ -1432,22 +1432,26 @@ fn spawn_threads_fetch(
     base_url: String,
     token: String,
     agent_id: String,
+    tag_with_agent: bool,
     tx: mpsc::UnboundedSender<TaggedEvent>,
 ) {
     tokio::spawn(async move {
         let client = GraphqlClient::new(&base_url, &token);
+        let wrap = |event| {
+            if tag_with_agent {
+                TaggedEvent::for_agent(&agent_id, event)
+            } else {
+                TaggedEvent::untagged(event)
+            }
+        };
         match fetch_threads(&client, &agent_id).await {
             Ok(grid) => {
-                let _ = tx.send(TaggedEvent::for_agent(
-                    &agent_id,
-                    ChatStreamEvent::ThreadsLoaded(Box::new(grid)),
-                ));
+                let _ = tx.send(wrap(ChatStreamEvent::ThreadsLoaded(Box::new(grid))));
             }
             Err(e) => {
-                let _ = tx.send(TaggedEvent::for_agent(
-                    &agent_id,
-                    ChatStreamEvent::Error(format!("Failed to load threads: {e}")),
-                ));
+                let _ = tx.send(wrap(ChatStreamEvent::Error(format!(
+                    "Failed to load threads: {e}"
+                ))));
             }
         }
     });
@@ -1927,18 +1931,30 @@ async fn run_event_loop(
                             }
                             handlers::Action::ToggleThreads => {
                                 if state.thread_view.is_some() {
-                                    state.thread_view = None;
-                                    state.focus = Focus::Chat;
-                                    state.loaded_agent_id = None; // triggers reactive reload below
+                                    state.dismiss_threads();
                                 } else if let Some(agent_id) = state.selected_agent_id() {
+                                    state.thread_return_focus = None;
                                     state.status_message = Some("Loading threads…".to_string());
                                     spawn_threads_fetch(
                                         config.server_url.clone(),
                                         config.auth_token.clone(),
                                         agent_id,
+                                        true,
                                         stream_tx.clone(),
                                     );
                                 }
+                            }
+                            handlers::Action::ToggleThreadsForAgent { agent_id } => {
+                                state.thread_return_focus = Some(Focus::Workflows);
+                                state.status_message =
+                                    Some("Loading threads…".to_string());
+                                spawn_threads_fetch(
+                                    config.server_url.clone(),
+                                    config.auth_token.clone(),
+                                    agent_id,
+                                    false,
+                                    stream_tx.clone(),
+                                );
                             }
                             handlers::Action::OpenWorkflows => {
                                 state.enter_workflows();

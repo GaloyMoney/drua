@@ -283,6 +283,8 @@ pub struct ScreenState {
     pub loaded_agent_id: Option<String>,
 
     pub thread_view: Option<ThreadGridState>,
+    /// When set, closing the thread view returns here instead of `Focus::Chat`.
+    pub thread_return_focus: Option<Focus>,
     pub workflows: WorkflowState,
 
     pub mode: Mode,
@@ -325,6 +327,7 @@ impl ScreenState {
             loaded_agent_id: None,
 
             thread_view: None,
+            thread_return_focus: None,
             workflows: WorkflowState::default(),
 
             mode: Mode::default(),
@@ -404,6 +407,14 @@ impl ScreenState {
         self.input_name.clear();
         self.input_description.clear();
         self.input_field = 0;
+    }
+
+    pub fn dismiss_threads(&mut self) {
+        self.thread_view = None;
+        self.focus = self.thread_return_focus.take().unwrap_or(Focus::Chat);
+        if self.focus != Focus::Workflows {
+            self.loaded_agent_id = None;
+        }
     }
 
     pub fn enter_export_mode(&mut self) {
@@ -641,6 +652,7 @@ impl ScreenState {
             agent_name,
             messages,
             scroll: 0,
+            viewport_height: 0,
         });
     }
 
@@ -657,6 +669,26 @@ impl ScreenState {
     pub fn conversation_scroll_up(&mut self) {
         if let Some(conv) = &mut self.workflows.conversation {
             conv.scroll = conv.scroll.saturating_sub(1);
+        }
+    }
+
+    pub fn conversation_fast_scroll_down(&mut self) {
+        if let Some(conv) = &mut self.workflows.conversation {
+            let jump = (conv.viewport_height / 2).max(1);
+            conv.scroll = conv.scroll.saturating_add(jump);
+        }
+    }
+
+    pub fn conversation_fast_scroll_up(&mut self) {
+        if let Some(conv) = &mut self.workflows.conversation {
+            let jump = (conv.viewport_height / 2).max(1);
+            conv.scroll = conv.scroll.saturating_sub(jump);
+        }
+    }
+
+    pub fn update_conversation_viewport_height(&mut self, h: u16) {
+        if let Some(conv) = &mut self.workflows.conversation {
+            conv.viewport_height = h;
         }
     }
 
