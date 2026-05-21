@@ -222,6 +222,8 @@ sandbox:
       - name: nixos
         url: https://cache.nixos.org
         publicKey: cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+  forwardProxy:
+    enabled: true
   image:
     repository: us.gcr.io/galoyorg/sandbox
     digest: "${sandbox_image_digest}"

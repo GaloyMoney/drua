@@ -215,9 +215,20 @@ let
 EOF
     fi
 
+    # Forward proxy for nix-daemon only — flake input fetches (GitHub
+    # tarballs) go through the proxy while the agent shell stays isolated.
+    proxy_env=()
+    if [ -n "''${DRUA_FORWARD_PROXY_URL:-}" ]; then
+        proxy_env=(
+            "http_proxy=''$DRUA_FORWARD_PROXY_URL"
+            "https_proxy=''$DRUA_FORWARD_PROXY_URL"
+            "no_proxy=.svc.cluster.local,.cluster.local,localhost,127.0.0.1"
+        )
+    fi
+
     # Clients use NIX_REMOTE=daemon, but the daemon itself must open the local
     # store or it recursively connects back to its own socket.
-    env -u NIX_REMOTE ${nix}/bin/nix-daemon &
+    env -u NIX_REMOTE "''${proxy_env[@]}" ${nix}/bin/nix-daemon &
 
     for i in $(seq 1 100); do
       [ -S /nix/var/nix/daemon-socket/socket ] && break

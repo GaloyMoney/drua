@@ -91,6 +91,17 @@ http://{{ include "galoyAgents.sandbox.nixCacheProxy.fullname" . }}.{{ .Release.
 {{- end -}}
 
 {{/*
+Sandbox forward HTTPS proxy names and service URL.
+*/}}
+{{- define "galoyAgents.sandbox.forwardProxy.fullname" -}}
+{{- printf "%s-sandbox-forward-proxy" (include "galoyAgents.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{- define "galoyAgents.sandbox.forwardProxy.url" -}}
+http://{{ include "galoyAgents.sandbox.forwardProxy.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.sandbox.forwardProxy.service.port }}
+{{- end -}}
+
+{{/*
 Sandbox NIX_CONFIG contents for configured remote substituters.
 */}}
 {{- define "galoyAgents.sandbox.nixSubstituterUrls" -}}
