@@ -16,7 +16,7 @@ use serde::Deserialize;
 use crate::audit::Audit;
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::primitives::SandboxId;
-use crate::sandbox::{Sandbox, Sandboxes};
+use crate::sandbox::{ResizeRequest, Sandbox, Sandboxes};
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
@@ -295,18 +295,20 @@ impl TopLevelTool for ProjectSandbox {
                 let sandbox_id = params.sandbox_id.ok_or_else(|| {
                     ToolSetsError::MissingArgument("sandbox_id is required for resize".to_string())
                 })?;
-                if params.cpu.is_none() && params.memory.is_none() && params.disk_size.is_none() {
+                // Forward only what the caller actually set; the
+                // service merges the rest from an in-transaction load
+                // so we don't race a concurrent resize.
+                let request = ResizeRequest {
+                    cpu: params.cpu,
+                    memory: params.memory,
+                    disk_size: params.disk_size,
+                };
+                if request.is_empty() {
                     return Err(ToolSetsError::MissingArgument(
                         "resize: at least one of cpu, memory, disk_size is required".to_string(),
                     ));
                 }
-                let existing = self.sandboxes.find_by_id(subject, sandbox_id).await?;
-                let specs = sandbox::SandboxSpecs {
-                    cpu: params.cpu.unwrap_or(existing.specs.cpu.clone()),
-                    memory: params.memory.unwrap_or(existing.specs.memory.clone()),
-                    disk_size: params.disk_size.unwrap_or(existing.specs.disk_size.clone()),
-                };
-                let resized = self.sandboxes.resize(subject, sandbox_id, specs).await?;
+                let resized = self.sandboxes.resize(subject, sandbox_id, request).await?;
                 Ok(CallToolResult::success(vec![Content::text(format!(
                     "Sandbox resized. CPU/memory changes apply on next `restart`; \
                      disk growth was applied to the backing PVC.\n\n{}",

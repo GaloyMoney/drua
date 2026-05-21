@@ -22,7 +22,9 @@ use crate::primitives::{
     AgentId, NoteId, ProjectId, SandboxId, SkillId, UserId, WorkflowDefinitionId, WorkflowRunId,
 };
 use crate::project::{Project, Projects};
-use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandboxes};
+use crate::sandbox::{
+    ResizeRequest, Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandboxes,
+};
 use crate::skill::{ScopedSkill, Skill, SkillSource, Skills};
 use crate::space_fs::SpaceFs;
 use crate::workflow::{
@@ -1092,18 +1094,17 @@ impl AdminToolSet {
                 let sandbox_id = params.sandbox_id.ok_or_else(|| {
                     ToolSetsError::MissingArgument("sandbox_id is required for resize".to_string())
                 })?;
-                if params.cpu.is_none() && params.memory.is_none() && params.disk_size.is_none() {
+                let request = ResizeRequest {
+                    cpu: params.cpu,
+                    memory: params.memory,
+                    disk_size: params.disk_size,
+                };
+                if request.is_empty() {
                     return Err(ToolSetsError::MissingArgument(
                         "resize: at least one of cpu, memory, disk_size is required".to_string(),
                     ));
                 }
-                let existing = self.sandboxes.find_by_id(subject, sandbox_id).await?;
-                let specs = SandboxSpecs {
-                    cpu: params.cpu.unwrap_or(existing.specs.cpu.clone()),
-                    memory: params.memory.unwrap_or(existing.specs.memory.clone()),
-                    disk_size: params.disk_size.unwrap_or(existing.specs.disk_size.clone()),
-                };
-                let resized = self.sandboxes.resize(subject, sandbox_id, specs).await?;
+                let resized = self.sandboxes.resize(subject, sandbox_id, request).await?;
                 Ok(CallToolResult::success(vec![Content::text(
                     format_sandbox(&resized),
                 )]))

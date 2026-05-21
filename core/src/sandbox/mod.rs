@@ -1008,13 +1008,16 @@ impl Sandboxes {
     /// fields (cpu, memory) only take effect on the next `restart`;
     /// disk growth is applied immediately to the backing PVC. Disk
     /// shrinks are rejected — k8s storage providers don't support it
-    /// and the local backend doesn't enforce sizes anyway.
+    /// and the local backend doesn't enforce sizes anyway. Callers
+    /// pass only the fields they want changed; unset fields are
+    /// preserved as-of the in-transaction load so a concurrent resize
+    /// can't make a CPU-only request look like a disk shrink.
     #[instrument(name = "domain.sandbox.resize", skip(self, sub))]
     pub async fn resize(
         &self,
         sub: &AuthSubject,
         id: impl Into<SandboxId> + std::fmt::Debug,
-        specs: SandboxSpecs,
+        request: ResizeRequest,
     ) -> Result<Sandbox, SandboxError> {
         let id = id.into();
         let sandbox = self.repo.find_by_id(id).await?;
@@ -1025,25 +1028,30 @@ impl Sandboxes {
         Audit::record_action_if_unset("sandbox.resize");
         Audit::record_project_id(sandbox.project_id);
         let mut op = self.repo.begin_op().await?;
-        let sandbox = self.resize_in_op(&mut op, id, specs).await?;
+        let sandbox = self.resize_in_op(&mut op, id, request).await?;
         op.commit().await?;
         Ok(sandbox)
     }
 
-    /// PVC growth is best-effort: a failure logs a warning but still
-    /// records the new entity-level allocation, mirroring the
-    /// admin-delete branch in `suspend_in_op`. Callers should
-    /// `restart` to apply CPU/memory changes.
+    /// Reads the sandbox in-transaction, merges `request` with the
+    /// current specs (so unset fields are filled from the in-tx row,
+    /// never a pre-tx read that a concurrent resize could have
+    /// invalidated), then validates / applies. PVC growth is
+    /// best-effort: a failure logs a warning but still records the
+    /// new entity-level allocation, mirroring the admin-delete branch
+    /// in `suspend_in_op`. Callers should `restart` to apply
+    /// CPU/memory changes.
     #[instrument(name = "domain.sandbox.resize_in_op", skip(self, op))]
     pub async fn resize_in_op(
         &self,
         op: &mut DbOp<'_>,
         id: impl Into<SandboxId> + std::fmt::Debug,
-        specs: SandboxSpecs,
+        request: ResizeRequest,
     ) -> Result<Sandbox, SandboxError> {
         let id = id.into();
         Audit::record_sandbox_id(id);
         let mut sandbox = self.repo.find_by_id_in_op(&mut *op, id).await?;
+        let specs = request.merge_with(&sandbox.specs);
 
         if !disk_size_grows(&sandbox.specs.disk_size, &specs.disk_size) {
             return Err(SandboxError::DiskShrinkNotSupported {
@@ -1199,6 +1207,33 @@ fn disk_size_grows(current: &str, new: &str) -> bool {
     }
 }
 
+/// Partial spec for [`Sandboxes::resize`]. Each field is `Some` only
+/// when the caller wants it changed; unset fields are filled from
+/// the in-transaction sandbox row inside `resize_in_op`, so a
+/// concurrent resize between the tool handler's pre-read and the
+/// service's in-tx read can't make a CPU-only request look like a
+/// disk shrink (Cursor bugbot review, PR #399).
+#[derive(Debug, Clone, Default)]
+pub struct ResizeRequest {
+    pub cpu: Option<String>,
+    pub memory: Option<String>,
+    pub disk_size: Option<String>,
+}
+
+impl ResizeRequest {
+    pub fn is_empty(&self) -> bool {
+        self.cpu.is_none() && self.memory.is_none() && self.disk_size.is_none()
+    }
+
+    fn merge_with(self, current: &SandboxSpecs) -> SandboxSpecs {
+        SandboxSpecs {
+            cpu: self.cpu.unwrap_or_else(|| current.cpu.clone()),
+            memory: self.memory.unwrap_or_else(|| current.memory.clone()),
+            disk_size: self.disk_size.unwrap_or_else(|| current.disk_size.clone()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1220,5 +1255,36 @@ mod tests {
     fn disk_size_grows_unparseable_falls_back_to_string_eq() {
         assert!(disk_size_grows("weird", "weird"));
         assert!(!disk_size_grows("weird", "other"));
+    }
+
+    #[test]
+    fn resize_request_merge_preserves_unset_fields() {
+        let current = SandboxSpecs {
+            cpu: "1".into(),
+            memory: "2Gi".into(),
+            disk_size: "10Gi".into(),
+        };
+        // CPU-only request — disk_size must come from `current`, not
+        // from a (potentially stale) caller-side default. This is the
+        // race the bugbot review (PR #399) flagged.
+        let req = ResizeRequest {
+            cpu: Some("2".into()),
+            memory: None,
+            disk_size: None,
+        };
+        let merged = req.merge_with(&current);
+        assert_eq!(merged.cpu, "2");
+        assert_eq!(merged.memory, "2Gi");
+        assert_eq!(merged.disk_size, "10Gi");
+    }
+
+    #[test]
+    fn resize_request_is_empty_only_when_all_none() {
+        assert!(ResizeRequest::default().is_empty());
+        let just_cpu = ResizeRequest {
+            cpu: Some("2".into()),
+            ..Default::default()
+        };
+        assert!(!just_cpu.is_empty());
     }
 }
