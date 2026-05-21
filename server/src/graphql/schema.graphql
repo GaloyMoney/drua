@@ -834,6 +834,15 @@ type WorkflowStep {
 	Wait-step `outputs` map serialized as `{ name: cel_expr }`.
 	"""
 	outputs: Json
+	"""
+	Wait-step only: webhook provider this step parks on.
+	"""
+	provider: String
+	"""
+	Wait-step only: CEL boolean evaluated against the inbound
+	webhook payload (`resume_payload.*`) plus `trigger` and `steps`.
+	"""
+	resumeCondition: String
 	sandbox: String
 	sandboxMode: SandboxAttachmentMode
 	skill: String

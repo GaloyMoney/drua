@@ -79,6 +79,8 @@ pub struct WorkflowStepItem {
     pub sandbox: Option<String>,
     pub sandbox_mode: Option<String>,
     pub condition: Option<String>,
+    pub provider: Option<String>,
+    pub resume_condition: Option<String>,
 }
 
 #[derive(Debug, Clone)]
