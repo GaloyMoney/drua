@@ -25,8 +25,9 @@ use crate::project::{Project, Projects};
 use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandboxes};
 use crate::skill::{ScopedSkill, Skill, SkillSource, Skills};
 use crate::space_fs::SpaceFs;
+use crate::workflow::template::{self, ConditionOutcome, TemplateContext};
 use crate::workflow::{
-    WorkflowDefinition, WorkflowRun, WorkflowRunState, WorkflowSandboxDecl, WorkflowStepDef,
+    self, WorkflowDefinition, WorkflowRun, WorkflowRunState, WorkflowSandboxDecl, WorkflowStepDef,
     WorkflowTrigger, Workflows,
 };
 
@@ -307,6 +308,8 @@ enum WorkflowCommand {
     Create,
     List,
     Get,
+    /// Dry-preflight an existing workflow definition and return diagnostics.
+    Validate,
     Update,
     Delete,
     /// Spawn a run with the given trigger payload. Returns the run id.
@@ -512,6 +515,414 @@ fn specs_from_parts(
     }
 }
 
+fn workflow_step_name_is_cel_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn lint_strict_schema_value(
+    value: &serde_json::Value,
+    path: &str,
+    diagnostics: &mut WorkflowDiagnostics,
+) {
+    match value {
+        serde_json::Value::Bool(_) => diagnostics.error(
+            "output_schema.boolean_schema",
+            path,
+            "boolean JSON Schemas are not compatible with strict provider tool schemas",
+        ),
+        serde_json::Value::Array(items) => {
+            for (idx, item) in items.iter().enumerate() {
+                lint_strict_schema_value(item, &format!("{path}/{idx}"), diagnostics);
+            }
+        }
+        serde_json::Value::Object(obj) => {
+            if obj.get("type").and_then(|v| v.as_str()) == Some("array") {
+                match obj.get("items") {
+                    Some(serde_json::Value::Object(items)) if items.is_empty() => {
+                        diagnostics.error(
+                            "output_schema.array_items_untyped",
+                            format!("{path}/items"),
+                            "array schemas must declare a concrete item schema; `items: {}` is rejected by strict provider tool validation",
+                        );
+                    }
+                    Some(items) => {
+                        lint_strict_schema_value(items, &format!("{path}/items"), diagnostics)
+                    }
+                    None => diagnostics.error(
+                        "output_schema.array_items_missing",
+                        format!("{path}/items"),
+                        "array schemas must declare `items` for strict provider tool validation",
+                    ),
+                }
+            }
+
+            if obj.get("type").and_then(|v| v.as_str()) == Some("object") {
+                if obj.get("additionalProperties") != Some(&serde_json::Value::Bool(false)) {
+                    diagnostics.error(
+                        "output_schema.additional_properties",
+                        path,
+                        "strict provider tool schemas require `additionalProperties: false` on every object",
+                    );
+                }
+                let props = obj
+                    .get("properties")
+                    .and_then(|v| v.as_object())
+                    .cloned()
+                    .unwrap_or_default();
+                let required: std::collections::HashSet<String> = obj
+                    .get("required")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                for prop in props.keys() {
+                    if !required.contains(prop) {
+                        diagnostics.error(
+                            "output_schema.required_properties",
+                            format!("{path}/required"),
+                            format!(
+                                "strict provider tool schemas require property `{prop}` to appear in `required`"
+                            ),
+                        );
+                    }
+                }
+            }
+
+            for (key, child) in obj {
+                if key == "additionalProperties" {
+                    continue;
+                }
+                lint_strict_schema_value(child, &format!("{path}/{key}"), diagnostics);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn lint_output_schema_for_strict(
+    schema: &workflow::OutputSchema,
+    path: &str,
+    diagnostics: &mut WorkflowDiagnostics,
+) {
+    let value = serde_json::to_value(schema.root_schema()).expect("OutputSchema serializes");
+    let normalized = crate::toolset::normalize_for_strict(value);
+    lint_strict_schema_value(&normalized, path, diagnostics);
+}
+
+fn validate_trigger_definition(
+    trigger: &WorkflowTrigger,
+    payload: Option<&serde_json::Value>,
+    diagnostics: &mut WorkflowDiagnostics,
+) {
+    if let WorkflowTrigger::Cron {
+        schedule, timezone, ..
+    } = trigger
+    {
+        if let Err(e) = workflow::parse_cron_schedule(schedule) {
+            diagnostics.error("trigger.cron_invalid", "/trigger/schedule", e);
+        }
+        if let Err(e) = workflow::parse_timezone(timezone.as_deref()) {
+            diagnostics.error("trigger.timezone_invalid", "/trigger/timezone", e);
+        }
+    }
+
+    let Some(condition) = trigger.condition() else {
+        diagnostics.info(
+            "trigger.condition_absent",
+            "/trigger/condition",
+            "trigger is ungated",
+        );
+        return;
+    };
+    if let Err(e) = template::parse_trigger_condition(condition) {
+        diagnostics.error(
+            "trigger.condition_invalid",
+            "/trigger/condition",
+            e.to_string(),
+        );
+        return;
+    }
+    if let Some(payload) = payload {
+        match template::evaluate_trigger_condition(condition, payload) {
+            Ok(ConditionOutcome::True) => diagnostics.info(
+                "trigger.sample_true",
+                "/trigger/condition",
+                "sample payload passes the trigger condition",
+            ),
+            Ok(ConditionOutcome::False) => diagnostics.warning(
+                "trigger.sample_false",
+                "/trigger/condition",
+                "sample payload is filtered by the trigger condition",
+            ),
+            Ok(ConditionOutcome::NotBoolean(value)) => diagnostics.error(
+                "trigger.sample_not_boolean",
+                "/trigger/condition",
+                format!("sample condition evaluated to {value}, expected boolean"),
+            ),
+            Err(e) => diagnostics.warning(
+                "trigger.sample_error",
+                "/trigger/condition",
+                format!("sample trigger condition could not be evaluated: {e}"),
+            ),
+        }
+    }
+}
+
+fn validate_step_static(
+    step: &WorkflowStepDef,
+    index: usize,
+    seen_step_names: &std::collections::HashSet<String>,
+    diagnostics: &mut WorkflowDiagnostics,
+) {
+    let step_path = format!("/steps/{index}");
+    if !workflow_step_name_is_cel_identifier(step.name()) {
+        diagnostics.error(
+            "step.name_not_cel_identifier",
+            format!("{step_path}/name"),
+            "step name must be a CEL identifier so downstream `steps.<name>.outputs` references can resolve",
+        );
+    }
+    if let Some(body) = step.condition() {
+        match template::parse_condition(body) {
+            Ok(r) => {
+                for target in template::referenced_step_names(&r) {
+                    if !seen_step_names.contains(&target) {
+                        diagnostics.error(
+                            "step.condition_forward_ref",
+                            format!("{step_path}/condition"),
+                            format!("condition references step `{target}` before it has run"),
+                        );
+                    }
+                }
+            }
+            Err(e) => diagnostics.error(
+                "step.condition_invalid",
+                format!("{step_path}/condition"),
+                e.to_string(),
+            ),
+        }
+    }
+
+    match step {
+        WorkflowStepDef::AgentStep { output_schema, .. } => {
+            lint_output_schema_for_strict(
+                output_schema,
+                &format!("{step_path}/output_schema"),
+                diagnostics,
+            );
+        }
+        WorkflowStepDef::ToolStep { name, params, .. } => {
+            match template::extract_refs_in_value(params) {
+                Ok(refs) => {
+                    for r in refs {
+                        if let Err(e) = template::validate_root(&r) {
+                            diagnostics.error(
+                                "step.params_template_invalid",
+                                format!("{step_path}/params"),
+                                e.to_string(),
+                            );
+                            continue;
+                        }
+                        for target in template::referenced_step_names(&r) {
+                            if !seen_step_names.contains(&target) {
+                                diagnostics.error(
+                                    "step.params_forward_ref",
+                                    format!("{step_path}/params"),
+                                    format!("tool step `{name}` params reference step `{target}` before it has run"),
+                                );
+                            }
+                        }
+                    }
+                }
+                Err(e) => diagnostics.error(
+                    "step.params_template_invalid",
+                    format!("{step_path}/params"),
+                    e.to_string(),
+                ),
+            }
+        }
+        WorkflowStepDef::Wait {
+            provider,
+            resume_condition,
+            outputs,
+            ..
+        } => {
+            if provider.is_empty() {
+                diagnostics.error(
+                    "step.wait_provider_empty",
+                    format!("{step_path}/provider"),
+                    "`provider` must be non-empty",
+                );
+            }
+            match template::parse_resume_condition(resume_condition.trim()) {
+                Ok(r) => {
+                    for target in template::referenced_step_names(&r) {
+                        if !seen_step_names.contains(&target) {
+                            diagnostics.error(
+                                "step.resume_forward_ref",
+                                format!("{step_path}/resume_condition"),
+                                format!(
+                                    "resume_condition references step `{target}` before it has run"
+                                ),
+                            );
+                        }
+                    }
+                }
+                Err(e) => diagnostics.error(
+                    "step.resume_condition_invalid",
+                    format!("{step_path}/resume_condition"),
+                    e.to_string(),
+                ),
+            }
+            for (key, expr) in outputs {
+                match template::parse_resume_condition(expr.trim()) {
+                    Ok(r) => {
+                        for target in template::referenced_step_names(&r) {
+                            if !seen_step_names.contains(&target) {
+                                diagnostics.error(
+                                    "step.wait_output_forward_ref",
+                                    format!("{step_path}/outputs/{key}"),
+                                    format!(
+                                        "wait output `{key}` references step `{target}` before it has run"
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                    Err(e) => diagnostics.error(
+                        "step.wait_output_invalid",
+                        format!("{step_path}/outputs/{key}"),
+                        e.to_string(),
+                    ),
+                }
+            }
+        }
+    }
+}
+
+fn record_tool_step_availability<E: std::fmt::Display>(
+    tool: &str,
+    path: &str,
+    result: Result<(), E>,
+    diagnostics: &mut WorkflowDiagnostics,
+) {
+    match result {
+        Ok(_) => diagnostics.info(
+            "step.tool_resolved",
+            path,
+            format!("tool `{tool}` is registered, composable, and declares structured output"),
+        ),
+        Err(e) => diagnostics.error(
+            "step.tool_unavailable",
+            path,
+            format!("tool `{tool}` cannot be used in a workflow tool_step: {e}"),
+        ),
+    }
+}
+
+fn evaluate_step_routing(
+    steps: &[WorkflowStepDef],
+    payload: &serde_json::Value,
+    diagnostics: &mut WorkflowDiagnostics,
+) {
+    let mut outputs = std::collections::HashMap::new();
+    for (index, step) in steps.iter().enumerate() {
+        let path = format!("/steps/{index}/condition");
+        match step.condition() {
+            None => diagnostics.info(
+                "routing.sample_would_run",
+                path,
+                format!(
+                    "step `{}` has no condition and would be reached in the approximate route",
+                    step.name()
+                ),
+            ),
+            Some(body) => {
+                match template::parse_condition(body) {
+                    Ok(r) => {
+                        let prior_refs: Vec<String> = template::referenced_step_names(&r)
+                            .into_iter()
+                            .filter(|name| outputs.contains_key(name))
+                            .collect();
+                        if !prior_refs.is_empty() {
+                            diagnostics.info(
+                                "routing.sample_unknown_due_to_prior_outputs",
+                                path,
+                                format!(
+                                    "sample route for step `{}` depends on prior step output(s) {}; provide concrete prior outputs for exact routing",
+                                    step.name(),
+                                    prior_refs.join(", ")
+                                ),
+                            );
+                            outputs.insert(
+                                step.name().to_string(),
+                                serde_json::Value::Object(Default::default()),
+                            );
+                            continue;
+                        }
+                    }
+                    Err(e) => {
+                        diagnostics.warning(
+                            "routing.sample_unknown",
+                            path,
+                            format!(
+                                "sample route for step `{}` could not parse: {e}",
+                                step.name()
+                            ),
+                        );
+                        outputs.insert(
+                            step.name().to_string(),
+                            serde_json::Value::Object(Default::default()),
+                        );
+                        continue;
+                    }
+                }
+                let ctx = TemplateContext {
+                    trigger: payload,
+                    steps: &outputs,
+                };
+                match ctx.evaluate_condition(body) {
+                    Ok(ConditionOutcome::True) => diagnostics.info(
+                        "routing.sample_would_run",
+                        path,
+                        format!("sample payload makes step `{}` condition true", step.name()),
+                    ),
+                    Ok(ConditionOutcome::False) => diagnostics.info(
+                        "routing.sample_would_skip",
+                        path,
+                        format!("sample payload makes step `{}` condition false", step.name()),
+                    ),
+                    Ok(ConditionOutcome::NotBoolean(value)) => diagnostics.warning(
+                        "routing.sample_not_boolean",
+                        path,
+                        format!("sample condition for step `{}` evaluated to {value}, expected boolean", step.name()),
+                    ),
+                    Err(e) => diagnostics.warning(
+                        "routing.sample_unknown",
+                        path,
+                        format!(
+                            "sample route for step `{}` could not be evaluated without real prior step outputs: {e}",
+                            step.name()
+                        ),
+                    ),
+                }
+            }
+        }
+        outputs.insert(
+            step.name().to_string(),
+            serde_json::Value::Object(Default::default()),
+        );
+    }
+}
+
 #[derive(Deserialize, schemars::JsonSchema)]
 struct WorkflowParams {
     command: WorkflowCommand,
@@ -531,7 +942,8 @@ struct WorkflowParams {
     run_id: Option<WorkflowRunId>,
 
     /// `trigger`: webhook-equivalent payload bound to the run's
-    /// `trigger.*` template namespace. Defaults to `{}`.
+    /// `trigger.*` template namespace. Defaults to `{}`. Also used
+    /// by `validate` as an optional dry-preflight sample payload.
     #[serde(default)]
     payload: Option<serde_json::Value>,
 
@@ -575,6 +987,75 @@ struct WorkflowParams {
     update_trigger: bool,
     #[serde(default)]
     clear_model_chain: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WorkflowDiagnosticSeverity {
+    Error,
+    Warning,
+    Info,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct WorkflowDiagnostic {
+    severity: WorkflowDiagnosticSeverity,
+    code: &'static str,
+    path: String,
+    message: String,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct WorkflowValidationReport {
+    definition_id: String,
+    workflow_name: String,
+    summary: String,
+    diagnostics: Vec<WorkflowDiagnostic>,
+}
+
+#[derive(Default)]
+struct WorkflowDiagnostics {
+    items: Vec<WorkflowDiagnostic>,
+}
+
+impl WorkflowDiagnostics {
+    fn push(
+        &mut self,
+        severity: WorkflowDiagnosticSeverity,
+        code: &'static str,
+        path: impl Into<String>,
+        message: impl Into<String>,
+    ) {
+        self.items.push(WorkflowDiagnostic {
+            severity,
+            code,
+            path: path.into(),
+            message: message.into(),
+        });
+    }
+
+    fn error(&mut self, code: &'static str, path: impl Into<String>, message: impl Into<String>) {
+        self.push(WorkflowDiagnosticSeverity::Error, code, path, message);
+    }
+
+    fn warning(&mut self, code: &'static str, path: impl Into<String>, message: impl Into<String>) {
+        self.push(WorkflowDiagnosticSeverity::Warning, code, path, message);
+    }
+
+    fn info(&mut self, code: &'static str, path: impl Into<String>, message: impl Into<String>) {
+        self.push(WorkflowDiagnosticSeverity::Info, code, path, message);
+    }
+
+    fn counts(&self) -> (usize, usize, usize) {
+        self.items.iter().fold((0, 0, 0), |mut acc, d| {
+            match d.severity {
+                WorkflowDiagnosticSeverity::Error => acc.0 += 1,
+                WorkflowDiagnosticSeverity::Warning => acc.1 += 1,
+                WorkflowDiagnosticSeverity::Info => acc.2 += 1,
+            }
+            acc
+        })
+    }
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -704,6 +1185,8 @@ static TOOLS: &[ToolDef] = &[
                        `sandboxes`), \
                        `list` (requires `project_id`), \
                        `get` (requires `definition_id`), \
+                       `validate` (requires `definition_id`; optional \
+                       `payload` sample; dry-preflight only, no agents run), \
                        `update` (requires `definition_id`; optional `name`, \
                        `description`+`clear_description` for None semantics, \
                        `provider`+`update_trigger`, `steps`+`update_steps`, \
@@ -878,6 +1361,167 @@ impl SearchableToolSet for AdminToolSet {
 }
 
 impl AdminToolSet {
+    async fn validate_workflow_definition(
+        &self,
+        subject: &AuthSubject,
+        definition: &WorkflowDefinition,
+        payload: Option<&serde_json::Value>,
+    ) -> WorkflowValidationReport {
+        let mut diagnostics = WorkflowDiagnostics::default();
+
+        validate_trigger_definition(&definition.trigger, payload, &mut diagnostics);
+
+        let mut decl_names = std::collections::HashSet::new();
+        let mut preexisting_ids = std::collections::HashMap::new();
+        for (idx, decl) in definition.sandboxes.iter().enumerate() {
+            if !decl_names.insert(decl.name().to_string()) {
+                diagnostics.error(
+                    "sandbox.duplicate_name",
+                    format!("/sandboxes/{idx}/name"),
+                    format!("sandbox name `{}` is declared more than once", decl.name()),
+                );
+            }
+            match decl {
+                WorkflowSandboxDecl::Preexisting { name } => {
+                    match self
+                        .sandboxes
+                        .find_by_name_in_project(subject, definition.project_id, name)
+                        .await
+                    {
+                        Ok(sandbox) => {
+                            preexisting_ids.insert(name.clone(), sandbox.id);
+                            if sandbox.state.to_string() != "ready" {
+                                diagnostics.warning(
+                                    "sandbox.preexisting_not_ready",
+                                    format!("/sandboxes/{idx}"),
+                                    format!(
+                                        "preexisting sandbox `{name}` is currently `{}`; validation does not create or restart sandboxes",
+                                        sandbox.state
+                                    ),
+                                );
+                            }
+                        }
+                        Err(e) => diagnostics.error(
+                            "sandbox.preexisting_missing",
+                            format!("/sandboxes/{idx}/name"),
+                            format!("preexisting sandbox `{name}` could not be resolved: {e}"),
+                        ),
+                    }
+                }
+                WorkflowSandboxDecl::Provisioned { name, specs, .. } => {
+                    diagnostics.info(
+                        "sandbox.provisioned_declared",
+                        format!("/sandboxes/{idx}"),
+                        format!(
+                            "provisioned sandbox `{name}` is declared; validate does not create or start it{}",
+                            if specs.is_some() { " and specs are present" } else { "" }
+                        ),
+                    );
+                }
+            }
+        }
+
+        if definition.steps.is_empty() {
+            diagnostics.error(
+                "workflow.steps_empty",
+                "/steps",
+                "workflow requires at least one step",
+            );
+        }
+
+        let mut seen_step_names = std::collections::HashSet::new();
+        for (idx, step) in definition.steps.iter().enumerate() {
+            validate_step_static(step, idx, &seen_step_names, &mut diagnostics);
+            if !seen_step_names.insert(step.name().to_string()) {
+                diagnostics.error(
+                    "step.duplicate_name",
+                    format!("/steps/{idx}/name"),
+                    format!("step name `{}` is declared more than once", step.name()),
+                );
+            }
+
+            if let WorkflowStepDef::AgentStep {
+                name,
+                skill,
+                sandbox,
+                ..
+            } = step
+            {
+                if let Some(sandbox_name) = sandbox {
+                    if !decl_names.contains(sandbox_name) {
+                        diagnostics.error(
+                            "step.sandbox_undeclared",
+                            format!("/steps/{idx}/sandbox"),
+                            format!(
+                                "step `{name}` references sandbox `{sandbox_name}` that is not declared"
+                            ),
+                        );
+                    }
+                }
+
+                let preexisting_sandbox_id = sandbox
+                    .as_ref()
+                    .and_then(|sandbox_name| preexisting_ids.get(sandbox_name).copied());
+                match self
+                    .skills
+                    .find_by_name(skill, Some(definition.project_id), preexisting_sandbox_id)
+                    .await
+                {
+                    Ok(Some(_)) => diagnostics.info(
+                        "step.skill_resolved",
+                        format!("/steps/{idx}/skill"),
+                        format!("step `{name}` skill `{skill}` resolves"),
+                    ),
+                    Ok(None) => diagnostics.error(
+                        "step.skill_missing",
+                        format!("/steps/{idx}/skill"),
+                        format!("step `{name}` references missing skill `{skill}`"),
+                    ),
+                    Err(e) => diagnostics.error(
+                        "step.skill_lookup_error",
+                        format!("/steps/{idx}/skill"),
+                        format!("step `{name}` skill `{skill}` lookup failed: {e}"),
+                    ),
+                }
+            } else if let WorkflowStepDef::ToolStep { tool, .. } = step {
+                record_tool_step_availability(
+                    tool,
+                    &format!("/steps/{idx}/tool"),
+                    self.workflows.validate_tool_step_tool(tool),
+                    &mut diagnostics,
+                );
+            }
+        }
+
+        if let Some(payload) = payload {
+            evaluate_step_routing(&definition.steps, payload, &mut diagnostics);
+        } else {
+            diagnostics.info(
+                "routing.sample_absent",
+                "/payload",
+                "provide `payload` to evaluate trigger condition and approximate step routing",
+            );
+        }
+
+        let (errors, warnings, infos) = diagnostics.counts();
+        let summary = if errors == 0 {
+            format!(
+                "Workflow validate completed: no errors, {warnings} warning(s), {infos} info diagnostic(s)."
+            )
+        } else {
+            format!(
+                "Workflow validate found {errors} error(s), {warnings} warning(s), {infos} info diagnostic(s)."
+            )
+        };
+
+        WorkflowValidationReport {
+            definition_id: definition.id.to_string(),
+            workflow_name: definition.name.clone(),
+            summary,
+            diagnostics: diagnostics.items,
+        }
+    }
+
     async fn agent(
         &self,
         subject: &AuthSubject,
@@ -1360,6 +2004,28 @@ impl AdminToolSet {
                 Ok(CallToolResult::success(vec![Content::text(
                     format_workflow(&definition, false),
                 )]))
+            }
+
+            WorkflowCommand::Validate => {
+                let definition_id = params.definition_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument(
+                        "definition_id is required for validate".to_string(),
+                    )
+                })?;
+                Audit::record_action("workflow.validate");
+                let definition = self
+                    .workflows
+                    .find_by_id(subject, definition_id)
+                    .await
+                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                let report = self
+                    .validate_workflow_definition(subject, &definition, params.payload.as_ref())
+                    .await;
+                let text = format_workflow_validation_report(&report);
+                let mut result = CallToolResult::success(vec![Content::text(text)]);
+                result.structured_content =
+                    Some(serde_json::to_value(&report).expect("report serializes"));
+                Ok(result)
             }
 
             WorkflowCommand::Update => {
@@ -2068,6 +2734,24 @@ fn format_workflow(d: &WorkflowDefinition, created: bool) -> String {
     )
 }
 
+fn format_workflow_validation_report(report: &WorkflowValidationReport) -> String {
+    let mut out = format!(
+        "{}\n  definition_id: {}\n  workflow: {}",
+        report.summary, report.definition_id, report.workflow_name
+    );
+    if report.diagnostics.is_empty() {
+        return out;
+    }
+    out.push_str("\n\ndiagnostics:");
+    for d in &report.diagnostics {
+        out.push_str(&format!(
+            "\n- {:?} {} {}: {}",
+            d.severity, d.code, d.path, d.message
+        ));
+    }
+    out
+}
+
 /// Renders a `WorkflowRun` as text. Step outputs are emitted as
 /// compact JSON (one per line) so callers can read the structured
 /// payload directly without a second round-trip through the inspect
@@ -2314,11 +2998,67 @@ fn format_spaces(spaces: &[Space]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::toolset::{ToolSets, ToolSetsError, TopLevelTool};
 
     fn args(json: serde_json::Value) -> Option<JsonObject> {
         match json {
             serde_json::Value::Object(obj) => Some(obj),
             _ => panic!("expected object"),
+        }
+    }
+
+    fn has_diag(diagnostics: &WorkflowDiagnostics, code: &str, path: &str) -> bool {
+        diagnostics
+            .items
+            .iter()
+            .any(|d| d.code == code && d.path == path)
+    }
+
+    struct StubTopLevelTool {
+        name: String,
+        composable: bool,
+        output_schema: Option<serde_json::Value>,
+    }
+
+    impl StubTopLevelTool {
+        fn new(name: &str, composable: bool, has_output_schema: bool) -> Self {
+            Self {
+                name: name.to_string(),
+                composable,
+                output_schema: has_output_schema.then(|| serde_json::json!({ "type": "object" })),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TopLevelTool for StubTopLevelTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        fn description(&self) -> &str {
+            "stub"
+        }
+
+        fn input_schema(&self) -> &serde_json::Value {
+            static EMPTY: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            EMPTY.get_or_init(|| serde_json::json!({ "type": "object" }))
+        }
+
+        fn inner_output_schema(&self) -> Option<&serde_json::Value> {
+            self.output_schema.as_ref()
+        }
+
+        fn composable(&self) -> bool {
+            self.composable
+        }
+
+        async fn call(
+            &self,
+            _subject: &AuthSubject,
+            _arguments: Option<JsonObject>,
+        ) -> Result<CallToolResult, ToolSetsError> {
+            unreachable!("stub tool not invoked by validate tests")
         }
     }
 
@@ -2630,6 +3370,26 @@ mod tests {
     }
 
     #[test]
+    fn workflow_validate_takes_definition_id_and_payload() {
+        let definition_id = uuid::Uuid::new_v4();
+        let p: WorkflowParams = parse_params(args(serde_json::json!({
+            "command": "validate",
+            "definition_id": definition_id,
+            "payload": { "action": "opened" },
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, WorkflowCommand::Validate));
+        assert_eq!(p.definition_id.map(uuid::Uuid::from), Some(definition_id));
+        assert_eq!(
+            p.payload
+                .as_ref()
+                .and_then(|v| v.get("action"))
+                .and_then(|v| v.as_str()),
+            Some("opened")
+        );
+    }
+
+    #[test]
     fn workflow_create_parses_tool_step() {
         let project_id = uuid::Uuid::new_v4();
         let p: WorkflowParams = parse_params(args(serde_json::json!({
@@ -2721,9 +3481,189 @@ mod tests {
     #[test]
     fn workflow_schema_includes_command_enum() {
         let s = serde_json::to_string(&*WORKFLOW_SCHEMA).unwrap();
-        for v in ["create", "list", "get", "update", "delete"] {
+        for v in ["create", "list", "get", "validate", "update", "delete"] {
             assert!(s.contains(&format!("\"{v}\"")), "missing {v} in schema");
         }
+    }
+
+    #[test]
+    fn workflow_validate_lints_array_items_empty_schema() {
+        let root: schemars::schema::RootSchema = serde_json::from_value(serde_json::json!({
+            "type": "object",
+            "required": ["items"],
+            "properties": {
+                "items": { "type": "array", "items": {} }
+            }
+        }))
+        .unwrap();
+        let schema = workflow::OutputSchema::new(root).unwrap();
+        let mut diagnostics = WorkflowDiagnostics::default();
+        lint_output_schema_for_strict(&schema, "/steps/0/output_schema", &mut diagnostics);
+        assert!(
+            diagnostics
+                .items
+                .iter()
+                .any(|d| d.code == "output_schema.array_items_untyped"
+                    && d.path == "/steps/0/output_schema/properties/items/items"),
+            "expected untyped array items diagnostic, got {:?}",
+            diagnostics.items
+        );
+    }
+
+    #[test]
+    fn workflow_validate_accepts_available_tool_step_tool() {
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_top_level(StubTopLevelTool::new("ok_tool", true, true));
+        let mut diagnostics = WorkflowDiagnostics::default();
+        record_tool_step_availability(
+            "ok_tool",
+            "/steps/0/tool",
+            toolsets.find_for_workflow("ok_tool").map(|_| ()),
+            &mut diagnostics,
+        );
+        assert!(has_diag(
+            &diagnostics,
+            "step.tool_resolved",
+            "/steps/0/tool"
+        ));
+    }
+
+    #[test]
+    fn workflow_validate_rejects_unknown_tool_step_tool() {
+        let toolsets = ToolSets::empty_for_test();
+        let mut diagnostics = WorkflowDiagnostics::default();
+        record_tool_step_availability(
+            "missing_tool",
+            "/steps/0/tool",
+            toolsets.find_for_workflow("missing_tool").map(|_| ()),
+            &mut diagnostics,
+        );
+        assert!(has_diag(
+            &diagnostics,
+            "step.tool_unavailable",
+            "/steps/0/tool"
+        ));
+        assert!(diagnostics.items[0].message.contains("not registered"));
+    }
+
+    #[test]
+    fn workflow_validate_rejects_non_composable_tool_step_tool() {
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_top_level(StubTopLevelTool::new("agent", false, true));
+        let mut diagnostics = WorkflowDiagnostics::default();
+        record_tool_step_availability(
+            "agent",
+            "/steps/0/tool",
+            toolsets.find_for_workflow("agent").map(|_| ()),
+            &mut diagnostics,
+        );
+        assert!(has_diag(
+            &diagnostics,
+            "step.tool_unavailable",
+            "/steps/0/tool"
+        ));
+        assert!(diagnostics.items[0].message.contains("not composable"));
+    }
+
+    #[test]
+    fn workflow_validate_rejects_tool_step_tool_without_output_schema() {
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_top_level(StubTopLevelTool::new("raw", true, false));
+        let mut diagnostics = WorkflowDiagnostics::default();
+        record_tool_step_availability(
+            "raw",
+            "/steps/0/tool",
+            toolsets.find_for_workflow("raw").map(|_| ()),
+            &mut diagnostics,
+        );
+        assert!(has_diag(
+            &diagnostics,
+            "step.tool_unavailable",
+            "/steps/0/tool"
+        ));
+        assert!(diagnostics.items[0]
+            .message
+            .contains("does not declare an output_schema"));
+    }
+
+    #[test]
+    fn workflow_validate_rejects_tool_step_param_unknown_root() {
+        let step = WorkflowStepDef::ToolStep {
+            name: "dispatch".into(),
+            tool: "workflow".into(),
+            params: serde_json::json!({ "value": "${{ env.HOME }}" }),
+            timeout_seconds: None,
+            condition: None,
+        };
+        let mut diagnostics = WorkflowDiagnostics::default();
+        validate_step_static(
+            &step,
+            0,
+            &std::collections::HashSet::new(),
+            &mut diagnostics,
+        );
+        assert!(has_diag(
+            &diagnostics,
+            "step.params_template_invalid",
+            "/steps/0/params"
+        ));
+    }
+
+    #[test]
+    fn workflow_validate_rejects_wait_output_forward_ref() {
+        let step = WorkflowStepDef::Wait {
+            name: "wait".into(),
+            provider: "github_app".into(),
+            resume_condition: "resume_payload.action == 'done'".into(),
+            outputs: [(
+                "future".to_string(),
+                "steps.after.outputs.value".to_string(),
+            )]
+            .into_iter()
+            .collect(),
+            condition: None,
+        };
+        let mut diagnostics = WorkflowDiagnostics::default();
+        let seen = ["before".to_string()].into_iter().collect();
+        validate_step_static(&step, 1, &seen, &mut diagnostics);
+        assert!(has_diag(
+            &diagnostics,
+            "step.wait_output_forward_ref",
+            "/steps/1/outputs/future"
+        ));
+    }
+
+    #[test]
+    fn workflow_validate_routing_prior_step_output_is_unknown() {
+        let steps = vec![
+            WorkflowStepDef::ToolStep {
+                name: "triage".into(),
+                tool: "workflow".into(),
+                params: serde_json::json!({}),
+                timeout_seconds: None,
+                condition: None,
+            },
+            WorkflowStepDef::ToolStep {
+                name: "dispatch".into(),
+                tool: "workflow".into(),
+                params: serde_json::json!({}),
+                timeout_seconds: None,
+                condition: Some("steps.triage.outputs.success == true".into()),
+            },
+        ];
+        let mut diagnostics = WorkflowDiagnostics::default();
+        evaluate_step_routing(&steps, &serde_json::json!({}), &mut diagnostics);
+        assert!(has_diag(
+            &diagnostics,
+            "routing.sample_unknown_due_to_prior_outputs",
+            "/steps/1/condition"
+        ));
+        assert!(
+            !diagnostics.items.iter().any(|d| {
+                d.code == "routing.sample_would_skip" && d.path == "/steps/1/condition"
+            }),
+            "prior-output condition must not be reported as a concrete skip"
+        );
     }
 
     #[test]

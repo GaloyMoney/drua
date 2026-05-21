@@ -559,6 +559,15 @@ impl Workflows {
         Ok(())
     }
 
+    /// Check the same tool-step dispatch contract enforced by
+    /// create/update and runtime execution without running the tool.
+    pub(crate) fn validate_tool_step_tool(
+        &self,
+        tool: &str,
+    ) -> Result<(), crate::toolset::WorkflowToolLookupError> {
+        self.toolsets.find_for_workflow(tool).map(|_| ())
+    }
+
     /// For every `Preexisting` decl, look the sandbox up by name in
     /// the workflow's project (project-unique) and verify `sub`
     /// can `Read` it. Returns a map from decl name to resolved
