@@ -68,14 +68,7 @@ impl GitHubAppTokenProvider {
             self.installation_id
         );
 
-        let body = serde_json::json!({
-            "permissions": {
-                "contents": "write",
-                "pull_requests": "write",
-                "issues": "write",
-                "metadata": "read"
-            }
-        });
+        let body = installation_token_request_body();
 
         let resp = self
             .http_client
@@ -107,5 +100,72 @@ impl GitHubAppTokenProvider {
         let expires_at = json["expires_at"].as_str().unwrap_or_default().to_string();
 
         Ok(InstallationToken { token, expires_at })
+    }
+}
+
+fn installation_token_request_body() -> serde_json::Value {
+    serde_json::json!({
+        "permissions": {
+            "contents": "write",
+            "pull_requests": "write",
+            "issues": "write",
+            "metadata": "read",
+            "checks": "read",
+            "statuses": "read",
+            "actions": "read"
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::installation_token_request_body;
+
+    #[test]
+    fn installation_token_requests_ci_read_permissions() {
+        let body = installation_token_request_body();
+        let permissions = body
+            .get("permissions")
+            .and_then(|v| v.as_object())
+            .expect("permissions object");
+
+        assert_eq!(
+            permissions.get("checks").and_then(|v| v.as_str()),
+            Some("read")
+        );
+        assert_eq!(
+            permissions.get("statuses").and_then(|v| v.as_str()),
+            Some("read")
+        );
+        assert_eq!(
+            permissions.get("actions").and_then(|v| v.as_str()),
+            Some("read")
+        );
+    }
+
+    #[test]
+    fn installation_token_preserves_existing_permissions() {
+        let body = installation_token_request_body();
+        let permissions = body
+            .get("permissions")
+            .and_then(|v| v.as_object())
+            .expect("permissions object");
+
+        assert_eq!(
+            permissions.get("contents").and_then(|v| v.as_str()),
+            Some("write")
+        );
+        assert_eq!(
+            permissions.get("pull_requests").and_then(|v| v.as_str()),
+            Some("write")
+        );
+        assert_eq!(
+            permissions.get("issues").and_then(|v| v.as_str()),
+            Some("write")
+        );
+        assert_eq!(
+            permissions.get("metadata").and_then(|v| v.as_str()),
+            Some("read")
+        );
     }
 }
