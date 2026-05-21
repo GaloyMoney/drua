@@ -163,6 +163,12 @@ spec:
               name: {{ template "galoyAgents.fullname" . }}
               key: "concourse-password"
               optional: true
+        - name: WEBHOOK_SECRET_CONCOURSE
+          valueFrom:
+            secretKeyRef:
+              name: {{ template "galoyAgents.fullname" . }}
+              key: "concourse-webhook-secret"
+              optional: true
         - name: ZENDUTY_API_TOKEN
           valueFrom:
             secretKeyRef:

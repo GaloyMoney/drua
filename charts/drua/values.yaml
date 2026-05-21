@@ -245,6 +245,7 @@ galoyAgents:
     githubClientSecret: ""
     concourseUsername: ""
     concoursePassword: ""
+    concourseWebhookSecret: ""
     zendutyApiToken: ""
     anthropicApiKey: ""
     openaiApiKey: ""
