@@ -147,6 +147,24 @@ let
     nixGvisorPtyPipePatch
   ];
 
+  # Wrap every nix binary so that DRUA_FORWARD_PROXY_URL (injected by K8s)
+  # becomes http_proxy/https_proxy for the nix *client* process.  Flake
+  # input fetching (GitHub tarballs) happens in the client, not the daemon,
+  # so the client is the one that needs proxy env.  The agent shell (curl,
+  # cargo, npm …) never sees these vars — only nix commands do.
+  nixProxyWrappers = map (name: pkgs.writeShellScriptBin name ''
+    if [ -n "''${DRUA_FORWARD_PROXY_URL:-}" ]; then
+        export http_proxy="$DRUA_FORWARD_PROXY_URL"
+        export https_proxy="$DRUA_FORWARD_PROXY_URL"
+        export no_proxy=".svc.cluster.local,.cluster.local,localhost,127.0.0.1"
+    fi
+    exec ${nix}/bin/${name} "$@"
+  '') [
+    "nix" "nix-build" "nix-channel" "nix-collect-garbage"
+    "nix-copy-closure" "nix-daemon" "nix-env" "nix-hash"
+    "nix-instantiate" "nix-prefetch-url" "nix-shell" "nix-store"
+  ];
+
   # Credential helper: reads the projected K8s ServiceAccount token at
   # invocation time and hands it to git as a Bearer credential (git
   # 2.46+ authtype/credential protocol — see `gitcredentials(7)`).
@@ -215,20 +233,10 @@ let
 EOF
     fi
 
-    # Forward proxy for nix-daemon only — flake input fetches (GitHub
-    # tarballs) go through the proxy while the agent shell stays isolated.
-    proxy_env=()
-    if [ -n "''${DRUA_FORWARD_PROXY_URL:-}" ]; then
-        proxy_env=(
-            "http_proxy=''$DRUA_FORWARD_PROXY_URL"
-            "https_proxy=''$DRUA_FORWARD_PROXY_URL"
-            "no_proxy=.svc.cluster.local,.cluster.local,localhost,127.0.0.1"
-        )
-    fi
-
     # Clients use NIX_REMOTE=daemon, but the daemon itself must open the local
-    # store or it recursively connects back to its own socket.
-    env -u NIX_REMOTE "''${proxy_env[@]}" ${nix}/bin/nix-daemon &
+    # store or it recursively connects back to its own socket.  The nix-daemon
+    # wrapper (nixProxyWrappers) sets http_proxy from DRUA_FORWARD_PROXY_URL.
+    env -u NIX_REMOTE nix-daemon &
 
     for i in $(seq 1 100); do
       [ -S /nix/var/nix/daemon-socket/socket ] && break
@@ -275,7 +283,7 @@ pkgs.dockerTools.buildLayeredImage {
     pkgs.gnused
     pkgs.gnugrep
     pkgs.ripgrep
-    nix
+  ] ++ nixProxyWrappers ++ [
     gitCredentialHelper
     gitconfig
     entrypoint
