@@ -14,6 +14,7 @@ groups:
   - build-sandbox-image
   - build-tunnel-connector-image
   - build-keycloak-mcp-image
+  - bump-galoy-charts-keycloak-mcp-image
   - build-concourse-drua-resource-image
   - bump-galoy-charts-tunnel-connector-image
   - deploy-to-prod
@@ -465,6 +466,63 @@ jobs:
     get_params:
       skip_download: true
 
+#! After `build-keycloak-mcp-image` publishes a fresh digest, open
+#! (or force-update) a PR on GaloyMoney/galoy-charts that pins
+#! `keycloakMcp.image.digest` in `charts/galoy-deps/values.yaml`.
+#! This keeps the chart on an auditable immutable digest instead of
+#! silently following the mutable `:edge` tag.
+- name: bump-galoy-charts-keycloak-mcp-image
+  serial: true
+  plan:
+  - in_parallel:
+    - get: keycloak-mcp-edge-image
+      trigger: true
+      passed: [build-keycloak-mcp-image]
+      params:
+        skip_download: true
+    - get: repo
+    - get: galoy-charts-repo
+  - task: update-digest
+    config:
+      platform: linux
+      image_resource: #@ nix_flake_image_config()
+      inputs:
+      - name: repo
+      - name: keycloak-mcp-edge-image
+      - name: galoy-charts-repo
+      outputs:
+      - name: galoy-charts-repo
+      caches:
+      - path: /nix-cache
+      run:
+        path: repo/ci/tasks/with-nix-cache.sh
+        args:
+          - repo/ci/tasks/bump-galoy-charts-keycloak-mcp.sh
+  - put: galoy-charts-keycloak-mcp-bump-branch
+    params:
+      repository: galoy-charts-repo
+      branch: bump-keycloak-mcp-image-bot-branch
+      force: true
+  - task: open-pr
+    config:
+      platform: linux
+      image_resource: #@ nix_flake_image_config()
+      inputs:
+      - name: repo
+      - name: galoy-charts-repo
+      caches:
+      - path: /nix-cache
+      params:
+        GH_APP_ID: #@ data.values.github_app_id
+        GH_APP_PRIVATE_KEY: #@ data.values.github_app_private_key
+        BOT_BRANCH: bump-keycloak-mcp-image-bot-branch
+        BASE_BRANCH: main
+        TARGET_REPO: GaloyMoney/galoy-charts
+      run:
+        path: repo/ci/tasks/with-nix-cache.sh
+        args:
+          - repo/ci/tasks/open-galoy-charts-keycloak-mcp-pr.sh
+
 #! Builds the OCI image used as a Concourse `resource_type` to fire
 #! drua workflow runs from any pipeline's `on_failure:` (or anywhere
 #! else). Image source lives in `images/concourse-drua-resource/`.
@@ -646,9 +704,9 @@ resources:
     - images/concourse-drua-resource/
     - flake.nix
 
-#! Read-only clone of galoy-charts main. The `bump-galoy-charts-
-#! tunnel-connector-image` job uses this to build the commit that gets
-#! force-pushed to the bot branch below.
+#! Read-only clone of galoy-charts main. The galoy-charts image bump
+#! jobs use this to build the commits that get force-pushed to bot
+#! branches below.
 - name: galoy-charts-repo
   type: git
   source:
@@ -664,6 +722,13 @@ resources:
   source:
     uri: git@github.com:GaloyMoney/galoy-charts.git
     branch: bump-tunnel-connector-image-bot-branch
+    private_key: #@ data.values.github_private_key
+
+- name: galoy-charts-keycloak-mcp-bump-branch
+  type: git
+  source:
+    uri: git@github.com:GaloyMoney/galoy-charts.git
+    branch: bump-keycloak-mcp-image-bot-branch
     private_key: #@ data.values.github_private_key
 
 - name: repo-labels
