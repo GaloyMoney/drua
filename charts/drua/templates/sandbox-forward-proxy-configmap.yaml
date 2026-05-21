@@ -19,6 +19,7 @@ data:
     ConnectPort 443
     ConnectPort 80
     Filter "/etc/tinyproxy/filter"
+    FilterExtended Yes
     FilterDefaultDeny Yes
     LogLevel Info
     Syslog Off
