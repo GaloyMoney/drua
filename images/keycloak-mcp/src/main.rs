@@ -591,6 +591,41 @@ fn parse_realms(raw: &str) -> Vec<String> {
         .collect()
 }
 
+#[tokio::main]
+async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+
+    let cli = Cli::parse();
+    let default_realms = parse_realms(&cli.realms);
+    if default_realms.is_empty() {
+        anyhow::bail!("KEYCLOAK_REALMS must include at least one realm");
+    }
+
+    let client = KeycloakClient::new(
+        cli.keycloak_base_url,
+        cli.token_realm,
+        cli.client_id,
+        cli.client_secret,
+        default_realms,
+    );
+    let mcp = KeycloakMcp::new(client, cli.declared_snapshot_file)?;
+    let service = mcp.into_service();
+
+    let app = Router::new()
+        .route("/healthz", get(|| async { (StatusCode::OK, "ok") }))
+        .nest_service(&cli.mount, service);
+
+    let listener = tokio::net::TcpListener::bind(cli.bind).await?;
+    let local_addr = listener.local_addr()?;
+    tracing::info!("keycloak-mcp listening on http://{local_addr}{}", cli.mount);
+    axum::serve(listener, app).await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -656,39 +691,4 @@ mod tests {
         assert_eq!(diff["equal"], false);
         assert_eq!(diff["differenceCount"], 2);
     }
-}
-
-#[tokio::main]
-async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
-
-    let cli = Cli::parse();
-    let default_realms = parse_realms(&cli.realms);
-    if default_realms.is_empty() {
-        anyhow::bail!("KEYCLOAK_REALMS must include at least one realm");
-    }
-
-    let client = KeycloakClient::new(
-        cli.keycloak_base_url,
-        cli.token_realm,
-        cli.client_id,
-        cli.client_secret,
-        default_realms,
-    );
-    let mcp = KeycloakMcp::new(client, cli.declared_snapshot_file)?;
-    let service = mcp.into_service();
-
-    let app = Router::new()
-        .route("/healthz", get(|| async { (StatusCode::OK, "ok") }))
-        .nest_service(&cli.mount, service);
-
-    let listener = tokio::net::TcpListener::bind(cli.bind).await?;
-    let local_addr = listener.local_addr()?;
-    tracing::info!("keycloak-mcp listening on http://{local_addr}{}", cli.mount);
-    axum::serve(listener, app).await?;
-    Ok(())
 }
