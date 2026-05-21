@@ -493,6 +493,12 @@ fn selected_step_body(run: &WorkflowRunDetail, cursor: usize, expanded: bool) ->
             let mode = step.sandbox_mode.as_deref().unwrap_or("default");
             lines.push(format!("sandbox: {sandbox} ({mode})"));
         }
+        if let Some(provider) = &step.provider {
+            lines.push(format!("provider: {provider}"));
+        }
+        if let Some(resume_condition) = &step.resume_condition {
+            lines.push(format!("resume_condition: {resume_condition}"));
+        }
         if let Some(condition) = &step.condition {
             lines.push(format!("condition: {condition}"));
         }

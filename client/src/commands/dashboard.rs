@@ -92,7 +92,7 @@ const WORKFLOW_DEFINITIONS_QUERY: &str = r#"
             name
             description
             trigger { kind provider cronSchedule cronTimezone nextRunAt condition webhookUrl }
-            steps { name stepType skill tool sandbox sandboxMode condition }
+            steps { name stepType skill tool sandbox sandboxMode condition provider resumeCondition }
             recentRuns(first: 1) {
                 id
                 state
@@ -112,7 +112,7 @@ const WORKFLOW_DEFINITION_QUERY: &str = r#"
             description
             yaml
             trigger { kind provider cronSchedule cronTimezone nextRunAt condition webhookUrl }
-            steps { name stepType skill tool sandbox sandboxMode condition }
+            steps { name stepType skill tool sandbox sandboxMode condition provider resumeCondition }
             sandboxes { name kind branch repoUrl }
             recentRuns(first: 10) { id state startedAt completedAt stepResults { name state output error skipped completedAt } }
         }
@@ -141,7 +141,7 @@ const WORKFLOW_RUN_QUERY: &str = r#"
             startedAt
             completedAt
             triggerContext
-            stepsSnapshot { name stepType skill tool sandbox sandboxMode condition }
+            stepsSnapshot { name stepType skill tool sandbox sandboxMode condition provider resumeCondition }
             stepResults { name state output error skipped completedAt }
             agents { id name role session { model } attachedSandbox { name mode } }
         }
@@ -240,6 +240,8 @@ struct WorkflowStepNode {
     sandbox: Option<String>,
     sandbox_mode: Option<String>,
     condition: Option<String>,
+    provider: Option<String>,
+    resume_condition: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -779,6 +781,8 @@ fn workflow_step_node_to_item(s: WorkflowStepNode) -> WorkflowStepItem {
         sandbox: s.sandbox,
         sandbox_mode: s.sandbox_mode,
         condition: s.condition,
+        provider: s.provider,
+        resume_condition: s.resume_condition,
     }
 }
 

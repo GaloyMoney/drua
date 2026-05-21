@@ -161,6 +161,11 @@ pub struct WorkflowStep {
     output_schema: Option<JsonValue>,
     /// Wait-step `outputs` map serialized as `{ name: cel_expr }`.
     outputs: Option<JsonValue>,
+    /// Wait-step only: webhook provider this step parks on.
+    provider: Option<String>,
+    /// Wait-step only: CEL boolean evaluated against the inbound
+    /// webhook payload (`resume_payload.*`) plus `trigger` and `steps`.
+    resume_condition: Option<String>,
 }
 
 impl From<&DomainWorkflowStepDef> for WorkflowStep {
@@ -188,6 +193,8 @@ impl From<&DomainWorkflowStepDef> for WorkflowStep {
                     .ok()
                     .map(Into::into),
                 outputs: None,
+                provider: None,
+                resume_condition: None,
             },
             DomainWorkflowStepDef::ToolStep {
                 name,
@@ -206,9 +213,13 @@ impl From<&DomainWorkflowStepDef> for WorkflowStep {
                 condition: condition.clone(),
                 output_schema: None,
                 outputs: None,
+                provider: None,
+                resume_condition: None,
             },
             DomainWorkflowStepDef::Wait {
                 name,
+                provider,
+                resume_condition,
                 condition,
                 outputs,
                 ..
@@ -223,6 +234,8 @@ impl From<&DomainWorkflowStepDef> for WorkflowStep {
                 condition: condition.clone(),
                 output_schema: None,
                 outputs: serde_json::to_value(outputs).ok().map(Into::into),
+                provider: Some(provider.clone()),
+                resume_condition: Some(resume_condition.clone()),
             },
         }
     }
