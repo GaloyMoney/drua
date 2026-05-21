@@ -247,6 +247,7 @@ galoyAgents:
     concoursePassword: ""
     concourseWebhookSecret: ""
     zendutyApiToken: ""
+    zendutyWebhookSecret: ""
     anthropicApiKey: ""
     openaiApiKey: ""
     tunnelInternalSecret: ""

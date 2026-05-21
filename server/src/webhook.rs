@@ -9,6 +9,8 @@
 //!
 //! Provider `github_app` uses HMAC-SHA256 verification
 //! (`X-Hub-Signature-256: sha256=<hex>`) instead of bearer tokens.
+//! Provider `zenduty` uses HMAC-SHA256 verification with the digest
+//! base64-encoded in the `X-SIGNATURE` header.
 
 use axum::{
     body::Bytes,
@@ -18,6 +20,7 @@ use axum::{
     routing::post,
     Json, Router,
 };
+use base64::{engine::general_purpose::STANDARD, Engine};
 use hmac::{Hmac, Mac};
 use serde::Serialize;
 use sha2::Sha256;
@@ -198,6 +201,7 @@ fn verify_webhook(
 ) -> bool {
     match provider {
         Some("github_app") => verify_github_hmac(expected_secret, headers, body),
+        Some("zenduty") => verify_zenduty_hmac(expected_secret, headers, body),
         other => verify_bearer_or_token(other, expected_secret, headers),
     }
 }
@@ -238,6 +242,33 @@ fn verify_github_hmac(secret: &str, headers: &HeaderMap, body: &[u8]) -> bool {
     mac.update(body);
 
     // `verify_slice` is constant-time.
+    mac.verify_slice(&expected_bytes).is_ok()
+}
+
+/// HMAC-SHA256 verification per Zenduty's outgoing webhook spec: the
+/// `X-SIGNATURE` header carries the base64-encoded digest computed
+/// over the raw body with the webhook secret as key.
+fn verify_zenduty_hmac(secret: &str, headers: &HeaderMap, body: &[u8]) -> bool {
+    let signature = match headers.get("x-signature").and_then(|v| v.to_str().ok()) {
+        Some(s) => s,
+        None => {
+            tracing::warn!("webhook: missing X-SIGNATURE header");
+            return false;
+        }
+    };
+
+    let expected_bytes = match STANDARD.decode(signature) {
+        Ok(b) => b,
+        Err(_) => {
+            tracing::warn!("webhook: X-SIGNATURE contains invalid base64");
+            return false;
+        }
+    };
+
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(body);
+
     mac.verify_slice(&expected_bytes).is_ok()
 }
 
@@ -406,5 +437,54 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("authorization", "whsec_abc".parse().unwrap());
         assert!(verify_webhook(None, "whsec_abc", &headers, b""));
+    }
+
+    #[test]
+    fn zenduty_hmac_valid_signature() {
+        let secret = "whsec_zenduty_secret";
+        let body = b"{\"payload\":{\"event_type\":\"triggered\"}}";
+
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        let signature = STANDARD.encode(mac.finalize().into_bytes());
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-signature", signature.parse().unwrap());
+        assert!(verify_webhook(Some("zenduty"), secret, &headers, body));
+    }
+
+    #[test]
+    fn zenduty_hmac_wrong_signature_rejects() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-signature", "ZGVhZGJlZWY=".parse().unwrap());
+        assert!(!verify_webhook(
+            Some("zenduty"),
+            "whsec_abc",
+            &headers,
+            b"{}"
+        ));
+    }
+
+    #[test]
+    fn zenduty_hmac_missing_header_rejects() {
+        let headers = HeaderMap::new();
+        assert!(!verify_webhook(
+            Some("zenduty"),
+            "whsec_abc",
+            &headers,
+            b"{}"
+        ));
+    }
+
+    #[test]
+    fn zenduty_hmac_invalid_base64_rejects() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-signature", "not!valid!base64".parse().unwrap());
+        assert!(!verify_webhook(
+            Some("zenduty"),
+            "whsec_abc",
+            &headers,
+            b"{}"
+        ));
     }
 }
