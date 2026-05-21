@@ -14,11 +14,13 @@ use crate::workflow::definition::WorkflowStepDef;
 /// - `Errored`: at least one step hit an infrastructure-level error
 ///   (sandbox not ready, idle timeout, executor / agent error, etc.).
 ///   Errored takes precedence over Failed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "VARCHAR", rename_all = "snake_case")]
 pub enum WorkflowRunState {
     Pending,
     Running,
+    WaitingForEvent,
     Succeeded,
     Failed,
     Errored,
@@ -37,12 +39,16 @@ pub struct StepResult {
     /// `StepResult` rows hydrate cleanly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub skipped: Option<String>,
+    /// Set when the step is a `Wait` step parked on a provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_provider: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowStepState {
     Pending,
+    WaitingForEvent,
     Succeeded,
     Failed,
     Errored,
@@ -59,6 +65,8 @@ impl StepResult {
             WorkflowStepState::Failed
         } else if self.output.is_some() {
             WorkflowStepState::Succeeded
+        } else if self.waiting_provider.is_some() {
+            WorkflowStepState::WaitingForEvent
         } else {
             WorkflowStepState::Pending
         }
@@ -118,6 +126,17 @@ pub enum WorkflowRunEvent {
         /// the event for forensic visibility in `runs --include=steps`.
         condition_body: String,
         completed_at: DateTime<Utc>,
+    },
+    StepWaiting {
+        step_name: String,
+        provider: String,
+        started_at: DateTime<Utc>,
+    },
+    StepResumed {
+        step_name: String,
+        output: serde_json::Value,
+        source: String,
+        resumed_at: DateTime<Utc>,
     },
     RunCompleted {
         state: WorkflowRunState,
@@ -187,6 +206,7 @@ impl WorkflowRun {
                 error: None,
                 completed_at: None,
                 skipped: None,
+                waiting_provider: None,
             });
         }
         if self.state == WorkflowRunState::Pending {
@@ -225,6 +245,7 @@ impl WorkflowRun {
                 error: None,
                 completed_at: Some(now),
                 skipped: None,
+                waiting_provider: None,
             });
         }
         self.events.push(WorkflowRunEvent::StepCompleted {
@@ -271,6 +292,7 @@ impl WorkflowRun {
                 error: Some(error.clone()),
                 completed_at: Some(now),
                 skipped: None,
+                waiting_provider: None,
             });
         }
         if self.state == WorkflowRunState::Pending {
@@ -318,6 +340,7 @@ impl WorkflowRun {
                 error: None,
                 completed_at: Some(now),
                 skipped: Some(condition_body.clone()),
+                waiting_provider: None,
             });
         }
         if self.state == WorkflowRunState::Pending {
@@ -337,12 +360,16 @@ impl WorkflowRun {
     /// - else any agent-reported failure (`output.success == false`) → `Failed`
     /// - else → `Succeeded`
     ///
-    /// No-op if the run already reached a terminal state.
+    /// No-op if the run already reached a terminal state or is
+    /// parked on a wait step.
     pub fn run_completed(&mut self) -> Idempotent<()> {
         idempotency_guard!(
             self.events.iter_all().rev(),
             already_applied: WorkflowRunEvent::RunCompleted { .. },
         );
+        if self.state == WorkflowRunState::WaitingForEvent {
+            return Idempotent::AlreadyApplied;
+        }
         let state = if self.any_step_errored() {
             WorkflowRunState::Errored
         } else if self.any_step_reported_failure() {
@@ -358,6 +385,100 @@ impl WorkflowRun {
             completed_at: now,
         });
         Idempotent::Executed(())
+    }
+
+    /// Transitions Running → WaitingForEvent when the executor
+    /// reaches a Wait step.
+    pub fn step_waiting(&mut self, step_name: String, provider: String) -> Idempotent<()> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied:
+                WorkflowRunEvent::StepWaiting { step_name: n, .. } if n == &step_name,
+            already_applied:
+                WorkflowRunEvent::StepResumed { step_name: n, .. } if n == &step_name,
+            already_applied:
+                WorkflowRunEvent::StepCompleted { step_name: n, .. } if n == &step_name,
+            already_applied:
+                WorkflowRunEvent::StepErrored { step_name: n, .. } if n == &step_name,
+            already_applied:
+                WorkflowRunEvent::StepSkipped { step_name: n, .. } if n == &step_name,
+        );
+        let now = Utc::now();
+        if let Some(r) = self.step_results.iter_mut().find(|r| r.name == step_name) {
+            r.waiting_provider = Some(provider.clone());
+        } else {
+            self.step_results.push(StepResult {
+                name: step_name.clone(),
+                output: None,
+                error: None,
+                completed_at: None,
+                skipped: None,
+                waiting_provider: Some(provider.clone()),
+            });
+        }
+        self.state = WorkflowRunState::WaitingForEvent;
+        self.events.push(WorkflowRunEvent::StepWaiting {
+            step_name,
+            provider,
+            started_at: now,
+        });
+        Idempotent::Executed(())
+    }
+
+    /// Transitions WaitingForEvent → Running when an inbound event
+    /// matched the wait step's resume_condition.
+    pub fn step_resumed(
+        &mut self,
+        step_name: String,
+        output: serde_json::Value,
+        source: String,
+    ) -> Idempotent<()> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied:
+                WorkflowRunEvent::StepResumed { step_name: n, .. } if n == &step_name,
+            already_applied:
+                WorkflowRunEvent::StepCompleted { step_name: n, .. } if n == &step_name,
+            already_applied:
+                WorkflowRunEvent::StepErrored { step_name: n, .. } if n == &step_name,
+        );
+        let now = Utc::now();
+        if let Some(r) = self.step_results.iter_mut().find(|r| r.name == step_name) {
+            r.output = Some(output.clone());
+            r.completed_at = Some(now);
+            r.waiting_provider = None;
+        } else {
+            self.step_results.push(StepResult {
+                name: step_name.clone(),
+                output: Some(output.clone()),
+                error: None,
+                completed_at: Some(now),
+                skipped: None,
+                waiting_provider: None,
+            });
+        }
+        self.state = WorkflowRunState::Running;
+        self.events.push(WorkflowRunEvent::StepResumed {
+            step_name,
+            output,
+            source,
+            resumed_at: now,
+        });
+        Idempotent::Executed(())
+    }
+
+    /// Returns the step that is currently in WaitingForEvent state.
+    pub fn current_wait_step(&self) -> Option<&StepResult> {
+        if self.state != WorkflowRunState::WaitingForEvent {
+            return None;
+        }
+        self.step_results.iter().find(|r| {
+            r.waiting_provider.is_some()
+                && r.output.is_none()
+                && r.error.is_none()
+                && r.skipped.is_none()
+                && r.completed_at.is_none()
+        })
     }
 }
 
@@ -405,6 +526,7 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
                             error: None,
                             completed_at: None,
                             skipped: None,
+                            waiting_provider: None,
                         });
                     }
                 }
@@ -423,6 +545,7 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
                             error: None,
                             completed_at: Some(*ts),
                             skipped: None,
+                            waiting_provider: None,
                         });
                     }
                 }
@@ -442,6 +565,7 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
                             error: Some(error.clone()),
                             completed_at: Some(*ts),
                             skipped: None,
+                            waiting_provider: None,
                         });
                     }
                 }
@@ -461,6 +585,48 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
                             error: None,
                             completed_at: Some(*ts),
                             skipped: Some(condition_body.clone()),
+                            waiting_provider: None,
+                        });
+                    }
+                }
+                WorkflowRunEvent::StepWaiting {
+                    step_name,
+                    provider,
+                    ..
+                } => {
+                    state = WorkflowRunState::WaitingForEvent;
+                    if let Some(r) = results.iter_mut().find(|r| &r.name == step_name) {
+                        r.waiting_provider = Some(provider.clone());
+                    } else {
+                        results.push(StepResult {
+                            name: step_name.clone(),
+                            output: None,
+                            error: None,
+                            completed_at: None,
+                            skipped: None,
+                            waiting_provider: Some(provider.clone()),
+                        });
+                    }
+                }
+                WorkflowRunEvent::StepResumed {
+                    step_name,
+                    output,
+                    resumed_at,
+                    ..
+                } => {
+                    state = WorkflowRunState::Running;
+                    if let Some(r) = results.iter_mut().find(|r| &r.name == step_name) {
+                        r.output = Some(output.clone());
+                        r.completed_at = Some(*resumed_at);
+                        r.waiting_provider = None;
+                    } else {
+                        results.push(StepResult {
+                            name: step_name.clone(),
+                            output: Some(output.clone()),
+                            error: None,
+                            completed_at: Some(*resumed_at),
+                            skipped: None,
+                            waiting_provider: None,
                         });
                     }
                 }
@@ -497,6 +663,10 @@ pub struct NewWorkflowRun {
 impl NewWorkflowRun {
     pub fn builder() -> NewWorkflowRunBuilder {
         NewWorkflowRunBuilder::default().id(WorkflowRunId::new())
+    }
+
+    pub(crate) fn initial_state(&self) -> WorkflowRunState {
+        WorkflowRunState::Pending
     }
 }
 
@@ -871,5 +1041,216 @@ mod tests {
         // event in the same way StepStarted drives it, so a run
         // hydrated mid-flight reflects the live state.
         assert_eq!(rehydrated.state, WorkflowRunState::Running);
+    }
+
+    // ── Wait step tests ──
+
+    #[test]
+    fn step_waiting_transitions_running_to_waiting_for_event() {
+        let mut run = fresh_run(&["a", "wait_step"]);
+        start(&mut run, "a");
+        complete(&mut run, "a", json!({ "success": true }));
+        assert_eq!(run.state, WorkflowRunState::Running);
+
+        run.step_waiting("wait_step".into(), "github_app".into())
+            .did_execute();
+        assert_eq!(run.state, WorkflowRunState::WaitingForEvent);
+        assert_eq!(run.step_results.len(), 2);
+        assert_eq!(
+            run.step_results[1].waiting_provider.as_deref(),
+            Some("github_app")
+        );
+        assert!(run.step_results[1].output.is_none());
+        assert!(run.step_results[1].completed_at.is_none());
+    }
+
+    #[test]
+    fn step_waiting_transitions_pending_to_waiting_for_event() {
+        let mut run = fresh_run(&["wait_step"]);
+        run.step_waiting("wait_step".into(), "github_app".into())
+            .did_execute();
+        assert_eq!(run.state, WorkflowRunState::WaitingForEvent);
+    }
+
+    #[test]
+    fn step_resumed_transitions_waiting_to_running() {
+        let mut run = fresh_run(&["wait_step", "after"]);
+        run.step_waiting("wait_step".into(), "github_app".into())
+            .did_execute();
+        assert_eq!(run.state, WorkflowRunState::WaitingForEvent);
+
+        let output = json!({ "reviewer": "alice", "action": "approved" });
+        run.step_resumed(
+            "wait_step".into(),
+            output.clone(),
+            "provider:github_app".into(),
+        )
+        .did_execute();
+        assert_eq!(run.state, WorkflowRunState::Running);
+        let sr = &run.step_results[0];
+        assert_eq!(sr.output.as_ref(), Some(&output));
+        assert!(sr.completed_at.is_some());
+        assert!(sr.waiting_provider.is_none());
+    }
+
+    #[test]
+    fn step_waiting_is_idempotent() {
+        let mut run = fresh_run(&["wait_step"]);
+        run.step_waiting("wait_step".into(), "github_app".into())
+            .did_execute();
+        let outcome = run.step_waiting("wait_step".into(), "github_app".into());
+        assert!(matches!(outcome, Idempotent::AlreadyApplied));
+    }
+
+    #[test]
+    fn step_resumed_is_idempotent() {
+        let mut run = fresh_run(&["wait_step"]);
+        run.step_waiting("wait_step".into(), "github_app".into())
+            .did_execute();
+        run.step_resumed("wait_step".into(), json!({}), "provider:github_app".into())
+            .did_execute();
+        let outcome = run.step_resumed("wait_step".into(), json!({}), "provider:github_app".into());
+        assert!(matches!(outcome, Idempotent::AlreadyApplied));
+    }
+
+    #[test]
+    fn step_waiting_and_resumed_hydrate_from_events() {
+        let mut run = fresh_run(&["wait_step"]);
+        run.step_waiting("wait_step".into(), "github_app".into())
+            .did_execute();
+        let output = json!({ "reviewer": "bob" });
+        run.step_resumed(
+            "wait_step".into(),
+            output.clone(),
+            "provider:github_app".into(),
+        )
+        .did_execute();
+
+        let events = run.events;
+        let rehydrated = WorkflowRun::try_from_events(events).unwrap();
+        assert_eq!(rehydrated.state, WorkflowRunState::Running);
+        assert_eq!(rehydrated.step_results.len(), 1);
+        let sr = &rehydrated.step_results[0];
+        assert_eq!(sr.output.as_ref(), Some(&output));
+        assert!(sr.completed_at.is_some());
+        assert!(sr.waiting_provider.is_none());
+    }
+
+    #[test]
+    fn step_waiting_hydrates_as_waiting_for_event() {
+        let mut run = fresh_run(&["wait_step"]);
+        run.step_waiting("wait_step".into(), "github_app".into())
+            .did_execute();
+
+        let events = run.events;
+        let rehydrated = WorkflowRun::try_from_events(events).unwrap();
+        assert_eq!(rehydrated.state, WorkflowRunState::WaitingForEvent);
+        assert_eq!(rehydrated.step_results.len(), 1);
+        assert_eq!(
+            rehydrated.step_results[0].waiting_provider.as_deref(),
+            Some("github_app")
+        );
+        assert!(rehydrated.step_results[0].output.is_none());
+    }
+
+    #[test]
+    fn run_completed_is_noop_when_waiting_for_event() {
+        let mut run = fresh_run(&["wait_step"]);
+        run.step_waiting("wait_step".into(), "github_app".into())
+            .did_execute();
+        let outcome = run.run_completed();
+        assert!(matches!(outcome, Idempotent::AlreadyApplied));
+        assert_eq!(run.state, WorkflowRunState::WaitingForEvent);
+        assert!(run.completed_at.is_none());
+    }
+
+    #[test]
+    fn current_wait_step_returns_waiting_step() {
+        let mut run = fresh_run(&["a", "wait_step"]);
+        start(&mut run, "a");
+        complete(&mut run, "a", json!({ "success": true }));
+        run.step_waiting("wait_step".into(), "github_app".into())
+            .did_execute();
+
+        let ws = run.current_wait_step().expect("should find waiting step");
+        assert_eq!(ws.name, "wait_step");
+        assert_eq!(ws.waiting_provider.as_deref(), Some("github_app"));
+    }
+
+    #[test]
+    fn current_wait_step_returns_none_when_not_waiting() {
+        let mut run = fresh_run(&["a"]);
+        start(&mut run, "a");
+        complete(&mut run, "a", json!({ "success": true }));
+        assert!(run.current_wait_step().is_none());
+    }
+
+    #[test]
+    fn full_lifecycle_pending_running_waiting_running_succeeded() {
+        let mut run = fresh_run(&["pre", "wait_step", "post"]);
+
+        start(&mut run, "pre");
+        complete(&mut run, "pre", json!({ "success": true }));
+        assert_eq!(run.state, WorkflowRunState::Running);
+
+        run.step_waiting("wait_step".into(), "github_app".into())
+            .did_execute();
+        assert_eq!(run.state, WorkflowRunState::WaitingForEvent);
+
+        run.step_resumed(
+            "wait_step".into(),
+            json!({ "approved": true }),
+            "provider:github_app".into(),
+        )
+        .did_execute();
+        assert_eq!(run.state, WorkflowRunState::Running);
+
+        start(&mut run, "post");
+        complete(&mut run, "post", json!({ "success": true }));
+        assert_eq!(finalize(&mut run), WorkflowRunState::Succeeded);
+    }
+
+    #[test]
+    fn step_waiting_event_wire_format() {
+        let ev = WorkflowRunEvent::StepWaiting {
+            step_name: "approval".into(),
+            provider: "github_app".into(),
+            started_at: Utc::now(),
+        };
+        let v = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v.get("type").and_then(|t| t.as_str()), Some("step_waiting"));
+        assert_eq!(
+            v.get("provider").and_then(|p| p.as_str()),
+            Some("github_app")
+        );
+    }
+
+    #[test]
+    fn step_resumed_event_wire_format() {
+        let ev = WorkflowRunEvent::StepResumed {
+            step_name: "approval".into(),
+            output: json!({ "reviewer": "alice" }),
+            source: "provider:github_app".into(),
+            resumed_at: Utc::now(),
+        };
+        let v = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v.get("type").and_then(|t| t.as_str()), Some("step_resumed"));
+        assert_eq!(
+            v.get("source").and_then(|s| s.as_str()),
+            Some("provider:github_app")
+        );
+    }
+
+    #[test]
+    fn step_state_waiting_for_event() {
+        let sr = StepResult {
+            name: "w".into(),
+            output: None,
+            error: None,
+            completed_at: None,
+            skipped: None,
+            waiting_provider: Some("github_app".into()),
+        };
+        assert_eq!(sr.step_state(), WorkflowStepState::WaitingForEvent);
     }
 }

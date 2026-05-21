@@ -12,6 +12,12 @@ use super::entity::*;
     columns(
         project_id(ty = "ProjectId", list_for(by(created_at))),
         definition_id(ty = "WorkflowDefinitionId", list_for(by(created_at))),
+        state(
+            ty = "WorkflowRunState",
+            list_for(by(created_at)),
+            create(accessor = "initial_state()"),
+            update(accessor = "state")
+        ),
     ),
     delete = "soft_without_queries"
 )]

@@ -255,6 +255,15 @@ enum WorkflowStepYaml {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         condition: Option<String>,
     },
+    Wait {
+        name: String,
+        provider: String,
+        resume_condition: String,
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        outputs: std::collections::BTreeMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        condition: Option<String>,
+    },
 }
 
 impl WorkflowStepYaml {
@@ -292,6 +301,19 @@ impl WorkflowStepYaml {
                 timeout_seconds: *timeout_seconds,
                 condition: condition.clone(),
             },
+            WorkflowStepDef::Wait {
+                name,
+                provider,
+                resume_condition,
+                outputs,
+                condition,
+            } => WorkflowStepYaml::Wait {
+                name: name.clone(),
+                provider: provider.clone(),
+                resume_condition: resume_condition.clone(),
+                outputs: outputs.clone(),
+                condition: condition.clone(),
+            },
         }
     }
 
@@ -327,6 +349,19 @@ impl WorkflowStepYaml {
                 tool,
                 params,
                 timeout_seconds,
+                condition,
+            },
+            WorkflowStepYaml::Wait {
+                name,
+                provider,
+                resume_condition,
+                outputs,
+                condition,
+            } => WorkflowStepDef::Wait {
+                name,
+                provider,
+                resume_condition,
+                outputs,
                 condition,
             },
         }

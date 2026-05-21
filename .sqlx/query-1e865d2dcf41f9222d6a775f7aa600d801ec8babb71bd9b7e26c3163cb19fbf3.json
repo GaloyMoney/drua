@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "WITH entities AS (SELECT created_at, id FROM workflow_runs WHERE COALESCE(project_id = $1, $1 IS NULL) AND COALESCE(definition_id = $2, $2 IS NULL) AND (COALESCE((created_at, id) > ($5, $4), $4 IS NULL)) AND deleted = FALSE ORDER BY created_at ASC, id ASC LIMIT $3) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $6 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN workflow_run_events e ON i.id = e.id ORDER BY i.created_at asc, i.id asc, i.id, e.sequence",
+  "query": "WITH entities AS (SELECT id FROM workflow_runs WHERE state = $1 AND deleted = FALSE) SELECT i.id AS \"entity_id: Repo__Id\", e.sequence, e.event, CASE WHEN $2 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at FROM entities i JOIN workflow_run_events e ON i.id = e.id ORDER BY i.id, e.sequence",
   "describe": {
     "columns": [
       {
@@ -31,11 +31,7 @@
     ],
     "parameters": {
       "Left": [
-        "Uuid",
-        "Uuid",
-        "Int8",
-        "Uuid",
-        "Timestamptz",
+        "Text",
         "Bool"
       ]
     },
@@ -47,5 +43,5 @@
       false
     ]
   },
-  "hash": "bc38fc728183a7073d34c605e8801a7b898d9e8b07fbfc2ce428eac53b8e7d95"
+  "hash": "1e865d2dcf41f9222d6a775f7aa600d801ec8babb71bd9b7e26c3163cb19fbf3"
 }

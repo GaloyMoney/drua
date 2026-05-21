@@ -84,49 +84,67 @@ struct BuiltContext {
     cel: Context<'static>,
 }
 
+/// Bind `trigger` and `steps` — the two roots shared by every
+/// evaluation context. Null/non-object payloads are coerced to `{}`
+/// so `trigger.payload.X` resolves to `null` instead of CEL's
+/// surprising `Bool(false)`.
+fn build_base_cel_context(
+    trigger: &Value,
+    steps: &std::collections::HashMap<String, Value>,
+) -> Result<Context<'static>, TemplateError> {
+    let mut ctx = Context::default();
+    let payload = match trigger {
+        Value::Object(_) => trigger.clone(),
+        _ => Value::Object(serde_json::Map::new()),
+    };
+    let trigger_value = serde_json::json!({ "payload": payload });
+    ctx.add_variable("trigger", trigger_value)
+        .map_err(|e| TemplateError::Resolve("<context>".to_string(), format!("trigger: {e}")))?;
+    let steps_value = Value::Object(
+        steps
+            .iter()
+            .map(|(k, v)| {
+                let mut wrapper = serde_json::Map::with_capacity(1);
+                wrapper.insert("outputs".to_string(), v.clone());
+                (k.clone(), Value::Object(wrapper))
+            })
+            .collect(),
+    );
+    ctx.add_variable("steps", steps_value)
+        .map_err(|e| TemplateError::Resolve("<context>".to_string(), format!("steps: {e}")))?;
+    Ok(ctx)
+}
+
+fn evaluate_condition_with_built(
+    built: &BuiltContext,
+    body: &str,
+) -> Result<ConditionOutcome, TemplateError> {
+    let trimmed = body.trim();
+    let raw = format!("{OPEN} {trimmed} {CLOSE}");
+    if trimmed.is_empty() {
+        return Err(TemplateError::EmptyPath(raw));
+    }
+    let program = Program::compile(trimmed)
+        .map_err(|e| TemplateError::Compile(raw.clone(), e.to_string()))?;
+    let value = program
+        .execute(&built.cel)
+        .map_err(|e| TemplateError::Resolve(raw.clone(), e.to_string()))?;
+    let json = value
+        .json()
+        .map_err(|e| TemplateError::JsonConvert(raw.clone(), e.to_string()))?;
+    Ok(match json {
+        Value::Bool(true) => ConditionOutcome::True,
+        Value::Bool(false) => ConditionOutcome::False,
+        other => ConditionOutcome::NotBoolean(
+            serde_json::to_string(&other).unwrap_or_else(|_| "<?>".to_string()),
+        ),
+    })
+}
+
 impl TemplateContext<'_> {
     fn build_cel_context(&self) -> Result<BuiltContext, TemplateError> {
-        let mut ctx = Context::default();
-        // GHA / Swamp convention: `${{ trigger.payload.X }}` for the
-        // run's user payload, leaving room for future trigger
-        // metadata (`trigger.received_at`, etc.) without breaking
-        // existing references. The executor passes the raw payload;
-        // wrapping happens here so callers don't have to.
-        //
-        // Null / non-object payloads (manual `trigger` with no
-        // arguments, webhook with empty body, …) are coerced to an
-        // empty object before binding. Without this, CEL evaluates
-        // `null.field` to `Bool(false)` rather than raising
-        // `NoSuchKey`, and the `false` ends up spliced into the
-        // params tree — surprising the consuming tool with a bool
-        // where it expected a string. The empty-object form lets
-        // every `trigger.payload.X` reference resolve cleanly to
-        // `null` via the existing missing-key path.
-        let payload = match &self.trigger {
-            Value::Object(_) => self.trigger.clone(),
-            _ => Value::Object(serde_json::Map::new()),
-        };
-        let trigger_value = serde_json::json!({ "payload": payload });
-        ctx.add_variable("trigger", trigger_value).map_err(|e| {
-            TemplateError::Resolve("<context>".to_string(), format!("trigger: {e}"))
-        })?;
-        // Same convention for `${{ steps.<id>.outputs.<field> }}` —
-        // wrap each step's recorded output under an `outputs` key so
-        // the literal namespace traverses naturally as a CEL field
-        // access.
-        let steps_value = Value::Object(
-            self.steps
-                .iter()
-                .map(|(k, v)| {
-                    let mut wrapper = serde_json::Map::with_capacity(1);
-                    wrapper.insert("outputs".to_string(), v.clone());
-                    (k.clone(), Value::Object(wrapper))
-                })
-                .collect(),
-        );
-        ctx.add_variable("steps", steps_value)
-            .map_err(|e| TemplateError::Resolve("<context>".to_string(), format!("steps: {e}")))?;
-        Ok(BuiltContext { cel: ctx })
+        let cel = build_base_cel_context(self.trigger, self.steps)?;
+        Ok(BuiltContext { cel })
     }
 
     /// `None` when the path doesn't exist at this point in time
@@ -157,29 +175,40 @@ impl TemplateContext<'_> {
         substitute_in_string_with_built(s, &built)
     }
 
-    /// Compile and evaluate a step `condition:` body in this
-    /// context — single entry point for the executor's gate. Returns
-    /// `Ok(ConditionOutcome::True/False)` on a clean boolean,
-    /// `Ok(ConditionOutcome::NotBoolean(rendered))` when the body
-    /// evaluated cleanly but produced a non-boolean (caller turns
-    /// this into a `StepErrored`), and `Err(TemplateError)` for
-    /// compile errors and CEL runtime errors (type mismatch,
-    /// reference to an unknown identifier, etc.).
-    ///
-    /// Compiles the CEL expression exactly once. The static
-    /// parse-time checks (`parse_path` body shape + `validate_root`
-    /// identifier scope) are workflow create/update concerns —
-    /// `Workflows::validate_steps` runs them via `parse_condition`
-    /// before any run is ever spawned. By the time this method
-    /// runs, the body is known-good against those static rules; an
-    /// `Err` here is a CEL evaluation failure (or, defensively, a
-    /// recompile failure).
-    ///
-    /// Truthy-coercion (treating `0`, `""`, `null`, etc. as false)
-    /// is intentionally NOT supported — non-boolean bodies surface
-    /// as `ConditionOutcome::NotBoolean` so authors fix the typing.
     pub fn evaluate_condition(&self, body: &str) -> Result<ConditionOutcome, TemplateError> {
-        let trimmed = body.trim();
+        let built = self.build_cel_context()?;
+        evaluate_condition_with_built(&built, body)
+    }
+}
+
+/// Extended context for evaluating wait step `resume_condition` and
+/// `extract` expressions. Adds a `resume_payload` root variable bound
+/// to the inbound webhook body that matched the wait step.
+pub struct ResumeContext<'a> {
+    pub trigger: &'a Value,
+    pub steps: &'a std::collections::HashMap<String, Value>,
+    pub resume_payload: &'a Value,
+}
+
+impl ResumeContext<'_> {
+    fn build_cel_context(&self) -> Result<BuiltContext, TemplateError> {
+        let mut cel = build_base_cel_context(self.trigger, self.steps)?;
+        cel.add_variable("resume_payload", self.resume_payload.clone())
+            .map_err(|e| {
+                TemplateError::Resolve("<context>".to_string(), format!("resume_payload: {e}"))
+            })?;
+        Ok(BuiltContext { cel })
+    }
+
+    pub fn evaluate_condition(&self, body: &str) -> Result<ConditionOutcome, TemplateError> {
+        let built = self.build_cel_context()?;
+        evaluate_condition_with_built(&built, body)
+    }
+
+    /// Evaluate a CEL expression in the resume context and return
+    /// the result as a JSON value.
+    pub fn evaluate_extract(&self, expr: &str) -> Result<Value, TemplateError> {
+        let trimmed = expr.trim();
         let raw = format!("{OPEN} {trimmed} {CLOSE}");
         if trimmed.is_empty() {
             return Err(TemplateError::EmptyPath(raw));
@@ -190,16 +219,9 @@ impl TemplateContext<'_> {
         let value = program
             .execute(&built.cel)
             .map_err(|e| TemplateError::Resolve(raw.clone(), e.to_string()))?;
-        let json = value
+        value
             .json()
-            .map_err(|e| TemplateError::JsonConvert(raw.clone(), e.to_string()))?;
-        Ok(match json {
-            Value::Bool(true) => ConditionOutcome::True,
-            Value::Bool(false) => ConditionOutcome::False,
-            other => ConditionOutcome::NotBoolean(
-                serde_json::to_string(&other).unwrap_or_else(|_| "<?>".to_string()),
-            ),
-        })
+            .map_err(|e| TemplateError::JsonConvert(raw.clone(), e.to_string()))
     }
 }
 
@@ -289,19 +311,35 @@ pub fn evaluate_trigger_condition(
     ctx.evaluate_condition(body)
 }
 
-/// Reject expressions that reference identifiers other than the two
-/// bound namespaces (`trigger`, `steps`). Stops mistakes like
-/// `${{ env.HOME }}` from compiling cleanly only to silently resolve
-/// to nothing at runtime.
-pub fn validate_root(r: &TemplateRef) -> Result<(), TemplateError> {
+/// Reject expressions that reference identifiers other than the
+/// bound namespaces. `allowed` lists every legal root for the
+/// context (`trigger`, `steps`, optionally `resume_payload`).
+fn validate_root_inner(r: &TemplateRef, allowed: &[&str]) -> Result<(), TemplateError> {
     let program = Program::compile(&r.body)
         .map_err(|e| TemplateError::Compile(r.raw.clone(), e.to_string()))?;
     for ident in program.references().variables() {
-        if ident != "trigger" && ident != "steps" {
+        if !allowed.contains(&ident) {
             return Err(TemplateError::UnknownRoot(r.raw.clone(), ident.to_string()));
         }
     }
     Ok(())
+}
+
+pub fn validate_root(r: &TemplateRef) -> Result<(), TemplateError> {
+    validate_root_inner(r, &["trigger", "steps"])
+}
+
+pub fn validate_resume_root(r: &TemplateRef) -> Result<(), TemplateError> {
+    validate_root_inner(r, &["trigger", "steps", "resume_payload"])
+}
+
+/// Compile-time parse + root validation for a wait step
+/// `resume_condition`. Like [`parse_condition`] but additionally
+/// allows `resume_payload` as a root.
+pub fn parse_resume_condition(body: &str) -> Result<TemplateRef, TemplateError> {
+    let r = parse_path(body)?;
+    validate_resume_root(&r)?;
+    Ok(r)
 }
 
 /// Names of every step referenced via `steps.<name>` in the

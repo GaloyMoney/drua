@@ -42,6 +42,7 @@ pub struct ProviderFanOutResult {
     pub triggered: usize,
     pub filtered: usize,
     pub errored: usize,
+    pub resumed: usize,
 }
 
 use cron_job::{cron_queue_id, TriggerCronConfig, TriggerCronJobInitializer};
@@ -56,6 +57,26 @@ const AUDIT_ACTION_TRIGGER_FILTERED: &str = "workflow.trigger_filtered";
 /// Audit action recorded when a `trigger.condition:` errors at
 /// runtime (compile, runtime, non-boolean result).
 const AUDIT_ACTION_TRIGGER_CONDITION_ERRORED: &str = "workflow.trigger_condition_errored";
+
+/// Evaluate each output's CEL expression against the resume context.
+/// Failed expressions log a warning and produce `null` for that key.
+fn extract_wait_output(
+    ctx: &template::ResumeContext<'_>,
+    outputs: &std::collections::BTreeMap<String, String>,
+) -> serde_json::Value {
+    let mut out = serde_json::Map::with_capacity(outputs.len());
+    for (key, expr) in outputs {
+        let value = match ctx.evaluate_extract(expr) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(key, expr, error = %e, "output CEL evaluation failed");
+                serde_json::Value::Null
+            }
+        };
+        out.insert(key.clone(), value);
+    }
+    serde_json::Value::Object(out)
+}
 
 /// SHA-256 hex digest of the JSON-encoded trigger context. Stored
 /// in audit metadata so operators can correlate filtered events
@@ -134,13 +155,11 @@ fn is_cel_identifier(s: &str) -> bool {
 /// Reject `${{ steps.X.outputs.… }}` refs whose `X` hasn't been
 /// validated yet. Trigger refs always pass (provider payload schema
 /// validation deferred — memo `019e01a4` open Q6).
-fn validate_ref_against_prior_steps(
+fn reject_forward_step_refs(
     step_name: &str,
     r: &TemplateRef,
     seen: &std::collections::HashSet<String>,
 ) -> Result<(), WorkflowError> {
-    template::validate_root(r)
-        .map_err(|e| WorkflowError::InvalidTemplateRef(format!("step '{step_name}': {e}")))?;
     for target in template::referenced_step_names(r) {
         if !seen.contains(&target) {
             return Err(WorkflowError::InvalidTemplateRef(format!(
@@ -150,6 +169,16 @@ fn validate_ref_against_prior_steps(
         }
     }
     Ok(())
+}
+
+fn validate_ref_against_prior_steps(
+    step_name: &str,
+    r: &TemplateRef,
+    seen: &std::collections::HashSet<String>,
+) -> Result<(), WorkflowError> {
+    template::validate_root(r)
+        .map_err(|e| WorkflowError::InvalidTemplateRef(format!("step '{step_name}': {e}")))?;
+    reject_forward_step_refs(step_name, r, seen)
 }
 
 #[derive(Clone)]
@@ -438,6 +467,34 @@ impl Workflows {
                     // `OutputSchema` enforces the `type: "object"` root
                     // invariant at construction/deserialization
                     // (memo 019dfc8c). Bad schemas can't reach here.
+                }
+                WorkflowStepDef::Wait {
+                    name,
+                    provider,
+                    resume_condition,
+                    outputs,
+                    ..
+                } => {
+                    if provider.is_empty() {
+                        return Err(WorkflowError::InvalidStep(format!(
+                            "wait step '{name}': `provider` must be a non-empty string"
+                        )));
+                    }
+                    let r =
+                        template::parse_resume_condition(resume_condition.trim()).map_err(|e| {
+                            WorkflowError::InvalidCondition(format!(
+                                "wait step '{name}': resume_condition: {e}"
+                            ))
+                        })?;
+                    reject_forward_step_refs(name, &r, &seen_step_names)?;
+                    for (key, expr) in outputs {
+                        let r = template::parse_resume_condition(expr.trim()).map_err(|e| {
+                            WorkflowError::InvalidTemplateRef(format!(
+                                "wait step '{name}': outputs.{key}: {e}"
+                            ))
+                        })?;
+                        reject_forward_step_refs(name, &r, &seen_step_names)?;
+                    }
                 }
                 WorkflowStepDef::ToolStep {
                     name, tool, params, ..
@@ -850,7 +907,127 @@ impl Workflows {
             triggered,
             filtered,
             errored,
+            resumed: 0,
         })
+    }
+
+    /// Try to resume parked runs whose wait step matches the inbound
+    /// event. Returns the number of runs resumed.
+    #[instrument(name = "core.workflow.try_resume_by_provider", skip_all)]
+    pub async fn try_resume_by_provider(
+        &self,
+        provider: &str,
+        event: &serde_json::Value,
+    ) -> Result<usize, WorkflowError> {
+        let mut resumed = 0usize;
+        let mut query = es_entity::PaginatedQueryArgs {
+            first: 100,
+            after: None,
+        };
+        loop {
+            let mut result = self
+                .run_repo
+                .list_for_state_by_created_at(
+                    WorkflowRunState::WaitingForEvent,
+                    query,
+                    es_entity::ListDirection::Descending,
+                )
+                .await?;
+
+            for mut run in result.entities.drain(..) {
+                let wait_step_name = match run.current_wait_step() {
+                    Some(sr) => sr.name.clone(),
+                    None => continue,
+                };
+
+                let wait_def = run
+                    .steps_snapshot
+                    .iter()
+                    .find(|s| s.name() == wait_step_name);
+
+                let (step_provider, resume_condition, outputs) = match wait_def {
+                    Some(WorkflowStepDef::Wait {
+                        provider: p,
+                        resume_condition,
+                        outputs,
+                        ..
+                    }) => (p.as_str(), resume_condition.as_str(), outputs),
+                    _ => continue,
+                };
+
+                if !step_provider.eq_ignore_ascii_case(provider) {
+                    continue;
+                }
+
+                let step_outputs: std::collections::HashMap<String, serde_json::Value> = run
+                    .step_results
+                    .iter()
+                    .map(|r| {
+                        let val = r.output.clone().unwrap_or(serde_json::Value::Null);
+                        (r.name.clone(), val)
+                    })
+                    .collect();
+
+                let ctx = template::ResumeContext {
+                    trigger: &run.trigger_context,
+                    steps: &step_outputs,
+                    resume_payload: event,
+                };
+
+                match ctx.evaluate_condition(resume_condition) {
+                    Ok(template::ConditionOutcome::True) => {}
+                    Ok(outcome) => {
+                        tracing::debug!(run_id = %run.id, ?outcome, "resume_condition not satisfied");
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::warn!(run_id = %run.id, err = %e, "resume_condition evaluation failed");
+                        continue;
+                    }
+                }
+
+                let extracted = extract_wait_output(&ctx, outputs);
+
+                let source = format!("provider:{provider}");
+                if run
+                    .step_resumed(wait_step_name, extracted, source)
+                    .did_execute()
+                {
+                    match self.commit_resume(&mut run).await {
+                        Ok(()) => {
+                            tracing::info!(run_id = %run.id, "resumed parked run");
+                            resumed += 1;
+                        }
+                        Err(e) => {
+                            tracing::warn!(run_id = %run.id, err = %e, "failed to commit resume");
+                        }
+                    }
+                }
+            }
+
+            match result.into_next_query() {
+                Some(next) => query = next,
+                None => break,
+            }
+        }
+        Ok(resumed)
+    }
+
+    async fn commit_resume(&self, run: &mut WorkflowRun) -> Result<(), WorkflowError> {
+        let mut op = self.run_repo.begin_op().await?;
+        self.run_repo.update_in_op(&mut op, run).await?;
+        let queue_id = format!("workflow:{}", run.definition_id);
+        self.execute_run_spawner
+            .spawn_with_queue_id_in_op(
+                &mut op,
+                run.id,
+                ExecuteRunConfig { run_id: run.id },
+                &queue_id,
+            )
+            .await
+            .map_err(|e| WorkflowError::Job(e.to_string()))?;
+        op.commit().await?;
+        Ok(())
     }
 
     async fn spawn_run(

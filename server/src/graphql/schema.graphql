@@ -807,6 +807,7 @@ enum WorkflowRunState {
 	PENDING
 	RUNNING
 	SUCCEEDED
+	WAITING_FOR_EVENT
 }
 
 type WorkflowSandbox {
@@ -829,6 +830,10 @@ type WorkflowStep {
 	condition: String
 	name: String!
 	outputSchema: Json
+	"""
+	Wait-step `outputs` map serialized as `{ name: cel_expr }`.
+	"""
+	outputs: Json
 	sandbox: String
 	sandboxMode: SandboxAttachmentMode
 	skill: String
@@ -852,11 +857,13 @@ enum WorkflowStepState {
 	PENDING
 	SKIPPED
 	SUCCEEDED
+	WAITING_FOR_EVENT
 }
 
 enum WorkflowStepType {
 	AGENT_STEP
 	TOOL_STEP
+	WAIT
 }
 
 type WorkflowTrigger {

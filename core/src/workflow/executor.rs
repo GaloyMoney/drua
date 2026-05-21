@@ -232,6 +232,18 @@ impl Executor {
                 }
             }
 
+            if let WorkflowStepDef::Wait { provider, .. } = step {
+                if run
+                    .step_waiting(step_name.clone(), provider.clone())
+                    .did_execute()
+                {
+                    self.runs.update(&mut run).await?;
+                }
+                self.suspend_workflow_sandboxes(project_id, workflow_id, &borrowed_preexisting)
+                    .await;
+                return Ok(());
+            }
+
             if run.step_started(step_name.clone()).did_execute() {
                 self.runs.update(&mut run).await?;
             }
@@ -635,6 +647,12 @@ impl Executor {
                 )
                 .await
             }
+            // Wait steps are handled in the main loop before reaching
+            // execute_step; this arm should be unreachable.
+            WorkflowStepDef::Wait { name, .. } => Err(WorkflowError::StepErrored {
+                step: name.clone(),
+                reason: "wait step reached execute_step unexpectedly".into(),
+            }),
         }
     }
 

@@ -159,6 +159,8 @@ pub struct WorkflowStep {
     timeout_seconds: Option<i32>,
     condition: Option<String>,
     output_schema: Option<JsonValue>,
+    /// Wait-step `outputs` map serialized as `{ name: cel_expr }`.
+    outputs: Option<JsonValue>,
 }
 
 impl From<&DomainWorkflowStepDef> for WorkflowStep {
@@ -185,6 +187,7 @@ impl From<&DomainWorkflowStepDef> for WorkflowStep {
                 output_schema: serde_json::to_value(output_schema.root_schema())
                     .ok()
                     .map(Into::into),
+                outputs: None,
             },
             DomainWorkflowStepDef::ToolStep {
                 name,
@@ -202,6 +205,24 @@ impl From<&DomainWorkflowStepDef> for WorkflowStep {
                 timeout_seconds: timeout_seconds.map(|s| s.min(i32::MAX as u64) as i32),
                 condition: condition.clone(),
                 output_schema: None,
+                outputs: None,
+            },
+            DomainWorkflowStepDef::Wait {
+                name,
+                condition,
+                outputs,
+                ..
+            } => Self {
+                name: name.clone(),
+                step_type: WorkflowStepType::Wait,
+                skill: None,
+                tool: None,
+                sandbox: None,
+                sandbox_mode: None,
+                timeout_seconds: None,
+                condition: condition.clone(),
+                output_schema: None,
+                outputs: serde_json::to_value(outputs).ok().map(Into::into),
             },
         }
     }
@@ -211,6 +232,7 @@ impl From<&DomainWorkflowStepDef> for WorkflowStep {
 pub enum WorkflowStepType {
     AgentStep,
     ToolStep,
+    Wait,
 }
 
 #[derive(SimpleObject, Clone)]
@@ -336,6 +358,7 @@ impl From<DomainWorkflowRun> for WorkflowRun {
 pub enum WorkflowRunState {
     Pending,
     Running,
+    WaitingForEvent,
     Succeeded,
     Failed,
     Errored,
@@ -346,6 +369,7 @@ impl From<DomainWorkflowRunState> for WorkflowRunState {
         match state {
             DomainWorkflowRunState::Pending => Self::Pending,
             DomainWorkflowRunState::Running => Self::Running,
+            DomainWorkflowRunState::WaitingForEvent => Self::WaitingForEvent,
             DomainWorkflowRunState::Succeeded => Self::Succeeded,
             DomainWorkflowRunState::Failed => Self::Failed,
             DomainWorkflowRunState::Errored => Self::Errored,
@@ -380,6 +404,7 @@ impl From<DomainWorkflowStepState> for WorkflowStepState {
     fn from(state: DomainWorkflowStepState) -> Self {
         match state {
             DomainWorkflowStepState::Pending => Self::Pending,
+            DomainWorkflowStepState::WaitingForEvent => Self::WaitingForEvent,
             DomainWorkflowStepState::Succeeded => Self::Succeeded,
             DomainWorkflowStepState::Failed => Self::Failed,
             DomainWorkflowStepState::Errored => Self::Errored,
@@ -391,6 +416,7 @@ impl From<DomainWorkflowStepState> for WorkflowStepState {
 #[derive(Enum, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowStepState {
     Pending,
+    WaitingForEvent,
     Succeeded,
     Failed,
     Errored,
@@ -425,6 +451,7 @@ mod tests {
             error: None,
             completed_at: None,
             skipped: None,
+            waiting_provider: None,
         }
     }
 
