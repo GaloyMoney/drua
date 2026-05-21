@@ -432,10 +432,9 @@ sandbox:
       - name: nixos
         url: https://cache.nixos.org
         publicKey: cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
-  ## Forward HTTPS proxy for the nix daemon inside sandbox pods. Allows
-  ## nix to fetch flake input sources (e.g. GitHub tarballs) through a
-  ## CONNECT-capable proxy with a domain allowlist. Only the nix daemon
-  ## process uses the proxy — the agent shell has no proxy env vars.
+  ## Forward HTTPS proxy for nix inside sandbox pods. All nix binaries
+  ## are wrapped to inject http_proxy from DRUA_FORWARD_PROXY_URL —
+  ## the agent shell (curl, cargo, npm) has no proxy env vars.
   ## Separate from nixCacheProxy (reverse cache for binary substitutes).
   forwardProxy:
     enabled: true
@@ -462,6 +461,9 @@ sandbox:
       - "^github\\.com$"
       - "^.*\\.github\\.com$"
       - "^.*\\.githubusercontent\\.com$"
+      - "^static\\.rust-lang\\.org$"
+      - "^tarballs\\.nixos\\.org$"
+      - "^static\\.crates\\.io$"
   ## Optional Nix netrc file for authenticated binary caches, such as a
   ## private Cachix cache. When enabled, `netrc-file = <mountPath>` is added
   ## to sandbox NIX_CONFIG and the Secret is mounted into the sandbox
