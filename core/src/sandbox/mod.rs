@@ -1012,6 +1012,12 @@ impl Sandboxes {
     /// pass only the fields they want changed; unset fields are
     /// preserved as-of the in-transaction load so a concurrent resize
     /// can't make a CPU-only request look like a disk shrink.
+    ///
+    /// The PVC patch runs *after* the DB commit on purpose: a grown
+    /// PVC can't be shrunk back, so applying it before commit would
+    /// leave the cluster ahead of the entity row on commit failure.
+    /// `resize_in_op` therefore only writes the DB; this wrapper is
+    /// the layer responsible for the admin-side side-effect.
     #[instrument(name = "domain.sandbox.resize", skip(self, sub))]
     pub async fn resize(
         &self,
@@ -1030,17 +1036,33 @@ impl Sandboxes {
         let mut op = self.repo.begin_op().await?;
         let sandbox = self.resize_in_op(&mut op, id, request).await?;
         op.commit().await?;
+
+        let resource_name = sandbox.resource_name();
+        if let Err(e) = self
+            .admin
+            .resize_pvc(&resource_name, &sandbox.specs.disk_size)
+            .await
+        {
+            tracing::warn!(
+                sandbox = %resource_name,
+                error = %e,
+                "Admin client resize_pvc failed; entity specs already committed — \
+                 restart will recreate the pod with new CPU/memory and a retry \
+                 can reconcile the PVC"
+            );
+        }
         Ok(sandbox)
     }
 
     /// Reads the sandbox in-transaction, merges `request` with the
     /// current specs (so unset fields are filled from the in-tx row,
     /// never a pre-tx read that a concurrent resize could have
-    /// invalidated), then validates / applies. PVC growth is
-    /// best-effort: a failure logs a warning but still records the
-    /// new entity-level allocation, mirroring the admin-delete branch
-    /// in `suspend_in_op`. Callers should `restart` to apply
-    /// CPU/memory changes.
+    /// invalidated), then validates and writes the new specs. The PVC
+    /// patch lives in [`Self::resize`] so it runs *after* the commit —
+    /// PVC growth isn't reversible, so applying it before commit would
+    /// strand the cluster ahead of the entity row on commit failure.
+    /// External callers composing this `_in_op` must call
+    /// `admin.resize_pvc` themselves after their `commit`.
     #[instrument(name = "domain.sandbox.resize_in_op", skip(self, op))]
     pub async fn resize_in_op(
         &self,
@@ -1051,6 +1073,7 @@ impl Sandboxes {
         let id = id.into();
         Audit::record_sandbox_id(id);
         let mut sandbox = self.repo.find_by_id_in_op(&mut *op, id).await?;
+        reject_if_provisioning("resize", sandbox.state)?;
         let specs = request.merge_with(&sandbox.specs);
 
         if !disk_size_grows(&sandbox.specs.disk_size, &specs.disk_size) {
@@ -1060,31 +1083,22 @@ impl Sandboxes {
             });
         }
 
-        if !sandbox.resize(specs.clone()).did_execute() {
+        if !sandbox.resize(specs).did_execute() {
             return Ok(sandbox);
         }
         self.repo.update_in_op(op, &mut sandbox).await?;
-
-        let resource_name = sandbox.resource_name();
-        if let Err(e) = self
-            .admin
-            .resize_pvc(&resource_name, &specs.disk_size)
-            .await
-        {
-            tracing::warn!(
-                sandbox = %resource_name,
-                error = %e,
-                "Admin client resize_pvc failed; entity specs still updated — \
-                 restart will recreate the pod with new CPU/memory"
-            );
-        }
         Ok(sandbox)
     }
 
-    /// Per-sandbox delete: tears down pod + PVCs via the admin client,
-    /// pushes a `Deleted` event, and soft-deletes the row. Unlike
-    /// [`Self::cascade_delete_for_project_in_op`], this path is the
-    /// auditable single-sandbox tombstone.
+    /// Per-sandbox delete: tears down pod + PVCs via the admin client
+    /// and soft-deletes the row. Symmetric with
+    /// [`Self::cascade_delete_for_project_in_op`] — neither path
+    /// records an entity-level `Deleted` tombstone, so callers must
+    /// rely on the repo-level soft-delete + audit log for history.
+    /// Rejects with [`SandboxError::SandboxStillAttached`] when any
+    /// agent is currently attached; the caller is expected to detach
+    /// via `agent.detach_sandbox` first so each agent's own
+    /// `attached_sandbox_id` doesn't end up pointing at a deleted row.
     #[instrument(name = "domain.sandbox.delete", skip(self, sub))]
     pub async fn delete(
         &self,
@@ -1106,8 +1120,11 @@ impl Sandboxes {
     }
 
     /// Admin teardown is best-effort: a stuck pod or PVC can't strand
-    /// the row, otherwise the entity becomes un-deletable and the
-    /// project cascade later picks up a tombstone anyway.
+    /// the row, otherwise the entity becomes un-deletable.
+    /// `delete_sandbox` runs unconditionally because a prior
+    /// `suspend` may have marked the entity `Suspended` even when its
+    /// admin call failed — skipping the call here would leak a live
+    /// pod.
     #[instrument(name = "domain.sandbox.delete_in_op", skip(self, op))]
     pub async fn delete_in_op(
         &self,
@@ -1117,18 +1134,23 @@ impl Sandboxes {
         let id = id.into();
         Audit::record_sandbox_id(id);
         let sandbox = self.repo.find_by_id_in_op(&mut *op, id).await?;
+        reject_if_provisioning("delete", sandbox.state)?;
+        if !sandbox.attached_agents.is_empty() {
+            return Err(SandboxError::SandboxStillAttached {
+                sandbox_id: sandbox.id,
+                agent_ids: sandbox.attached_agents.iter().map(|(id, _)| *id).collect(),
+            });
+        }
 
         let resource_name = sandbox.resource_name();
-        if sandbox.state != SandboxState::Suspended {
-            if let Err(e) = self.admin.delete_sandbox(&resource_name).await {
-                match e {
-                    sandbox::AdminError::NotFound(_) => {}
-                    other => tracing::warn!(
-                        sandbox = %resource_name,
-                        error = %other,
-                        "admin delete_sandbox failed during single-sandbox delete"
-                    ),
-                }
+        if let Err(e) = self.admin.delete_sandbox(&resource_name).await {
+            match e {
+                sandbox::AdminError::NotFound(_) => {}
+                other => tracing::warn!(
+                    sandbox = %resource_name,
+                    error = %other,
+                    "admin delete_sandbox failed during single-sandbox delete"
+                ),
             }
         }
         if let Err(e) = self.admin.delete_pvcs(&resource_name).await {
@@ -1191,15 +1213,40 @@ impl Sandboxes {
     }
 }
 
-/// `true` when `new` is larger than or equal to `current`. Falls back
-/// to string equality when either side fails to parse, so a typo
-/// doesn't silently reject a no-op resize. Uses the same parser as
-/// the k8s admin client's PVC patch idempotency check so both layers
-/// agree on what counts as a shrink.
+/// `true` when `new` is larger than or equal to `current`. When the
+/// stored `current` is unparseable but `new` is well-formed we accept
+/// the change — otherwise a single bad row in the DB would block every
+/// future grow until an operator patched it by hand. Falls back to
+/// string equality when both sides are unparseable so a typo still
+/// short-circuits the identical case. Uses the same parser as the k8s
+/// admin client's PVC patch idempotency check so both layers agree on
+/// what counts as a shrink.
 fn disk_size_grows(current: &str, new: &str) -> bool {
     match (parse_k8s_quantity(current), parse_k8s_quantity(new)) {
         (Some(c), Some(n)) => n >= c,
+        (None, Some(_)) => true,
         _ => current == new,
+    }
+}
+
+/// `resize`/`delete` race the create lifecycle when the sandbox is
+/// still being provisioned — the spawned task reads specs once and
+/// then keeps calling the admin client, so a spec change mid-flight
+/// would land on stale state and a `delete` would orphan whatever the
+/// task is about to create. Reject until the sandbox lands in a
+/// terminal state.
+fn reject_if_provisioning(
+    operation: &'static str,
+    state: SandboxState,
+) -> Result<(), SandboxError> {
+    match state {
+        SandboxState::Provisioning | SandboxState::Initializing => {
+            Err(SandboxError::OperationNotAllowedWhileProvisioning {
+                operation,
+                state: state.to_string(),
+            })
+        }
+        SandboxState::Ready | SandboxState::Suspended | SandboxState::Errored => Ok(()),
     }
 }
 
@@ -1251,6 +1298,33 @@ mod tests {
     fn disk_size_grows_unparseable_falls_back_to_string_eq() {
         assert!(disk_size_grows("weird", "weird"));
         assert!(!disk_size_grows("weird", "other"));
+    }
+
+    #[test]
+    fn disk_size_grows_accepts_parseable_new_when_current_unparseable() {
+        // A bad value in the stored row would otherwise block every
+        // future grow forever; treat any well-formed `new` as a grow
+        // so an operator can reconcile by passing a real quantity.
+        assert!(disk_size_grows("weird", "20Gi"));
+    }
+
+    #[test]
+    fn reject_if_provisioning_rejects_in_flight_states() {
+        assert!(matches!(
+            reject_if_provisioning("resize", SandboxState::Provisioning),
+            Err(SandboxError::OperationNotAllowedWhileProvisioning { .. })
+        ));
+        assert!(matches!(
+            reject_if_provisioning("delete", SandboxState::Initializing),
+            Err(SandboxError::OperationNotAllowedWhileProvisioning { .. })
+        ));
+    }
+
+    #[test]
+    fn reject_if_provisioning_accepts_terminal_states() {
+        assert!(reject_if_provisioning("resize", SandboxState::Ready).is_ok());
+        assert!(reject_if_provisioning("resize", SandboxState::Suspended).is_ok());
+        assert!(reject_if_provisioning("delete", SandboxState::Errored).is_ok());
     }
 
     #[test]

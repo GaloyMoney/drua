@@ -3,7 +3,7 @@ use thiserror::Error;
 use sandbox::{AdminError, InstanceError};
 
 use crate::auth::error::AuthorizationError;
-use crate::primitives::{AgentId, ProjectId};
+use crate::primitives::{AgentId, ProjectId, SandboxId};
 
 use super::repo::{SandboxCreateError, SandboxFindError, SandboxModifyError, SandboxQueryError};
 
@@ -57,4 +57,29 @@ pub enum SandboxError {
         "SandboxError - DiskShrinkNotSupported: cannot shrink disk from {current} to {requested}"
     )]
     DiskShrinkNotSupported { current: String, requested: String },
+    /// `resize`/`delete` while the spawned creation lifecycle is still
+    /// making admin calls would race with stale specs or orphan
+    /// just-provisioned resources. Reject until the sandbox lands in a
+    /// terminal state (`Ready`, `Suspended`, `Errored`).
+    #[error(
+        "SandboxError - OperationNotAllowedWhileProvisioning: {operation} cannot run while \
+         sandbox is in {state} state (wait for Ready/Suspended/Errored)"
+    )]
+    OperationNotAllowedWhileProvisioning {
+        operation: &'static str,
+        state: String,
+    },
+    /// Single-sandbox delete refuses to break agent attachments
+    /// implicitly — callers must detach each agent first via
+    /// `agent.detach_sandbox`. The project-cascade path deletes the
+    /// agents along with the sandboxes so it doesn't hit this guard.
+    #[error(
+        "SandboxError - SandboxStillAttached: sandbox {sandbox_id} still has {} attached \
+         agent(s); detach them before deleting",
+        .agent_ids.len()
+    )]
+    SandboxStillAttached {
+        sandbox_id: SandboxId,
+        agent_ids: Vec<AgentId>,
+    },
 }

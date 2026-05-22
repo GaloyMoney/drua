@@ -52,7 +52,10 @@ pub fn parse_k8s_quantity(s: &str) -> Option<u128> {
         (prefix, 1024u128.pow(4))
     } else if let Some(prefix) = trimmed.strip_suffix("Pi") {
         (prefix, 1024u128.pow(5))
-    } else if let Some(prefix) = trimmed.strip_suffix('K') {
+    } else if let Some(prefix) = trimmed.strip_suffix('k') {
+        // K8s uses lowercase `k` for the decimal kilo suffix; uppercase
+        // `K` alone is not a valid quantity suffix. See
+        // `k8s.io/apimachinery/pkg/api/resource/quantity.go`.
         (prefix, 1_000)
     } else if let Some(prefix) = trimmed.strip_suffix('M') {
         (prefix, 1_000_000)
@@ -113,8 +116,16 @@ mod tests {
 
     #[test]
     fn parse_k8s_quantity_handles_decimal_suffixes() {
-        assert_eq!(parse_k8s_quantity("1K"), Some(1_000));
+        assert_eq!(parse_k8s_quantity("1k"), Some(1_000));
         assert_eq!(parse_k8s_quantity("2M"), Some(2_000_000));
+    }
+
+    #[test]
+    fn parse_k8s_quantity_rejects_uppercase_kilo() {
+        // K8s only accepts lowercase `k` for the decimal kilo suffix;
+        // uppercase `K` is not in the suffix vocabulary so should fall
+        // through to the bare-integer parse and fail.
+        assert_eq!(parse_k8s_quantity("1K"), None);
     }
 
     #[test]
