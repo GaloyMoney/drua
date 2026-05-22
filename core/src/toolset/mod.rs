@@ -64,7 +64,7 @@ pub(crate) fn array_of_any_schema(
 // schemas — which may reasonably mark fields as optional — must be lifted
 // to that shape. Naturally-optional fields stay semantically optional by
 // becoming nullable on the wire.
-pub(crate) fn normalize_for_strict(mut value: serde_json::Value) -> serde_json::Value {
+fn normalize_for_strict(mut value: serde_json::Value) -> serde_json::Value {
     normalize_for_strict_in_place(&mut value);
     value
 }

@@ -26,10 +26,9 @@ use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandb
 use crate::skill::{ScopedSkill, Skill, SkillSource, Skills};
 use crate::space_fs::SpaceFs;
 use crate::workflow::{
-    evaluate_step_routing, record_preexisting_sandbox_state, record_tool_step_availability,
-    validate_step_static, validate_trigger_definition, WorkflowDefinition, WorkflowDiagnostic,
-    WorkflowDiagnostics, WorkflowRun, WorkflowRunState, WorkflowSandboxDecl, WorkflowStepDef,
-    WorkflowTrigger, Workflows,
+    record_tool_step_availability, validate_step_static, validate_trigger_definition,
+    WorkflowDefinition, WorkflowDiagnostic, WorkflowDiagnostics, WorkflowRun, WorkflowRunState,
+    WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger, Workflows,
 };
 
 use super::super::error::ToolSetsError;
@@ -534,8 +533,7 @@ struct WorkflowParams {
     run_id: Option<WorkflowRunId>,
 
     /// `trigger`: webhook-equivalent payload bound to the run's
-    /// `trigger.*` template namespace. Defaults to `{}`. Also used
-    /// by `validate` as an optional dry-preflight sample payload.
+    /// `trigger.*` template namespace. Defaults to `{}`.
     #[serde(default)]
     payload: Option<serde_json::Value>,
 
@@ -716,8 +714,7 @@ static TOOLS: &[ToolDef] = &[
                        `sandboxes`), \
                        `list` (requires `project_id`), \
                        `get` (requires `definition_id`), \
-                       `validate` (requires `definition_id`; optional \
-                       `payload` sample; dry-preflight only, no agents run), \
+                       `validate` (requires `definition_id`; dry-preflight only, no agents run), \
                        `update` (requires `definition_id`; optional `name`, \
                        `description`+`clear_description` for None semantics, \
                        `provider`+`update_trigger`, `steps`+`update_steps`, \
@@ -896,11 +893,10 @@ impl AdminToolSet {
         &self,
         subject: &AuthSubject,
         definition: &WorkflowDefinition,
-        payload: Option<&serde_json::Value>,
     ) -> WorkflowValidationReport {
         let mut diagnostics = WorkflowDiagnostics::default();
 
-        validate_trigger_definition(&definition.trigger, payload, &mut diagnostics);
+        validate_trigger_definition(&definition.trigger, &mut diagnostics);
 
         let mut decl_names = std::collections::HashSet::new();
         let mut preexisting_ids = std::collections::HashMap::new();
@@ -921,12 +917,6 @@ impl AdminToolSet {
                     {
                         Ok(sandbox) => {
                             preexisting_ids.insert(name.clone(), sandbox.id);
-                            record_preexisting_sandbox_state(
-                                name,
-                                sandbox.state,
-                                &format!("/sandboxes/{idx}"),
-                                &mut diagnostics,
-                            );
                         }
                         Err(e) => diagnostics.error(
                             "sandbox.preexisting_missing",
@@ -1020,25 +1010,11 @@ impl AdminToolSet {
             }
         }
 
-        if let Some(payload) = payload {
-            evaluate_step_routing(&definition.steps, payload, &mut diagnostics);
-        } else {
-            diagnostics.info(
-                "routing.sample_absent",
-                "/payload",
-                "provide `payload` to evaluate trigger condition and approximate step routing",
-            );
-        }
-
-        let (errors, warnings, infos) = diagnostics.counts();
+        let (errors, infos) = diagnostics.counts();
         let summary = if errors == 0 {
-            format!(
-                "Workflow validate completed: no errors, {warnings} warning(s), {infos} info diagnostic(s)."
-            )
+            format!("Workflow validate completed: no errors, {infos} info diagnostic(s).")
         } else {
-            format!(
-                "Workflow validate found {errors} error(s), {warnings} warning(s), {infos} info diagnostic(s)."
-            )
+            format!("Workflow validate found {errors} error(s), {infos} info diagnostic(s).")
         };
 
         WorkflowValidationReport {
@@ -1533,7 +1509,7 @@ impl AdminToolSet {
                 Audit::record_action("workflow.validate");
                 let definition = self.workflows.find_by_id(subject, definition_id).await?;
                 let report = self
-                    .validate_workflow_definition(subject, &definition, params.payload.as_ref())
+                    .validate_workflow_definition(subject, &definition)
                     .await;
                 let text = format_workflow_validation_report(&report);
                 let mut result = CallToolResult::success(vec![Content::text(text)]);
@@ -2503,10 +2479,7 @@ fn format_spaces(spaces: &[Space]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandbox::SandboxState;
     use crate::toolset::{ToolSets, ToolSetsError, TopLevelTool};
-    use crate::workflow::validation::{lint_strict_output_schema, WorkflowDiagnosticSeverity};
-    use crate::workflow::OutputSchema;
 
     fn args(json: serde_json::Value) -> Option<JsonObject> {
         match json {
@@ -2878,23 +2851,15 @@ mod tests {
     }
 
     #[test]
-    fn workflow_validate_takes_definition_id_and_payload() {
+    fn workflow_validate_takes_definition_id() {
         let definition_id = uuid::Uuid::new_v4();
         let p: WorkflowParams = parse_params(args(serde_json::json!({
             "command": "validate",
             "definition_id": definition_id,
-            "payload": { "action": "opened" },
         })))
         .expect("parse");
         assert!(matches!(p.command, WorkflowCommand::Validate));
         assert_eq!(p.definition_id.map(uuid::Uuid::from), Some(definition_id));
-        assert_eq!(
-            p.payload
-                .as_ref()
-                .and_then(|v| v.get("action"))
-                .and_then(|v| v.as_str()),
-            Some("opened")
-        );
     }
 
     #[test]
@@ -2992,30 +2957,6 @@ mod tests {
         for v in ["create", "list", "get", "validate", "update", "delete"] {
             assert!(s.contains(&format!("\"{v}\"")), "missing {v} in schema");
         }
-    }
-
-    #[test]
-    fn workflow_validate_lints_array_items_empty_schema() {
-        let root: schemars::schema::RootSchema = serde_json::from_value(serde_json::json!({
-            "type": "object",
-            "required": ["items"],
-            "properties": {
-                "items": { "type": "array", "items": {} }
-            }
-        }))
-        .unwrap();
-        let schema = OutputSchema::new(root).unwrap();
-        let mut diagnostics = WorkflowDiagnostics::default();
-        lint_strict_output_schema(&schema, "/steps/0/output_schema", &mut diagnostics);
-        assert!(
-            diagnostics
-                .items
-                .iter()
-                .any(|d| d.code == "output_schema.array_items_untyped"
-                    && d.path == "/steps/0/output_schema/properties/items/items"),
-            "expected untyped array items diagnostic, got {:?}",
-            diagnostics.items
-        );
     }
 
     #[test]
@@ -3139,85 +3080,6 @@ mod tests {
             "step.wait_output_forward_ref",
             "/steps/1/outputs/future"
         ));
-    }
-
-    #[test]
-    fn workflow_validate_routing_prior_step_output_is_unknown() {
-        let steps = vec![
-            WorkflowStepDef::ToolStep {
-                name: "triage".into(),
-                tool: "workflow".into(),
-                params: serde_json::json!({}),
-                timeout_seconds: None,
-                condition: None,
-            },
-            WorkflowStepDef::ToolStep {
-                name: "dispatch".into(),
-                tool: "workflow".into(),
-                params: serde_json::json!({}),
-                timeout_seconds: None,
-                condition: Some("steps.triage.outputs.success == true".into()),
-            },
-        ];
-        let mut diagnostics = WorkflowDiagnostics::default();
-        evaluate_step_routing(&steps, &serde_json::json!({}), &mut diagnostics);
-        assert!(has_diag(
-            &diagnostics,
-            "routing.sample_unknown_due_to_prior_outputs",
-            "/steps/1/condition"
-        ));
-        assert!(
-            !diagnostics.items.iter().any(|d| {
-                d.code == "routing.sample_would_skip" && d.path == "/steps/1/condition"
-            }),
-            "prior-output condition must not be reported as a concrete skip"
-        );
-    }
-
-    #[test]
-    fn workflow_validate_preexisting_suspended_sandbox_is_info() {
-        let mut diagnostics = WorkflowDiagnostics::default();
-        record_preexisting_sandbox_state(
-            "devbox",
-            SandboxState::Suspended,
-            "/sandboxes/0",
-            &mut diagnostics,
-        );
-        assert!(has_diag(
-            &diagnostics,
-            "sandbox.preexisting_restartable",
-            "/sandboxes/0"
-        ));
-        assert_eq!(
-            diagnostics.items[0].severity,
-            WorkflowDiagnosticSeverity::Info
-        );
-        assert!(diagnostics.items[0]
-            .message
-            .contains("runtime preflight will restart"));
-    }
-
-    #[test]
-    fn workflow_validate_preexisting_initializing_sandbox_stays_warning() {
-        let mut diagnostics = WorkflowDiagnostics::default();
-        record_preexisting_sandbox_state(
-            "devbox",
-            SandboxState::Initializing,
-            "/sandboxes/0",
-            &mut diagnostics,
-        );
-        assert!(has_diag(
-            &diagnostics,
-            "sandbox.preexisting_not_ready",
-            "/sandboxes/0"
-        ));
-        assert_eq!(
-            diagnostics.items[0].severity,
-            WorkflowDiagnosticSeverity::Warning
-        );
-        assert!(diagnostics.items[0]
-            .message
-            .contains("validate does not wait or mutate"));
     }
 
     #[test]
