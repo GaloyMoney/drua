@@ -8,6 +8,7 @@ pub(crate) mod job;
 pub(crate) mod repo;
 pub mod run;
 pub mod template;
+pub(crate) mod validation;
 pub mod yaml;
 
 pub use importer::WorkflowsImporter;
@@ -37,6 +38,11 @@ pub use definition::{
 pub use entity::*;
 pub use error::*;
 pub use run::{StepResult, WorkflowRun, WorkflowRunRepo, WorkflowRunState, WorkflowStepState};
+pub(crate) use validation::{
+    evaluate_step_routing, is_cel_identifier, record_preexisting_sandbox_state,
+    record_tool_step_availability, validate_step_static, validate_trigger_definition,
+    WorkflowDiagnostic, WorkflowDiagnostics,
+};
 
 pub struct ProviderFanOutResult {
     pub triggered: usize,
@@ -150,19 +156,6 @@ fn record_trigger_condition_errored_audit(
         error = reason,
         "trigger condition errored; run not created"
     );
-}
-
-/// CEL identifier shape — `[A-Za-z_][A-Za-z0-9_]*`. Step names
-/// must conform so `${{ steps.<name>.outputs.… }}` parses as a
-/// field path rather than an arithmetic expression. Mirrors the
-/// regex in `template::referenced_step_names`.
-fn is_cel_identifier(s: &str) -> bool {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
-        _ => return false,
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Reject `${{ steps.X.outputs.… }}` refs whose `X` hasn't been
