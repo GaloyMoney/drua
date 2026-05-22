@@ -1116,7 +1116,7 @@ impl Sandboxes {
     ) -> Result<(), SandboxError> {
         let id = id.into();
         Audit::record_sandbox_id(id);
-        let mut sandbox = self.repo.find_by_id_in_op(&mut *op, id).await?;
+        let sandbox = self.repo.find_by_id_in_op(&mut *op, id).await?;
 
         let resource_name = sandbox.resource_name();
         if sandbox.state != SandboxState::Suspended {
@@ -1139,11 +1139,7 @@ impl Sandboxes {
             );
         }
 
-        if sandbox.delete().did_execute() {
-            self.repo.update_in_op(&mut *op, &mut sandbox).await?;
-        }
-        let to_delete = self.repo.find_by_id_in_op(&mut *op, id).await?;
-        self.repo.delete_in_op(op, to_delete).await?;
+        self.repo.delete_in_op(op, sandbox).await?;
         Ok(())
     }
 

@@ -89,11 +89,6 @@ pub enum SandboxEvent {
     Resized {
         specs: SandboxSpecs,
     },
-    /// Per-sandbox tombstone. Cascade deletes (project / workflow)
-    /// bypass this event and flip the row directly via SQL.
-    Deleted {
-        deleted_at: DateTime<Utc>,
-    },
 }
 
 #[derive(EsEntity, Builder)]
@@ -123,11 +118,6 @@ pub struct Sandbox {
     /// reuses these across runs of the same definition.
     #[builder(default)]
     pub workflow_id: Option<WorkflowDefinitionId>,
-    /// Set by `delete()`; non-`None` means the sandbox has been
-    /// soft-deleted at the entity layer. The repo's `deleted` column
-    /// is the source of truth for query filtering.
-    #[builder(default)]
-    pub deleted_at: Option<DateTime<Utc>>,
     events: EntityEvents<SandboxEvent>,
 }
 
@@ -338,18 +328,6 @@ impl Sandbox {
         self.events.push(SandboxEvent::Resized { specs });
         Idempotent::Executed(())
     }
-
-    /// Idempotent. Records the tombstone event; row-level soft-delete
-    /// is the caller's responsibility via `SandboxRepo::delete_in_op`.
-    pub(super) fn delete(&mut self) -> Idempotent<()> {
-        if self.deleted_at.is_some() {
-            return Idempotent::AlreadyApplied;
-        }
-        let deleted_at = Utc::now();
-        self.deleted_at = Some(deleted_at);
-        self.events.push(SandboxEvent::Deleted { deleted_at });
-        Idempotent::Executed(())
-    }
 }
 
 fn specs_eq(a: &SandboxSpecs, b: &SandboxSpecs) -> bool {
@@ -431,9 +409,6 @@ impl TryFromEvents<SandboxEvent> for Sandbox {
                 }
                 SandboxEvent::Resized { specs } => {
                     builder = builder.specs(specs.clone());
-                }
-                SandboxEvent::Deleted { deleted_at } => {
-                    builder = builder.deleted_at(Some(*deleted_at));
                 }
             }
         }
@@ -799,58 +774,6 @@ mod tests {
         let mut sb = new_sandbox();
         let res = sb.resize(test_specs());
         assert!(!res.did_execute());
-    }
-
-    #[test]
-    fn delete_records_tombstone_event() {
-        let mut sb = new_sandbox();
-        let res = sb.delete();
-        assert!(res.did_execute());
-        assert!(sb.deleted_at.is_some());
-    }
-
-    #[test]
-    fn delete_is_idempotent() {
-        let mut sb = new_sandbox();
-        let _ = sb.delete();
-        let res = sb.delete();
-        assert!(!res.did_execute());
-    }
-
-    #[test]
-    fn hydration_replays_resize_and_delete() {
-        let sandbox_id = SandboxId::new();
-        let project_id = ProjectId::new();
-        let resized_specs = SandboxSpecs {
-            cpu: "1".into(),
-            memory: "1Gi".into(),
-            disk_size: "20Gi".into(),
-        };
-        let events = EntityEvents::init(
-            sandbox_id,
-            [
-                SandboxEvent::Initialized {
-                    id: sandbox_id,
-                    project_id,
-                    name: "test-sandbox".into(),
-                    specs: test_specs(),
-                    mode: SandboxMode::Scratch,
-                    mount_path: "/workspace".into(),
-                    workflow_id: None,
-                },
-                SandboxEvent::Resized {
-                    specs: resized_specs.clone(),
-                },
-                SandboxEvent::Deleted {
-                    deleted_at: chrono::Utc::now(),
-                },
-            ],
-        );
-        let sb = Sandbox::try_from_events(events).unwrap();
-        assert_eq!(sb.specs.cpu, resized_specs.cpu);
-        assert_eq!(sb.specs.memory, resized_specs.memory);
-        assert_eq!(sb.specs.disk_size, resized_specs.disk_size);
-        assert!(sb.deleted_at.is_some());
     }
 
     #[test]
