@@ -26,9 +26,8 @@ use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandb
 use crate::skill::{ScopedSkill, Skill, SkillSource, Skills};
 use crate::space_fs::SpaceFs;
 use crate::workflow::{
-    record_tool_step_availability, validate_step_static, validate_trigger_definition,
-    WorkflowDefinition, WorkflowDiagnostic, WorkflowDiagnostics, WorkflowRun, WorkflowRunState,
-    WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger, Workflows,
+    WorkflowDefinition, WorkflowDefinitionValidator, WorkflowRun, WorkflowRunState,
+    WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger, WorkflowValidationError, Workflows,
 };
 
 use super::super::error::ToolSetsError;
@@ -583,27 +582,31 @@ struct WorkflowParams {
 struct WorkflowValidationReport {
     definition_id: String,
     workflow_name: String,
-    summary: String,
-    diagnostics: Vec<WorkflowDiagnostic>,
+    ok: bool,
+    error_count: usize,
+    errors: Vec<WorkflowValidationError>,
 }
 
-impl WorkflowValidationReport {
-    fn to_text(&self) -> String {
-        let mut out = format!(
-            "{}\n  definition_id: {}\n  workflow: {}",
-            self.summary, self.definition_id, self.workflow_name
-        );
-        if self.diagnostics.is_empty() {
-            return out;
+impl std::fmt::Display for WorkflowValidationReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.ok {
+            write!(f, "workflow validate: OK")?;
+        } else {
+            write!(f, "workflow validate: found {} error(s)", self.error_count)?;
         }
-        out.push_str("\n\ndiagnostics:");
-        for d in &self.diagnostics {
-            out.push_str(&format!(
-                "\n- {:?} {} {}: {}",
-                d.severity, d.code, d.path, d.message
-            ));
+        write!(
+            f,
+            "\n  definition_id: {}\n  workflow: {}",
+            self.definition_id, self.workflow_name
+        )?;
+        if self.errors.is_empty() {
+            return Ok(());
         }
-        out
+        write!(f, "\n\nerrors:")?;
+        for error in &self.errors {
+            write!(f, "\n- {} {}: {}", error.code, error.path, error.message)?;
+        }
+        Ok(())
     }
 }
 
@@ -914,68 +917,30 @@ impl AdminToolSet {
         subject: &AuthSubject,
         definition: &WorkflowDefinition,
     ) -> WorkflowValidationReport {
-        let mut diagnostics = WorkflowDiagnostics::default();
+        let mut validator = WorkflowDefinitionValidator::default();
 
-        validate_trigger_definition(&definition.trigger, &mut diagnostics);
-
-        let mut decl_names = std::collections::HashSet::new();
+        validator.validate_trigger(&definition.trigger);
         let mut preexisting_ids = std::collections::HashMap::new();
         for (idx, decl) in definition.sandboxes.iter().enumerate() {
-            if !decl_names.insert(decl.name().to_string()) {
-                diagnostics.error(
-                    "sandbox.duplicate_name",
-                    format!("/sandboxes/{idx}/name"),
-                    format!("sandbox name `{}` is declared more than once", decl.name()),
-                );
-            }
-            match decl {
-                WorkflowSandboxDecl::Preexisting { name } => {
-                    match self
-                        .sandboxes
-                        .find_by_name_in_project(subject, definition.project_id, name)
-                        .await
-                    {
-                        Ok(sandbox) => {
-                            preexisting_ids.insert(name.clone(), sandbox.id);
-                        }
-                        Err(e) => diagnostics.error(
-                            "sandbox.preexisting_missing",
-                            format!("/sandboxes/{idx}/name"),
-                            format!("preexisting sandbox `{name}` could not be resolved: {e}"),
-                        ),
+            validator.validate_sandbox_decl(idx, decl);
+            if let WorkflowSandboxDecl::Preexisting { name } = decl {
+                match self
+                    .sandboxes
+                    .find_by_name_in_project(subject, definition.project_id, name)
+                    .await
+                {
+                    Ok(sandbox) => {
+                        preexisting_ids.insert(name.clone(), sandbox.id);
                     }
-                }
-                WorkflowSandboxDecl::Provisioned { name, specs, .. } => {
-                    diagnostics.info(
-                        "sandbox.provisioned_declared",
-                        format!("/sandboxes/{idx}"),
-                        format!(
-                            "provisioned sandbox `{name}` is declared; validate does not create or start it{}",
-                            if specs.is_some() { " and specs are present" } else { "" }
-                        ),
-                    );
+                    Err(e) => validator.record_preexisting_sandbox_missing(idx, name, e),
                 }
             }
         }
 
-        if definition.steps.is_empty() {
-            diagnostics.error(
-                "workflow.steps_empty",
-                "/steps",
-                "workflow requires at least one step",
-            );
-        }
+        validator.validate_steps_present(&definition.steps);
 
-        let mut seen_step_names = std::collections::HashSet::new();
         for (idx, step) in definition.steps.iter().enumerate() {
-            validate_step_static(step, idx, &seen_step_names, &mut diagnostics);
-            if !seen_step_names.insert(step.name().to_string()) {
-                diagnostics.error(
-                    "step.duplicate_name",
-                    format!("/steps/{idx}/name"),
-                    format!("step name `{}` is declared more than once", step.name()),
-                );
-            }
+            validator.validate_step_static(idx, step);
 
             if let WorkflowStepDef::AgentStep {
                 name,
@@ -984,18 +949,6 @@ impl AdminToolSet {
                 ..
             } = step
             {
-                if let Some(sandbox_name) = sandbox {
-                    if !decl_names.contains(sandbox_name) {
-                        diagnostics.error(
-                            "step.sandbox_undeclared",
-                            format!("/steps/{idx}/sandbox"),
-                            format!(
-                                "step `{name}` references sandbox `{sandbox_name}` that is not declared"
-                            ),
-                        );
-                    }
-                }
-
                 let preexisting_sandbox_id = sandbox
                     .as_ref()
                     .and_then(|sandbox_name| preexisting_ids.get(sandbox_name).copied());
@@ -1004,44 +957,28 @@ impl AdminToolSet {
                     .find_by_name(skill, Some(definition.project_id), preexisting_sandbox_id)
                     .await
                 {
-                    Ok(Some(_)) => diagnostics.info(
-                        "step.skill_resolved",
-                        format!("/steps/{idx}/skill"),
-                        format!("step `{name}` skill `{skill}` resolves"),
-                    ),
-                    Ok(None) => diagnostics.error(
-                        "step.skill_missing",
-                        format!("/steps/{idx}/skill"),
-                        format!("step `{name}` references missing skill `{skill}`"),
-                    ),
-                    Err(e) => diagnostics.error(
-                        "step.skill_lookup_error",
-                        format!("/steps/{idx}/skill"),
-                        format!("step `{name}` skill `{skill}` lookup failed: {e}"),
-                    ),
+                    Ok(Some(_)) => {}
+                    Ok(None) => validator.record_skill_missing(idx, name, skill),
+                    Err(e) => validator.record_skill_lookup_error(idx, name, skill, e),
                 }
             } else if let WorkflowStepDef::ToolStep { tool, .. } = step {
-                record_tool_step_availability(
+                validator.record_tool_step_availability(
+                    idx,
                     tool,
-                    &format!("/steps/{idx}/tool"),
                     self.workflows.validate_tool_step_tool(tool),
-                    &mut diagnostics,
                 );
             }
         }
 
-        let (errors, infos) = diagnostics.counts();
-        let summary = if errors == 0 {
-            format!("Workflow validate completed: no errors, {infos} info diagnostic(s).")
-        } else {
-            format!("Workflow validate found {errors} error(s), {infos} info diagnostic(s).")
-        };
+        let errors = validator.finish();
+        let error_count = errors.count();
 
         WorkflowValidationReport {
             definition_id: definition.id.to_string(),
             workflow_name: definition.name.clone(),
-            summary,
-            diagnostics: diagnostics.items,
+            ok: error_count == 0,
+            error_count,
+            errors: errors.items,
         }
     }
 
@@ -1531,7 +1468,7 @@ impl AdminToolSet {
                 let report = self
                     .validate_workflow_definition(subject, &definition)
                     .await;
-                let text = report.to_text();
+                let text = report.to_string();
                 let mut result = CallToolResult::success(vec![Content::text(text)]);
                 result.structured_content =
                     Some(serde_json::to_value(&report).expect("report serializes"));
@@ -2482,6 +2419,7 @@ fn format_spaces(spaces: &[Space]) -> String {
 mod tests {
     use super::*;
     use crate::toolset::{ToolSets, ToolSetsError, TopLevelTool};
+    use crate::workflow::validation::WorkflowValidationErrors;
 
     fn args(json: serde_json::Value) -> Option<JsonObject> {
         match json {
@@ -2490,8 +2428,8 @@ mod tests {
         }
     }
 
-    fn has_diag(diagnostics: &WorkflowDiagnostics, code: &str, path: &str) -> bool {
-        diagnostics
+    fn has_error(errors: &WorkflowValidationErrors, code: &str, path: &str) -> bool {
+        errors
             .items
             .iter()
             .any(|d| d.code == code && d.path == path)
@@ -2965,74 +2903,62 @@ mod tests {
     fn workflow_validate_accepts_available_tool_step_tool() {
         let toolsets = ToolSets::empty_for_test();
         toolsets.register_top_level(StubTopLevelTool::new("ok_tool", true, true));
-        let mut diagnostics = WorkflowDiagnostics::default();
-        record_tool_step_availability(
+        let mut validator = WorkflowDefinitionValidator::default();
+        validator.record_tool_step_availability(
+            0,
             "ok_tool",
-            "/steps/0/tool",
             toolsets.find_for_workflow("ok_tool").map(|_| ()),
-            &mut diagnostics,
         );
-        assert!(has_diag(
-            &diagnostics,
-            "step.tool_resolved",
-            "/steps/0/tool"
-        ));
+        let errors = validator.finish();
+        assert!(
+            errors.items.is_empty(),
+            "available tool should not emit errors: {:?}",
+            errors.items
+        );
     }
 
     #[test]
     fn workflow_validate_rejects_unknown_tool_step_tool() {
         let toolsets = ToolSets::empty_for_test();
-        let mut diagnostics = WorkflowDiagnostics::default();
-        record_tool_step_availability(
+        let mut validator = WorkflowDefinitionValidator::default();
+        validator.record_tool_step_availability(
+            0,
             "missing_tool",
-            "/steps/0/tool",
             toolsets.find_for_workflow("missing_tool").map(|_| ()),
-            &mut diagnostics,
         );
-        assert!(has_diag(
-            &diagnostics,
-            "step.tool_unavailable",
-            "/steps/0/tool"
-        ));
-        assert!(diagnostics.items[0].message.contains("not registered"));
+        let errors = validator.finish();
+        assert!(has_error(&errors, "step.tool_unavailable", "/steps/0/tool"));
+        assert!(errors.items[0].message.contains("not registered"));
     }
 
     #[test]
     fn workflow_validate_rejects_non_composable_tool_step_tool() {
         let toolsets = ToolSets::empty_for_test();
         toolsets.register_top_level(StubTopLevelTool::new("agent", false, true));
-        let mut diagnostics = WorkflowDiagnostics::default();
-        record_tool_step_availability(
+        let mut validator = WorkflowDefinitionValidator::default();
+        validator.record_tool_step_availability(
+            0,
             "agent",
-            "/steps/0/tool",
             toolsets.find_for_workflow("agent").map(|_| ()),
-            &mut diagnostics,
         );
-        assert!(has_diag(
-            &diagnostics,
-            "step.tool_unavailable",
-            "/steps/0/tool"
-        ));
-        assert!(diagnostics.items[0].message.contains("not composable"));
+        let errors = validator.finish();
+        assert!(has_error(&errors, "step.tool_unavailable", "/steps/0/tool"));
+        assert!(errors.items[0].message.contains("not composable"));
     }
 
     #[test]
     fn workflow_validate_rejects_tool_step_tool_without_output_schema() {
         let toolsets = ToolSets::empty_for_test();
         toolsets.register_top_level(StubTopLevelTool::new("raw", true, false));
-        let mut diagnostics = WorkflowDiagnostics::default();
-        record_tool_step_availability(
+        let mut validator = WorkflowDefinitionValidator::default();
+        validator.record_tool_step_availability(
+            0,
             "raw",
-            "/steps/0/tool",
             toolsets.find_for_workflow("raw").map(|_| ()),
-            &mut diagnostics,
         );
-        assert!(has_diag(
-            &diagnostics,
-            "step.tool_unavailable",
-            "/steps/0/tool"
-        ));
-        assert!(diagnostics.items[0]
+        let errors = validator.finish();
+        assert!(has_error(&errors, "step.tool_unavailable", "/steps/0/tool"));
+        assert!(errors.items[0]
             .message
             .contains("does not declare an output_schema"));
     }
@@ -3046,15 +2972,11 @@ mod tests {
             timeout_seconds: None,
             condition: None,
         };
-        let mut diagnostics = WorkflowDiagnostics::default();
-        validate_step_static(
-            &step,
-            0,
-            &std::collections::HashSet::new(),
-            &mut diagnostics,
-        );
-        assert!(has_diag(
-            &diagnostics,
+        let mut validator = WorkflowDefinitionValidator::default();
+        validator.validate_step_static(0, &step);
+        let errors = validator.finish();
+        assert!(has_error(
+            &errors,
             "step.params_template_invalid",
             "/steps/0/params"
         ));
@@ -3074,11 +2996,19 @@ mod tests {
             .collect(),
             condition: None,
         };
-        let mut diagnostics = WorkflowDiagnostics::default();
-        let seen = ["before".to_string()].into_iter().collect();
-        validate_step_static(&step, 1, &seen, &mut diagnostics);
-        assert!(has_diag(
-            &diagnostics,
+        let before = WorkflowStepDef::ToolStep {
+            name: "before".into(),
+            tool: "workflow".into(),
+            params: serde_json::json!({}),
+            timeout_seconds: None,
+            condition: None,
+        };
+        let mut validator = WorkflowDefinitionValidator::default();
+        validator.validate_step_static(0, &before);
+        validator.validate_step_static(1, &step);
+        let errors = validator.finish();
+        assert!(has_error(
+            &errors,
             "step.wait_output_forward_ref",
             "/steps/1/outputs/future"
         ));

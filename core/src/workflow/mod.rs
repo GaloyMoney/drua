@@ -39,8 +39,7 @@ pub use entity::*;
 pub use error::*;
 pub use run::{StepResult, WorkflowRun, WorkflowRunRepo, WorkflowRunState, WorkflowStepState};
 pub(crate) use validation::{
-    is_cel_identifier, record_tool_step_availability, validate_step_static,
-    validate_trigger_definition, WorkflowDiagnostic, WorkflowDiagnostics,
+    is_cel_identifier, WorkflowDefinitionValidator, WorkflowValidationError,
 };
 
 pub struct ProviderFanOutResult {
