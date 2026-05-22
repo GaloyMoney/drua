@@ -587,6 +587,26 @@ struct WorkflowValidationReport {
     diagnostics: Vec<WorkflowDiagnostic>,
 }
 
+impl WorkflowValidationReport {
+    fn to_text(&self) -> String {
+        let mut out = format!(
+            "{}\n  definition_id: {}\n  workflow: {}",
+            self.summary, self.definition_id, self.workflow_name
+        );
+        if self.diagnostics.is_empty() {
+            return out;
+        }
+        out.push_str("\n\ndiagnostics:");
+        for d in &self.diagnostics {
+            out.push_str(&format!(
+                "\n- {:?} {} {}: {}",
+                d.severity, d.code, d.path, d.message
+            ));
+        }
+        out
+    }
+}
+
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 enum SkillCommand {
@@ -1511,7 +1531,7 @@ impl AdminToolSet {
                 let report = self
                     .validate_workflow_definition(subject, &definition)
                     .await;
-                let text = format_workflow_validation_report(&report);
+                let text = report.to_text();
                 let mut result = CallToolResult::success(vec![Content::text(text)]);
                 result.structured_content =
                     Some(serde_json::to_value(&report).expect("report serializes"));
@@ -2213,24 +2233,6 @@ fn format_workflow(d: &WorkflowDefinition, created: bool) -> String {
         d.steps.len(),
         d.sandboxes.len(),
     )
-}
-
-fn format_workflow_validation_report(report: &WorkflowValidationReport) -> String {
-    let mut out = format!(
-        "{}\n  definition_id: {}\n  workflow: {}",
-        report.summary, report.definition_id, report.workflow_name
-    );
-    if report.diagnostics.is_empty() {
-        return out;
-    }
-    out.push_str("\n\ndiagnostics:");
-    for d in &report.diagnostics {
-        out.push_str(&format!(
-            "\n- {:?} {} {}: {}",
-            d.severity, d.code, d.path, d.message
-        ));
-    }
-    out
 }
 
 /// Renders a `WorkflowRun` as text. Step outputs are emitted as
