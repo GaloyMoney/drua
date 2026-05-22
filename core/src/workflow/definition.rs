@@ -269,6 +269,45 @@ pub enum WorkflowStepDef {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         condition: Option<String>,
     },
+    /// Repeats `steps` until `break_condition` evaluates to true OR
+    /// `max_iterations` is exhausted. Each iteration runs inner steps
+    /// sequentially with their own dotted-name `StepResult` rows
+    /// (`{loop}.iter[{N}].{inner}`), so existing idempotency
+    /// (`step_already_terminal`) and wait-resume (`current_wait_step`)
+    /// keep working unchanged. `break_condition` is evaluated against
+    /// an [`crate::workflow::template::IterationContext`] that exposes
+    /// `iter.<inner>.outputs.X` (this iteration's already-completed
+    /// inner outputs) and `iteration` (1-based count). Exhaustion
+    /// without break records `success: false` on the outer loop's
+    /// `StepResult.output` and folds into `WorkflowRunState::Failed`.
+    Loop {
+        name: String,
+        /// Bare CEL boolean. Evaluated AFTER each iteration's last
+        /// inner step completes. `true` → break out of the loop.
+        /// Compiled and validated at workflow create/update time.
+        break_condition: String,
+        /// Hard safety valve. 25 mirrors LangGraph's default
+        /// `recursion_limit`. Loop step records `success: false`
+        /// when exhausted without `break_condition` firing.
+        #[serde(default = "default_loop_max_iterations")]
+        max_iterations: u32,
+        /// Inner steps. Run sequentially per iteration. MVP rejects
+        /// nested loops at parse time. May contain Wait (the driving
+        /// use case — PR review cycle).
+        steps: Vec<WorkflowStepDef>,
+        /// Outer skip gate — false skips the entire loop without
+        /// running any iteration. Same semantics as on other step
+        /// variants.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        condition: Option<String>,
+    },
+}
+
+/// Mirrors LangGraph's `GRAPH_RECURSION_LIMIT` default (25). Loop
+/// authors with tighter convergence expectations should set their
+/// own (e.g. evaluator-optimizer typically caps at 2-3).
+fn default_loop_max_iterations() -> u32 {
+    25
 }
 
 impl WorkflowStepDef {
@@ -276,14 +315,17 @@ impl WorkflowStepDef {
         match self {
             WorkflowStepDef::AgentStep { name, .. }
             | WorkflowStepDef::ToolStep { name, .. }
-            | WorkflowStepDef::Wait { name, .. } => name,
+            | WorkflowStepDef::Wait { name, .. }
+            | WorkflowStepDef::Loop { name, .. } => name,
         }
     }
 
     pub fn model_chain(&self) -> Option<&ModelChain> {
         match self {
             WorkflowStepDef::AgentStep { model_chain, .. } => model_chain.as_ref(),
-            WorkflowStepDef::ToolStep { .. } | WorkflowStepDef::Wait { .. } => None,
+            WorkflowStepDef::ToolStep { .. }
+            | WorkflowStepDef::Wait { .. }
+            | WorkflowStepDef::Loop { .. } => None,
         }
     }
 
@@ -293,7 +335,9 @@ impl WorkflowStepDef {
     pub fn output_schema(&self) -> Option<&OutputSchema> {
         match self {
             WorkflowStepDef::AgentStep { output_schema, .. } => Some(output_schema.as_ref()),
-            WorkflowStepDef::ToolStep { .. } | WorkflowStepDef::Wait { .. } => None,
+            WorkflowStepDef::ToolStep { .. }
+            | WorkflowStepDef::Wait { .. }
+            | WorkflowStepDef::Loop { .. } => None,
         }
     }
 
@@ -303,7 +347,8 @@ impl WorkflowStepDef {
         match self {
             WorkflowStepDef::AgentStep { condition, .. }
             | WorkflowStepDef::ToolStep { condition, .. }
-            | WorkflowStepDef::Wait { condition, .. } => condition.as_deref(),
+            | WorkflowStepDef::Wait { condition, .. }
+            | WorkflowStepDef::Loop { condition, .. } => condition.as_deref(),
         }
     }
 }
@@ -735,6 +780,50 @@ mod tests {
             output["properties"]["reason"]["description"], "custom reason desc",
             "existing reason description preserved"
         );
+    }
+
+    #[test]
+    fn loop_step_round_trips_through_serde() {
+        let step = WorkflowStepDef::Loop {
+            name: "review_cycle".into(),
+            break_condition: "iter.check_pr.outputs.merged == true".into(),
+            max_iterations: 10,
+            steps: vec![WorkflowStepDef::ToolStep {
+                name: "check_pr".into(),
+                tool: "github".into(),
+                params: serde_json::json!({ "command": "get_pr" }),
+                timeout_seconds: None,
+                condition: None,
+            }],
+            condition: None,
+        };
+        let value = serde_json::to_value(&step).unwrap();
+        assert_eq!(value.get("type").and_then(|v| v.as_str()), Some("loop"));
+        assert_eq!(
+            value.get("max_iterations").and_then(|v| v.as_u64()),
+            Some(10)
+        );
+        let back: WorkflowStepDef = serde_json::from_value(value).unwrap();
+        assert_eq!(back.name(), "review_cycle");
+        assert!(back.model_chain().is_none());
+        assert!(back.output_schema().is_none());
+    }
+
+    #[test]
+    fn loop_step_max_iterations_defaults_to_25() {
+        let json = serde_json::json!({
+            "type": "loop",
+            "name": "x",
+            "break_condition": "true",
+            "steps": [
+                { "type": "tool_step", "name": "t", "tool": "whoami" }
+            ]
+        });
+        let step: WorkflowStepDef = serde_json::from_value(json).unwrap();
+        match step {
+            WorkflowStepDef::Loop { max_iterations, .. } => assert_eq!(max_iterations, 25),
+            _ => panic!("expected Loop"),
+        }
     }
 
     /// Old serialized triggers without the `condition` field must

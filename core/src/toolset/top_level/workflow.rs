@@ -1040,6 +1040,14 @@ fn step_to_output(s: &WorkflowStepDef) -> WorkflowStepOutput {
             timeout_seconds: None,
             tool: None,
         },
+        WorkflowStepDef::Loop { name, .. } => WorkflowStepOutput {
+            name: name.clone(),
+            step_type: "loop".to_string(),
+            skill: String::new(),
+            sandbox: None,
+            timeout_seconds: None,
+            tool: None,
+        },
     }
 }
 
@@ -1250,6 +1258,17 @@ fn format_get_text(d: &WorkflowDefinition) -> String {
             }
             WorkflowStepDef::Wait { name, provider, .. } => {
                 out.push_str(&format!("  - wait name={name} provider={provider}\n"));
+            }
+            WorkflowStepDef::Loop {
+                name,
+                max_iterations,
+                steps,
+                ..
+            } => {
+                out.push_str(&format!(
+                    "  - loop name={name} max_iterations={max_iterations} inner_steps={}\n",
+                    steps.len()
+                ));
             }
         }
     }

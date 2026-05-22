@@ -13,17 +13,33 @@ use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxSpecs, SandboxState, Sand
 use crate::skill::Skills;
 use crate::toolset::ToolSets;
 
-use super::definition::{WorkflowSandboxDecl, WorkflowStepDef};
+use super::definition::{OutputSchema, WorkflowSandboxDecl, WorkflowStepDef};
 use super::error::WorkflowError;
 use super::repo::WorkflowDefinitionRepo;
-use super::run::{StepResult, WorkflowRunRepo, WorkflowRunState};
+use super::run::{StepResult, WorkflowRun, WorkflowRunRepo, WorkflowRunState};
 use super::template::{
-    format_template_diagnostics, template_diagnostics, ConditionOutcome, TemplateContext,
+    format_template_diagnostics, template_diagnostics, ConditionOutcome, IterationContext,
+    TemplateContext,
 };
 
 /// Hard cap on the pre-flight per-sandbox readiness wait. Protects the
 /// queue from a stuck infrastructure step.
 const SANDBOX_READY_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Result of [`Executor::run_loop_step`]. Three terminal shapes:
+///
+///   - `Completed` — break_condition fired (`success: true`) or
+///     max_iterations exhausted (`success: false`). Caller emits the
+///     outer `step_completed` event with the carried output.
+///   - `Parked` — an inner Wait step has parked the run. Caller
+///     stops processing further outer steps and returns from `run`.
+///   - `Cancelled` — cooperative cancellation observed between
+///     inner steps; the caller propagates `WorkflowError::Cancelled`.
+enum LoopOutcome {
+    Completed(serde_json::Value),
+    Parked,
+    Cancelled,
+}
 
 /// Default per-`ToolStep` dispatch timeout when the step doesn't
 /// specify one. Same shape as the agent step's idle timeout default.
@@ -60,6 +76,45 @@ fn first_text_content(result: &rmcp::model::CallToolResult) -> Option<String> {
         rmcp::model::RawContent::Text(t) => Some(t.text.clone()),
         _ => None,
     })
+}
+
+/// Build the agent prompt from a pre-templated skill body and the
+/// run's trigger context. The trigger payload is appended as opaque
+/// text (or interpolated via `$ARGUMENTS` if the skill opts in) so
+/// templates smuggled through user-controlled fields can't reach
+/// prior step outputs. Caller is responsible for the substitution
+/// pass on the skill body — both `TemplateContext` and
+/// `IterationContext` are valid sources.
+fn build_agent_prompt(templated_body: String, trigger_context: &serde_json::Value) -> String {
+    let pretty = serde_json::to_string_pretty(trigger_context)
+        .unwrap_or_else(|_| trigger_context.to_string());
+    if templated_body.contains("$ARGUMENTS") {
+        crate::skill::SkillBody::new(templated_body).interpolate(Some(&pretty))
+    } else {
+        format!("{templated_body}\n\nTRIGGER_CONTEXT:\n```json\n{pretty}\n```")
+    }
+}
+
+/// Per-iteration outputs scoped to a single Loop iteration. Walks
+/// the run's `step_results` for entries whose names start with the
+/// `{loop_name}.iter[{iteration}].` prefix and returns a map keyed
+/// by the inner step name (with the dotted prefix stripped). Used
+/// to seed [`crate::workflow::template::IterationContext::iter`]
+/// for inner-step condition gates and break_condition evaluation.
+fn collect_inner_iter_outputs(
+    results: &[StepResult],
+    loop_name: &str,
+    iteration: u32,
+) -> HashMap<String, serde_json::Value> {
+    let prefix = format!("{loop_name}.iter[{iteration}].");
+    let mut out = HashMap::new();
+    for r in results {
+        if let Some(stripped) = r.name.strip_prefix(&prefix) {
+            let val = r.output.clone().unwrap_or(serde_json::Value::Null);
+            out.insert(stripped.to_string(), val);
+        }
+    }
+    out
 }
 
 fn type_label(v: &serde_json::Value) -> &'static str {
@@ -242,6 +297,59 @@ impl Executor {
                 self.suspend_workflow_sandboxes(project_id, workflow_id, &borrowed_preexisting)
                     .await;
                 return Ok(());
+            }
+
+            // Loop step: keep entity bookkeeping (outer step_started
+            // here, step_completed below) identical to the other
+            // variants, but defer the inner iteration logic to
+            // `run_loop_step`. `LoopOutcome::Parked` short-circuits
+            // the outer loop the same way a Wait at the outer level
+            // does.
+            if let WorkflowStepDef::Loop { .. } = step {
+                if run.step_started(step_name.clone()).did_execute() {
+                    self.runs.update(&mut run).await?;
+                }
+                match self
+                    .run_loop_step(
+                        project_id,
+                        workflow_id,
+                        run_id,
+                        step,
+                        &trigger_context,
+                        &sandbox_ids,
+                        &preexisting_ids,
+                        &mut borrowed_preexisting,
+                        &definition,
+                        &mut run,
+                        &cancel,
+                    )
+                    .await
+                {
+                    Ok(LoopOutcome::Completed(output)) => {
+                        if run.step_completed(step_name, output).did_execute() {
+                            self.runs.update(&mut run).await?;
+                        }
+                        continue;
+                    }
+                    Ok(LoopOutcome::Parked) => {
+                        self.suspend_workflow_sandboxes(
+                            project_id,
+                            workflow_id,
+                            &borrowed_preexisting,
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                    Ok(LoopOutcome::Cancelled) => {
+                        return Err(WorkflowError::Cancelled);
+                    }
+                    Err(err) => {
+                        if run.step_errored(step_name, err.to_string()).did_execute() {
+                            self.runs.update(&mut run).await?;
+                        }
+                        break;
+                    }
+                }
             }
 
             if run.step_started(step_name.clone()).did_execute() {
@@ -505,18 +613,6 @@ impl Executor {
                 output_schema,
                 ..
             } => {
-                let attach_sandbox = match sandbox.as_deref() {
-                    Some(sandbox_name) => {
-                        let id = sandbox_ids.get(sandbox_name).copied().ok_or_else(|| {
-                            WorkflowError::UndeclaredSandbox(sandbox_name.to_string())
-                        })?;
-                        Some((id, sandbox_mode.unwrap_or(SandboxAgentMode::Write)))
-                    }
-                    None => None,
-                };
-
-                let sandbox_id = attach_sandbox.map(|(id, _)| id);
-
                 // Two-pass interpolation, ORDER MATTERS for security:
                 //
                 //   1. Resolve `${{ trigger.X }}` / `${{ steps.<n>.outputs.Y }}`
@@ -528,8 +624,7 @@ impl Executor {
                 //      survives this expansion but is no longer re-evaluated,
                 //      so an attacker cannot leak prior step outputs into the
                 //      prompt by smuggling templates through the trigger.
-                // The append-vs-interpolate split avoids exposing the body
-                // to bare `$N` substitution unless the skill opts in.
+                let sandbox_id = sandbox.as_deref().and_then(|n| sandbox_ids.get(n).copied());
                 let raw_body: String = self
                     .skills
                     .find_by_name(skill, Some(project_id), sandbox_id)
@@ -544,88 +639,25 @@ impl Executor {
                 let templated_body = template_ctx
                     .substitute_in_string(&raw_body)
                     .map_err(|e| WorkflowError::Skill(e.to_string()))?;
-                let pretty = serde_json::to_string_pretty(trigger_context)
-                    .unwrap_or_else(|_| trigger_context.to_string());
-                let prompt = if templated_body.contains("$ARGUMENTS") {
-                    crate::skill::SkillBody::new(templated_body).interpolate(Some(&pretty))
-                } else {
-                    format!("{templated_body}\n\nTRIGGER_CONTEXT:\n```json\n{pretty}\n```")
-                };
+                let prompt = build_agent_prompt(templated_body, trigger_context);
 
-                let agent_name = format!("workflow-{}-{name}", run_id.short());
-                let mut op = self.agents.begin_op().await?;
-
-                let existing = self
-                    .agents
-                    .find_for_workflow_step_in_op(&mut op, run_id, &agent_name)
-                    .await?;
-
-                let (agent, detached_agents) = if let Some(agent) = existing {
-                    (agent, Vec::new())
-                } else {
-                    let detached_agents = match attach_sandbox {
-                        Some((sandbox_id, mode)) => {
-                            self.agents
-                                .detach_conflicting_writer_in_op(
-                                    &mut op,
-                                    sandbox_id,
-                                    mode,
-                                    Some(workflow_id),
-                                )
-                                .await?
-                        }
-                        None => Vec::new(),
-                    };
-                    let chain_override = definition.resolve_step_chain(step);
-                    let agent = self
-                        .agents
-                        .create_for_workflow_run_in_op(
-                            &mut op,
-                            project_id,
-                            workflow_id,
-                            run_id,
-                            &agent_name,
-                            attach_sandbox,
-                            chain_override,
-                            output_schema.as_ref().clone(),
-                        )
-                        .await?;
-                    (agent, detached_agents)
-                };
-                op.commit().await?;
-
-                if let Some((sandbox_id, _)) = attach_sandbox {
-                    if preexisting_ids.contains(&sandbox_id) {
-                        borrowed_preexisting.insert(sandbox_id);
-                    }
-                }
-
-                for prior in detached_agents {
-                    self.agents.invalidate_agent_cache(prior);
-                }
-
-                // Reset the workspace repo so leftover state from a prior
-                // workflow run (stale `bot/*` branches, dirty checkout)
-                // doesn't leak into this agent's view of HEAD. Runs after
-                // `notify_sandbox_attach` (which fired in
-                // `create_for_workflow_run_in_op` above) so the freshly
-                // refreshed token is available for `git fetch`. Best-effort.
-                if let Some((sandbox_id, _)) = attach_sandbox {
-                    self.sandboxes.reset_for_workflow_step(sandbox_id).await;
-                }
-
-                let result = self
-                    .run_agent_until_submit_output(&agent, prompt, name, *timeout_seconds)
-                    .await;
-
-                // Detach the sandbox unconditionally so the next step can
-                // attach (Write mode is single-writer). Best-effort; the
-                // step-level result still propagates.
-                if let Some((sandbox_id, _)) = attach_sandbox {
-                    self.detach_step_sandbox(sandbox_id, agent.id).await;
-                }
-
-                result
+                self.dispatch_agent_step(
+                    project_id,
+                    workflow_id,
+                    run_id,
+                    name,
+                    sandbox.as_deref(),
+                    sandbox_mode.unwrap_or(SandboxAgentMode::Write),
+                    *timeout_seconds,
+                    output_schema.as_ref(),
+                    step,
+                    prompt,
+                    sandbox_ids,
+                    preexisting_ids,
+                    borrowed_preexisting,
+                    definition,
+                )
+                .await
             }
             WorkflowStepDef::ToolStep {
                 name,
@@ -653,6 +685,429 @@ impl Executor {
                 step: name.clone(),
                 reason: "wait step reached execute_step unexpectedly".into(),
             }),
+            // Loop steps are dispatched via `run_loop_step` directly
+            // from the outer loop in `run`; this arm should be
+            // unreachable.
+            WorkflowStepDef::Loop { name, .. } => Err(WorkflowError::StepErrored {
+                step: name.clone(),
+                reason: "loop step reached execute_step unexpectedly".into(),
+            }),
+        }
+    }
+
+    /// Post-prompt dispatch: open the agent, attach the sandbox (if
+    /// any), run the chat session to `submit_output`, detach. Shared
+    /// by both the top-level `AgentStep` arm and the inner-loop
+    /// `AgentStep` path so the sandbox/agent lifecycle stays
+    /// identical regardless of where the step lives. `step` is the
+    /// inner [`WorkflowStepDef::AgentStep`] used only to resolve the
+    /// model chain override.
+    #[allow(clippy::too_many_arguments)]
+    async fn dispatch_agent_step(
+        &self,
+        project_id: ProjectId,
+        workflow_id: WorkflowDefinitionId,
+        run_id: WorkflowRunId,
+        step_name: &str,
+        sandbox: Option<&str>,
+        sandbox_mode: SandboxAgentMode,
+        timeout_seconds: Option<u64>,
+        output_schema: &OutputSchema,
+        chain_step: &WorkflowStepDef,
+        prompt: String,
+        sandbox_ids: &HashMap<String, SandboxId>,
+        preexisting_ids: &HashSet<SandboxId>,
+        borrowed_preexisting: &mut HashSet<SandboxId>,
+        definition: &super::entity::WorkflowDefinition,
+    ) -> Result<serde_json::Value, WorkflowError> {
+        let attach_sandbox = match sandbox {
+            Some(sandbox_name) => {
+                let id = sandbox_ids
+                    .get(sandbox_name)
+                    .copied()
+                    .ok_or_else(|| WorkflowError::UndeclaredSandbox(sandbox_name.to_string()))?;
+                Some((id, sandbox_mode))
+            }
+            None => None,
+        };
+
+        let agent_name = format!("workflow-{}-{step_name}", run_id.short());
+        let mut op = self.agents.begin_op().await?;
+        let existing = self
+            .agents
+            .find_for_workflow_step_in_op(&mut op, run_id, &agent_name)
+            .await?;
+
+        let (agent, detached_agents) = if let Some(agent) = existing {
+            (agent, Vec::new())
+        } else {
+            let detached_agents = match attach_sandbox {
+                Some((sandbox_id, mode)) => {
+                    self.agents
+                        .detach_conflicting_writer_in_op(
+                            &mut op,
+                            sandbox_id,
+                            mode,
+                            Some(workflow_id),
+                        )
+                        .await?
+                }
+                None => Vec::new(),
+            };
+            let chain_override = definition.resolve_step_chain(chain_step);
+            let agent = self
+                .agents
+                .create_for_workflow_run_in_op(
+                    &mut op,
+                    project_id,
+                    workflow_id,
+                    run_id,
+                    &agent_name,
+                    attach_sandbox,
+                    chain_override,
+                    output_schema.clone(),
+                )
+                .await?;
+            (agent, detached_agents)
+        };
+        op.commit().await?;
+
+        if let Some((sandbox_id, _)) = attach_sandbox {
+            if preexisting_ids.contains(&sandbox_id) {
+                borrowed_preexisting.insert(sandbox_id);
+            }
+        }
+        for prior in detached_agents {
+            self.agents.invalidate_agent_cache(prior);
+        }
+
+        // Reset the workspace repo so leftover state from a prior
+        // workflow run (stale `bot/*` branches, dirty checkout)
+        // doesn't leak into this agent's view of HEAD.
+        if let Some((sandbox_id, _)) = attach_sandbox {
+            self.sandboxes.reset_for_workflow_step(sandbox_id).await;
+        }
+
+        let result = self
+            .run_agent_until_submit_output(&agent, prompt, step_name, timeout_seconds)
+            .await;
+
+        // Detach the sandbox unconditionally so the next step can
+        // attach (Write mode is single-writer). Best-effort.
+        if let Some((sandbox_id, _)) = attach_sandbox {
+            self.detach_step_sandbox(sandbox_id, agent.id).await;
+        }
+        result
+    }
+
+    /// Drive a `WorkflowStepDef::Loop` until its `break_condition`
+    /// fires or `max_iterations` is exhausted. Each iteration's inner
+    /// steps are recorded as dotted-name `StepResult` rows
+    /// (`{loop_name}.iter[{N}].{inner_name}`), so the existing
+    /// idempotency (`step_already_terminal`) and resume-from-wait
+    /// (`current_wait_step`) infrastructure keeps working unchanged.
+    /// Resumable: replays of an in-flight iteration pick up where
+    /// the prior attempt left off via [`WorkflowRun::loop_current_iteration`]
+    /// and per-inner-step terminal checks.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_loop_step(
+        &self,
+        project_id: ProjectId,
+        workflow_id: WorkflowDefinitionId,
+        run_id: WorkflowRunId,
+        loop_step: &WorkflowStepDef,
+        trigger_context: &serde_json::Value,
+        sandbox_ids: &HashMap<String, SandboxId>,
+        preexisting_ids: &HashSet<SandboxId>,
+        borrowed_preexisting: &mut HashSet<SandboxId>,
+        definition: &super::entity::WorkflowDefinition,
+        run: &mut WorkflowRun,
+        cancel: &Arc<AtomicBool>,
+    ) -> Result<LoopOutcome, WorkflowError> {
+        let (loop_name, break_condition, max_iterations, inner_steps) = match loop_step {
+            WorkflowStepDef::Loop {
+                name,
+                break_condition,
+                max_iterations,
+                steps,
+                ..
+            } => (
+                name.clone(),
+                break_condition.clone(),
+                *max_iterations,
+                steps,
+            ),
+            _ => unreachable!("run_loop_step called with non-Loop step"),
+        };
+
+        let mut iteration: u32 = run.loop_current_iteration(&loop_name).max(1);
+
+        loop {
+            if iteration > max_iterations {
+                let iters = run.loop_iterations_so_far(&loop_name);
+                return Ok(LoopOutcome::Completed(serde_json::json!({
+                    "success": false,
+                    "reason": format!(
+                        "loop '{loop_name}' reached max_iterations ({max_iterations}) without break_condition firing"
+                    ),
+                    "iterations": iters,
+                })));
+            }
+
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(LoopOutcome::Cancelled);
+            }
+
+            if run
+                .loop_iteration_started(loop_name.clone(), iteration)
+                .did_execute()
+            {
+                self.runs.update(run).await?;
+            }
+
+            // Resume safety: if a prior attempt recorded broke=true
+            // we exit here instead of running another iteration.
+            if run.loop_broke(&loop_name) {
+                let iters = run.loop_iterations_so_far(&loop_name);
+                return Ok(LoopOutcome::Completed(serde_json::json!({
+                    "success": true,
+                    "iterations": iters,
+                })));
+            }
+
+            for inner in inner_steps {
+                let dotted_name = format!("{loop_name}.iter[{iteration}].{}", inner.name());
+                if run.step_already_terminal(&dotted_name) {
+                    continue;
+                }
+                if cancel.load(Ordering::Relaxed) {
+                    return Ok(LoopOutcome::Cancelled);
+                }
+
+                let outer_step_outputs = collect_step_outputs(&run.step_results);
+                let inner_outputs =
+                    collect_inner_iter_outputs(&run.step_results, &loop_name, iteration);
+                let ictx = IterationContext {
+                    trigger: trigger_context,
+                    steps: &outer_step_outputs,
+                    iter: &inner_outputs,
+                    iteration,
+                };
+
+                if let Some(body) = inner.condition() {
+                    match ictx.evaluate_condition(body) {
+                        Ok(ConditionOutcome::True) => {}
+                        Ok(ConditionOutcome::False) => {
+                            if run
+                                .step_skipped(dotted_name.clone(), body.to_string())
+                                .did_execute()
+                            {
+                                self.runs.update(run).await?;
+                            }
+                            continue;
+                        }
+                        Ok(ConditionOutcome::NotBoolean(rendered)) => {
+                            return Err(WorkflowError::ConditionNotBoolean {
+                                step: dotted_name,
+                                body: body.to_string(),
+                                value: rendered,
+                            });
+                        }
+                        Err(e) => {
+                            return Err(WorkflowError::InvalidCondition(format!(
+                                "step '{dotted_name}': {e}"
+                            )));
+                        }
+                    }
+                }
+
+                if let WorkflowStepDef::Wait { provider, .. } = inner {
+                    if run
+                        .step_waiting(dotted_name.clone(), provider.clone())
+                        .did_execute()
+                    {
+                        self.runs.update(run).await?;
+                    }
+                    return Ok(LoopOutcome::Parked);
+                }
+
+                if run.step_started(dotted_name.clone()).did_execute() {
+                    self.runs.update(run).await?;
+                }
+
+                let result = match inner {
+                    WorkflowStepDef::AgentStep {
+                        skill,
+                        sandbox,
+                        sandbox_mode,
+                        timeout_seconds,
+                        output_schema,
+                        ..
+                    } => {
+                        let sandbox_id =
+                            sandbox.as_deref().and_then(|n| sandbox_ids.get(n).copied());
+                        let raw_body: String = match self
+                            .skills
+                            .find_by_name(skill, Some(project_id), sandbox_id)
+                            .await
+                        {
+                            Ok(Some(s)) => s.into(),
+                            Ok(None) => {
+                                let err = WorkflowError::SkillNotFound(skill.clone());
+                                if run
+                                    .step_errored(dotted_name.clone(), err.to_string())
+                                    .did_execute()
+                                {
+                                    self.runs.update(run).await?;
+                                }
+                                return Err(err);
+                            }
+                            Err(e) => {
+                                let err = WorkflowError::Skill(e.to_string());
+                                if run
+                                    .step_errored(dotted_name.clone(), err.to_string())
+                                    .did_execute()
+                                {
+                                    self.runs.update(run).await?;
+                                }
+                                return Err(err);
+                            }
+                        };
+                        let templated_body = match ictx.substitute_in_string(&raw_body) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                let err = WorkflowError::Skill(e.to_string());
+                                if run
+                                    .step_errored(dotted_name.clone(), err.to_string())
+                                    .did_execute()
+                                {
+                                    self.runs.update(run).await?;
+                                }
+                                return Err(err);
+                            }
+                        };
+                        let prompt = build_agent_prompt(templated_body, trigger_context);
+                        self.dispatch_agent_step(
+                            project_id,
+                            workflow_id,
+                            run_id,
+                            &dotted_name,
+                            sandbox.as_deref(),
+                            sandbox_mode.unwrap_or(SandboxAgentMode::Write),
+                            *timeout_seconds,
+                            output_schema.as_ref(),
+                            inner,
+                            prompt,
+                            sandbox_ids,
+                            preexisting_ids,
+                            borrowed_preexisting,
+                            definition,
+                        )
+                        .await
+                    }
+                    WorkflowStepDef::ToolStep {
+                        tool,
+                        params,
+                        timeout_seconds,
+                        ..
+                    } => {
+                        // Pre-resolve `${{ … }}` refs via the iteration
+                        // context (covers trigger/steps/iter/iteration).
+                        // Then call `execute_tool_step` with empty
+                        // trigger/steps maps so its own substitution
+                        // pass is a no-op on the already-resolved tree.
+                        let resolved = match ictx.substitute(params) {
+                            Ok(v) => v,
+                            Err(e) => {
+                                let err = WorkflowError::InvalidTemplateRef(e.to_string());
+                                if run
+                                    .step_errored(dotted_name.clone(), err.to_string())
+                                    .did_execute()
+                                {
+                                    self.runs.update(run).await?;
+                                }
+                                return Err(err);
+                            }
+                        };
+                        let empty_outputs: HashMap<String, serde_json::Value> = HashMap::new();
+                        let empty_trigger = serde_json::Value::Null;
+                        self.execute_tool_step(
+                            project_id,
+                            workflow_id,
+                            run_id,
+                            &dotted_name,
+                            tool,
+                            &resolved,
+                            *timeout_seconds,
+                            &empty_trigger,
+                            &empty_outputs,
+                        )
+                        .await
+                    }
+                    WorkflowStepDef::Wait { .. } | WorkflowStepDef::Loop { .. } => unreachable!(
+                        "Wait handled via park-and-return; nested Loop rejected at validate time"
+                    ),
+                };
+
+                match result {
+                    Ok(output) => {
+                        if run.step_completed(dotted_name, output).did_execute() {
+                            self.runs.update(run).await?;
+                        }
+                    }
+                    Err(err) => {
+                        if run.step_errored(dotted_name, err.to_string()).did_execute() {
+                            self.runs.update(run).await?;
+                        }
+                        return Err(err);
+                    }
+                }
+            }
+
+            // All inner steps for this iteration complete. Evaluate
+            // break_condition against the now-finalized iter map.
+            let outer_step_outputs = collect_step_outputs(&run.step_results);
+            let inner_outputs =
+                collect_inner_iter_outputs(&run.step_results, &loop_name, iteration);
+            let ictx = IterationContext {
+                trigger: trigger_context,
+                steps: &outer_step_outputs,
+                iter: &inner_outputs,
+                iteration,
+            };
+            let broke = match ictx.evaluate_condition(&break_condition) {
+                Ok(ConditionOutcome::True) => true,
+                Ok(ConditionOutcome::False) => false,
+                Ok(ConditionOutcome::NotBoolean(rendered)) => {
+                    return Err(WorkflowError::ConditionNotBoolean {
+                        step: loop_name.clone(),
+                        body: break_condition.clone(),
+                        value: rendered,
+                    });
+                }
+                Err(e) => {
+                    return Err(WorkflowError::InvalidCondition(format!(
+                        "loop '{loop_name}' break_condition: {e}"
+                    )));
+                }
+            };
+
+            if run
+                .loop_iteration_completed(loop_name.clone(), iteration, broke)
+                .did_execute()
+            {
+                self.runs.update(run).await?;
+            }
+
+            if broke {
+                let iters = run.loop_iterations_so_far(&loop_name);
+                return Ok(LoopOutcome::Completed(serde_json::json!({
+                    "success": true,
+                    "iterations": iters,
+                })));
+            }
+
+            iteration += 1;
         }
     }
 
