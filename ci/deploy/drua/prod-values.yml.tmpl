@@ -198,32 +198,6 @@ sandbox:
   templateName: agent-sandbox
   runtimeClassName: gvisor
   networkPolicyManagement: Unmanaged
-  nixCacheProxy:
-    enabled: true
-    authSecretChecksum: "${nix_cache_proxy_auth_secret_checksum}"
-    cache:
-      maxSize: 80g
-    persistence:
-      enabled: true
-      size: 100Gi
-      storageClassName: standard-rwo
-    upstreams:
-%{ if lana_bank_cachix_enabled ~}
-      - name: lana-bank
-        url: https://lana-bank-github-actions.cachix.org
-        publicKey: ${lana_bank_cachix_public_key}
-        auth:
-          secretName: sandbox-nix-cache-proxy-auth
-          secretKey: lana-bank-github-actions.conf
-%{ endif ~}
-      - name: galoy-agents
-        url: https://galoy-agents.cachix.org
-        publicKey: galoy-agents.cachix.org-1:wGb5wYMLJ3yPYoOvf2O5vt9gEZEJ7hHsqDCNPMELGPY=
-      - name: nixos
-        url: https://cache.nixos.org
-        publicKey: cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
-  forwardProxy:
-    enabled: true
   image:
     repository: us.gcr.io/galoyorg/sandbox
     digest: "${sandbox_image_digest}"
@@ -236,8 +210,6 @@ sandbox:
       enabled: true
       size: 50Gi
       storageClassName: standard-rwo
-  ## Used only if nixCacheProxy.enabled is turned off. Production
-  ## sandbox Nix traffic normally goes through nixCacheProxy.upstreams above.
   nixSubstituters:
 %{ if lana_bank_cachix_enabled ~}
   - url: https://lana-bank-github-actions.cachix.org
@@ -254,7 +226,6 @@ sandbox:
       name: sandbox-nix-netrc
       key: netrc
 %{ endif ~}
-  otelCollectorNamespace: galoy-agents-otel
   mcpGatewayUrl: "http://galoy-agents.galoy-agents.svc.cluster.local:5254/mcp"
 
 kubernetes-mcp-server:

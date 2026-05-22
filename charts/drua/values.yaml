@@ -376,95 +376,11 @@ sandbox:
   ## Free-form extra env vars on the sandbox container. NIX_CONFIG
   ## should normally come from `nixSubstituters` below, not here.
   env: []
-  ## Namespace of the OTel collector for trace export.
-  ## When set, adds an egress rule allowing ports 4317 and 4318.
-  otelCollectorNamespace: ""
   ## Nix substituters placed before cache.nixos.org in the sandbox's
-  ## NIX_CONFIG when nixCacheProxy.enabled=false. Proxy mode uses
-  ## nixCacheProxy.upstreams instead.
+  ## NIX_CONFIG.
   nixSubstituters:
     - url: https://galoy-agents.cachix.org
       publicKey: galoy-agents.cachix.org-1:wGb5wYMLJ3yPYoOvf2O5vt9gEZEJ7hHsqDCNPMELGPY=
-  ## Internal reverse cache for public Nix binary caches. Sandboxes talk only
-  ## to this ClusterIP service; the proxy fetches and caches approved upstreams.
-  ## Authenticated upstreams can mount Secret-backed Nginx snippets via
-  ## upstreams[].auth, keeping tokens out of the ConfigMap and sandbox pods.
-  nixCacheProxy:
-    enabled: true
-    authSecretChecksum: ""
-    replicas: 1
-    image:
-      repository: nginxinc/nginx-unprivileged
-      tag: 1.27-alpine
-      pullPolicy: IfNotPresent
-    service:
-      port: 8080
-    cache:
-      maxSize: 10g
-      inactive: 30d
-      keysZoneSize: 20m
-      validTtl: 30d
-      notFoundTtl: 10m
-    proxy:
-      readTimeout: 300s
-      sendTimeout: 300s
-    persistence:
-      enabled: false
-      size: 20Gi
-      storageClassName: ""
-    resources:
-      requests:
-        cpu: 50m
-        memory: 128Mi
-      limits:
-        cpu: 500m
-        memory: 512Mi
-    upstreams:
-      - name: galoy-agents
-        url: https://galoy-agents.cachix.org
-        publicKey: galoy-agents.cachix.org-1:wGb5wYMLJ3yPYoOvf2O5vt9gEZEJ7hHsqDCNPMELGPY=
-        ## Optional Nginx snippet Secret for authenticated caches.
-        ## The Secret key content should be a location-safe directive such as:
-        ##   proxy_set_header Authorization "Basic <base64(:token)>";
-        # auth:
-        #   secretName: sandbox-nix-cache-proxy-auth
-        #   secretKey: my-cache.conf
-      - name: nixos
-        url: https://cache.nixos.org
-        publicKey: cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
-  ## Forward HTTPS proxy for nix inside sandbox pods. All nix binaries
-  ## are wrapped to inject http_proxy from DRUA_FORWARD_PROXY_URL —
-  ## the agent shell (curl, cargo, npm) has no proxy env vars.
-  ## Separate from nixCacheProxy (reverse cache for binary substitutes).
-  forwardProxy:
-    enabled: true
-    replicas: 1
-    image:
-      repository: alpine
-      tag: "3.20"
-      pullPolicy: IfNotPresent
-    service:
-      port: 8888
-    timeout: 600
-    maxClients: 100
-    resources:
-      requests:
-        cpu: 25m
-        memory: 32Mi
-      limits:
-        cpu: 200m
-        memory: 128Mi
-    ## Domain allowlist — one POSIX extended regex per entry, matched
-    ## against the requested host. FilterDefaultDeny is on: unlisted
-    ## domains are blocked.
-    allowedDomains:
-      - "^github\\.com$"
-      - "^.*\\.github\\.com$"
-      - "^.*\\.githubusercontent\\.com$"
-      - "^static\\.rust-lang\\.org$"
-      - "^tarballs\\.nixos\\.org$"
-      - "^ci\\.galoy\\.io$"
-      - "^static\\.crates\\.io$"
   ## Optional Nix netrc file for authenticated binary caches, such as a
   ## private Cachix cache. When enabled, `netrc-file = <mountPath>` is added
   ## to sandbox NIX_CONFIG and the Secret is mounted into the sandbox
