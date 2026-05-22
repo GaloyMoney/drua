@@ -552,8 +552,6 @@ impl Workflows {
         Ok(())
     }
 
-    /// Check the same tool-step dispatch contract enforced by
-    /// create/update and runtime execution without running the tool.
     pub(crate) fn validate_tool_step_tool(
         &self,
         tool: &str,

@@ -309,7 +309,6 @@ enum WorkflowCommand {
     Create,
     List,
     Get,
-    /// Dry-preflight an existing workflow definition and return diagnostics.
     Validate,
     Update,
     Delete,
@@ -1497,8 +1496,7 @@ impl AdminToolSet {
                         sandboxes,
                         params.model_chain,
                     )
-                    .await
-                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                    .await?;
                 Ok(CallToolResult::success(vec![Content::text(
                     format_workflow(&definition, true),
                 )]))
@@ -1509,11 +1507,7 @@ impl AdminToolSet {
                     ToolSetsError::MissingArgument("project_id is required for list".to_string())
                 })?;
                 Audit::record_action("workflow.list");
-                let definitions = self
-                    .workflows
-                    .list_for_project(subject, project_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                let definitions = self.workflows.list_for_project(subject, project_id).await?;
                 Ok(CallToolResult::success(vec![Content::text(
                     format_workflows(&definitions),
                 )]))
@@ -1524,11 +1518,7 @@ impl AdminToolSet {
                     ToolSetsError::MissingArgument("definition_id is required for get".to_string())
                 })?;
                 Audit::record_action("workflow.get");
-                let definition = self
-                    .workflows
-                    .find_by_id(subject, definition_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                let definition = self.workflows.find_by_id(subject, definition_id).await?;
                 Ok(CallToolResult::success(vec![Content::text(
                     format_workflow(&definition, false),
                 )]))
@@ -1541,11 +1531,7 @@ impl AdminToolSet {
                     )
                 })?;
                 Audit::record_action("workflow.validate");
-                let definition = self
-                    .workflows
-                    .find_by_id(subject, definition_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                let definition = self.workflows.find_by_id(subject, definition_id).await?;
                 let report = self
                     .validate_workflow_definition(subject, &definition, params.payload.as_ref())
                     .await;
@@ -1622,8 +1608,7 @@ impl AdminToolSet {
                         sandboxes,
                         model_chain,
                     )
-                    .await
-                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                    .await?;
                 Ok(CallToolResult::success(vec![Content::text(
                     format_workflow(&definition, false),
                 )]))
@@ -1636,10 +1621,7 @@ impl AdminToolSet {
                     )
                 })?;
                 Audit::record_action("workflow.delete");
-                self.workflows
-                    .delete(subject, definition_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                self.workflows.delete(subject, definition_id).await?;
                 Ok(CallToolResult::success(vec![Content::text(format!(
                     "Workflow deleted (id {definition_id})."
                 ))]))
@@ -1658,8 +1640,7 @@ impl AdminToolSet {
                 let maybe_run = self
                     .workflows
                     .trigger_run(subject, definition_id, payload)
-                    .await
-                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                    .await?;
                 let body = match maybe_run {
                     Some(run) => format_run(&run),
                     None => "Trigger condition evaluated to false; no run created.".to_string(),
@@ -1672,11 +1653,7 @@ impl AdminToolSet {
                     ToolSetsError::MissingArgument("run_id is required for run".to_string())
                 })?;
                 Audit::record_action("workflow.run");
-                let run = self
-                    .workflows
-                    .find_run_by_id(subject, run_id)
-                    .await
-                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                let run = self.workflows.find_run_by_id(subject, run_id).await?;
                 Ok(CallToolResult::success(vec![Content::text(format_run(
                     &run,
                 ))]))

@@ -52,6 +52,12 @@ pub enum ToolSetsError {
     Unauthorized,
 }
 
+impl From<crate::workflow::WorkflowError> for ToolSetsError {
+    fn from(e: crate::workflow::WorkflowError) -> Self {
+        Self::Workflow(e.to_string())
+    }
+}
+
 /// Why a top-level tool can't be invoked from a workflow `tool_step`.
 /// Returned by [`super::ToolSets::find_for_workflow`]; both
 /// parse-time validation (`workflow create`/`update`) and runtime
