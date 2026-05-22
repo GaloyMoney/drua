@@ -936,16 +936,18 @@ impl AdminToolSet {
         for (idx, decl) in definition.sandboxes.iter().enumerate() {
             validator.validate_sandbox_decl(idx, decl);
             if let WorkflowSandboxDecl::Preexisting { name } = decl {
-                match self
+                let lookup_result = match self
                     .sandboxes
                     .find_by_name_in_project(subject, definition.project_id, name)
                     .await
                 {
                     Ok(sandbox) => {
                         preexisting_ids.insert(name.clone(), sandbox.id);
+                        Ok(())
                     }
-                    Err(e) => validator.record_preexisting_sandbox_missing(idx, name, e),
-                }
+                    Err(e) => Err(e),
+                };
+                validator.validate_preexisting_sandbox_lookup(idx, name, lookup_result);
             }
         }
 
@@ -964,17 +966,14 @@ impl AdminToolSet {
                 let preexisting_sandbox_id = sandbox
                     .as_ref()
                     .and_then(|sandbox_name| preexisting_ids.get(sandbox_name).copied());
-                match self
+                let skill_lookup_result = self
                     .skills
                     .find_by_name(skill, Some(definition.project_id), preexisting_sandbox_id)
                     .await
-                {
-                    Ok(Some(_)) => {}
-                    Ok(None) => validator.record_skill_missing(idx, name, skill),
-                    Err(e) => validator.record_skill_lookup_error(idx, name, skill, e),
-                }
+                    .map(|maybe_skill| maybe_skill.is_some());
+                validator.validate_skill_lookup(idx, name, skill, skill_lookup_result);
             } else if let WorkflowStepDef::ToolStep { tool, .. } = step {
-                validator.record_tool_step_availability(
+                validator.validate_tool_step_availability(
                     idx,
                     tool,
                     self.workflows.validate_tool_step_tool(tool),
@@ -2911,7 +2910,7 @@ mod tests {
         let toolsets = ToolSets::empty_for_test();
         toolsets.register_top_level(StubTopLevelTool::new("ok_tool", true, true));
         let mut validator = WorkflowDefinitionValidator::default();
-        validator.record_tool_step_availability(
+        validator.validate_tool_step_availability(
             0,
             "ok_tool",
             toolsets.find_for_workflow("ok_tool").map(|_| ()),
@@ -2928,7 +2927,7 @@ mod tests {
     fn workflow_validate_rejects_unknown_tool_step_tool() {
         let toolsets = ToolSets::empty_for_test();
         let mut validator = WorkflowDefinitionValidator::default();
-        validator.record_tool_step_availability(
+        validator.validate_tool_step_availability(
             0,
             "missing_tool",
             toolsets.find_for_workflow("missing_tool").map(|_| ()),
@@ -2943,7 +2942,7 @@ mod tests {
         let toolsets = ToolSets::empty_for_test();
         toolsets.register_top_level(StubTopLevelTool::new("agent", false, true));
         let mut validator = WorkflowDefinitionValidator::default();
-        validator.record_tool_step_availability(
+        validator.validate_tool_step_availability(
             0,
             "agent",
             toolsets.find_for_workflow("agent").map(|_| ()),
@@ -2958,7 +2957,7 @@ mod tests {
         let toolsets = ToolSets::empty_for_test();
         toolsets.register_top_level(StubTopLevelTool::new("raw", true, false));
         let mut validator = WorkflowDefinitionValidator::default();
-        validator.record_tool_step_availability(
+        validator.validate_tool_step_availability(
             0,
             "raw",
             toolsets.find_for_workflow("raw").map(|_| ()),

@@ -85,17 +85,21 @@ impl WorkflowDefinitionValidator {
         }
     }
 
-    pub(crate) fn record_preexisting_sandbox_missing(
+    pub(crate) fn validate_preexisting_sandbox_lookup<E>(
         &mut self,
         index: usize,
         name: &str,
-        error: impl std::fmt::Display,
-    ) {
-        self.errors.error(
-            "sandbox.preexisting_missing",
-            format!("/sandboxes/{index}/name"),
-            format!("preexisting sandbox `{name}` could not be resolved: {error}"),
-        );
+        result: Result<(), E>,
+    ) where
+        E: std::fmt::Display,
+    {
+        if let Err(e) = result {
+            self.errors.error(
+                "sandbox.preexisting_missing",
+                format!("/sandboxes/{index}/name"),
+                format!("preexisting sandbox `{name}` could not be resolved: {e}"),
+            );
+        }
     }
 
     pub(crate) fn validate_steps_present(&mut self, steps: &[WorkflowStepDef]) {
@@ -237,7 +241,7 @@ impl WorkflowDefinitionValidator {
         }
     }
 
-    pub(crate) fn record_tool_step_availability<E: std::fmt::Display>(
+    pub(crate) fn validate_tool_step_availability<E: std::fmt::Display>(
         &mut self,
         index: usize,
         tool: &str,
@@ -252,26 +256,28 @@ impl WorkflowDefinitionValidator {
         }
     }
 
-    pub(crate) fn record_skill_missing(&mut self, index: usize, step: &str, skill: &str) {
-        self.errors.error(
-            "step.skill_missing",
-            format!("/steps/{index}/skill"),
-            format!("step `{step}` references missing skill `{skill}`"),
-        );
-    }
-
-    pub(crate) fn record_skill_lookup_error(
+    pub(crate) fn validate_skill_lookup<E>(
         &mut self,
         index: usize,
         step: &str,
         skill: &str,
-        error: impl std::fmt::Display,
-    ) {
-        self.errors.error(
-            "step.skill_lookup_error",
-            format!("/steps/{index}/skill"),
-            format!("step `{step}` skill `{skill}` lookup failed: {error}"),
-        );
+        result: Result<bool, E>,
+    ) where
+        E: std::fmt::Display,
+    {
+        match result {
+            Ok(true) => {}
+            Ok(false) => self.errors.error(
+                "step.skill_missing",
+                format!("/steps/{index}/skill"),
+                format!("step `{step}` references missing skill `{skill}`"),
+            ),
+            Err(e) => self.errors.error(
+                "step.skill_lookup_error",
+                format!("/steps/{index}/skill"),
+                format!("step `{step}` skill `{skill}` lookup failed: {e}"),
+            ),
+        }
     }
 
     pub(crate) fn finish(self) -> WorkflowValidationErrors {
