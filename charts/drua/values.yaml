@@ -465,6 +465,7 @@ sandbox:
       - "^static\\.rust-lang\\.org$"
       - "^tarballs\\.nixos\\.org$"
       - "^ci\\.galoy\\.io$"
+      - "^pypi\\.io$"
       - "^static\\.crates\\.io$"
   ## Optional Nix netrc file for authenticated binary caches, such as a
   ## private Cachix cache. When enabled, `netrc-file = <mountPath>` is added
