@@ -9,8 +9,13 @@
 //!
 //! Provider `github_app` uses HMAC-SHA256 verification
 //! (`X-Hub-Signature-256: sha256=<hex>`) instead of bearer tokens.
-//! Provider `zenduty` uses HMAC-SHA256 verification with the digest
-//! base64-encoded in the `X-SIGNATURE` header.
+//! Provider `zenduty` uses HTTP Basic auth — Zenduty mints a per-
+//! integration HMAC secret on Save (receiver can't pre-set one), so
+//! one shared secret across N service webhooks needs a different
+//! channel. Basic auth is Zenduty's first-class auth selector and
+//! carries the secret in `Authorization: Basic <base64(user:pass)>`.
+//! Username is ignored; password is compared against the configured
+//! webhook secret.
 
 use axum::{
     body::Bytes,
@@ -201,7 +206,7 @@ fn verify_webhook(
 ) -> bool {
     match provider {
         Some("github_app") => verify_github_hmac(expected_secret, headers, body),
-        Some("zenduty") => verify_zenduty_hmac(expected_secret, headers, body),
+        Some("zenduty") => verify_basic_auth(expected_secret, headers),
         other => verify_bearer_or_token(other, expected_secret, headers),
     }
 }
@@ -245,31 +250,54 @@ fn verify_github_hmac(secret: &str, headers: &HeaderMap, body: &[u8]) -> bool {
     mac.verify_slice(&expected_bytes).is_ok()
 }
 
-/// HMAC-SHA256 verification per Zenduty's outgoing webhook spec: the
-/// `X-SIGNATURE` header carries the base64-encoded digest computed
-/// over the raw body with the webhook secret as key.
-fn verify_zenduty_hmac(secret: &str, headers: &HeaderMap, body: &[u8]) -> bool {
-    let signature = match headers.get("x-signature").and_then(|v| v.to_str().ok()) {
+/// HTTP Basic auth: `Authorization: Basic <base64(user:pass)>`.
+/// Username is ignored; password must equal the configured secret.
+fn verify_basic_auth(secret: &str, headers: &HeaderMap) -> bool {
+    let header = match headers.get("authorization").and_then(|v| v.to_str().ok()) {
         Some(s) => s,
         None => {
-            tracing::warn!("webhook: missing X-SIGNATURE header");
+            tracing::warn!("webhook: missing Authorization header");
             return false;
         }
     };
 
-    let expected_bytes = match STANDARD.decode(signature) {
+    let b64 = match header.strip_prefix("Basic ") {
+        Some(s) => s,
+        None => {
+            tracing::warn!("webhook: Authorization missing Basic prefix");
+            return false;
+        }
+    };
+
+    let decoded = match STANDARD.decode(b64) {
         Ok(b) => b,
         Err(_) => {
-            tracing::warn!("webhook: X-SIGNATURE contains invalid base64");
+            tracing::warn!("webhook: Authorization Basic value is not valid base64");
             return false;
         }
     };
 
-    let mut mac =
-        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
-    mac.update(body);
+    let credentials = match std::str::from_utf8(&decoded) {
+        Ok(s) => s,
+        Err(_) => {
+            tracing::warn!("webhook: Authorization Basic credentials are not valid utf-8");
+            return false;
+        }
+    };
 
-    mac.verify_slice(&expected_bytes).is_ok()
+    let password = match credentials.split_once(':') {
+        Some((_user, pw)) => pw,
+        None => {
+            tracing::warn!("webhook: Authorization Basic credentials missing colon");
+            return false;
+        }
+    };
+
+    if password != secret {
+        tracing::warn!("webhook: secret mismatch");
+        return false;
+    }
+    true
 }
 
 fn verify_bearer_or_token(
@@ -439,52 +467,65 @@ mod tests {
         assert!(verify_webhook(None, "whsec_abc", &headers, b""));
     }
 
-    #[test]
-    fn zenduty_hmac_valid_signature() {
-        let secret = "whsec_zenduty_secret";
-        let body = b"{\"payload\":{\"event_type\":\"triggered\"}}";
-
-        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(body);
-        let signature = STANDARD.encode(mac.finalize().into_bytes());
-
-        let mut headers = HeaderMap::new();
-        headers.insert("x-signature", signature.parse().unwrap());
-        assert!(verify_webhook(Some("zenduty"), secret, &headers, body));
+    fn basic_header(user: &str, pass: &str) -> String {
+        format!("Basic {}", STANDARD.encode(format!("{user}:{pass}")))
     }
 
     #[test]
-    fn zenduty_hmac_wrong_signature_rejects() {
+    fn zenduty_basic_auth_accepts_matching_password() {
         let mut headers = HeaderMap::new();
-        headers.insert("x-signature", "ZGVhZGJlZWY=".parse().unwrap());
-        assert!(!verify_webhook(
-            Some("zenduty"),
-            "whsec_abc",
-            &headers,
-            b"{}"
-        ));
+        headers.insert(
+            "authorization",
+            basic_header("drua", "whsec_abc").parse().unwrap(),
+        );
+        assert!(verify_webhook(Some("zenduty"), "whsec_abc", &headers, b""));
     }
 
     #[test]
-    fn zenduty_hmac_missing_header_rejects() {
+    fn zenduty_basic_auth_ignores_username() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            basic_header("anything", "whsec_abc").parse().unwrap(),
+        );
+        assert!(verify_webhook(Some("zenduty"), "whsec_abc", &headers, b""));
+    }
+
+    #[test]
+    fn zenduty_basic_auth_rejects_wrong_password() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            basic_header("drua", "wrong").parse().unwrap(),
+        );
+        assert!(!verify_webhook(Some("zenduty"), "whsec_abc", &headers, b""));
+    }
+
+    #[test]
+    fn zenduty_basic_auth_rejects_missing_header() {
         let headers = HeaderMap::new();
-        assert!(!verify_webhook(
-            Some("zenduty"),
-            "whsec_abc",
-            &headers,
-            b"{}"
-        ));
+        assert!(!verify_webhook(Some("zenduty"), "whsec_abc", &headers, b""));
     }
 
     #[test]
-    fn zenduty_hmac_invalid_base64_rejects() {
+    fn zenduty_basic_auth_rejects_bearer_prefix() {
         let mut headers = HeaderMap::new();
-        headers.insert("x-signature", "not!valid!base64".parse().unwrap());
-        assert!(!verify_webhook(
-            Some("zenduty"),
-            "whsec_abc",
-            &headers,
-            b"{}"
-        ));
+        headers.insert("authorization", "Bearer whsec_abc".parse().unwrap());
+        assert!(!verify_webhook(Some("zenduty"), "whsec_abc", &headers, b""));
+    }
+
+    #[test]
+    fn zenduty_basic_auth_rejects_invalid_base64() {
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Basic not!base64".parse().unwrap());
+        assert!(!verify_webhook(Some("zenduty"), "whsec_abc", &headers, b""));
+    }
+
+    #[test]
+    fn zenduty_basic_auth_rejects_credentials_without_colon() {
+        let mut headers = HeaderMap::new();
+        let no_colon = format!("Basic {}", STANDARD.encode("nocolonhere"));
+        headers.insert("authorization", no_colon.parse().unwrap());
+        assert!(!verify_webhook(Some("zenduty"), "whsec_abc", &headers, b""));
     }
 }
