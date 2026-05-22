@@ -80,71 +80,28 @@ Sandbox Nix netrc Secret. Used for authenticated private binary caches.
 {{- end -}}
 
 {{/*
-Sandbox Nix cache proxy names and service URL.
-*/}}
-{{- define "galoyAgents.sandbox.nixCacheProxy.fullname" -}}
-{{- printf "%s-sandbox-nix-cache-proxy" (include "galoyAgents.fullname" .) | trunc 63 | trimSuffix "-" -}}
-{{- end -}}
-
-{{- define "galoyAgents.sandbox.nixCacheProxy.url" -}}
-http://{{ include "galoyAgents.sandbox.nixCacheProxy.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.sandbox.nixCacheProxy.service.port }}
-{{- end -}}
-
-{{/*
-Sandbox forward HTTPS proxy names and service URL.
-*/}}
-{{- define "galoyAgents.sandbox.forwardProxy.fullname" -}}
-{{- printf "%s-sandbox-forward-proxy" (include "galoyAgents.fullname" .) | trunc 63 | trimSuffix "-" -}}
-{{- end -}}
-
-{{- define "galoyAgents.sandbox.forwardProxy.url" -}}
-http://{{ include "galoyAgents.sandbox.forwardProxy.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.sandbox.forwardProxy.service.port }}
-{{- end -}}
-
-{{/*
 Sandbox NIX_CONFIG contents for configured remote substituters.
 */}}
 {{- define "galoyAgents.sandbox.nixSubstituterUrls" -}}
-{{- if and .Values.sandbox.nixCacheProxy.enabled (not (gt (len .Values.sandbox.nixCacheProxy.upstreams) 0)) -}}
-{{- fail "sandbox.nixCacheProxy.upstreams must not be empty when sandbox.nixCacheProxy.enabled=true" -}}
-{{- end -}}
-{{- if .Values.sandbox.nixCacheProxy.enabled -}}
-{{- $root := . -}}
-{{- range $i, $upstream := .Values.sandbox.nixCacheProxy.upstreams -}}
-{{- $name := required "sandbox.nixCacheProxy.upstreams[].name is required" $upstream.name -}}
-{{- if $i }} {{ end -}}{{ include "galoyAgents.sandbox.nixCacheProxy.url" $root }}/{{ $name }}/
-{{- end -}}
-{{- else -}}
 {{- range $i, $substituter := .Values.sandbox.nixSubstituters -}}
 {{- if $i }} {{ end -}}{{ $substituter.url -}}
-{{- end -}}
 {{- end -}}
 {{- end -}}
 
 {{- define "galoyAgents.sandbox.nixPublicKeys" -}}
 {{- $first := true -}}
-{{- if .Values.sandbox.nixCacheProxy.enabled -}}
-{{- range $substituter := .Values.sandbox.nixCacheProxy.upstreams -}}
-{{- if $substituter.publicKey -}}
-{{- if not $first }} {{ end -}}{{ $substituter.publicKey -}}
-{{- $first = false -}}
-{{- end -}}
-{{- end -}}
-{{- else -}}
 {{- range $substituter := .Values.sandbox.nixSubstituters -}}
 {{- if $substituter.publicKey -}}
 {{- if not $first }} {{ end -}}{{ $substituter.publicKey -}}
 {{- $first = false -}}
 {{- end -}}
 {{- end -}}
-{{- if not $first }} {{ end -}}cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
-{{- end -}}
 {{- end -}}
 
 {{- define "galoyAgents.sandbox.nixConfig" -}}
-substituters ={{- with (include "galoyAgents.sandbox.nixSubstituterUrls" .) }} {{ . }}{{- end }}{{- if not .Values.sandbox.nixCacheProxy.enabled }} https://cache.nixos.org/{{- end }}
-trusted-public-keys ={{- with (include "galoyAgents.sandbox.nixPublicKeys" .) }} {{ . }}{{- end }}
-{{- if and .Values.sandbox.nixNetrc.enabled (not .Values.sandbox.nixCacheProxy.enabled) }}
+substituters ={{- with (include "galoyAgents.sandbox.nixSubstituterUrls" .) }} {{ . }}{{- end }} https://cache.nixos.org/
+trusted-public-keys ={{- with (include "galoyAgents.sandbox.nixPublicKeys" .) }} {{ . }}{{- end }} cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+{{- if .Values.sandbox.nixNetrc.enabled }}
 netrc-file = {{ .Values.sandbox.nixNetrc.mountPath }}
 {{- end }}
 {{- end -}}

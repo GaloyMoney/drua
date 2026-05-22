@@ -61,14 +61,10 @@ spec:
           # Override via `sandbox.gitProxyUrl`. Defaults to the
           # in-cluster service URL — see `galoyAgents.gitProxyUrl`.
           value: {{ .Values.sandbox.gitProxyUrl | default (include "galoyAgents.gitProxyUrl" .) | quote }}
-        {{- if or .Values.sandbox.nixSubstituters .Values.sandbox.nixNetrc.enabled .Values.sandbox.nixCacheProxy.enabled }}
+        {{- if or .Values.sandbox.nixSubstituters .Values.sandbox.nixNetrc.enabled }}
         - name: NIX_CONFIG
           value: |-
 {{ include "galoyAgents.sandbox.nixConfig" . | indent 12 }}
-        {{- end }}
-        {{- if .Values.sandbox.forwardProxy.enabled }}
-        - name: DRUA_FORWARD_PROXY_URL
-          value: {{ include "galoyAgents.sandbox.forwardProxy.url" . | quote }}
         {{- end }}
         volumeMounts:
         # Repurposed from the previous MCP-only volume (memo `019dfebc`
@@ -79,7 +75,7 @@ spec:
           readOnly: true
         - name: project-secrets
           mountPath: /run/secrets
-        {{- if and .Values.sandbox.nixNetrc.enabled (not .Values.sandbox.nixCacheProxy.enabled) }}
+        {{- if .Values.sandbox.nixNetrc.enabled }}
         - name: nix-netrc
           mountPath: {{ .Values.sandbox.nixNetrc.mountPath | quote }}
           subPath: {{ .Values.sandbox.nixNetrc.secret.key | quote }}
@@ -96,7 +92,7 @@ spec:
               audience: {{ .Values.sandbox.saTokenAudience | default "galoy-agents-git" }}
               expirationSeconds: 3600
               path: token
-      {{- if and .Values.sandbox.nixNetrc.enabled (not .Values.sandbox.nixCacheProxy.enabled) }}
+      {{- if .Values.sandbox.nixNetrc.enabled }}
       - name: nix-netrc
         secret:
           secretName: {{ include "galoyAgents.sandbox.nixNetrcSecretName" . }}
