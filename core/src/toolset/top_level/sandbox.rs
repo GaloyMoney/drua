@@ -16,7 +16,7 @@ use serde::Deserialize;
 use crate::audit::Audit;
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::primitives::SandboxId;
-use crate::sandbox::{ResizeRequest, Sandbox, Sandboxes};
+use crate::sandbox::{DeleteOutcome, ResizeRequest, Sandbox, Sandboxes};
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
@@ -308,11 +308,20 @@ impl TopLevelTool for ProjectSandbox {
                         "resize: at least one of cpu, memory, disk_size is required".to_string(),
                     ));
                 }
-                let resized = self.sandboxes.resize(subject, sandbox_id, request).await?;
+                let outcome = self.sandboxes.resize(subject, sandbox_id, request).await?;
+                let header = match &outcome.pvc_warning {
+                    None => "Sandbox specs updated. CPU/memory changes apply on the \
+                             next `restart`; any disk grow was patched on the workspace PVC."
+                        .to_string(),
+                    Some(w) => format!(
+                        "Sandbox specs updated, but the workspace-PVC patch failed: {w}\n\
+                         The DB now records the new disk size; a follow-up resize \
+                         (or manual PVC reconcile) is needed to grow the cluster volume."
+                    ),
+                };
                 Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Sandbox resized. CPU/memory changes apply on next `restart`; \
-                     disk growth was applied to the backing PVC.\n\n{}",
-                    format_sandbox(&resized)
+                    "{header}\n\n{}",
+                    format_sandbox(&outcome.sandbox)
                 ))]))
             }
 
@@ -320,11 +329,10 @@ impl TopLevelTool for ProjectSandbox {
                 let sandbox_id = params.sandbox_id.ok_or_else(|| {
                     ToolSetsError::MissingArgument("sandbox_id is required for delete".to_string())
                 })?;
-                self.sandboxes.delete(subject, sandbox_id).await?;
-                Ok(CallToolResult::success(vec![Content::text(format!(
-                    "Sandbox {sandbox_id} deleted. Pod + PVCs torn down; \
-                     the row is soft-deleted and no longer addressable."
-                ))]))
+                let outcome = self.sandboxes.delete(subject, sandbox_id).await?;
+                Ok(CallToolResult::success(vec![Content::text(
+                    format_delete_outcome(sandbox_id, &outcome),
+                )]))
             }
         }
     }
@@ -455,6 +463,30 @@ fn format_sandbox(s: &Sandbox) -> String {
         s.id, s.name, s.project_id, s.state, s.mode,
         s.specs.cpu, s.specs.memory, s.specs.disk_size,
         error_str, agents_str,
+    )
+}
+
+/// Render a per-step admin-teardown report so the caller doesn't have
+/// to guess whether the pod / PVCs actually went away — bugbot caught
+/// the original "Pod + PVCs torn down" claim being asserted even when
+/// the admin calls had failed and only logged a warning.
+fn format_delete_outcome(sandbox_id: SandboxId, outcome: &DeleteOutcome) -> String {
+    let header = format!("Sandbox {sandbox_id}: row soft-deleted and no longer addressable.");
+    if outcome.admin_teardown_clean() {
+        return format!("{header}\nPod + PVC teardown: ok.");
+    }
+    let pod_line = match &outcome.pod_warning {
+        None => "Pod teardown: ok.".to_string(),
+        Some(w) => format!("Pod teardown FAILED: {w}"),
+    };
+    let pvc_line = match &outcome.pvcs_warning {
+        None => "PVC teardown: ok.".to_string(),
+        Some(w) => format!("PVC teardown FAILED: {w}"),
+    };
+    format!(
+        "{header}\n{pod_line}\n{pvc_line}\n\
+         The row is gone; the leaked cluster resources can be reconciled \
+         out-of-band (k8s objects are labeled `sandbox-name=<resource_name>`)."
     )
 }
 

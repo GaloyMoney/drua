@@ -1017,14 +1017,17 @@ impl Sandboxes {
     /// PVC can't be shrunk back, so applying it before commit would
     /// leave the cluster ahead of the entity row on commit failure.
     /// `resize_in_op` therefore only writes the DB; this wrapper is
-    /// the layer responsible for the admin-side side-effect.
+    /// the layer responsible for the admin-side side-effect. A failed
+    /// PVC patch surfaces as [`ResizeOutcome::pvc_warning`] rather than
+    /// an error so the caller can render the actual outcome — the DB
+    /// row is already committed regardless.
     #[instrument(name = "domain.sandbox.resize", skip(self, sub))]
     pub async fn resize(
         &self,
         sub: &AuthSubject,
         id: impl Into<SandboxId> + std::fmt::Debug,
         request: ResizeRequest,
-    ) -> Result<Sandbox, SandboxError> {
+    ) -> Result<ResizeOutcome, SandboxError> {
         let id = id.into();
         let sandbox = self.repo.find_by_id(id).await?;
         sub.can(
@@ -1038,20 +1041,27 @@ impl Sandboxes {
         op.commit().await?;
 
         let resource_name = sandbox.resource_name();
-        if let Err(e) = self
+        let pvc_warning = match self
             .admin
             .resize_pvc(&resource_name, &sandbox.specs.disk_size)
             .await
         {
-            tracing::warn!(
-                sandbox = %resource_name,
-                error = %e,
-                "Admin client resize_pvc failed; entity specs already committed — \
-                 restart will recreate the pod with new CPU/memory and a retry \
-                 can reconcile the PVC"
-            );
-        }
-        Ok(sandbox)
+            Ok(()) => None,
+            Err(e) => {
+                tracing::warn!(
+                    sandbox = %resource_name,
+                    error = %e,
+                    "Admin client resize_pvc failed; entity specs already committed — \
+                     restart will recreate the pod with new CPU/memory and a retry \
+                     can reconcile the PVC"
+                );
+                Some(e.to_string())
+            }
+        };
+        Ok(ResizeOutcome {
+            sandbox,
+            pvc_warning,
+        })
     }
 
     /// Reads the sandbox in-transaction, merges `request` with the
@@ -1090,8 +1100,8 @@ impl Sandboxes {
         Ok(sandbox)
     }
 
-    /// Per-sandbox delete: tears down pod + PVCs via the admin client
-    /// and soft-deletes the row. Symmetric with
+    /// Per-sandbox delete: soft-deletes the row, then best-effort tears
+    /// down the pod + PVCs via the admin client. Symmetric with
     /// [`Self::cascade_delete_for_project_in_op`] — neither path
     /// records an entity-level `Deleted` tombstone, so callers must
     /// rely on the repo-level soft-delete + audit log for history.
@@ -1099,12 +1109,18 @@ impl Sandboxes {
     /// agent is currently attached; the caller is expected to detach
     /// via `agent.detach_sandbox` first so each agent's own
     /// `attached_sandbox_id` doesn't end up pointing at a deleted row.
+    ///
+    /// Admin teardown runs *after* the DB commit so a partial cluster
+    /// teardown can't leave the row in a half-deleted state. Failures
+    /// surface as warnings on [`DeleteOutcome`] rather than errors —
+    /// the row is already gone, the orphaned pod/PVC can be reconciled
+    /// out-of-band.
     #[instrument(name = "domain.sandbox.delete", skip(self, sub))]
     pub async fn delete(
         &self,
         sub: &AuthSubject,
         id: impl Into<SandboxId> + std::fmt::Debug,
-    ) -> Result<(), SandboxError> {
+    ) -> Result<DeleteOutcome, SandboxError> {
         let id = id.into();
         let sandbox = self.repo.find_by_id(id).await?;
         sub.can(
@@ -1114,23 +1130,54 @@ impl Sandboxes {
         Audit::record_action_if_unset("sandbox.delete");
         Audit::record_project_id(sandbox.project_id);
         let mut op = self.repo.begin_op().await?;
-        self.delete_in_op(&mut op, id).await?;
+        let resource_name = self.delete_in_op(&mut op, id).await?;
         op.commit().await?;
-        Ok(())
+
+        // `delete_sandbox` runs unconditionally because a prior
+        // `suspend` may have marked the entity `Suspended` even when
+        // its admin call failed — skipping it here would leak a live
+        // pod.
+        let pod_warning = match self.admin.delete_sandbox(&resource_name).await {
+            Ok(()) => None,
+            Err(sandbox::AdminError::NotFound(_)) => None,
+            Err(other) => {
+                tracing::warn!(
+                    sandbox = %resource_name,
+                    error = %other,
+                    "admin delete_sandbox failed during single-sandbox delete"
+                );
+                Some(other.to_string())
+            }
+        };
+        let pvcs_warning = match self.admin.delete_pvcs(&resource_name).await {
+            Ok(()) => None,
+            Err(e) => {
+                tracing::warn!(
+                    sandbox = %resource_name,
+                    error = %e,
+                    "admin delete_pvcs failed during single-sandbox delete"
+                );
+                Some(e.to_string())
+            }
+        };
+        Ok(DeleteOutcome {
+            pod_warning,
+            pvcs_warning,
+        })
     }
 
-    /// Admin teardown is best-effort: a stuck pod or PVC can't strand
-    /// the row, otherwise the entity becomes un-deletable.
-    /// `delete_sandbox` runs unconditionally because a prior
-    /// `suspend` may have marked the entity `Suspended` even when its
-    /// admin call failed — skipping the call here would leak a live
-    /// pod.
+    /// DB-only piece of [`Self::delete`]: validates the sandbox is in a
+    /// deletable state and soft-deletes the row. The admin-side pod /
+    /// PVC teardown happens *after* the commit in `delete` so a stuck
+    /// k8s call can't strand a half-deleted entity. Returns the
+    /// resource name so the caller can drive the post-commit teardown
+    /// without re-loading the row.
     #[instrument(name = "domain.sandbox.delete_in_op", skip(self, op))]
     pub async fn delete_in_op(
         &self,
         op: &mut DbOp<'_>,
         id: impl Into<SandboxId> + std::fmt::Debug,
-    ) -> Result<(), SandboxError> {
+    ) -> Result<String, SandboxError> {
         let id = id.into();
         Audit::record_sandbox_id(id);
         let sandbox = self.repo.find_by_id_in_op(&mut *op, id).await?;
@@ -1141,28 +1188,9 @@ impl Sandboxes {
                 agent_ids: sandbox.attached_agents.iter().map(|(id, _)| *id).collect(),
             });
         }
-
         let resource_name = sandbox.resource_name();
-        if let Err(e) = self.admin.delete_sandbox(&resource_name).await {
-            match e {
-                sandbox::AdminError::NotFound(_) => {}
-                other => tracing::warn!(
-                    sandbox = %resource_name,
-                    error = %other,
-                    "admin delete_sandbox failed during single-sandbox delete"
-                ),
-            }
-        }
-        if let Err(e) = self.admin.delete_pvcs(&resource_name).await {
-            tracing::warn!(
-                sandbox = %resource_name,
-                error = %e,
-                "admin delete_pvcs failed during single-sandbox delete"
-            );
-        }
-
         self.repo.delete_in_op(op, sandbox).await?;
-        Ok(())
+        Ok(resource_name)
     }
 
     #[instrument(name = "domain.sandbox.suspend", skip(self, sub))]
@@ -1247,6 +1275,41 @@ fn reject_if_provisioning(
             })
         }
         SandboxState::Ready | SandboxState::Suspended | SandboxState::Errored => Ok(()),
+    }
+}
+
+/// Result of [`Sandboxes::resize`]. The DB row is always committed
+/// before this is returned; `pvc_warning` carries the best-effort PVC
+/// patch outcome so callers can surface honest cluster-side state
+/// instead of always claiming a successful resize.
+pub struct ResizeOutcome {
+    pub sandbox: Sandbox,
+    /// `Some` only when the post-commit PVC patch failed. The entity's
+    /// `specs.disk_size` already reflects the new size; the cluster
+    /// PVC will need a follow-up retry (or, in practice, a `restart`
+    /// that recreates the pod with the new mount spec).
+    pub pvc_warning: Option<String>,
+}
+
+/// Result of [`Sandboxes::delete`]. The row is always committed before
+/// this is returned; the warnings carry best-effort admin teardown
+/// outcomes so callers don't claim a pod/PVC was removed when only the
+/// row went away.
+#[derive(Debug, Clone, Default)]
+pub struct DeleteOutcome {
+    /// `Some` when `delete_sandbox` failed with anything other than
+    /// `NotFound` (which is treated as "already gone").
+    pub pod_warning: Option<String>,
+    /// `Some` when `delete_pvcs` failed; the workspace PVC (and any
+    /// `volumeClaimTemplate`-owned siblings) may still exist.
+    pub pvcs_warning: Option<String>,
+}
+
+impl DeleteOutcome {
+    /// `true` when both pod and PVC teardown reported clean exits
+    /// (or `NotFound`). Lets callers branch their user-facing copy.
+    pub fn admin_teardown_clean(&self) -> bool {
+        self.pod_warning.is_none() && self.pvcs_warning.is_none()
     }
 }
 
