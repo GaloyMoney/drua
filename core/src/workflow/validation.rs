@@ -38,10 +38,6 @@ impl WorkflowValidationErrors {
             message: message.into(),
         });
     }
-
-    pub(crate) fn count(&self) -> usize {
-        self.items.len()
-    }
 }
 
 #[derive(Default)]

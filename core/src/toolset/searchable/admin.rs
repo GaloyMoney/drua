@@ -582,17 +582,29 @@ struct WorkflowParams {
 struct WorkflowValidationReport {
     definition_id: String,
     workflow_name: String,
-    ok: bool,
-    error_count: usize,
     errors: Vec<WorkflowValidationError>,
+}
+
+impl WorkflowValidationReport {
+    fn ok(&self) -> bool {
+        self.errors.is_empty()
+    }
+
+    fn error_count(&self) -> usize {
+        self.errors.len()
+    }
 }
 
 impl std::fmt::Display for WorkflowValidationReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.ok {
+        if self.ok() {
             write!(f, "workflow validate: OK")?;
         } else {
-            write!(f, "workflow validate: found {} error(s)", self.error_count)?;
+            write!(
+                f,
+                "workflow validate: found {} error(s)",
+                self.error_count()
+            )?;
         }
         write!(
             f,
@@ -970,15 +982,10 @@ impl AdminToolSet {
             }
         }
 
-        let errors = validator.finish();
-        let error_count = errors.count();
-
         WorkflowValidationReport {
             definition_id: definition.id.to_string(),
             workflow_name: definition.name.clone(),
-            ok: error_count == 0,
-            error_count,
-            errors: errors.items,
+            errors: validator.finish().items,
         }
     }
 
