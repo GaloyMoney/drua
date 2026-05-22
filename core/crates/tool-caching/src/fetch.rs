@@ -100,6 +100,114 @@ impl FetchQuery {
     }
 }
 
+pub(crate) struct ShrunkSlice {
+    pub value: Value,
+    pub original_len: usize,
+    pub actual_len: usize,
+    pub unit: &'static str,
+    /// The next offset to use for paging through the remainder.
+    pub next_offset: usize,
+}
+
+impl FetchQuery {
+    /// Try to produce a smaller slice that fits within `max_bytes`.
+    /// Returns `None` if shrinking isn't applicable to this query mode.
+    fn shrink_to_fit(
+        &self,
+        resolved: Value,
+        max_bytes: usize,
+    ) -> Result<Option<ShrunkSlice>, ToolCachingError> {
+        match self {
+            FetchQuery::Lines { offset, len } => {
+                let s = resolved.as_str().ok_or_else(|| {
+                    ToolCachingError::InvalidPath(
+                        "lines query requires a string at the resolved path".into(),
+                    )
+                })?;
+                let all: Vec<&str> = s.lines().collect();
+                let start = resolve_offset(*offset, all.len());
+                let end = start.saturating_add(*len).min(all.len());
+                let original_len = end - start;
+                let mut hi = end;
+                while hi > start {
+                    let candidate = all[start..hi].join("\n");
+                    if candidate.len() <= max_bytes {
+                        return Ok(Some(ShrunkSlice {
+                            value: Value::String(candidate),
+                            original_len,
+                            actual_len: hi - start,
+                            unit: "lines",
+                            next_offset: hi,
+                        }));
+                    }
+                    let ratio = max_bytes as f64 / candidate.len() as f64;
+                    let new_count = ((hi - start) as f64 * ratio * 0.9) as usize;
+                    let next_hi = start + new_count.max(1);
+                    if next_hi >= hi {
+                        hi -= 1;
+                    } else {
+                        hi = next_hi;
+                    }
+                }
+                Ok(None)
+            }
+            FetchQuery::JsonArraySlice { offset, len } => {
+                let arr = resolved.as_array().ok_or_else(|| {
+                    ToolCachingError::InvalidPath(
+                        "json_array_slice query requires an array at the resolved path".into(),
+                    )
+                })?;
+                let start = resolve_offset(*offset, arr.len());
+                let end = start.saturating_add(*len).min(arr.len());
+                let original_len = end - start;
+                let mut hi = end;
+                while hi > start {
+                    let slice = Value::Array(arr[start..hi].to_vec());
+                    let text = fetch_text_for_raw(&slice);
+                    if text.len() <= max_bytes {
+                        return Ok(Some(ShrunkSlice {
+                            value: slice,
+                            original_len,
+                            actual_len: hi - start,
+                            unit: "items",
+                            next_offset: hi,
+                        }));
+                    }
+                    let ratio = max_bytes as f64 / text.len() as f64;
+                    let new_count = ((hi - start) as f64 * ratio * 0.9) as usize;
+                    let next_hi = start + new_count.max(1);
+                    if next_hi >= hi {
+                        hi -= 1;
+                    } else {
+                        hi = next_hi;
+                    }
+                }
+                Ok(None)
+            }
+            FetchQuery::Range { offset, len } => {
+                let s = resolved.as_str().ok_or_else(|| {
+                    ToolCachingError::InvalidPath(
+                        "range query requires a string at the resolved path".into(),
+                    )
+                })?;
+                let (start, _end) = resolve_utf8_byte_window(s, *offset, *len);
+                let capped_len = max_bytes.min(s.len() - start);
+                let (actual_start, actual_end) =
+                    resolve_utf8_byte_window_usize(s, start, capped_len);
+                let slice = &s[actual_start..actual_end];
+                Ok(Some(ShrunkSlice {
+                    value: Value::String(slice.to_string()),
+                    original_len: *len,
+                    actual_len: actual_end - actual_start,
+                    unit: "bytes",
+                    next_offset: actual_end,
+                }))
+            }
+            FetchQuery::Summary => Ok(None),
+        }
+    }
+}
+
 fn resolve_utf8_byte_window(s: &str, offset: i64, len: usize) -> (usize, usize) {
     let requested_start = resolve_offset(offset, s.len());
     resolve_utf8_byte_window_usize(s, requested_start, len)
@@ -142,38 +250,60 @@ pub struct FetchResult {
 impl StoredInvocation {
     /// Resolve `path` against the stored root and slice with `query`.
     /// Wraps the result back at `path` so the response shape mirrors
-    /// the caller's request (`$.foo[2]` → `{"foo": [X]}`). Responses
-    /// over `max_bytes` (text channel size) are rejected.
+    /// the caller's request (`$.foo[2]` → `{"foo": [X]}`). When the
+    /// sliced result exceeds `max_bytes`, the window is automatically
+    /// shrunk to fit rather than returning an error.
     pub fn query(
         &self,
         path: &str,
         query: Option<&FetchQuery>,
         max_bytes: usize,
     ) -> Result<FetchResult, ToolCachingError> {
-        // `Summary` short-circuits navigation — return the stored
-        // envelope and its structured wrapper, regardless of `path`.
         if matches!(query, Some(FetchQuery::Summary)) {
             return self.summary_view(max_bytes);
         }
         let resolved = self.navigate(path)?.clone();
         let sliced = match query {
-            Some(q) => q.apply(resolved)?,
-            None => resolved,
+            Some(q) => q.apply(resolved.clone())?,
+            None => resolved.clone(),
         };
-        // Text channel shows the resolved value raw — strings stay
-        // human-readable instead of becoming JSON-escaped `"..."`.
         let text = fetch_text_for_raw(&sliced);
-        let wrapped = wrap_at_path(path, sliced)?;
-        if text.len() > max_bytes {
-            return Err(ToolCachingError::FetchResponseTooLarge {
-                size: text.len(),
-                max: max_bytes,
-                hint: self.too_large_hint(path, max_bytes),
+
+        if text.len() <= max_bytes {
+            let wrapped = wrap_at_path(path, sliced)?;
+            return Ok(FetchResult {
+                result: CallToolResult::success(vec![Content::text(text)]),
+                structured: wrapped,
             });
         }
-        Ok(FetchResult {
-            result: CallToolResult::success(vec![Content::text(text)]),
-            structured: wrapped,
+
+        if let Some(q) = query {
+            if let Some(shrunk) = q.shrink_to_fit(resolved, max_bytes)? {
+                let text = fetch_text_for_raw(&shrunk.value);
+                let wrapped = wrap_at_path(path, shrunk.value)?;
+                let remaining = shrunk.original_len - shrunk.actual_len;
+                let note = format!(
+                    "\n\n[TRUNCATED: returned {actual} of {requested} {unit} \
+                     ({remaining} remaining). Fetch the next page with \
+                     offset: {next_offset}]",
+                    actual = shrunk.actual_len,
+                    requested = shrunk.original_len,
+                    unit = shrunk.unit,
+                    remaining = remaining,
+                    next_offset = shrunk.next_offset,
+                );
+                return Ok(FetchResult {
+                    result: CallToolResult::success(vec![Content::text(format!("{text}{note}"))]),
+                    structured: wrapped,
+                });
+            }
+        }
+
+        // No query or shrink not possible (e.g. single scalar too large).
+        Err(ToolCachingError::FetchResponseTooLarge {
+            size: text.len(),
+            max: max_bytes,
+            hint: self.too_large_hint(path, max_bytes),
         })
     }
 

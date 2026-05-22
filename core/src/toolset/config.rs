@@ -35,10 +35,12 @@ pub struct ComposeConfig {
     pub memory_limit_bytes: usize,
     #[serde(default = "default_stack_limit_bytes")]
     pub stack_limit_bytes: usize,
-    #[serde(default = "default_default_timeout_ms")]
-    pub default_timeout_ms: u64,
-    #[serde(default = "default_max_timeout_ms")]
-    pub max_timeout_ms: u64,
+    #[serde(
+        default = "default_timeout_ms",
+        alias = "default_timeout_ms",
+        alias = "max_timeout_ms"
+    )]
+    pub timeout_ms: u64,
 }
 
 impl Default for ComposeConfig {
@@ -50,8 +52,7 @@ impl Default for ComposeConfig {
             max_console_bytes: default_max_console_bytes(),
             memory_limit_bytes: default_memory_limit_bytes(),
             stack_limit_bytes: default_stack_limit_bytes(),
-            default_timeout_ms: default_default_timeout_ms(),
-            max_timeout_ms: default_max_timeout_ms(),
+            timeout_ms: default_timeout_ms(),
         }
     }
 }
@@ -88,12 +89,8 @@ fn default_stack_limit_bytes() -> usize {
     512 * 1024
 }
 
-fn default_default_timeout_ms() -> u64 {
-    120_000
-}
-
-fn default_max_timeout_ms() -> u64 {
-    300_000
+fn default_timeout_ms() -> u64 {
+    420_000
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

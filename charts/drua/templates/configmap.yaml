@@ -172,8 +172,7 @@ data:
         max_console_bytes: {{ printf "%d" (int .maxConsoleBytes) }}
         memory_limit_bytes: {{ printf "%d" (int .memoryLimitBytes) }}
         stack_limit_bytes: {{ printf "%d" (int .stackLimitBytes) }}
-        default_timeout_ms: {{ printf "%d" (int .defaultTimeoutMs) }}
-        max_timeout_ms: {{ printf "%d" (int .maxTimeoutMs) }}
+        timeout_ms: {{ printf "%d" (int .timeoutMs) }}
       {{- end }}
       {{- $hasUpstreams := .Values.galoyAgents.config.mcpUpstreams }}
       {{- $k8sMcp := index .Values "kubernetes-mcp-server" }}

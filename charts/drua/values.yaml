@@ -170,8 +170,7 @@ galoyAgents:
       ## headroom for split / filter / sort over the parsed payload.
       memoryLimitBytes: "67108864"
       stackLimitBytes: "524288"
-      defaultTimeoutMs: 120000
-      maxTimeoutMs: 300000
+      timeoutMs: 420000
     mcpUpstreams: []
     # - name: honeycomb
     #   url: https://mcp.honeycomb.io/mcp

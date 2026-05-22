@@ -38,8 +38,7 @@ toolsets:
     max_console_bytes: 8192
     memory_limit_bytes: 67108864
     stack_limit_bytes: 524288
-    default_timeout_ms: 120000
-    max_timeout_ms: 300000
+    timeout_ms: 420000
 sandbox:
   backend:
     provider: local

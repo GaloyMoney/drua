@@ -4,7 +4,12 @@ pub enum ToolCachingError {
     Sqlx(#[from] sqlx::Error),
     #[error("tool-caching serde_json error: {0}")]
     Serde(#[from] serde_json::Error),
-    #[error("tool invocation not found")]
+    #[error(
+        "tool invocation not found — the ID may have expired \
+         (cached results have a limited lifetime) or belong to a \
+         different session. Do not retry; re-run the original tool \
+         call to get a fresh result."
+    )]
     InvocationNotFound,
     #[error("invalid fetch path: {0}")]
     InvalidPath(String),

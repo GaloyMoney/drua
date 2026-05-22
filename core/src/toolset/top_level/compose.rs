@@ -15,15 +15,11 @@ use crate::auth::AuthSubject;
 use super::super::config::ComposeConfig;
 use super::super::error::ToolSetsError;
 use super::super::traits::{SearchableToolSet, TopLevelTool};
-use super::liberal;
 use super::{parse_params, schema_for};
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct ComposeParams {
     script: String,
-
-    #[serde(default, deserialize_with = "liberal::deserialize_option_i64")]
-    timeout_ms: Option<i64>,
 }
 
 pub struct ComposeTool {
@@ -126,18 +122,12 @@ impl TopLevelTool for ComposeTool {
     ) -> Result<CallToolResult, ToolSetsError> {
         let params: ComposeParams = parse_params(arguments)?;
 
-        let max_timeout = Duration::from_millis(self.config.max_timeout_ms);
-        let default_timeout = Duration::from_millis(self.config.default_timeout_ms);
-        let timeout = match params.timeout_ms {
-            Some(ms) if ms > 0 => Duration::from_millis(ms as u64).min(max_timeout),
-            _ => default_timeout,
-        };
+        let timeout = Duration::from_millis(self.config.timeout_ms);
 
         Audit::record_action("compose".to_string());
 
         let recorded_args = serde_json::json!({
             "script": params.script,
-            "timeout_ms": params.timeout_ms,
         });
 
         let dts = {
