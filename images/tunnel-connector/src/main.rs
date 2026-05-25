@@ -84,6 +84,14 @@ struct Cli {
     /// Comma-separated upstream MCP servers: name=url[,name=url,...]
     #[arg(long, env = "TUNNEL_UPSTREAMS")]
     upstreams: String,
+
+    /// Poll interval for upstream MCP tool catalog changes. A value of 0 disables refresh.
+    #[arg(
+        long,
+        env = "TUNNEL_TOOL_REFRESH_INTERVAL_SECS",
+        default_value_t = DEFAULT_TOOL_REFRESH_INTERVAL_SECS
+    )]
+    tool_refresh_interval_secs: u64,
 }
 
 struct UpstreamConfig {
@@ -129,6 +137,7 @@ fn sign_handshake(deployment_id: &str, signing_key: &SigningKey) -> String {
 const INITIAL_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
 const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
 const JITTER_MS_MAX: u64 = 1_000;
+const DEFAULT_TOOL_REFRESH_INTERVAL_SECS: u64 = 300;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -218,6 +227,7 @@ async fn run_tunnel(
     tracing::info!(server = %cli.server_url, "connected to drua");
 
     // ── 3. Send registration ──────────────────────────────────────────────
+    let registration_fingerprint = registration_fingerprint(&registrations)?;
     let register_msg = TunnelMessage::Register {
         deployment_id: cli.deployment_id.clone(),
         toolsets: registrations,
@@ -232,43 +242,71 @@ async fn run_tunnel(
     *backoff = INITIAL_BACKOFF;
 
     // ── 4. Relay loop ─────────────────────────────────────────────────────
-    while let Some(msg) = ws_rx.next().await {
-        let msg = msg?;
-        match msg {
-            tungstenite::Message::Text(text) => {
-                let tunnel_msg: TunnelMessage = match serde_json::from_str(&text) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "ignoring unparseable message");
-                        continue;
-                    }
-                };
+    let refresh_enabled = cli.tool_refresh_interval_secs > 0;
+    let refresh_interval = std::time::Duration::from_secs(cli.tool_refresh_interval_secs.max(1));
+    let mut refresh_tick = tokio::time::interval_at(
+        tokio::time::Instant::now() + refresh_interval,
+        refresh_interval,
+    );
+    refresh_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
-                match tunnel_msg {
-                    TunnelMessage::CallTool {
-                        id,
-                        upstream,
-                        tool_name,
-                        arguments,
-                    } => {
-                        let response =
-                            handle_call(&mcp_clients, id, &upstream, &tool_name, arguments).await;
-                        let json = serde_json::to_string(&response)?;
-                        ws_tx.send(tungstenite::Message::Text(json.into())).await?;
+    loop {
+        tokio::select! {
+            biased;
+            _ = refresh_tick.tick(), if refresh_enabled => {
+                match tool_catalog_changed(upstreams, &cli.deployment_id, &registration_fingerprint).await {
+                    Ok(true) => {
+                        tracing::info!("upstream tool catalog changed; reconnecting to refresh drua registration");
+                        return Ok(());
                     }
-                    _ => {
-                        tracing::warn!("unexpected message type from server");
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "upstream tool catalog refresh failed; keeping current registration");
                     }
                 }
             }
-            tungstenite::Message::Ping(data) => {
-                ws_tx.send(tungstenite::Message::Pong(data)).await?;
+            maybe_msg = ws_rx.next() => {
+                let Some(msg) = maybe_msg else {
+                    break;
+                };
+                let msg = msg?;
+                match msg {
+                    tungstenite::Message::Text(text) => {
+                        let tunnel_msg: TunnelMessage = match serde_json::from_str(&text) {
+                            Ok(m) => m,
+                            Err(e) => {
+                                tracing::warn!(error = %e, "ignoring unparseable message");
+                                continue;
+                            }
+                        };
+
+                        match tunnel_msg {
+                            TunnelMessage::CallTool {
+                                id,
+                                upstream,
+                                tool_name,
+                                arguments,
+                            } => {
+                                let response =
+                                    handle_call(&mcp_clients, id, &upstream, &tool_name, arguments).await;
+                                let json = serde_json::to_string(&response)?;
+                                ws_tx.send(tungstenite::Message::Text(json.into())).await?;
+                            }
+                            _ => {
+                                tracing::warn!("unexpected message type from server");
+                            }
+                        }
+                    }
+                    tungstenite::Message::Ping(data) => {
+                        ws_tx.send(tungstenite::Message::Pong(data)).await?;
+                    }
+                    tungstenite::Message::Close(_) => {
+                        tracing::info!("server closed connection");
+                        break;
+                    }
+                    _ => {}
+                }
             }
-            tungstenite::Message::Close(_) => {
-                tracing::info!("server closed connection");
-                break;
-            }
-            _ => {}
         }
     }
 
@@ -281,10 +319,25 @@ async fn discover_upstream(
 ) -> anyhow::Result<(String, RunningService<RoleClient, ()>, RegisteredToolSet)> {
     tracing::info!(name = %upstream.name, url = %upstream.url, "connecting to local MCP server");
 
+    let client = connect_upstream(upstream).await?;
+    let registration = discover_tools(upstream, deployment_id, &client).await?;
+
+    Ok((upstream.name.clone(), client, registration))
+}
+
+async fn connect_upstream(
+    upstream: &UpstreamConfig,
+) -> anyhow::Result<RunningService<RoleClient, ()>> {
     let config = StreamableHttpClientTransportConfig::with_uri(upstream.url.as_str());
     let worker = StreamableHttpClientWorker::new(reqwest::Client::new(), config);
-    let client: RunningService<RoleClient, ()> = ().serve(worker).await?;
+    Ok(().serve(worker).await?)
+}
 
+async fn discover_tools(
+    upstream: &UpstreamConfig,
+    deployment_id: &str,
+    client: &RunningService<RoleClient, ()>,
+) -> anyhow::Result<RegisteredToolSet> {
     let tools: Vec<serde_json::Value> = client
         .list_all_tools()
         .await?
@@ -302,7 +355,37 @@ async fn discover_upstream(
         tools,
     };
 
-    Ok((upstream.name.clone(), client, registration))
+    Ok(registration)
+}
+
+fn registration_fingerprint(registrations: &[RegisteredToolSet]) -> anyhow::Result<String> {
+    Ok(serde_json::to_string(registrations)?)
+}
+
+async fn tool_catalog_changed(
+    upstreams: &[UpstreamConfig],
+    deployment_id: &str,
+    current_fingerprint: &str,
+) -> anyhow::Result<bool> {
+    let mut registrations = Vec::with_capacity(upstreams.len());
+
+    for upstream in upstreams {
+        let client = match connect_upstream(upstream).await {
+            Ok(client) => client,
+            Err(e) => {
+                tracing::warn!(
+                    name = %upstream.name,
+                    url = %upstream.url,
+                    error = %e,
+                    "skipping tool catalog refresh because an upstream is unavailable"
+                );
+                return Ok(false);
+            }
+        };
+        registrations.push(discover_tools(upstream, deployment_id, &client).await?);
+    }
+
+    Ok(registration_fingerprint(&registrations)? != current_fingerprint)
 }
 
 async fn handle_call(
@@ -339,5 +422,28 @@ async fn handle_call(
             id,
             error: e.to_string(),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registration(tool_name: &str) -> RegisteredToolSet {
+        RegisteredToolSet {
+            name: "postgres".to_string(),
+            prefix: "postgres".to_string(),
+            category: "deployment".to_string(),
+            category_description: "staging deployment".to_string(),
+            tools: vec![serde_json::json!({ "name": tool_name })],
+        }
+    }
+
+    #[test]
+    fn registration_fingerprint_changes_when_tools_change() {
+        let before = registration_fingerprint(&[registration("execute_sql")]).unwrap();
+        let after = registration_fingerprint(&[registration("execute_sql_pg_lana")]).unwrap();
+
+        assert_ne!(before, after);
     }
 }
