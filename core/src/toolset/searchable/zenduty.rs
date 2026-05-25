@@ -33,12 +33,55 @@ fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
     value
 }
 
+/// Incident status accepted on input. Names (canonical) or Zenduty's
+/// internal integer codes (1=triggered, 2=acknowledged, 3=resolved) both
+/// work — `list_incidents` results sometimes leak the int form and
+/// agents copy it back unchanged. Schema surfaces the enum names.
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+enum IncidentStatusName {
+    Triggered,
+    Acknowledged,
+    Resolved,
+}
+
+impl IncidentStatusName {
+    fn into_incident_status(self) -> IncidentStatus {
+        match self {
+            Self::Triggered => IncidentStatus::Triggered,
+            Self::Acknowledged => IncidentStatus::Acknowledged,
+            Self::Resolved => IncidentStatus::Resolved,
+        }
+    }
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+enum StatusInput {
+    Name(IncidentStatusName),
+    Code(u8),
+}
+
+impl StatusInput {
+    fn into_incident_status(self) -> Result<IncidentStatus, ToolSetsError> {
+        match self {
+            Self::Name(n) => Ok(n.into_incident_status()),
+            Self::Code(c) => IncidentStatus::try_from(c).map_err(|_| {
+                ToolSetsError::InvalidArgument(format!(
+                    "unknown status code '{c}' (expected 1=triggered, 2=acknowledged, 3=resolved)"
+                ))
+            }),
+        }
+    }
+}
+
 #[derive(Deserialize, schemars::JsonSchema)]
 struct ListIncidentsArgs {
-    /// Filter by status names: "triggered", "acknowledged", "resolved".
-    /// Defaults to triggered + acknowledged (i.e. ongoing) when omitted.
+    /// Filter by status. Accepts canonical names ("triggered",
+    /// "acknowledged", "resolved") or Zenduty's int codes (1/2/3).
+    /// Defaults to triggered + acknowledged (ongoing) when omitted.
     #[serde(default)]
-    statuses: Option<Vec<String>>,
+    statuses: Option<Vec<StatusInput>>,
     #[serde(default)]
     team_id: Option<String>,
     #[serde(default)]
@@ -51,29 +94,37 @@ struct ListIncidentsArgs {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct IncidentIdArgs {
-    /// Zenduty incident `unique_id` (the string id used in URL paths).
-    incident_id: String,
+    /// Zenduty incident `unique_id` — the alphanumeric string returned by
+    /// `list_incidents` (e.g. `"HjZEH2pEMC44c89PWMpsEA"`). Not the
+    /// `incident_number` (small int). Legacy callers may still pass
+    /// `incident_id` for backward compatibility.
+    #[serde(alias = "incident_id")]
+    unique_id: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct AddNoteArgs {
-    /// Zenduty incident `unique_id`.
-    incident_id: String,
+    /// Zenduty incident `unique_id` (alphanumeric, from `list_incidents`).
+    #[serde(alias = "incident_id")]
+    unique_id: String,
     /// Note body (markdown supported by Zenduty).
     note: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct DeleteNoteArgs {
-    /// Zenduty incident `unique_id`.
-    incident_id: String,
+    /// Zenduty incident `unique_id` (alphanumeric, from `list_incidents`).
+    #[serde(alias = "incident_id")]
+    unique_id: String,
     /// Note `unique_id` (returned by `add_incident_note` / `list_incident_notes`).
     note_id: String,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct UpdateStatusArgs {
-    incident_id: String,
+    /// Zenduty incident `unique_id` (alphanumeric, from `list_incidents`).
+    #[serde(alias = "incident_id")]
+    unique_id: String,
     /// One of "acknowledged" or "resolved". "triggered" is rarely useful.
     status: String,
 }
@@ -189,7 +240,7 @@ static OUT_DELETED: LazyLock<serde_json::Value> = LazyLock::new(|| {
         "type": "object",
         "properties": {
             "deleted": { "type": "boolean" },
-            "incident_id": { "type": "string" },
+            "unique_id": { "type": "string" },
             "note_id": { "type": "string" },
         },
         "additionalProperties": false,
@@ -329,9 +380,9 @@ impl SearchableToolSet for ZendutyToolSet {
             "list_incidents" => {
                 let args: ListIncidentsArgs = parse_params(arguments)?;
                 let status_codes: Vec<u8> = match args.statuses {
-                    Some(names) => names
-                        .iter()
-                        .map(|s| parse_status_name(s).map(|st| st.as_u8()))
+                    Some(inputs) => inputs
+                        .into_iter()
+                        .map(|s| s.into_incident_status().map(|st| st.as_u8()))
                         .collect::<Result<Vec<_>, _>>()?,
                     None => vec![
                         IncidentStatus::Triggered.as_u8(),
@@ -363,7 +414,7 @@ impl SearchableToolSet for ZendutyToolSet {
             }
             "get_incident" => {
                 let args: IncidentIdArgs = parse_params(arguments)?;
-                let i = self.client.get_incident(&args.incident_id).await?;
+                let i = self.client.get_incident(&args.unique_id).await?;
                 let out = IncidentDetailOutput {
                     unique_id: i.unique_id,
                     incident_number: i.incident_number,
@@ -386,7 +437,7 @@ impl SearchableToolSet for ZendutyToolSet {
                 let args: AddNoteArgs = parse_params(arguments)?;
                 let note = self
                     .client
-                    .add_incident_note(&args.incident_id, &args.note)
+                    .add_incident_note(&args.unique_id, &args.note)
                     .await?;
                 let out = NoteOutput {
                     unique_id: note.unique_id,
@@ -398,7 +449,7 @@ impl SearchableToolSet for ZendutyToolSet {
             }
             "list_incident_notes" => {
                 let args: IncidentIdArgs = parse_params(arguments)?;
-                let notes = self.client.list_incident_notes(&args.incident_id).await?;
+                let notes = self.client.list_incident_notes(&args.unique_id).await?;
                 let mapped: Vec<NoteOutput> = notes
                     .into_iter()
                     .map(|n| NoteOutput {
@@ -417,11 +468,11 @@ impl SearchableToolSet for ZendutyToolSet {
             "delete_incident_note" => {
                 let args: DeleteNoteArgs = parse_params(arguments)?;
                 self.client
-                    .delete_incident_note(&args.incident_id, &args.note_id)
+                    .delete_incident_note(&args.unique_id, &args.note_id)
                     .await?;
                 let out = serde_json::json!({
                     "deleted": true,
-                    "incident_id": args.incident_id,
+                    "unique_id": args.unique_id,
                     "note_id": args.note_id,
                 });
                 let text = serde_json::to_string_pretty(&out).unwrap_or_default();
@@ -434,7 +485,7 @@ impl SearchableToolSet for ZendutyToolSet {
                 let status = parse_status_name(&args.status)?;
                 let i = self
                     .client
-                    .update_incident_status(&args.incident_id, status)
+                    .update_incident_status(&args.unique_id, status)
                     .await?;
                 let out = IncidentDetailOutput {
                     unique_id: i.unique_id,
@@ -556,5 +607,113 @@ mod tests {
         assert_eq!(status_name(Some(3)).as_deref(), Some("resolved"));
         assert_eq!(status_name(Some(99)), None);
         assert_eq!(status_name(None), None);
+    }
+
+    #[test]
+    fn incident_id_args_accepts_unique_id_field() {
+        let args: IncidentIdArgs =
+            serde_json::from_value(serde_json::json!({ "unique_id": "HjZEH2pEMC44c89PWMpsEA" }))
+                .expect("unique_id form deserializes");
+        assert_eq!(args.unique_id, "HjZEH2pEMC44c89PWMpsEA");
+    }
+
+    #[test]
+    fn incident_id_args_still_accepts_legacy_incident_id_alias() {
+        let args: IncidentIdArgs =
+            serde_json::from_value(serde_json::json!({ "incident_id": "HjZEH2pEMC44c89PWMpsEA" }))
+                .expect("legacy incident_id alias deserializes");
+        assert_eq!(args.unique_id, "HjZEH2pEMC44c89PWMpsEA");
+    }
+
+    #[test]
+    fn list_incidents_args_accepts_name_strings() {
+        let args: ListIncidentsArgs = serde_json::from_value(serde_json::json!({
+            "statuses": ["triggered", "acknowledged"],
+        }))
+        .expect("name form deserializes");
+        let codes: Vec<u8> = args
+            .statuses
+            .unwrap()
+            .into_iter()
+            .map(|s| s.into_incident_status().unwrap().as_u8())
+            .collect();
+        assert_eq!(codes, vec![1, 2]);
+    }
+
+    #[test]
+    fn list_incidents_args_accepts_int_codes() {
+        let args: ListIncidentsArgs = serde_json::from_value(serde_json::json!({
+            "statuses": [1, 2, 3],
+        }))
+        .expect("int form deserializes");
+        let codes: Vec<u8> = args
+            .statuses
+            .unwrap()
+            .into_iter()
+            .map(|s| s.into_incident_status().unwrap().as_u8())
+            .collect();
+        assert_eq!(codes, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn list_incidents_args_accepts_mixed_names_and_ints() {
+        let args: ListIncidentsArgs = serde_json::from_value(serde_json::json!({
+            "statuses": ["triggered", 2, "resolved"],
+        }))
+        .expect("mixed form deserializes");
+        let codes: Vec<u8> = args
+            .statuses
+            .unwrap()
+            .into_iter()
+            .map(|s| s.into_incident_status().unwrap().as_u8())
+            .collect();
+        assert_eq!(codes, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn status_input_rejects_unknown_int_code() {
+        let args: ListIncidentsArgs = serde_json::from_value(serde_json::json!({
+            "statuses": [9],
+        }))
+        .unwrap();
+        let err = args
+            .statuses
+            .unwrap()
+            .into_iter()
+            .map(|s| s.into_incident_status())
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("unknown status code '9'"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn list_incidents_schema_exposes_canonical_status_names() {
+        let schema = serde_json::to_value(&*LIST_INCIDENTS_SCHEMA).unwrap();
+        // Walk to any `enum` keyword whose array matches the canonical names.
+        // Searching recursively avoids brittleness over schemars's exact layout
+        // for the untagged `StatusInput` (it may emit `anyOf` of variants).
+        fn find_canonical_enum(v: &serde_json::Value) -> bool {
+            if let Some(arr) = v.get("enum").and_then(|e| e.as_array()) {
+                let names: Vec<&str> = arr.iter().filter_map(|x| x.as_str()).collect();
+                if names.contains(&"triggered")
+                    && names.contains(&"acknowledged")
+                    && names.contains(&"resolved")
+                {
+                    return true;
+                }
+            }
+            match v {
+                serde_json::Value::Object(map) => map.values().any(find_canonical_enum),
+                serde_json::Value::Array(arr) => arr.iter().any(find_canonical_enum),
+                _ => false,
+            }
+        }
+        assert!(
+            find_canonical_enum(&schema),
+            "schema does not surface enum constraint for statuses: {schema}"
+        );
     }
 }
