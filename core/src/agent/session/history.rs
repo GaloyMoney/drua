@@ -125,6 +125,7 @@ pub enum ThreadSystemBlockKind {
     Notes,
     Skills,
     Spaces,
+    Workspace,
 }
 
 impl From<SystemBlockKind> for ThreadSystemBlockKind {
@@ -137,6 +138,7 @@ impl From<SystemBlockKind> for ThreadSystemBlockKind {
             SystemBlockKind::Notes => ThreadSystemBlockKind::Notes,
             SystemBlockKind::Skills => ThreadSystemBlockKind::Skills,
             SystemBlockKind::Spaces => ThreadSystemBlockKind::Spaces,
+            SystemBlockKind::Workspace => ThreadSystemBlockKind::Workspace,
         }
     }
 }

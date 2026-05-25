@@ -257,6 +257,11 @@ impl Sessions {
         Ok(result)
     }
 
+    /// Records a sandbox attach/detach in chat history. `workspace_text` is
+    /// the pre-wrapped `Workspace` system block content; on Attach with
+    /// `Some` it's pushed alongside the notification, on Detach the Workspace
+    /// block is cleared automatically. Bundling these here means callers can't
+    /// forget to keep CLAUDE.md in sync with the attached sandbox.
     #[instrument(
         name = "domain.agent_session.sandbox_notification_in_op",
         skip(self, op)
@@ -267,9 +272,10 @@ impl Sessions {
         agent_id: AgentId,
         sandbox_name: String,
         operation: message::SandboxOperation,
+        workspace_text: Option<String>,
     ) -> Result<AgentSessionResponse, AgentSessionError> {
         let mut session = self.repo.find_by_agent_id_in_op(op, agent_id).await?;
-        let response = session.add_sandbox_notification(sandbox_name, operation)?;
+        let response = session.add_sandbox_notification(sandbox_name, operation, workspace_text)?;
         self.repo.update_in_op(op, &mut session).await?;
         Ok(response)
     }
@@ -385,7 +391,10 @@ impl Sessions {
     ) -> Result<(), AgentSessionError> {
         let mut session = self.repo.find_by_agent_id_in_op(op, agent_id).await?;
         if let Some((sandbox_name, operation)) = detach {
-            session.add_sandbox_notification(sandbox_name, operation)?;
+            // Session is about to be deleted; the workspace-clear event the
+            // detach emits is moot, but we still go through the same path to
+            // keep the chat-history projection consistent.
+            session.add_sandbox_notification(sandbox_name, operation, None)?;
         }
         self.repo.delete_in_op(op, session).await?;
         Ok(())

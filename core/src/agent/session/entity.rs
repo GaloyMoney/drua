@@ -54,6 +54,13 @@ pub enum AgentSessionEvent {
     SystemBlockUpdated {
         block: SystemBlock,
     },
+    /// Removes the latest block of `kind` from the canonical view. Materialize
+    /// keeps the prior `SystemBlockUpdated` entry in the flat list but drops
+    /// the `latest_idx_by_kind` entry, so the prompt omits the kind until a
+    /// new `SystemBlockUpdated` arrives.
+    SystemBlockCleared {
+        kind: SystemBlockKind,
+    },
     UserInputAdded {
         target: TargetThread,
         source: UserMessageSource,
@@ -234,13 +241,27 @@ impl AgentSession {
         self.user_message_response(target)
     }
 
+    /// Records a sandbox attach/detach event in chat history AND keeps the
+    /// `Workspace` system block in sync with the attached sandbox:
+    /// - `Attach` with `Some(text)` pushes / replaces the Workspace block.
+    /// - `Attach` with `None` (sandbox has no CLAUDE.md) leaves any existing
+    ///   Workspace block intact — caller is responsible for clearing first
+    ///   when transitioning between sandboxes (the agent service enforces
+    ///   "at most one attached sandbox").
+    /// - `Detach` clears the Workspace block.
+    ///
+    /// `workspace_text` is the **already-wrapped** block content (the agent
+    /// service owns the `<repo_instructions>` framing convention, consistent
+    /// with how Skills / Notes / Spaces blocks arrive pre-formatted).
     pub fn add_sandbox_notification(
         &mut self,
         sandbox_name: String,
         operation: SandboxOperation,
+        workspace_text: Option<String>,
     ) -> Result<AgentSessionResponse, AgentSessionError> {
         let target = TargetThread::Main;
         let text = sandbox_notification_text(&sandbox_name, &operation);
+        let is_attach = matches!(operation, SandboxOperation::Attach { .. });
         self.events
             .push(AgentSessionEvent::SandboxNotificationAdded {
                 target,
@@ -248,6 +269,13 @@ impl AgentSession {
                 operation,
                 text,
             });
+        if is_attach {
+            if let Some(text) = workspace_text {
+                let _ = self.push_system_block(SystemBlock::Workspace { text });
+            }
+        } else {
+            let _ = self.clear_system_block(SystemBlockKind::Workspace);
+        }
         self.user_message_response(target)
     }
 
@@ -463,15 +491,37 @@ impl AgentSession {
 
     pub fn push_system_block(&mut self, block: SystemBlock) -> Idempotent<()> {
         let kind = block.kind();
-        let latest_of_kind = self.events.iter_all().rev().find_map(|e| match e {
-            AgentSessionEvent::SystemBlockUpdated { block: b } if b.kind() == kind => Some(b),
+        // Walk back stopping at the latest event that mentions this kind —
+        // either an update (block survives) or a clear (kind is currently
+        // absent). Lets us treat post-clear re-pushes as non-idempotent
+        // even when the new block matches the pre-clear content.
+        let latest = self.events.iter_all().rev().find_map(|e| match e {
+            AgentSessionEvent::SystemBlockUpdated { block: b } if b.kind() == kind => Some(Some(b)),
+            AgentSessionEvent::SystemBlockCleared { kind: k } if *k == kind => Some(None),
             _ => None,
         });
-        if latest_of_kind == Some(&block) {
+        if matches!(latest, Some(Some(b)) if b == &block) {
             return Idempotent::AlreadyApplied;
         }
         self.events
             .push(AgentSessionEvent::SystemBlockUpdated { block });
+        Idempotent::Executed(())
+    }
+
+    /// Drops the latest block of `kind` from the canonical view. No-op when
+    /// the kind is already absent (never pushed, or last touched by a
+    /// `SystemBlockCleared`).
+    pub fn clear_system_block(&mut self, kind: SystemBlockKind) -> Idempotent<()> {
+        let latest = self.events.iter_all().rev().find_map(|e| match e {
+            AgentSessionEvent::SystemBlockUpdated { block: b } if b.kind() == kind => Some(true),
+            AgentSessionEvent::SystemBlockCleared { kind: k } if *k == kind => Some(false),
+            _ => None,
+        });
+        if !matches!(latest, Some(true)) {
+            return Idempotent::AlreadyApplied;
+        }
+        self.events
+            .push(AgentSessionEvent::SystemBlockCleared { kind });
         Idempotent::Executed(())
     }
 
@@ -940,6 +990,9 @@ impl AgentSession {
                 AgentSessionEvent::SystemBlockUpdated { block } => {
                     materialized.push_updated_system_block(block);
                 }
+                AgentSessionEvent::SystemBlockCleared { kind } => {
+                    materialized.clear_system_block(*kind);
+                }
                 AgentSessionEvent::UserInputAdded { .. }
                 | AgentSessionEvent::SandboxNotificationAdded { .. } => {
                     materialized.push_user_message();
@@ -1050,6 +1103,7 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                 AgentSessionEvent::AssistantResponseReceived { .. } => {}
                 AgentSessionEvent::ToolDefsUpdated { .. } => {}
                 AgentSessionEvent::SystemBlockUpdated { .. } => {}
+                AgentSessionEvent::SystemBlockCleared { .. } => {}
                 AgentSessionEvent::PromptSent { .. } => {}
                 AgentSessionEvent::ToolResultsAdded { .. } => {}
                 AgentSessionEvent::ToolResultsMasked { .. } => {}
@@ -2444,5 +2498,179 @@ mod tests {
             )
             .expect("assistant response on refreshed thread must succeed");
         assert!(matches!(response, AgentSessionResponse::Done));
+    }
+
+    // ─── workspace block / sandbox notification lifecycle ──────────────────
+
+    fn attach_op() -> SandboxOperation {
+        SandboxOperation::Attach {
+            agent_mode: "read".into(),
+            kind: "repo".into(),
+            cwd: "/work/repo".into(),
+            scope: Some("repo \"x\"".into()),
+            push_policy: None,
+        }
+    }
+
+    /// Workspace block surfaces in the prompt after Attach with text.
+    #[test]
+    fn attach_with_workspace_text_pushes_workspace_block() {
+        let mut session = new_session();
+        let _ = session.push_system_block(SystemBlock::Base { text: "B".into() });
+        session
+            .add_sandbox_notification(
+                "sb".into(),
+                attach_op(),
+                Some("<repo_instructions>\nhello\n</repo_instructions>".into()),
+            )
+            .unwrap();
+        session
+            .add_user_input(TargetThread::Main, user_source(), "hi".into())
+            .unwrap();
+        session.next_prompt(TargetThread::Main).unwrap();
+        hydrate_threads(&mut session);
+
+        let thread_id = session.current_main_thread.unwrap();
+        let resolved = resolved_blocks(&session, thread_id);
+        assert!(
+            resolved
+                .iter()
+                .any(|b| matches!(b, SystemBlock::Workspace { text } if text.contains("hello"))),
+            "Workspace block should appear after Attach, got {:?}",
+            resolved
+        );
+    }
+
+    /// Attach with no CLAUDE.md leaves the Workspace block absent.
+    #[test]
+    fn attach_without_workspace_text_leaves_workspace_absent() {
+        let mut session = new_session();
+        let _ = session.push_system_block(SystemBlock::Base { text: "B".into() });
+        session
+            .add_sandbox_notification("sb".into(), attach_op(), None)
+            .unwrap();
+        session
+            .add_user_input(TargetThread::Main, user_source(), "hi".into())
+            .unwrap();
+        session.next_prompt(TargetThread::Main).unwrap();
+        hydrate_threads(&mut session);
+
+        let thread_id = session.current_main_thread.unwrap();
+        let resolved = resolved_blocks(&session, thread_id);
+        assert!(
+            !resolved
+                .iter()
+                .any(|b| matches!(b, SystemBlock::Workspace { .. })),
+            "Workspace block should be absent when sandbox carries no CLAUDE.md, got {:?}",
+            resolved
+        );
+    }
+
+    /// Detach drops the Workspace block — the canonical view shouldn't
+    /// surface stale CLAUDE.md after the sandbox is gone.
+    #[test]
+    fn detach_clears_workspace_block() {
+        let mut session = new_session();
+        let _ = session.push_system_block(SystemBlock::Base { text: "B".into() });
+        session
+            .add_sandbox_notification(
+                "sb".into(),
+                attach_op(),
+                Some("<repo_instructions>\nhello\n</repo_instructions>".into()),
+            )
+            .unwrap();
+        session
+            .add_user_input(TargetThread::Main, user_source(), "hi".into())
+            .unwrap();
+        session.next_prompt(TargetThread::Main).unwrap();
+        hydrate_threads(&mut session);
+
+        // Drive a refresh so a new thread reflects the clear.
+        session
+            .add_sandbox_notification("sb".into(), SandboxOperation::Detach, None)
+            .unwrap();
+        session
+            .add_user_input(TargetThread::Main, user_source(), "after detach".into())
+            .unwrap();
+        session.next_prompt(TargetThread::Main).unwrap();
+        hydrate_threads(&mut session);
+
+        let thread_id = session.current_main_thread.unwrap();
+        let resolved = resolved_blocks(&session, thread_id);
+        assert!(
+            !resolved
+                .iter()
+                .any(|b| matches!(b, SystemBlock::Workspace { .. })),
+            "Workspace block must be absent after detach, got {:?}",
+            resolved
+        );
+
+        // A `SystemBlockCleared` was emitted exactly once.
+        let cleared_count = session
+            .events
+            .iter_all()
+            .filter(|e| {
+                matches!(
+                    e,
+                    AgentSessionEvent::SystemBlockCleared {
+                        kind: SystemBlockKind::Workspace,
+                    }
+                )
+            })
+            .count();
+        assert_eq!(cleared_count, 1);
+    }
+
+    /// Detach when no Workspace was ever pushed is a no-op (no clear event).
+    #[test]
+    fn detach_without_prior_workspace_is_noop() {
+        let mut session = new_session();
+        let _ = session.push_system_block(SystemBlock::Base { text: "B".into() });
+        session
+            .add_sandbox_notification("sb".into(), SandboxOperation::Detach, None)
+            .unwrap();
+
+        let cleared_count = session
+            .events
+            .iter_all()
+            .filter(|e| matches!(e, AgentSessionEvent::SystemBlockCleared { .. }))
+            .count();
+        assert_eq!(cleared_count, 0, "no clear event when nothing to clear");
+    }
+
+    /// Attach → Detach → Attach with same text re-pushes (post-clear must
+    /// not idempotency-collapse against the pre-clear block).
+    #[test]
+    fn reattach_after_detach_repushes_workspace() {
+        let mut session = new_session();
+        let _ = session.push_system_block(SystemBlock::Base { text: "B".into() });
+        let workspace = "<repo_instructions>\nhello\n</repo_instructions>".to_string();
+
+        session
+            .add_sandbox_notification("sb".into(), attach_op(), Some(workspace.clone()))
+            .unwrap();
+        session
+            .add_sandbox_notification("sb".into(), SandboxOperation::Detach, None)
+            .unwrap();
+        session
+            .add_sandbox_notification("sb".into(), attach_op(), Some(workspace.clone()))
+            .unwrap();
+
+        let updates = session
+            .events
+            .iter_all()
+            .filter(|e| {
+                matches!(
+                    e,
+                    AgentSessionEvent::SystemBlockUpdated {
+                        block: SystemBlock::Workspace { .. },
+                    }
+                )
+            })
+            .count();
+        assert_eq!(
+            updates, 2,
+            "post-clear re-push of identical text must emit a fresh update"
+        );
     }
 }

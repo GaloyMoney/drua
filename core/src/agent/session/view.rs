@@ -115,6 +115,15 @@ impl<'a> MaterializedSession<'a> {
         self.latest_idx_by_kind.insert(block.kind(), idx);
     }
 
+    /// Drops `kind` from the canonical view. The historical block stays in
+    /// `system_blocks` (so flat enumeration over `iter_system_blocks` still
+    /// surfaces it for chat-history projections), but `latest_idx_for_kind`
+    /// returns `None` until a fresh `push_updated_system_block` of the same
+    /// kind arrives.
+    pub fn clear_system_block(&mut self, kind: SystemBlockKind) {
+        self.latest_idx_by_kind.remove(&kind);
+    }
+
     pub fn latest_idx_for_kind(&self, kind: SystemBlockKind) -> Option<SystemBlockIndex> {
         self.latest_idx_by_kind.get(&kind).copied()
     }
