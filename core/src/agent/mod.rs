@@ -17,6 +17,18 @@ use crate::note::Notes;
 use crate::skill::Skills;
 use crate::toolset::ToolSets;
 
+/// Pre-wrapped `<repo_instructions>` content for the `Workspace` system
+/// block. `None` when the sandbox has no `CLAUDE.md` (scratch sandbox, or
+/// a repo without one). The agent service owns the wire framing so the
+/// session entity stores ready-to-render text, matching how Notes / Skills
+/// / Spaces blocks flow.
+fn workspace_block_text(sandbox: &Sandbox) -> Option<String> {
+    sandbox
+        .exported_system_prompt
+        .as_ref()
+        .map(|f| format!("<repo_instructions>\n{}\n</repo_instructions>", f.content))
+}
+
 /// Lead → `ProjectAdmin`; Agent → `ProjectMember`; WorkflowStepAgent →
 /// `ProjectMember` + `WorkflowStepAgent` marker (gates submit_output's
 /// visibility). Sandbox scopes are added later via
@@ -38,7 +50,7 @@ use crate::primitives::{
     AgentId, AuthResource, AuthScope, AuthSubject, AuthVerb, ChatOutputEvent, ContextGeneration,
     ProjectId, SandboxId, WorkflowDefinitionId, WorkflowRunId,
 };
-use crate::sandbox::{SandboxAgentMode, Sandboxes};
+use crate::sandbox::{Sandbox, SandboxAgentMode, Sandboxes};
 pub use config::{AgentsConfig, ModelChain, ModelDefaults, RoleConfig};
 pub use entity::*;
 pub use error::AgentError;
@@ -517,6 +529,7 @@ impl Agents {
 
             let (kind, scope) = sandbox.kind_and_scope();
             let push_policy = self.sandboxes.push_policy_text(&sandbox.mode);
+            let workspace_text = workspace_block_text(&sandbox);
             self.sessions
                 .sandbox_notification_in_op(
                     op,
@@ -529,6 +542,7 @@ impl Agents {
                         scope,
                         push_policy,
                     },
+                    workspace_text,
                 )
                 .await?;
         }
@@ -844,6 +858,7 @@ impl Agents {
 
         let (kind, scope) = sandbox.kind_and_scope();
         let push_policy = self.sandboxes.push_policy_text(&sandbox.mode);
+        let workspace_text = workspace_block_text(&sandbox);
         self.sessions
             .sandbox_notification_in_op(
                 &mut op,
@@ -856,6 +871,7 @@ impl Agents {
                     scope,
                     push_policy,
                 },
+                workspace_text,
             )
             .await?;
 
@@ -904,6 +920,7 @@ impl Agents {
                 agent_id,
                 sandbox.name,
                 session::message::SandboxOperation::Detach,
+                None,
             )
             .await?;
 
@@ -997,6 +1014,7 @@ impl Agents {
                 agent_id,
                 sandbox.name,
                 session::message::SandboxOperation::Detach,
+                None,
             )
             .await?;
         self.refresh_skills_block_in_op(op, agent_id, project_id, None)

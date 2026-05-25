@@ -37,6 +37,7 @@ pub enum SystemBlockKind {
     Notes,
     Skills,
     Spaces,
+    Workspace,
 }
 
 #[derive(Union, Clone)]
@@ -352,6 +353,7 @@ impl From<history::ThreadSystemBlock> for SystemBlockInfo {
                 history::ThreadSystemBlockKind::Notes => SystemBlockKind::Notes,
                 history::ThreadSystemBlockKind::Skills => SystemBlockKind::Skills,
                 history::ThreadSystemBlockKind::Spaces => SystemBlockKind::Spaces,
+                history::ThreadSystemBlockKind::Workspace => SystemBlockKind::Workspace,
             },
             text: b.text,
         }

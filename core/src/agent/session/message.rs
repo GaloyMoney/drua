@@ -50,6 +50,7 @@ pub struct Prompt {
 #[serde(rename_all = "snake_case")]
 pub enum SystemBlockKind {
     Base,
+    Workspace,
     Tools,
     Behavioral,
     Role,
@@ -62,6 +63,7 @@ impl SystemBlockKind {
     /// Canonical order shared between `system_prompt` and the session entity.
     pub const ORDER: &'static [SystemBlockKind] = &[
         SystemBlockKind::Base,
+        SystemBlockKind::Workspace,
         SystemBlockKind::Tools,
         SystemBlockKind::Behavioral,
         SystemBlockKind::Role,
@@ -75,6 +77,7 @@ impl SystemBlockKind {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SystemBlock {
     Base { text: String },
+    Workspace { text: String },
     Tools { text: String },
     Behavioral { text: String },
     Role { text: String },
@@ -87,6 +90,7 @@ impl SystemBlock {
     pub fn kind(&self) -> SystemBlockKind {
         match self {
             SystemBlock::Base { .. } => SystemBlockKind::Base,
+            SystemBlock::Workspace { .. } => SystemBlockKind::Workspace,
             SystemBlock::Tools { .. } => SystemBlockKind::Tools,
             SystemBlock::Behavioral { .. } => SystemBlockKind::Behavioral,
             SystemBlock::Role { .. } => SystemBlockKind::Role,
@@ -99,6 +103,7 @@ impl SystemBlock {
     pub fn text(&self) -> &str {
         match self {
             SystemBlock::Base { text }
+            | SystemBlock::Workspace { text }
             | SystemBlock::Tools { text }
             | SystemBlock::Behavioral { text }
             | SystemBlock::Role { text }
@@ -226,6 +231,7 @@ impl From<SystemBlock> for llm::prompt::SystemBlock {
         // Kind is domain-level only; wire format is always `Text`.
         let text = match b {
             SystemBlock::Base { text }
+            | SystemBlock::Workspace { text }
             | SystemBlock::Tools { text }
             | SystemBlock::Behavioral { text }
             | SystemBlock::Role { text }

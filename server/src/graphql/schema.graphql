@@ -662,6 +662,7 @@ enum SystemBlockKind {
 	SKILLS
 	SPACES
 	TOOLS
+	WORKSPACE
 }
 
 type TextContent {
