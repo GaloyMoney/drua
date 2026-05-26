@@ -55,20 +55,34 @@ locals {
   ]))
 }
 
-module "postgresql" {
-  source = "git::https://github.com/GaloyMoney/galoy-infra.git//modules/postgresql/gcp?ref=main"
+module "postgresql_instance" {
+  source = "git::https://github.com/GaloyMoney/galoy-infra.git//modules/postgresql/gcp/instance?ref=main"
 
-  gcp_project      = local.gcp_project
-  vpc_name         = local.vpc_name
-  instance_name    = "galoy-agents"
-  region           = local.region
-  databases        = ["galoy-agents"]
-  destroyable      = true
-  highly_available = false
-  tier             = "db-f1-micro"
-  max_connections  = 50
-  replication      = false
-  readonly_users   = ["mcp"]
+  gcp_project                    = local.gcp_project
+  vpc_name                       = local.vpc_name
+  instance_name                  = "galoy-agents"
+  region                         = local.region
+  destroyable                    = true
+  highly_available               = false
+  tier                           = "db-f1-micro"
+  backup_enabled                 = true
+  point_in_time_recovery_enabled = true
+}
+
+module "postgresql_database" {
+  for_each = toset(["galoy-agents"])
+  source   = "git::https://github.com/GaloyMoney/galoy-infra.git//modules/postgresql/gcp/database?ref=main"
+
+  providers = {
+    postgresql = postgresql.galoy_agents
+  }
+
+  db_name         = each.value
+  admin_user_name = module.postgresql_instance.admin_user
+  user_name       = "${each.value}-user"
+  readonly_users  = ["mcp"]
+
+  depends_on = [module.postgresql_instance]
 }
 
 resource "kubernetes_namespace" "galoy_agents" {
@@ -111,11 +125,11 @@ resource "kubernetes_secret" "galoy_agents" {
   }
 
   data = {
-    "pg-con" = module.postgresql.creds["galoy-agents"].conn
+    "pg-con" = "postgres://${module.postgresql_database["galoy-agents"].user}:${module.postgresql_database["galoy-agents"].password}@${module.postgresql_instance.private_ip}:5432/galoy-agents"
     # Read-only DSN for the postgres-mcp sidecar. `?sslmode=require` is
     # required — Cloud SQL's pg_hba.conf rejects unencrypted connections
     # and dbhub crash-loops without it.
-    "pg-mcp-uri"                       = "postgres://${module.postgresql.creds["galoy-agents"].readonly_users["mcp"].user}:${module.postgresql.creds["galoy-agents"].readonly_users["mcp"].password}@${module.postgresql.creds["galoy-agents"].host}:5432/galoy-agents?sslmode=require"
+    "pg-mcp-uri"                       = "postgres://${module.postgresql_database["galoy-agents"].readonly_users["mcp"].user}:${module.postgresql_database["galoy-agents"].readonly_users["mcp"].password}@${module.postgresql_instance.private_ip}:5432/galoy-agents?sslmode=require"
     "github-client-secret"             = var.github_client_secret
     "gcs-creds"                        = file("${path.module}/gcs-creds.json")
     "concourse-username"               = var.concourse_username
@@ -238,7 +252,7 @@ resource "postgresql_extension" "vector" {
   name     = "vector"
   database = "galoy-agents"
 
-  depends_on = [module.postgresql]
+  depends_on = [module.postgresql_database]
 }
 
 resource "helm_release" "galoy_agents" {
@@ -303,10 +317,10 @@ provider "kubectl" {
 
 provider "postgresql" {
   alias     = "galoy_agents"
-  host      = module.postgresql.creds["galoy-agents"].host
+  host      = module.postgresql_instance.private_ip
   port      = 5432
-  username  = module.postgresql.admin-creds.user
-  password  = module.postgresql.admin-creds.password
+  username  = module.postgresql_instance.admin_user
+  password  = module.postgresql_instance.admin_password
   database  = "galoy-agents"
   superuser = false
 }
