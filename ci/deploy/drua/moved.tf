@@ -19,6 +19,6 @@ moved {
 }
 
 moved {
-  from = module.postgresql.module.database
-  to   = module.postgresql_database
+  from = module.postgresql.module.database["galoy-agents"]
+  to   = module.postgresql_database["galoy-agents"]
 }

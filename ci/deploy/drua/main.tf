@@ -65,6 +65,7 @@ module "postgresql_instance" {
   destroyable                    = true
   highly_available               = false
   tier                           = "db-f1-micro"
+  database_version               = "POSTGRES_17"
   backup_enabled                 = true
   point_in_time_recovery_enabled = true
 }
