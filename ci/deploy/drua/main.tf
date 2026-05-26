@@ -69,6 +69,17 @@ module "postgresql_instance" {
   point_in_time_recovery_enabled = true
 }
 
+# Keep the old child-module provider address while removed blocks process
+# legacy manual/big_query database resources from the pre-split module state.
+module "postgresql" {
+  source = "git::https://github.com/GaloyMoney/galoy-infra.git//modules/postgresql/gcp/provider-compat?ref=main"
+
+  host     = module.postgresql_instance.private_ip
+  port     = 5432
+  username = module.postgresql_instance.admin_user
+  password = module.postgresql_instance.admin_password
+}
+
 module "postgresql_database" {
   for_each = toset(["galoy-agents"])
   source   = "git::https://github.com/GaloyMoney/galoy-infra.git//modules/postgresql/gcp/database?ref=main"
