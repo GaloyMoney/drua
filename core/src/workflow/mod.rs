@@ -280,16 +280,17 @@ impl Workflows {
             ..
         } = parsed;
 
-        Self::validate_trigger(&trigger)?;
-
+        // Soft-delete cleanup runs BEFORE `validate_trigger`: an orphan
+        // YAML with an invalid trigger (bad cron, malformed condition, …)
+        // would otherwise error out here every sync tick and never reach
+        // the cleanup. drua is authoritative for workflow lifecycle, so
+        // a soft-deleted record means the YAML is an orphan (e.g. record
+        // was removed via a path that bypassed `Workflows::delete`'s
+        // file-delete enqueue — project cascade rollback, manual DB
+        // cleanup, …). Schedule a cleanup commit so the next reverse-sync
+        // tick converges library → drua state instead of letting the
+        // file linger forever.
         if self.repo.is_soft_deleted_in_op(op, workflow_id).await? {
-            // drua is authoritative for workflow lifecycle: a soft-deleted
-            // record means the YAML is an orphan (e.g. record was removed
-            // via a path that bypassed `Workflows::delete`'s file-delete
-            // enqueue — project cascade rollback, manual DB cleanup, …).
-            // Schedule a cleanup commit so the next reverse-sync tick
-            // converges library → drua state instead of letting the file
-            // linger forever.
             let id_uuid: uuid::Uuid = workflow_id.into();
             let message = format!(
                 "workflow: prune orphan {}-{}",
@@ -313,6 +314,8 @@ impl Workflows {
             );
             return Ok(None);
         }
+
+        Self::validate_trigger(&trigger)?;
 
         let file_hash = drua_library::GitFileHash::new(rendered);
 
