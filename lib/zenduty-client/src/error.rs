@@ -34,3 +34,39 @@ pub enum ZendutyError {
     #[error("API error (HTTP {status}): {message}")]
     Api { status: u16, message: String },
 }
+
+impl ZendutyError {
+    /// True when the upstream returned a 404 whose body is Zenduty's
+    /// off-the-end paging sentinel (`{"detail":"Invalid page."}`).
+    /// `list_incidents` translates this to an empty result; standard
+    /// list semantics rather than a hard error.
+    pub fn is_invalid_page_overshoot(&self) -> bool {
+        matches!(self, ZendutyError::NotFound(body) if body.contains("Invalid page"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_page_overshoot_recognises_zenduty_sentinel() {
+        let err = ZendutyError::NotFound(r#"{"detail":"Invalid page."}"#.into());
+        assert!(err.is_invalid_page_overshoot());
+    }
+
+    #[test]
+    fn invalid_page_overshoot_rejects_real_not_found() {
+        let err = ZendutyError::NotFound(r#"{"detail":"Not found."}"#.into());
+        assert!(!err.is_invalid_page_overshoot());
+    }
+
+    #[test]
+    fn invalid_page_overshoot_rejects_non_not_found_errors() {
+        let err = ZendutyError::Api {
+            status: 500,
+            message: "Invalid page".into(),
+        };
+        assert!(!err.is_invalid_page_overshoot());
+    }
+}

@@ -159,10 +159,16 @@ impl ZendutyClient {
             postmortem_filter: -1,
             escalation_policy_ids: Vec::new(),
         };
-        let page: Page<Incident> = self
-            .post_json_with_query("/api/incidents/filter/", &body, &q)
-            .await?;
-        Ok(page.into_results())
+        match self
+            .post_json_with_query::<Page<Incident>, _, _>("/api/incidents/filter/", &body, &q)
+            .await
+        {
+            Ok(page) => Ok(page.into_results()),
+            // Zenduty returns 404 + {"detail":"Invalid page."} when `page`
+            // is past the last page; standard list semantics is an empty page.
+            Err(e) if e.is_invalid_page_overshoot() => Ok(Vec::new()),
+            Err(e) => Err(e),
+        }
     }
 
     #[tracing::instrument(name = "zenduty_client.get_incident", skip_all)]

@@ -277,33 +277,47 @@ impl StoredInvocation {
             });
         }
 
+        let mut shrink_failed = false;
         if let Some(q) = query {
-            if let Some(shrunk) = q.shrink_to_fit(resolved, max_bytes)? {
-                let text = fetch_text_for_raw(&shrunk.value);
-                let wrapped = wrap_at_path(path, shrunk.value)?;
-                let remaining = shrunk.original_len - shrunk.actual_len;
-                let note = format!(
-                    "\n\n[TRUNCATED: returned {actual} of {requested} {unit} \
-                     ({remaining} remaining). Fetch the next page with \
-                     offset: {next_offset}]",
-                    actual = shrunk.actual_len,
-                    requested = shrunk.original_len,
-                    unit = shrunk.unit,
-                    remaining = remaining,
-                    next_offset = shrunk.next_offset,
-                );
-                return Ok(FetchResult {
-                    result: CallToolResult::success(vec![Content::text(format!("{text}{note}"))]),
-                    structured: wrapped,
-                });
+            match q.shrink_to_fit(resolved, max_bytes)? {
+                Some(shrunk) => {
+                    let text = fetch_text_for_raw(&shrunk.value);
+                    let wrapped = wrap_at_path(path, shrunk.value)?;
+                    let remaining = shrunk.original_len - shrunk.actual_len;
+                    let note = format!(
+                        "\n\n[TRUNCATED: returned {actual} of {requested} {unit} \
+                         ({remaining} remaining). Fetch the next page with \
+                         offset: {next_offset}]",
+                        actual = shrunk.actual_len,
+                        requested = shrunk.original_len,
+                        unit = shrunk.unit,
+                        remaining = remaining,
+                        next_offset = shrunk.next_offset,
+                    );
+                    return Ok(FetchResult {
+                        result: CallToolResult::success(vec![Content::text(format!(
+                            "{text}{note}"
+                        ))]),
+                        structured: wrapped,
+                    });
+                }
+                None => {
+                    // Shrink attempted but even the smallest slice exceeds the cap —
+                    // typically a single array element with elided sub-fields.
+                    shrink_failed = matches!(
+                        q,
+                        FetchQuery::JsonArraySlice { .. }
+                            | FetchQuery::Lines { .. }
+                            | FetchQuery::Range { .. }
+                    );
+                }
             }
         }
 
-        // No query or shrink not possible (e.g. single scalar too large).
         Err(ToolCachingError::FetchResponseTooLarge {
             size: text.len(),
             max: max_bytes,
-            hint: self.too_large_hint(path, max_bytes),
+            hint: self.too_large_hint(path, max_bytes, shrink_failed),
         })
     }
 
@@ -315,17 +329,28 @@ impl StoredInvocation {
         Ok(FetchResult { result, structured })
     }
 
-    /// Tail-appended hint for `FetchResponseTooLarge`. Always nudges
-    /// `mode:'summary'`; on a compose root (`sub_invocations` array at
-    /// `$`), names up to three drill-down invocation_ids the agent can
-    /// fetch directly instead of re-slicing the aggregate body.
-    fn too_large_hint(&self, path: &str, max_bytes: usize) -> String {
+    /// Tail-appended hint for `FetchResponseTooLarge`. Surfaces, in order:
+    /// (1) when the upstream walker advertised elided sub-paths under the
+    /// requested path, lists up to three with their byte sizes and the
+    /// exact `tool_output_fetch` template the agent should copy — this is
+    /// the case where even the smallest array slice can't fit because one
+    /// element carries a multi-KB elided field; (2) `mode:'summary'` as
+    /// the always-available escape hatch; (3) on a compose root, names
+    /// drill-down sub-invocation ids.
+    fn too_large_hint(&self, path: &str, max_bytes: usize, shrink_failed: bool) -> String {
         let summary_envelope_bytes = self.summary.build_envelope_text().len();
-        let mut parts = vec![format!(
+        let mut parts = Vec::new();
+
+        if let Some(advertised) = self.advertised_paths_hint(path, shrink_failed) {
+            parts.push(advertised);
+        }
+
+        parts.push(format!(
             ". Try `query: {{mode: \"summary\"}}` for the curated envelope \
              (summary_envelope_bytes: {summary_envelope_bytes}, \
              normal_fetch_limit_bytes: {max_bytes}; summary mode bypasses that cap)"
-        )];
+        ));
+
         let touches_result = path == "$" || path == "$.result" || path.starts_with("$.result.");
         if touches_result {
             if let Some(arr) = self
@@ -358,6 +383,55 @@ impl StoredInvocation {
             }
         }
         parts.join("")
+    }
+
+    /// Find persisted `elided_paths` that fall under the requested fetch
+    /// `path` and render the first few as a copy-pasteable hint. Returns
+    /// `None` when nothing useful is under this path.
+    fn advertised_paths_hint(&self, path: &str, shrink_failed: bool) -> Option<String> {
+        let matching_count = self
+            .summary
+            .elided_paths
+            .iter()
+            .filter(|ep| path_is_ancestor_or_equal(path, &ep.path))
+            .count();
+        let nested: Vec<&crate::primitives::ElidedPath> = self
+            .summary
+            .elided_paths
+            .iter()
+            .filter(|ep| path_is_ancestor_or_equal(path, &ep.path))
+            .take(4)
+            .collect();
+        if nested.is_empty() {
+            return None;
+        }
+        let lead = if shrink_failed {
+            ". This invocation has per-item elisions; even the smallest \
+             slice exceeds the cap because individual elements carry \
+             multi-KB elided fields. Fetch those fields directly using \
+             the advertised paths"
+        } else {
+            ". The upstream walker advertised elided sub-paths under \
+             this path; fetch them directly instead of slicing the parent"
+        };
+        let rendered: Vec<String> = nested
+            .iter()
+            .map(|ep| {
+                let dims = elided_dims_summary(ep);
+                let template = serde_json::to_string(&ep.recover).unwrap_or_default();
+                format!("\n  - {} ({}) — {}", ep.path, dims, template)
+            })
+            .collect();
+        let extra = matching_count.saturating_sub(nested.len());
+        let trailer = if extra > 0 {
+            format!("\n  - (+{extra} more in `_recovery.paths`)")
+        } else {
+            String::new()
+        };
+        Some(format!(
+            "{lead}:{rendered}{trailer}",
+            rendered = rendered.join("")
+        ))
     }
 
     fn navigate(&self, path: &str) -> Result<&Value, ToolCachingError> {
@@ -489,6 +563,34 @@ fn parse_path(path: &str) -> Result<Vec<PathSegment>, ToolCachingError> {
         }
     }
     Ok(out)
+}
+
+/// True when `ancestor` is the root (`$`), equals `descendant`, or is a
+/// strict path-prefix of `descendant` at a segment boundary. Avoids
+/// false positives like `$.items` ancestor-of `$.itemsX`.
+fn path_is_ancestor_or_equal(ancestor: &str, descendant: &str) -> bool {
+    if ancestor == "$" {
+        return descendant == "$" || descendant.starts_with("$.") || descendant.starts_with("$[");
+    }
+    if ancestor == descendant {
+        return true;
+    }
+    if let Some(rest) = descendant.strip_prefix(ancestor) {
+        return rest.starts_with('.') || rest.starts_with('[');
+    }
+    false
+}
+
+/// One-line "43337 bytes, 524 lines" summary of an ElidedPath's dimensions.
+fn elided_dims_summary(ep: &crate::primitives::ElidedPath) -> String {
+    let mut parts = vec![format!("{} bytes", ep.total_bytes)];
+    if let Some(n) = ep.total_lines {
+        parts.push(format!("{n} lines"));
+    }
+    if let Some(n) = ep.total_items {
+        parts.push(format!("{n} items"));
+    }
+    parts.join(", ")
 }
 
 /// Describe what's actually at `cur` so the agent can correct a missing
@@ -695,7 +797,7 @@ mod tests {
     #[test]
     fn too_large_hint_always_suggests_summary_mode() {
         let inv = stored(serde_json::json!({"result": "x"}));
-        let hint = inv.too_large_hint("$.result", 64);
+        let hint = inv.too_large_hint("$.result", 64, false);
         assert!(hint.contains("mode: \"summary\""), "got: {hint}");
         assert!(hint.contains("summary_envelope_bytes:"), "got: {hint}");
         assert!(hint.contains("normal_fetch_limit_bytes: 64"), "got: {hint}");
@@ -742,7 +844,7 @@ mod tests {
                 {"invocation_id": "bbb", "tool_name": "honeycomb_query"},
             ],
         }));
-        let hint = inv.too_large_hint("$.result", 1024);
+        let hint = inv.too_large_hint("$.result", 1024, false);
         assert!(hint.contains("github_list_prs=aaa"), "got: {hint}");
         assert!(hint.contains("honeycomb_query=bbb"), "got: {hint}");
     }
@@ -759,11 +861,128 @@ mod tests {
                 {"invocation_id": "i4", "tool_name": "t4"},
             ],
         }));
-        let hint = inv.too_large_hint("$.result", 1024);
+        let hint = inv.too_large_hint("$.result", 1024, false);
         assert!(hint.contains("t0=i0"), "got: {hint}");
         assert!(hint.contains("t2=i2"), "got: {hint}");
         assert!(!hint.contains("t3=i3"), "should cap at 3; got: {hint}");
         assert!(hint.contains("+2 more"), "got: {hint}");
+    }
+
+    fn stored_with_elided(
+        root: Value,
+        elided_paths: Vec<crate::primitives::ElidedPath>,
+    ) -> StoredInvocation {
+        StoredInvocation {
+            id: ToolInvocationId::new(),
+            query_structure: QueryStructure { root },
+            summary: ToolCallSummary {
+                summary: Value::Null,
+                wire_result: Value::Null,
+                elided_paths,
+                root_path: "$".to_string(),
+                total_bytes: 0,
+                shown_bytes: 0,
+                total_items: None,
+                shown_items: None,
+                total_lines: None,
+                shown_lines: None,
+            },
+            original_structured: None,
+        }
+    }
+
+    fn elided(
+        path: &str,
+        total_bytes: u64,
+        total_lines: Option<u32>,
+    ) -> crate::primitives::ElidedPath {
+        crate::primitives::ElidedPath {
+            path: path.to_string(),
+            total_bytes,
+            shown_bytes: 0,
+            total_lines,
+            shown_lines: total_lines.map(|_| 1),
+            total_items: None,
+            shown_items: None,
+            recover: serde_json::json!({
+                "tool": "tool_output_fetch",
+                "args_template": {"invocation_id": "x", "path": path},
+            }),
+        }
+    }
+
+    #[test]
+    fn path_ancestor_check_handles_root_keys_and_indices() {
+        assert!(path_is_ancestor_or_equal("$", "$.items[0].body"));
+        assert!(path_is_ancestor_or_equal("$", "$[3]"));
+        assert!(path_is_ancestor_or_equal("$", "$"));
+        assert!(path_is_ancestor_or_equal("$.items", "$.items[0].body"));
+        assert!(path_is_ancestor_or_equal("$.items", "$.items"));
+        // segment-boundary check: $.items must not match $.itemsX
+        assert!(!path_is_ancestor_or_equal("$.items", "$.itemsX"));
+        assert!(!path_is_ancestor_or_equal("$.items", "$.other"));
+    }
+
+    #[test]
+    fn too_large_hint_surfaces_advertised_paths_under_requested_path() {
+        let inv = stored_with_elided(
+            serde_json::json!({"items": [{"body": "x"}]}),
+            vec![
+                elided("$.items[0].body", 43337, Some(524)),
+                elided("$.items[1].body", 1521, Some(23)),
+            ],
+        );
+        let hint = inv.too_large_hint("$.items", 16384, true);
+        assert!(hint.contains("$.items[0].body"), "got: {hint}");
+        assert!(hint.contains("43337 bytes"), "got: {hint}");
+        assert!(hint.contains("524 lines"), "got: {hint}");
+        assert!(hint.contains("$.items[1].body"), "got: {hint}");
+        assert!(
+            hint.contains("smallest slice exceeds the cap"),
+            "shrink_failed lead should appear: {hint}"
+        );
+    }
+
+    #[test]
+    fn too_large_hint_uses_softer_lead_when_shrink_was_not_attempted() {
+        let inv = stored_with_elided(
+            serde_json::json!({"logs": "x"}),
+            vec![elided("$.logs", 50000, Some(900))],
+        );
+        let hint = inv.too_large_hint("$", 16384, false);
+        assert!(hint.contains("advertised elided sub-paths"), "got: {hint}");
+        assert!(!hint.contains("smallest slice"), "got: {hint}");
+    }
+
+    #[test]
+    fn too_large_hint_caps_advertised_paths_to_four_with_overflow_note() {
+        let inv = stored_with_elided(
+            serde_json::json!({"items": []}),
+            vec![
+                elided("$.items[0].body", 1000, None),
+                elided("$.items[1].body", 1000, None),
+                elided("$.items[2].body", 1000, None),
+                elided("$.items[3].body", 1000, None),
+                elided("$.items[4].body", 1000, None),
+                elided("$.items[5].body", 1000, None),
+            ],
+        );
+        let hint = inv.too_large_hint("$.items", 16384, true);
+        assert!(hint.contains("$.items[3].body"), "got: {hint}");
+        assert!(!hint.contains("$.items[4].body"), "should cap at 4: {hint}");
+        assert!(hint.contains("+2 more in `_recovery.paths`"), "got: {hint}");
+    }
+
+    #[test]
+    fn too_large_hint_skips_advertised_paths_outside_requested_path() {
+        let inv = stored_with_elided(
+            serde_json::json!({"items": [], "other": "x"}),
+            vec![elided("$.other.body", 50000, None)],
+        );
+        let hint = inv.too_large_hint("$.items", 16384, true);
+        assert!(!hint.contains("$.other.body"), "got: {hint}");
+        // still falls back to the summary suggestion
+        assert!(hint.contains("mode: \"summary\""), "got: {hint}");
     }
 
     #[test]
@@ -774,7 +993,7 @@ mod tests {
                 {"invocation_id": "aaa", "tool_name": "github_list_prs"},
             ],
         }));
-        let hint = inv.too_large_hint("$.sub_invocations", 1024);
+        let hint = inv.too_large_hint("$.sub_invocations", 1024, false);
         assert!(!hint.contains("github_list_prs"), "got: {hint}");
         assert!(hint.contains("mode: \"summary\""), "got: {hint}");
     }
