@@ -283,9 +283,33 @@ impl Workflows {
         Self::validate_trigger(&trigger)?;
 
         if self.repo.is_soft_deleted_in_op(op, workflow_id).await? {
+            // drua is authoritative for workflow lifecycle: a soft-deleted
+            // record means the YAML is an orphan (e.g. record was removed
+            // via a path that bypassed `Workflows::delete`'s file-delete
+            // enqueue — project cascade rollback, manual DB cleanup, …).
+            // Schedule a cleanup commit so the next reverse-sync tick
+            // converges library → drua state instead of letting the file
+            // linger forever.
+            let id_uuid: uuid::Uuid = workflow_id.into();
+            let message = format!(
+                "workflow: prune orphan {}-{}",
+                slugify(&name),
+                &id_uuid.to_string()[..8]
+            );
+            self.library
+                .enqueue_write_in_op(
+                    op,
+                    WriteOp::DeleteFile {
+                        path: original_path.clone(),
+                        message,
+                    },
+                    CommitAttribution::system(),
+                )
+                .await?;
             tracing::info!(
                 %workflow_id,
-                "skipping reverse-sync import for soft-deleted workflow"
+                path = %original_path,
+                "enqueued orphan-YAML delete for soft-deleted workflow"
             );
             return Ok(None);
         }
