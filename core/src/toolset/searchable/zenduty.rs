@@ -37,7 +37,7 @@ fn schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
 /// internal integer codes (1=triggered, 2=acknowledged, 3=resolved) both
 /// work — `list_incidents` results sometimes leak the int form and
 /// agents copy it back unchanged. Schema surfaces the enum names.
-#[derive(Deserialize, schemars::JsonSchema)]
+#[derive(schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 enum IncidentStatusName {
     Triggered,
@@ -51,6 +51,20 @@ impl IncidentStatusName {
             Self::Triggered => IncidentStatus::Triggered,
             Self::Acknowledged => IncidentStatus::Acknowledged,
             Self::Resolved => IncidentStatus::Resolved,
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for IncidentStatusName {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        match s.to_ascii_lowercase().as_str() {
+            "triggered" => Ok(Self::Triggered),
+            "acknowledged" | "ack" => Ok(Self::Acknowledged),
+            "resolved" | "resolve" => Ok(Self::Resolved),
+            other => Err(serde::de::Error::custom(format!(
+                "unknown status '{other}' (expected triggered|acknowledged|ack|resolved|resolve)"
+            ))),
         }
     }
 }
@@ -715,5 +729,31 @@ mod tests {
             find_canonical_enum(&schema),
             "schema does not surface enum constraint for statuses: {schema}"
         );
+    }
+
+    #[test]
+    fn status_input_is_case_insensitive_and_accepts_aliases() {
+        for (input, expected_code) in [
+            ("TRIGGERED", 1u8),
+            ("Acknowledged", 2),
+            ("ack", 2),
+            ("RESOLVED", 3),
+            ("resolve", 3),
+        ] {
+            let args: ListIncidentsArgs = serde_json::from_value(serde_json::json!({
+                "statuses": [input],
+            }))
+            .unwrap_or_else(|e| panic!("'{input}' should deserialize: {e}"));
+            let code = args
+                .statuses
+                .unwrap()
+                .into_iter()
+                .next()
+                .unwrap()
+                .into_incident_status()
+                .unwrap_or_else(|e| panic!("'{input}' should convert: {e}"))
+                .as_u8();
+            assert_eq!(code, expected_code, "input: {input}");
+        }
     }
 }
