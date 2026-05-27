@@ -389,6 +389,12 @@ impl StoredInvocation {
     /// `path` and render the first few as a copy-pasteable hint. Returns
     /// `None` when nothing useful is under this path.
     fn advertised_paths_hint(&self, path: &str, shrink_failed: bool) -> Option<String> {
+        let matching_count = self
+            .summary
+            .elided_paths
+            .iter()
+            .filter(|ep| path_is_ancestor_or_equal(path, &ep.path))
+            .count();
         let nested: Vec<&crate::primitives::ElidedPath> = self
             .summary
             .elided_paths
@@ -416,7 +422,7 @@ impl StoredInvocation {
                 format!("\n  - {} ({}) — {}", ep.path, dims, template)
             })
             .collect();
-        let extra = self.summary.elided_paths.len().saturating_sub(nested.len());
+        let extra = matching_count.saturating_sub(nested.len());
         let trailer = if extra > 0 {
             format!("\n  - (+{extra} more in `_recovery.paths`)")
         } else {
