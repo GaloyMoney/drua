@@ -167,11 +167,9 @@ galoyAgents:
   ingress:
     enabled: true
     host: dashboard.agents.galoy.io
-    ingressClassName: nginx
+    ingressClassName: traefik
     annotations:
       cert-manager.io/cluster-issuer: letsencrypt-issuer
-      nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
-      nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     tls:
       - hosts:
           - dashboard.agents.galoy.io
