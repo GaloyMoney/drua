@@ -195,11 +195,9 @@ pub enum StopReason {
 
 impl From<Prompt> for llm::Prompt {
     fn from(p: Prompt) -> Self {
-        let max_tokens = Some(p.model_chain.primary.max_tokens_per_response);
-        let mut chain = llm::ModelChain::new(
-            llm::ModelSpec::new(p.model_chain.primary.model)
-                .with_max_tokens(p.model_chain.primary.max_tokens_per_response),
-        );
+        let primary = llm::ModelSpec::new(p.model_chain.primary.model)
+            .with_max_tokens(p.model_chain.primary.max_tokens_per_response);
+        let mut chain = llm::ModelChain::new(primary);
         for fallback in p.model_chain.fallbacks {
             chain = chain.with_fallback(
                 llm::ModelSpec::new(fallback.model)
@@ -208,7 +206,6 @@ impl From<Prompt> for llm::Prompt {
         }
         llm::Prompt {
             chain,
-            max_tokens,
             cache_key: p.cache_key,
             system: p
                 .system

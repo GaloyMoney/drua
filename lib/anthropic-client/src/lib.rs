@@ -11,9 +11,8 @@ use thiserror::Error;
 use tracing::instrument;
 
 use llm::provider::LlmProvider;
-use llm::{Prompt, PromptError, PromptResponse};
-
 use llm::stream::StreamDelta;
+use llm::{ModelSpec, Prompt, PromptError, PromptResponse};
 
 use crate::convert::{accumulated_to_response, prompt_to_request, AnthropicDeltaConverter};
 use crate::sse::{parse_sse_stream, SseError};
@@ -70,8 +69,12 @@ impl AnthropicClient {
 
     /// Streams the Messages API and returns the fully-accumulated reply.
     #[instrument(name = "anthropic_client.send_prompt", skip_all)]
-    pub async fn send_prompt(&self, prompt: &Prompt) -> Result<PromptResponse, AnthropicError> {
-        let request_body = prompt_to_request(prompt);
+    pub async fn send_prompt(
+        &self,
+        prompt: &Prompt,
+        spec: &ModelSpec,
+    ) -> Result<PromptResponse, AnthropicError> {
+        let request_body = prompt_to_request(prompt, spec);
 
         let resp = self
             .http
@@ -126,9 +129,10 @@ impl AnthropicClient {
     pub async fn send_prompt_streaming(
         &self,
         prompt: &Prompt,
+        spec: &ModelSpec,
     ) -> Result<tokio::sync::mpsc::Receiver<Result<StreamDelta, AnthropicError>>, AnthropicError>
     {
-        let request_body = prompt_to_request(prompt);
+        let request_body = prompt_to_request(prompt, spec);
 
         let resp = self
             .http
@@ -208,8 +212,9 @@ impl LlmProvider for AnthropicClient {
     async fn send_prompt_streaming(
         &self,
         prompt: &Prompt,
+        spec: &ModelSpec,
     ) -> Result<tokio::sync::mpsc::Receiver<Result<StreamDelta, PromptError>>, PromptError> {
-        let rx = AnthropicClient::send_prompt_streaming(self, prompt)
+        let rx = AnthropicClient::send_prompt_streaming(self, prompt, spec)
             .await
             .map_err(classify)?;
 
