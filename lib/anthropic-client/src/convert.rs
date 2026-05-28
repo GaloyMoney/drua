@@ -406,7 +406,7 @@ mod tests {
     }
 
     fn base_spec() -> ModelSpec {
-        ModelSpec::new("claude-sonnet-4").with_max_tokens(1024)
+        ModelSpec::new("claude-fallback-id").with_max_tokens(1024)
     }
 
     #[test]
@@ -434,8 +434,8 @@ mod tests {
     }
 
     #[test]
-    fn primary_model_id_is_used() {
+    fn spec_model_id_lands_on_request_not_prompt_primary() {
         let req = prompt_to_request(&base_prompt(), &base_spec());
-        assert_eq!(req.model, "claude-sonnet-4");
+        assert_eq!(req.model, "claude-fallback-id");
     }
 }
