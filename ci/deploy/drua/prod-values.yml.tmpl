@@ -164,6 +164,11 @@ galoyAgents:
     enabled: true
     databaseUrlSecret:
       key: pg-mcp-uri
+  serverTransport:
+    enabled: true
+    forwardingTimeouts:
+      responseHeaderTimeout: 3600s
+      idleConnTimeout: 3600s
   ingress:
     enabled: true
     host: dashboard.agents.galoy.io

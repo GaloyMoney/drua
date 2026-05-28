@@ -27,6 +27,13 @@ http://{{ template "galoyAgents.fullname" . }}.{{ .Release.Namespace }}.svc.clus
 {{- end -}}
 
 {{/*
+Traefik ServersTransport for the main drua Service.
+*/}}
+{{- define "galoyAgents.serverTransport.fullname" -}}
+{{- printf "%s-servertransport" (include "galoyAgents.fullname" .) | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+
+{{/*
 Postgres MCP fullname: <release>-postgres-mcp
 */}}
 {{- define "galoyAgents.postgresMcp.fullname" -}}

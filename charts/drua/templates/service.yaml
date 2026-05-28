@@ -1,5 +1,12 @@
 apiVersion: v1
 kind: Service
+{{- $serviceAnnotations := dict -}}
+{{- with .Values.galoyAgents.server.service.annotations -}}
+{{- $serviceAnnotations = . -}}
+{{- end -}}
+{{- if .Values.galoyAgents.serverTransport.enabled -}}
+{{- $_ := set $serviceAnnotations "traefik.ingress.kubernetes.io/service.serverstransport" (printf "%s-%s@kubernetescrd" .Release.Namespace (include "galoyAgents.serverTransport.fullname" .)) -}}
+{{- end }}
 metadata:
   name: {{ template "galoyAgents.fullname" . }}
   namespace: {{ .Release.Namespace }}
@@ -7,7 +14,7 @@ metadata:
     app: {{ template "galoyAgents.fullname" . }}
     chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
     release: "{{ .Release.Name }}"
-  {{- with .Values.galoyAgents.server.service.annotations }}
+  {{- with $serviceAnnotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
   {{- end }}

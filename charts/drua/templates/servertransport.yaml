@@ -1,0 +1,16 @@
+{{- if .Values.galoyAgents.serverTransport.enabled }}
+apiVersion: traefik.io/v1alpha1
+kind: ServersTransport
+metadata:
+  name: {{ template "galoyAgents.serverTransport.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: {{ template "galoyAgents.fullname" . }}
+    chart: "{{ .Chart.Name }}-{{ .Chart.Version }}"
+    release: "{{ .Release.Name }}"
+spec:
+  {{- with .Values.galoyAgents.serverTransport.forwardingTimeouts }}
+  forwardingTimeouts:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

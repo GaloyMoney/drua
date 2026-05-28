@@ -11,6 +11,9 @@ galoyAgents:
       type: ClusterIP
       port: 5254
       annotations: {}
+  serverTransport:
+    enabled: false
+    forwardingTimeouts: {}
   ingress:
     enabled: false
     host: ""
