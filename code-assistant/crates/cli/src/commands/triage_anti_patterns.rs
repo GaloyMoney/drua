@@ -104,11 +104,6 @@ enum Mode {
         text: String,
         pending: AttachPending,
     },
-    NewCategory {
-        slug: String,
-        text: String,
-        pending: AttachPending,
-    },
     NewComment(NewCommentState),
 }
 
@@ -132,7 +127,6 @@ impl AttachPending {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct NewCommentState {
     slug: String,
-    category: String,
     text: String,
     pending: AttachPending,
 }
@@ -230,15 +224,10 @@ impl App {
         Ok(())
     }
 
-    fn create_pattern(
-        &mut self,
-        slug: String,
-        category: String,
-        canonical_comment: String,
-    ) -> anyhow::Result<()> {
+    fn create_pattern(&mut self, slug: String, canonical_comment: String) -> anyhow::Result<()> {
         let pattern = Pattern {
             slug,
-            category,
+            category: None,
             canonical_comment,
             active: true,
         };
@@ -286,11 +275,6 @@ fn handle_key(code: KeyCode, mods: KeyModifiers, app: &mut App) -> anyhow::Resul
         } => handle_slug_picker(code, query, cursor, pending, app),
         Mode::AttachAnother(pending) => handle_attach_another(code, pending, app),
         Mode::NewSlug { text, pending } => handle_new_slug(code, text, pending, app),
-        Mode::NewCategory {
-            slug,
-            text,
-            pending,
-        } => handle_new_category(code, slug, text, pending, app),
         Mode::NewComment(state) => handle_new_comment(code, state, app),
     }
 }
@@ -450,46 +434,8 @@ fn handle_new_slug(
                 app.error = Some(format!("Slug '{slug}' already exists."));
                 app.mode = Mode::Normal;
             } else {
-                app.mode = Mode::NewCategory {
-                    slug,
-                    text: String::new(),
-                    pending,
-                };
-            }
-        }
-        KeyCode::Backspace => {
-            let mut t = text;
-            t.pop();
-            app.mode = Mode::NewSlug { text: t, pending };
-        }
-        KeyCode::Char(c) => {
-            let mut t = text;
-            t.push(c);
-            app.mode = Mode::NewSlug { text: t, pending };
-        }
-        _ => {}
-    }
-    Ok(())
-}
-
-fn handle_new_category(
-    code: KeyCode,
-    slug: String,
-    text: String,
-    pending: AttachPending,
-    app: &mut App,
-) -> anyhow::Result<()> {
-    match code {
-        KeyCode::Esc => app.mode = Mode::Normal,
-        KeyCode::Enter => {
-            let category = text.trim().to_string();
-            if category.is_empty() {
-                app.error = Some("Category cannot be empty.".to_string());
-                app.mode = Mode::Normal;
-            } else {
                 app.mode = Mode::NewComment(NewCommentState {
                     slug,
-                    category,
                     text: String::new(),
                     pending,
                 });
@@ -498,20 +444,12 @@ fn handle_new_category(
         KeyCode::Backspace => {
             let mut t = text;
             t.pop();
-            app.mode = Mode::NewCategory {
-                slug,
-                text: t,
-                pending,
-            };
+            app.mode = Mode::NewSlug { text: t, pending };
         }
         KeyCode::Char(c) => {
             let mut t = text;
             t.push(c);
-            app.mode = Mode::NewCategory {
-                slug,
-                text: t,
-                pending,
-            };
+            app.mode = Mode::NewSlug { text: t, pending };
         }
         _ => {}
     }
@@ -526,7 +464,7 @@ fn handle_new_comment(code: KeyCode, state: NewCommentState, app: &mut App) -> a
             if comment.is_empty() {
                 app.error = Some("Canonical comment cannot be empty.".to_string());
                 app.mode = Mode::Normal;
-            } else if let Err(e) = app.create_pattern(state.slug.clone(), state.category, comment) {
+            } else if let Err(e) = app.create_pattern(state.slug.clone(), comment) {
                 app.error = Some(format!("create pattern failed: {e}"));
                 app.mode = Mode::Normal;
             } else {
@@ -572,7 +510,9 @@ fn filter_patterns<'a>(patterns: &'a [Pattern], query: &str) -> Vec<&'a Pattern>
         .filter(|p| {
             q.is_empty()
                 || p.slug.to_lowercase().contains(&q)
-                || p.category.to_lowercase().contains(&q)
+                || p.category
+                    .as_deref()
+                    .is_some_and(|c| c.to_lowercase().contains(&q))
         })
         .collect()
 }
@@ -626,7 +566,6 @@ fn draw(frame: &mut Frame, app: &App) {
         Mode::NewSlug { text, .. } => {
             draw_input_popup(frame, "New pattern slug (kebab-case):", text)
         }
-        Mode::NewCategory { text, .. } => draw_input_popup(frame, "Category:", text),
         Mode::NewComment(state) => draw_multiline_popup(
             frame,
             "Canonical comment (Tab to submit, Esc to cancel):",
@@ -821,10 +760,7 @@ fn draw_slug_picker(
                 Style::default().fg(Color::White)
             };
             ListItem::new(Line::from(Span::styled(
-                format!(
-                    " {} {} [{}]  {}",
-                    prefix, p.slug, p.category, p.canonical_comment
-                ),
+                format!(" {} {}  —  {}", prefix, p.slug, p.canonical_comment),
                 style,
             )))
         })
@@ -968,13 +904,13 @@ mod tests {
         let patterns = vec![
             Pattern {
                 slug: "manual_error_mapping".into(),
-                category: "error-handling".into(),
+                category: None,
                 canonical_comment: "use ?".into(),
                 active: true,
             },
             Pattern {
                 slug: "raw_uuid".into(),
-                category: "domain-primitives".into(),
+                category: Some("domain-primitives".into()),
                 canonical_comment: "use typed id".into(),
                 active: true,
             },
@@ -982,6 +918,7 @@ mod tests {
         assert_eq!(filter_patterns(&patterns, "").len(), 2);
         assert_eq!(filter_patterns(&patterns, "uuid").len(), 1);
         assert_eq!(filter_patterns(&patterns, "error").len(), 1);
+        // Backfilled categories are still searchable.
         assert_eq!(filter_patterns(&patterns, "domain").len(), 1);
         assert_eq!(filter_patterns(&patterns, "zzz").len(), 0);
     }

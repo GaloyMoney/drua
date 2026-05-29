@@ -32,10 +32,14 @@ pub struct InlineReview {
 }
 
 /// Curated anti-pattern entry persisted to `anti-patterns.toml`.
+///
+/// `category` is optional and intentionally left unset at triage time —
+/// taxonomy is better designed in one pass over the full catalog later.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Pattern {
     pub slug: String,
-    pub category: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
     pub canonical_comment: String,
     #[serde(default = "default_active")]
     pub active: bool,
@@ -461,18 +465,23 @@ mod tests {
         let patterns = vec![
             Pattern {
                 slug: "manual_error_mapping".into(),
-                category: "error-handling".into(),
+                category: None,
                 canonical_comment: "Use ? with From impl instead of map_err.".into(),
                 active: true,
             },
             Pattern {
                 slug: "raw_uuid".into(),
-                category: "domain-primitives".into(),
+                category: Some("domain-primitives".into()),
                 canonical_comment: "Use a strongly-typed id, not raw Uuid.".into(),
                 active: true,
             },
         ];
         save_patterns(&path, &patterns).unwrap();
+
+        // A pattern with no category omits the field entirely; only the
+        // categorized pattern emits one `category =` line.
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("category =").count(), 1);
 
         let loaded = load_patterns(&path).unwrap();
         assert_eq!(loaded, patterns);
