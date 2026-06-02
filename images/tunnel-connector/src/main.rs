@@ -2,22 +2,41 @@
 //! locally, dials out to drua over WSS with an Ed25519-signed handshake,
 //! relays tool calls. Reconnects with exponential backoff + jitter.
 
-use std::collections::HashMap;
+use std::sync::Arc;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use clap::Parser;
 use ed25519_dalek::{pkcs8::DecodePrivateKey, Signer, SigningKey};
 use futures::{SinkExt, StreamExt};
-use rmcp::{
-    model::CallToolRequestParams,
-    service::RunningService,
-    transport::streamable_http_client::{
-        StreamableHttpClientTransportConfig, StreamableHttpClientWorker,
-    },
-    RoleClient, ServiceExt,
+use mcp_upstream::{
+    call_tool, discover_upstream, parse_upstreams, registration_fingerprint, tool_catalog_changed,
+    McpClients, RegisteredToolSet, UpstreamConfig,
 };
+use postgres_mcp::{
+    PostgresMcpConfig, PostgresMcpController, PostgresMcpHandler, PostgresSourceValidator,
+    DEFAULT_POSTGRES_MCP_CONFIG_SECRET, DEFAULT_POSTGRES_MCP_CONNECT_TIMEOUT_SECS,
+    DEFAULT_POSTGRES_MCP_IMAGE, DEFAULT_POSTGRES_MCP_LIMIT_CPU, DEFAULT_POSTGRES_MCP_LIMIT_MEMORY,
+    DEFAULT_POSTGRES_MCP_MAX_ROWS, DEFAULT_POSTGRES_MCP_QUERY_TIMEOUT,
+    DEFAULT_POSTGRES_MCP_REGISTRY_KEY, DEFAULT_POSTGRES_MCP_REGISTRY_SECRET,
+    DEFAULT_POSTGRES_MCP_REQUEST_CPU, DEFAULT_POSTGRES_MCP_REQUEST_MEMORY,
+    DEFAULT_POSTGRES_MCP_RESOURCE_NAME, DEFAULT_POSTGRES_MCP_SERVICE_PORT,
+    DEFAULT_POSTGRES_MCP_UPSTREAM_NAME,
+};
+use postgres_mcp_kubernetes::{resolve_namespace, KubernetesPostgresMcpHandler};
+use postgres_mcp_postgres::SqlxPostgresSourceValidator;
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 use tokio_tungstenite::tungstenite;
+
+mod mcp_upstream;
+mod postgres_mcp;
+mod postgres_mcp_kubernetes;
+mod postgres_mcp_postgres;
+#[cfg(test)]
+mod tunnel_registration_test;
+
+type ManagedPostgresMcpController =
+    PostgresMcpController<KubernetesPostgresMcpHandler, SqlxPostgresSourceValidator>;
 
 // ---------------------------------------------------------------------------
 // Wire protocol (mirrored from galoy-agents-core::tunnel)
@@ -46,15 +65,6 @@ enum TunnelMessage {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct RegisteredToolSet {
-    name: String,
-    prefix: String,
-    category: String,
-    category_description: String,
-    tools: Vec<serde_json::Value>,
-}
-
 // ---------------------------------------------------------------------------
 // CLI
 // ---------------------------------------------------------------------------
@@ -81,8 +91,9 @@ struct Cli {
     #[arg(long, env = "TUNNEL_DEPLOYMENT_ID")]
     deployment_id: String,
 
-    /// Comma-separated upstream MCP servers: name=url[,name=url,...]
-    #[arg(long, env = "TUNNEL_UPSTREAMS")]
+    /// Comma-separated upstream MCP servers: name=url[,name=url,...].
+    /// May be empty when the Postgres MCP registry has valid sources.
+    #[arg(long, env = "TUNNEL_UPSTREAMS", default_value = "")]
     upstreams: String,
 
     /// Poll interval for upstream MCP tool catalog changes. A value of 0 disables refresh.
@@ -92,23 +103,131 @@ struct Cli {
         default_value_t = DEFAULT_TOOL_REFRESH_INTERVAL_SECS
     )]
     tool_refresh_interval_secs: u64,
-}
 
-struct UpstreamConfig {
-    name: String,
-    url: String,
-}
+    /// Namespace containing the Lana-written registry Secret and generated DBHub resources.
+    /// Defaults to the pod namespace when running in Kubernetes.
+    #[arg(long, env = "TUNNEL_POSTGRES_MCP_NAMESPACE")]
+    postgres_mcp_namespace: Option<String>,
 
-fn parse_upstreams(raw: &str) -> Vec<UpstreamConfig> {
-    raw.split(',')
-        .filter_map(|pair| {
-            let (name, url) = pair.split_once('=')?;
-            Some(UpstreamConfig {
-                name: name.trim().to_string(),
-                url: url.trim().to_string(),
-            })
-        })
-        .collect()
+    /// Lana-written Secret containing the Postgres MCP registry YAML.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_REGISTRY_SECRET",
+        default_value = DEFAULT_POSTGRES_MCP_REGISTRY_SECRET
+    )]
+    postgres_mcp_registry_secret: String,
+
+    /// Secret data key that stores the registry YAML.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_REGISTRY_KEY",
+        default_value = DEFAULT_POSTGRES_MCP_REGISTRY_KEY
+    )]
+    postgres_mcp_registry_key: String,
+
+    /// Fixed name for the generated aggregate DBHub Deployment and Service.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_RESOURCE_NAME",
+        default_value = DEFAULT_POSTGRES_MCP_RESOURCE_NAME
+    )]
+    postgres_mcp_resource_name: String,
+
+    /// Fixed name for the generated DBHub config Secret.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_CONFIG_SECRET",
+        default_value = DEFAULT_POSTGRES_MCP_CONFIG_SECRET
+    )]
+    postgres_mcp_config_secret: String,
+
+    /// Drua upstream name used for the aggregate DBHub MCP service.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_UPSTREAM_NAME",
+        default_value = DEFAULT_POSTGRES_MCP_UPSTREAM_NAME
+    )]
+    postgres_mcp_upstream_name: String,
+
+    /// DBHub image used for the aggregate Postgres MCP server.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_IMAGE",
+        default_value = DEFAULT_POSTGRES_MCP_IMAGE
+    )]
+    postgres_mcp_image: String,
+
+    /// Image pull policy for the DBHub container.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_IMAGE_PULL_POLICY",
+        default_value = "IfNotPresent"
+    )]
+    postgres_mcp_image_pull_policy: String,
+
+    /// DBHub HTTP port.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_SERVICE_PORT",
+        default_value_t = DEFAULT_POSTGRES_MCP_SERVICE_PORT
+    )]
+    postgres_mcp_service_port: u16,
+
+    /// DBHub query timeout, in seconds, rendered into each source.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_QUERY_TIMEOUT",
+        default_value_t = DEFAULT_POSTGRES_MCP_QUERY_TIMEOUT
+    )]
+    postgres_mcp_query_timeout: u32,
+
+    /// DBHub maximum rows returned by execute_sql.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_MAX_ROWS",
+        default_value_t = DEFAULT_POSTGRES_MCP_MAX_ROWS
+    )]
+    postgres_mcp_max_rows: u32,
+
+    /// Timeout for per-source Postgres credential checks.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_CONNECT_TIMEOUT_SECS",
+        default_value_t = DEFAULT_POSTGRES_MCP_CONNECT_TIMEOUT_SECS
+    )]
+    postgres_mcp_connect_timeout_secs: u64,
+
+    /// CPU request for generated DBHub pods.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_REQUEST_CPU",
+        default_value = DEFAULT_POSTGRES_MCP_REQUEST_CPU
+    )]
+    postgres_mcp_request_cpu: String,
+
+    /// Memory request for generated DBHub pods.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_REQUEST_MEMORY",
+        default_value = DEFAULT_POSTGRES_MCP_REQUEST_MEMORY
+    )]
+    postgres_mcp_request_memory: String,
+
+    /// CPU limit for generated DBHub pods.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_LIMIT_CPU",
+        default_value = DEFAULT_POSTGRES_MCP_LIMIT_CPU
+    )]
+    postgres_mcp_limit_cpu: String,
+
+    /// Memory limit for generated DBHub pods.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_LIMIT_MEMORY",
+        default_value = DEFAULT_POSTGRES_MCP_LIMIT_MEMORY
+    )]
+    postgres_mcp_limit_memory: String,
 }
 
 fn load_signing_key(path: &std::path::Path) -> anyhow::Result<SigningKey> {
@@ -144,11 +263,9 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let cli = Cli::parse();
-    let upstreams = parse_upstreams(&cli.upstreams);
-
-    if upstreams.is_empty() {
-        anyhow::bail!("no upstreams configured — provide at least one name=url pair");
-    }
+    let static_upstreams = parse_upstreams(&cli.upstreams);
+    let postgres_mcp = build_postgres_mcp(&cli).await?;
+    let mut postgres_changes = postgres_mcp.spawn_registry_watcher();
 
     let mut backoff = INITIAL_BACKOFF;
     loop {
@@ -156,7 +273,15 @@ async fn main() -> anyhow::Result<()> {
         // successfully sent the Register frame. That way a long-lived
         // session that eventually errors out doesn't start its *next*
         // reconnect from a stale high backoff.
-        match run_tunnel(&cli, &upstreams, &mut backoff).await {
+        match run_tunnel(
+            &cli,
+            &static_upstreams,
+            postgres_mcp.as_ref(),
+            &mut postgres_changes,
+            &mut backoff,
+        )
+        .await
+        {
             Ok(()) => tracing::info!("tunnel closed cleanly"),
             Err(e) => tracing::error!(error = %e, "tunnel session failed"),
         }
@@ -168,22 +293,69 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-async fn run_tunnel(
-    cli: &Cli,
-    upstreams: &[UpstreamConfig],
-    backoff: &mut std::time::Duration,
-) -> anyhow::Result<()> {
-    // ── 1. Discover tools from local MCP servers ──────────────────────────
-    let mut mcp_clients: HashMap<String, RunningService<RoleClient, ()>> = HashMap::new();
-    let mut registrations: Vec<RegisteredToolSet> = Vec::new();
+async fn build_postgres_mcp(cli: &Cli) -> anyhow::Result<Arc<ManagedPostgresMcpController>> {
+    let config = PostgresMcpConfig {
+        namespace: resolve_namespace(cli.postgres_mcp_namespace.clone())?,
+        registry_secret: cli.postgres_mcp_registry_secret.clone(),
+        registry_key: cli.postgres_mcp_registry_key.clone(),
+        resource_name: cli.postgres_mcp_resource_name.clone(),
+        config_secret: cli.postgres_mcp_config_secret.clone(),
+        upstream_name: cli.postgres_mcp_upstream_name.clone(),
+        image: cli.postgres_mcp_image.clone(),
+        image_pull_policy: cli.postgres_mcp_image_pull_policy.clone(),
+        service_port: cli.postgres_mcp_service_port,
+        query_timeout: cli.postgres_mcp_query_timeout,
+        max_rows: cli.postgres_mcp_max_rows,
+        connect_timeout: std::time::Duration::from_secs(cli.postgres_mcp_connect_timeout_secs),
+        request_cpu: cli.postgres_mcp_request_cpu.clone(),
+        request_memory: cli.postgres_mcp_request_memory.clone(),
+        limit_cpu: cli.postgres_mcp_limit_cpu.clone(),
+        limit_memory: cli.postgres_mcp_limit_memory.clone(),
+    };
 
-    for upstream in upstreams {
+    let handler = KubernetesPostgresMcpHandler::try_default().await?;
+    let validator = SqlxPostgresSourceValidator;
+
+    Ok(Arc::new(PostgresMcpController::try_new(
+        config, handler, validator,
+    )?))
+}
+
+async fn run_tunnel<H, V>(
+    cli: &Cli,
+    static_upstreams: &[UpstreamConfig],
+    postgres_mcp: &PostgresMcpController<H, V>,
+    postgres_changes: &mut watch::Receiver<u64>,
+    backoff: &mut std::time::Duration,
+) -> anyhow::Result<()>
+where
+    H: PostgresMcpHandler,
+    V: PostgresSourceValidator,
+{
+    let upstreams = build_upstreams(static_upstreams, postgres_mcp).await?;
+    if upstreams.is_empty() {
+        anyhow::bail!("all configured MCP upstreams are unavailable or disabled");
+    }
+
+    // ── 1. Discover tools from local MCP servers ──────────────────────────
+    let mut mcp_clients = McpClients::new();
+    let mut registrations: Vec<RegisteredToolSet> = Vec::new();
+    let postgres_upstream_name = postgres_mcp.upstream_name();
+
+    for upstream in &upstreams {
         match discover_upstream(upstream, &cli.deployment_id).await {
             Ok((name, client, registration)) => {
                 registrations.push(registration);
                 mcp_clients.insert(name, client);
             }
             Err(e) => {
+                if postgres_upstream_name == upstream.name.as_str() {
+                    anyhow::bail!(
+                        "postgres mcp upstream {} is unavailable after reconciliation: {e}",
+                        upstream.name
+                    );
+                }
+
                 tracing::warn!(
                     name = %upstream.name,
                     url = %upstream.url,
@@ -254,7 +426,18 @@ async fn run_tunnel(
         tokio::select! {
             biased;
             _ = refresh_tick.tick(), if refresh_enabled => {
-                match tool_catalog_changed(upstreams, &cli.deployment_id, &registration_fingerprint).await {
+                match build_upstreams(static_upstreams, postgres_mcp).await {
+                    Ok(refreshed_upstreams) if refreshed_upstreams != upstreams => {
+                        tracing::info!("configured upstream set changed; reconnecting to refresh drua registration");
+                        return Ok(());
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "upstream reconciliation refresh failed; keeping current registration");
+                    }
+                }
+
+                match tool_catalog_changed(&upstreams, &cli.deployment_id, &registration_fingerprint).await {
                     Ok(true) => {
                         tracing::info!("upstream tool catalog changed; reconnecting to refresh drua registration");
                         return Ok(());
@@ -264,6 +447,12 @@ async fn run_tunnel(
                         tracing::warn!(error = %e, "upstream tool catalog refresh failed; keeping current registration");
                     }
                 }
+            }
+            _ = async {
+                let _ = postgres_changes.changed().await;
+            } => {
+                tracing::info!("postgres mcp registry changed; reconnecting to refresh drua registration");
+                return Ok(());
             }
             maybe_msg = ws_rx.next() => {
                 let Some(msg) = maybe_msg else {
@@ -313,137 +502,32 @@ async fn run_tunnel(
     Ok(())
 }
 
-async fn discover_upstream(
-    upstream: &UpstreamConfig,
-    deployment_id: &str,
-) -> anyhow::Result<(String, RunningService<RoleClient, ()>, RegisteredToolSet)> {
-    tracing::info!(name = %upstream.name, url = %upstream.url, "connecting to local MCP server");
+async fn build_upstreams<H, V>(
+    static_upstreams: &[UpstreamConfig],
+    postgres_mcp: &PostgresMcpController<H, V>,
+) -> anyhow::Result<Vec<UpstreamConfig>>
+where
+    H: PostgresMcpHandler,
+    V: PostgresSourceValidator,
+{
+    let mut upstreams = static_upstreams.to_vec();
 
-    let client = connect_upstream(upstream).await?;
-    let registration = discover_tools(upstream, deployment_id, &client).await?;
-
-    Ok((upstream.name.clone(), client, registration))
-}
-
-async fn connect_upstream(
-    upstream: &UpstreamConfig,
-) -> anyhow::Result<RunningService<RoleClient, ()>> {
-    let config = StreamableHttpClientTransportConfig::with_uri(upstream.url.as_str());
-    let worker = StreamableHttpClientWorker::new(reqwest::Client::new(), config);
-    Ok(().serve(worker).await?)
-}
-
-async fn discover_tools(
-    upstream: &UpstreamConfig,
-    deployment_id: &str,
-    client: &RunningService<RoleClient, ()>,
-) -> anyhow::Result<RegisteredToolSet> {
-    let tools: Vec<serde_json::Value> = client
-        .list_all_tools()
-        .await?
-        .into_iter()
-        .filter_map(|t| serde_json::to_value(t).ok())
-        .collect();
-
-    tracing::info!(name = %upstream.name, tools = tools.len(), "discovered tools");
-
-    let registration = RegisteredToolSet {
-        name: upstream.name.clone(),
-        prefix: upstream.name.clone(),
-        category: "deployment".to_string(),
-        category_description: format!("{deployment_id} deployment"),
-        tools,
-    };
-
-    Ok(registration)
-}
-
-fn registration_fingerprint(registrations: &[RegisteredToolSet]) -> anyhow::Result<String> {
-    Ok(serde_json::to_string(registrations)?)
-}
-
-async fn tool_catalog_changed(
-    upstreams: &[UpstreamConfig],
-    deployment_id: &str,
-    current_fingerprint: &str,
-) -> anyhow::Result<bool> {
-    let mut registrations = Vec::with_capacity(upstreams.len());
-
-    for upstream in upstreams {
-        let client = match connect_upstream(upstream).await {
-            Ok(client) => client,
-            Err(e) => {
-                tracing::warn!(
-                    name = %upstream.name,
-                    url = %upstream.url,
-                    error = %e,
-                    "skipping tool catalog refresh because an upstream is unavailable"
-                );
-                return Ok(false);
-            }
-        };
-        registrations.push(discover_tools(upstream, deployment_id, &client).await?);
+    if let Some(upstream) = postgres_mcp.reconcile().await? {
+        upstreams.push(upstream);
     }
 
-    Ok(registration_fingerprint(&registrations)? != current_fingerprint)
+    Ok(upstreams)
 }
 
 async fn handle_call(
-    clients: &HashMap<String, RunningService<RoleClient, ()>>,
+    clients: &McpClients,
     id: String,
     upstream: &str,
     tool_name: &str,
     arguments: Option<serde_json::Map<String, serde_json::Value>>,
 ) -> TunnelMessage {
-    let client = match clients.get(upstream) {
-        Some(c) => c,
-        None => {
-            return TunnelMessage::CallToolError {
-                id,
-                error: format!("unknown upstream: {upstream}"),
-            }
-        }
-    };
-
-    let mut params = CallToolRequestParams::new(tool_name.to_string());
-    if let Some(args) = arguments {
-        params = params.with_arguments(args);
-    }
-
-    match client.peer().call_tool(params).await {
-        Ok(result) => match serde_json::to_value(&result) {
-            Ok(value) => TunnelMessage::CallToolResult { id, result: value },
-            Err(e) => TunnelMessage::CallToolError {
-                id,
-                error: format!("serialize result: {e}"),
-            },
-        },
-        Err(e) => TunnelMessage::CallToolError {
-            id,
-            error: e.to_string(),
-        },
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn registration(tool_name: &str) -> RegisteredToolSet {
-        RegisteredToolSet {
-            name: "postgres".to_string(),
-            prefix: "postgres".to_string(),
-            category: "deployment".to_string(),
-            category_description: "staging deployment".to_string(),
-            tools: vec![serde_json::json!({ "name": tool_name })],
-        }
-    }
-
-    #[test]
-    fn registration_fingerprint_changes_when_tools_change() {
-        let before = registration_fingerprint(&[registration("execute_sql")]).unwrap();
-        let after = registration_fingerprint(&[registration("execute_sql_pg_lana")]).unwrap();
-
-        assert_ne!(before, after);
+    match call_tool(clients, upstream, tool_name, arguments).await {
+        Ok(result) => TunnelMessage::CallToolResult { id, result },
+        Err(error) => TunnelMessage::CallToolError { id, error },
     }
 }
