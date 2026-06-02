@@ -490,6 +490,10 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
                 "type": "boolean",
                 "description": "Opt out of webhooks entirely and create a manually-triggered workflow (create)."
             },
+            "trigger_condition": {
+                "type": "string",
+                "description": "Bare CEL boolean evaluated against the `trigger` payload before a run is created; non-matching events are filtered with no run spawned (create). On update, applies when `update_trigger` is true. Only `trigger` is in scope, not `steps`."
+            },
             "skill": {
                 "type": "string",
                 "description": "Single-step shorthand: NAME of an existing skill in this project (create skill first via the `skill` tool). Used only when `steps` is omitted/empty."
@@ -606,14 +610,16 @@ impl TopLevelTool for WorkflowTool {
          as raw shell scripts). The trigger payload is interpolated into \
          each step's skill via `$ARGUMENTS`. Commands: `create` (requires \
          `name`; either `steps` array or single-step shorthand `skill`; \
-         optional `provider`, `sandboxes`, `manual`, `model_chain`), \
+         optional `provider`, `trigger_condition`, `sandboxes`, `manual`, \
+         `model_chain`), \
          `list`, `get` (requires `definition_id`), `trigger` (requires \
          `definition_id`, optional `payload`; returns immediately with \
          the spawned run), `runs` (requires `definition_id`; truncated step \
          outputs), `run` (requires `run_id`; full per-step outputs), \
          `update` (requires `definition_id`; optional `name`, \
          `description`+`clear_description`, `steps`+`update_steps`, \
-         `sandboxes`+`update_sandboxes`, `provider`/`manual`+`update_trigger`, \
+         `sandboxes`+`update_sandboxes`, \
+         `provider`/`manual`/`trigger_condition`+`update_trigger`, \
          `model_chain`+`clear_model_chain`), \
          `delete` (requires `definition_id`; cascades to runs and queues \
          a `DeleteFile` on the canonical YAML)."
