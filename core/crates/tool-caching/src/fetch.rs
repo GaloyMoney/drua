@@ -548,12 +548,14 @@ fn parse_path(path: &str) -> Result<Vec<PathSegment>, ToolCachingError> {
                     while i < bytes.len() {
                         if bytes[i] == b'\\' && i + 1 < bytes.len() {
                             key.push_str(&rest[span_start..i]);
+                            let escaped_char_len =
+                                rest[i + 1..].chars().next().map_or(1, |c| c.len_utf8());
                             match bytes[i + 1] {
                                 b'"' => key.push('"'),
                                 b'\\' => key.push('\\'),
-                                _ => key.push_str(&rest[i..i + 2]),
+                                _ => key.push_str(&rest[i..i + 1 + escaped_char_len]),
                             }
-                            i += 2;
+                            i += 1 + escaped_char_len;
                             span_start = i;
                         } else if bytes[i] == b'"' {
                             key.push_str(&rest[span_start..i]);
@@ -765,6 +767,15 @@ mod tests {
                 PathSegment::Key("files".into()),
                 PathSegment::Key("données.txt".into()),
             ]
+        );
+    }
+
+    #[test]
+    fn parse_path_bracket_backslash_before_multibyte_no_panic() {
+        let segs = parse_path(r#"$.x["\é"]"#).unwrap();
+        assert_eq!(
+            segs,
+            vec![PathSegment::Key("x".into()), PathSegment::Key("\\é".into()),]
         );
     }
 
