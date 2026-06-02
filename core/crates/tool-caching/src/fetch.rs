@@ -457,6 +457,7 @@ impl StoredInvocation {
     }
 }
 
+#[derive(Debug, PartialEq)]
 enum PathSegment {
     Key(String),
     Index(usize),
@@ -541,24 +542,23 @@ fn parse_path(path: &str) -> Result<Vec<PathSegment>, ToolCachingError> {
             b'[' => {
                 i += 1;
                 if i < bytes.len() && bytes[i] == b'"' {
-                    // Bracket-quoted key: ["key.with.dots"] or ["key with \"quotes\""]
                     i += 1;
                     let mut key = String::new();
+                    let mut span_start = i;
                     while i < bytes.len() {
                         if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                            key.push_str(&rest[span_start..i]);
                             match bytes[i + 1] {
                                 b'"' => key.push('"'),
                                 b'\\' => key.push('\\'),
-                                other => {
-                                    key.push('\\');
-                                    key.push(other as char);
-                                }
+                                _ => key.push_str(&rest[i..i + 2]),
                             }
                             i += 2;
+                            span_start = i;
                         } else if bytes[i] == b'"' {
+                            key.push_str(&rest[span_start..i]);
                             break;
                         } else {
-                            key.push(bytes[i] as char);
                             i += 1;
                         }
                     }
@@ -754,6 +754,18 @@ mod tests {
         let wrapped =
             wrap_at_path(r#"$.files["values.yaml"]"#, Value::String("hi".into())).unwrap();
         assert_eq!(wrapped, serde_json::json!({"files": {"values.yaml": "hi"}}));
+    }
+
+    #[test]
+    fn parse_path_bracket_quoted_key_with_unicode() {
+        let segs = parse_path(r#"$.files["données.txt"]"#).unwrap();
+        assert_eq!(
+            segs,
+            vec![
+                PathSegment::Key("files".into()),
+                PathSegment::Key("données.txt".into()),
+            ]
+        );
     }
 
     #[test]
