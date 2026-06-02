@@ -457,6 +457,7 @@ impl StoredInvocation {
     }
 }
 
+#[derive(Debug, PartialEq)]
 enum PathSegment {
     Key(String),
     Index(usize),
@@ -540,20 +541,59 @@ fn parse_path(path: &str) -> Result<Vec<PathSegment>, ToolCachingError> {
             }
             b'[' => {
                 i += 1;
-                let start = i;
-                while i < bytes.len() && bytes[i] != b']' {
+                if i < bytes.len() && bytes[i] == b'"' {
+                    i += 1;
+                    let mut key = String::new();
+                    let mut span_start = i;
+                    while i < bytes.len() {
+                        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                            key.push_str(&rest[span_start..i]);
+                            let escaped_char_len =
+                                rest[i + 1..].chars().next().map_or(1, |c| c.len_utf8());
+                            match bytes[i + 1] {
+                                b'"' => key.push('"'),
+                                b'\\' => key.push('\\'),
+                                _ => key.push_str(&rest[i..i + 1 + escaped_char_len]),
+                            }
+                            i += 1 + escaped_char_len;
+                            span_start = i;
+                        } else if bytes[i] == b'"' {
+                            key.push_str(&rest[span_start..i]);
+                            break;
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    if i == bytes.len() {
+                        return Err(ToolCachingError::InvalidPath(format!(
+                            "unclosed `[\"` in path {path}"
+                        )));
+                    }
+                    i += 1; // skip closing "
+                    if i >= bytes.len() || bytes[i] != b']' {
+                        return Err(ToolCachingError::InvalidPath(format!(
+                            "expected `]` after quoted key in path {path}"
+                        )));
+                    }
+                    i += 1; // skip ]
+                    out.push(PathSegment::Key(key));
+                } else {
+                    // Numeric array index: [0]
+                    let start = i;
+                    while i < bytes.len() && bytes[i] != b']' {
+                        i += 1;
+                    }
+                    if i == bytes.len() {
+                        return Err(ToolCachingError::InvalidPath(format!(
+                            "unclosed `[` in path {path}"
+                        )));
+                    }
+                    let idx: usize = rest[start..i].parse().map_err(|_| {
+                        ToolCachingError::InvalidPath(format!("invalid array index in path {path}"))
+                    })?;
+                    out.push(PathSegment::Index(idx));
                     i += 1;
                 }
-                if i == bytes.len() {
-                    return Err(ToolCachingError::InvalidPath(format!(
-                        "unclosed `[` in path {path}"
-                    )));
-                }
-                let idx: usize = rest[start..i].parse().map_err(|_| {
-                    ToolCachingError::InvalidPath(format!("invalid array index in path {path}"))
-                })?;
-                out.push(PathSegment::Index(idx));
-                i += 1;
             }
             _ => {
                 return Err(ToolCachingError::InvalidPath(format!(
@@ -683,6 +723,60 @@ mod tests {
         assert!(matches!(&segs[0], PathSegment::Key(k) if k == "items"));
         assert!(matches!(&segs[1], PathSegment::Index(3)));
         assert!(matches!(&segs[2], PathSegment::Key(k) if k == "name"));
+    }
+
+    #[test]
+    fn parse_path_bracket_quoted_key_with_dot() {
+        let segs = parse_path(r#"$.files["values.yaml"].content"#).unwrap();
+        assert_eq!(segs.len(), 3);
+        assert!(matches!(&segs[0], PathSegment::Key(k) if k == "files"));
+        assert!(matches!(&segs[1], PathSegment::Key(k) if k == "values.yaml"));
+        assert!(matches!(&segs[2], PathSegment::Key(k) if k == "content"));
+    }
+
+    #[test]
+    fn parse_path_bracket_quoted_key_with_escaped_quote() {
+        let segs = parse_path(r#"$.files["he said \"hi\".txt"]"#).unwrap();
+        assert_eq!(segs.len(), 2);
+        assert!(matches!(&segs[0], PathSegment::Key(k) if k == "files"));
+        assert!(matches!(&segs[1], PathSegment::Key(k) if k == r#"he said "hi".txt"#));
+    }
+
+    #[test]
+    fn navigate_bracket_quoted_key_resolves_dotted_key() {
+        let inv = stored(serde_json::json!({"files": {"values.yaml": {"content": "x"}}}));
+        assert_eq!(
+            inv.navigate(r#"$.files["values.yaml"].content"#).unwrap(),
+            &Value::String("x".into())
+        );
+    }
+
+    #[test]
+    fn wrap_at_path_bracket_quoted_key() {
+        let wrapped =
+            wrap_at_path(r#"$.files["values.yaml"]"#, Value::String("hi".into())).unwrap();
+        assert_eq!(wrapped, serde_json::json!({"files": {"values.yaml": "hi"}}));
+    }
+
+    #[test]
+    fn parse_path_bracket_quoted_key_with_unicode() {
+        let segs = parse_path(r#"$.files["données.txt"]"#).unwrap();
+        assert_eq!(
+            segs,
+            vec![
+                PathSegment::Key("files".into()),
+                PathSegment::Key("données.txt".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_path_bracket_backslash_before_multibyte_no_panic() {
+        let segs = parse_path(r#"$.x["\é"]"#).unwrap();
+        assert_eq!(
+            segs,
+            vec![PathSegment::Key("x".into()), PathSegment::Key("\\é".into()),]
+        );
     }
 
     #[test]

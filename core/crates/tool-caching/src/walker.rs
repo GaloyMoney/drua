@@ -250,7 +250,7 @@ impl Walker {
                 let per_key = (usable.saturating_mul(size) / total).max(1);
                 (
                     k.clone(),
-                    self.walk(v, &format!("{path}.{k}"), per_key, ctx, elided_paths),
+                    self.walk(v, &format_path_key(path, k), per_key, ctx, elided_paths),
                 )
             })
             .collect();
@@ -1077,6 +1077,17 @@ fn make_truncated_array(walked: &[Value], head_count: usize) -> Value {
     Value::Array(walked.iter().take(head_count).cloned().collect())
 }
 
+/// Bracket-quote keys that contain `.`, `[`, or `"` so the path parser
+/// round-trips them as a single segment instead of splitting on the dot.
+pub(crate) fn format_path_key(parent: &str, key: &str) -> String {
+    if key.contains('.') || key.contains('[') || key.contains('"') {
+        let escaped = key.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("{parent}[\"{escaped}\"]")
+    } else {
+        format!("{parent}.{key}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1384,6 +1395,14 @@ mod tests {
         ] {
             regen_one(fixture_name, tool_name);
         }
+    }
+
+    #[test]
+    fn format_path_key_brackets_dotted_keys() {
+        assert_eq!(format_path_key("$", "normal"), "$.normal");
+        assert_eq!(format_path_key("$", "values.yaml"), r#"$["values.yaml"]"#);
+        assert_eq!(format_path_key("$.a", "b[0]"), r#"$.a["b[0]"]"#);
+        assert_eq!(format_path_key("$", r#"say "hi""#), r#"$["say \"hi\""]"#);
     }
 
     #[test]
