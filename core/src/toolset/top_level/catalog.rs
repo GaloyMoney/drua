@@ -448,9 +448,8 @@ impl TopLevelTool for CallCatalogTool {
 
         let (set, name) = match self.find_set(subject, &tool_name) {
             Some(found) => found,
-            None
-                if tool_name == "tool_output_fetch"
-                    || tool_name == "mcp__drua__tool_output_fetch" =>
+            None if tool_name == "tool_output_fetch"
+                || tool_name == "mcp__drua__tool_output_fetch" =>
             {
                 let tc = self
                     .tool_caching

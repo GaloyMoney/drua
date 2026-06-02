@@ -1077,11 +1077,12 @@ fn make_truncated_array(walked: &[Value], head_count: usize) -> Value {
     Value::Array(walked.iter().take(head_count).cloned().collect())
 }
 
-/// Bracket-quote keys that contain `.` or `[` so the path parser
+/// Bracket-quote keys that contain `.`, `[`, or `"` so the path parser
 /// round-trips them as a single segment instead of splitting on the dot.
 pub(crate) fn format_path_key(parent: &str, key: &str) -> String {
-    if key.contains('.') || key.contains('[') {
-        format!("{parent}[\"{key}\"]")
+    if key.contains('.') || key.contains('[') || key.contains('"') {
+        let escaped = key.replace('\\', "\\\\").replace('"', "\\\"");
+        format!("{parent}[\"{escaped}\"]")
     } else {
         format!("{parent}.{key}")
     }
@@ -1381,6 +1382,14 @@ mod tests {
     /// Off-by-default helper: regenerates the bats `<summary>+<recovery>`
     /// golden files for fixtures the walker touches, by driving it over
     /// the raw input. Run with `REGEN_GOLDEN=1 cargo test -p
+    #[test]
+    fn format_path_key_brackets_dotted_keys() {
+        assert_eq!(format_path_key("$", "normal"), "$.normal");
+        assert_eq!(format_path_key("$", "values.yaml"), r#"$["values.yaml"]"#);
+        assert_eq!(format_path_key("$.a", "b[0]"), r#"$.a["b[0]"]"#);
+        assert_eq!(format_path_key("$", r#"say "hi""#), r#"$["say \"hi\""]"#);
+    }
+
     /// drua-tool-caching --lib walker::tests::regen_bats_goldens --
     /// --nocapture`.
     #[test]

@@ -541,18 +541,32 @@ fn parse_path(path: &str) -> Result<Vec<PathSegment>, ToolCachingError> {
             b'[' => {
                 i += 1;
                 if i < bytes.len() && bytes[i] == b'"' {
-                    // Bracket-quoted key: ["key.with.dots"]
+                    // Bracket-quoted key: ["key.with.dots"] or ["key with \"quotes\""]
                     i += 1;
-                    let start = i;
-                    while i < bytes.len() && bytes[i] != b'"' {
-                        i += 1;
+                    let mut key = String::new();
+                    while i < bytes.len() {
+                        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                            match bytes[i + 1] {
+                                b'"' => key.push('"'),
+                                b'\\' => key.push('\\'),
+                                other => {
+                                    key.push('\\');
+                                    key.push(other as char);
+                                }
+                            }
+                            i += 2;
+                        } else if bytes[i] == b'"' {
+                            break;
+                        } else {
+                            key.push(bytes[i] as char);
+                            i += 1;
+                        }
                     }
                     if i == bytes.len() {
                         return Err(ToolCachingError::InvalidPath(format!(
                             "unclosed `[\"` in path {path}"
                         )));
                     }
-                    let key = rest[start..i].to_string();
                     i += 1; // skip closing "
                     if i >= bytes.len() || bytes[i] != b']' {
                         return Err(ToolCachingError::InvalidPath(format!(
@@ -573,9 +587,7 @@ fn parse_path(path: &str) -> Result<Vec<PathSegment>, ToolCachingError> {
                         )));
                     }
                     let idx: usize = rest[start..i].parse().map_err(|_| {
-                        ToolCachingError::InvalidPath(format!(
-                            "invalid array index in path {path}"
-                        ))
+                        ToolCachingError::InvalidPath(format!("invalid array index in path {path}"))
                     })?;
                     out.push(PathSegment::Index(idx));
                     i += 1;
@@ -718,6 +730,14 @@ mod tests {
         assert!(matches!(&segs[0], PathSegment::Key(k) if k == "files"));
         assert!(matches!(&segs[1], PathSegment::Key(k) if k == "values.yaml"));
         assert!(matches!(&segs[2], PathSegment::Key(k) if k == "content"));
+    }
+
+    #[test]
+    fn parse_path_bracket_quoted_key_with_escaped_quote() {
+        let segs = parse_path(r#"$.files["he said \"hi\".txt"]"#).unwrap();
+        assert_eq!(segs.len(), 2);
+        assert!(matches!(&segs[0], PathSegment::Key(k) if k == "files"));
+        assert!(matches!(&segs[1], PathSegment::Key(k) if k == r#"he said "hi".txt"#));
     }
 
     #[test]
