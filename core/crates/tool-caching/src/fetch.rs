@@ -540,20 +540,46 @@ fn parse_path(path: &str) -> Result<Vec<PathSegment>, ToolCachingError> {
             }
             b'[' => {
                 i += 1;
-                let start = i;
-                while i < bytes.len() && bytes[i] != b']' {
+                if i < bytes.len() && bytes[i] == b'"' {
+                    // Bracket-quoted key: ["key.with.dots"]
+                    i += 1;
+                    let start = i;
+                    while i < bytes.len() && bytes[i] != b'"' {
+                        i += 1;
+                    }
+                    if i == bytes.len() {
+                        return Err(ToolCachingError::InvalidPath(format!(
+                            "unclosed `[\"` in path {path}"
+                        )));
+                    }
+                    let key = rest[start..i].to_string();
+                    i += 1; // skip closing "
+                    if i >= bytes.len() || bytes[i] != b']' {
+                        return Err(ToolCachingError::InvalidPath(format!(
+                            "expected `]` after quoted key in path {path}"
+                        )));
+                    }
+                    i += 1; // skip ]
+                    out.push(PathSegment::Key(key));
+                } else {
+                    // Numeric array index: [0]
+                    let start = i;
+                    while i < bytes.len() && bytes[i] != b']' {
+                        i += 1;
+                    }
+                    if i == bytes.len() {
+                        return Err(ToolCachingError::InvalidPath(format!(
+                            "unclosed `[` in path {path}"
+                        )));
+                    }
+                    let idx: usize = rest[start..i].parse().map_err(|_| {
+                        ToolCachingError::InvalidPath(format!(
+                            "invalid array index in path {path}"
+                        ))
+                    })?;
+                    out.push(PathSegment::Index(idx));
                     i += 1;
                 }
-                if i == bytes.len() {
-                    return Err(ToolCachingError::InvalidPath(format!(
-                        "unclosed `[` in path {path}"
-                    )));
-                }
-                let idx: usize = rest[start..i].parse().map_err(|_| {
-                    ToolCachingError::InvalidPath(format!("invalid array index in path {path}"))
-                })?;
-                out.push(PathSegment::Index(idx));
-                i += 1;
             }
             _ => {
                 return Err(ToolCachingError::InvalidPath(format!(
@@ -683,6 +709,31 @@ mod tests {
         assert!(matches!(&segs[0], PathSegment::Key(k) if k == "items"));
         assert!(matches!(&segs[1], PathSegment::Index(3)));
         assert!(matches!(&segs[2], PathSegment::Key(k) if k == "name"));
+    }
+
+    #[test]
+    fn parse_path_bracket_quoted_key_with_dot() {
+        let segs = parse_path(r#"$.files["values.yaml"].content"#).unwrap();
+        assert_eq!(segs.len(), 3);
+        assert!(matches!(&segs[0], PathSegment::Key(k) if k == "files"));
+        assert!(matches!(&segs[1], PathSegment::Key(k) if k == "values.yaml"));
+        assert!(matches!(&segs[2], PathSegment::Key(k) if k == "content"));
+    }
+
+    #[test]
+    fn navigate_bracket_quoted_key_resolves_dotted_key() {
+        let inv = stored(serde_json::json!({"files": {"values.yaml": {"content": "x"}}}));
+        assert_eq!(
+            inv.navigate(r#"$.files["values.yaml"].content"#).unwrap(),
+            &Value::String("x".into())
+        );
+    }
+
+    #[test]
+    fn wrap_at_path_bracket_quoted_key() {
+        let wrapped =
+            wrap_at_path(r#"$.files["values.yaml"]"#, Value::String("hi".into())).unwrap();
+        assert_eq!(wrapped, serde_json::json!({"files": {"values.yaml": "hi"}}));
     }
 
     #[test]

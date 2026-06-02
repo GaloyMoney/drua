@@ -446,9 +446,23 @@ impl TopLevelTool for CallCatalogTool {
 
         let extra_keys: Vec<String> = args.keys().cloned().collect();
 
-        let (set, name) = self
-            .find_set(subject, &tool_name)
-            .ok_or_else(|| ToolSetsError::ToolNotFound(tool_name.clone()))?;
+        let (set, name) = match self.find_set(subject, &tool_name) {
+            Some(found) => found,
+            None
+                if tool_name == "tool_output_fetch"
+                    || tool_name == "mcp__drua__tool_output_fetch" =>
+            {
+                let tc = self
+                    .tool_caching
+                    .as_ref()
+                    .ok_or_else(|| ToolSetsError::ToolNotFound(tool_name.clone()))?;
+                let fetch =
+                    super::tool_output_fetch::ToolOutputFetch::new(std::sync::Arc::clone(tc));
+                Audit::record_action("tool_output_fetch");
+                return fetch.call(subject, inner_args).await;
+            }
+            None => return Err(ToolSetsError::ToolNotFound(tool_name.clone())),
+        };
 
         // Auto-parse inner_args against the upstream tool's input schema —
         // the outer call_tool envelope only declares `arguments: object`, so

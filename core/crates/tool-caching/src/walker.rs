@@ -250,7 +250,7 @@ impl Walker {
                 let per_key = (usable.saturating_mul(size) / total).max(1);
                 (
                     k.clone(),
-                    self.walk(v, &format!("{path}.{k}"), per_key, ctx, elided_paths),
+                    self.walk(v, &format_path_key(path, k), per_key, ctx, elided_paths),
                 )
             })
             .collect();
@@ -1075,6 +1075,16 @@ fn byte_offset_for_line(raw: &str, line: usize) -> usize {
 
 fn make_truncated_array(walked: &[Value], head_count: usize) -> Value {
     Value::Array(walked.iter().take(head_count).cloned().collect())
+}
+
+/// Bracket-quote keys that contain `.` or `[` so the path parser
+/// round-trips them as a single segment instead of splitting on the dot.
+pub(crate) fn format_path_key(parent: &str, key: &str) -> String {
+    if key.contains('.') || key.contains('[') {
+        format!("{parent}[\"{key}\"]")
+    } else {
+        format!("{parent}.{key}")
+    }
 }
 
 #[cfg(test)]
