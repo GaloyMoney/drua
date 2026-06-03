@@ -64,7 +64,8 @@ module "postgresql_instance" {
   region                         = local.region
   destroyable                    = true
   highly_available               = false
-  tier                           = "db-f1-micro"
+  tier                           = "db-custom-1-3840"
+  max_connections                = 100
   backup_enabled                 = true
   point_in_time_recovery_enabled = true
 }

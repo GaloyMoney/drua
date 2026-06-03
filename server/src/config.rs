@@ -206,11 +206,28 @@ pub struct OAuthConfig {
     pub dev_mode_agent_tokens: bool,
 }
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DbConfig {
     #[serde(skip)]
     pub pg_con: String,
+    /// Per-replica sqlx pool cap. Cluster draw is this × replica count, so it
+    /// must stay under the instance `max_connections` set in terraform.
+    #[serde(default = "default_pg_max_connections")]
+    pub max_connections: u32,
+}
+
+impl Default for DbConfig {
+    fn default() -> Self {
+        Self {
+            pg_con: String::new(),
+            max_connections: default_pg_max_connections(),
+        }
+    }
+}
+
+fn default_pg_max_connections() -> u32 {
+    30
 }
 
 pub struct EnvSecrets {

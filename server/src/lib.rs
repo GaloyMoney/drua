@@ -136,7 +136,14 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
         &args.config_overrides,
     )?;
 
-    let pool = sqlx::PgPool::connect(&config.db.pg_con).await?;
+    // Size the pool explicitly: the default `PgPool::connect` caps at 10, and
+    // with N replicas the cluster-wide draw is `max_connections * N` — keep
+    // that under the instance's `max_connections` (CloudSQL flag) or replicas
+    // starve each other into `pool timed out`.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(config.db.max_connections)
+        .connect(&config.db.pg_con)
+        .await?;
     sqlx::migrate!("../core/migrations").run(&pool).await?;
 
     let github_app_config = config.github_app.as_ref().and_then(|gh| {
