@@ -254,6 +254,13 @@ impl Workflows {
         }
     }
 
+    /// Liveness probe for the library forward-sync write job: `true` when
+    /// the definition is present and not soft-deleted. Owns the SQL so the
+    /// generic library crate stays decoupled from `workflow_definitions`.
+    pub(crate) async fn is_live(&self, id: WorkflowDefinitionId) -> Result<bool, WorkflowError> {
+        Ok(self.repo.is_live(id).await?)
+    }
+
     /// Reverse-sync entry point: persist a `ParsedWorkflow` produced
     /// by the library importer. Creates or updates depending on
     /// whether the workflow already exists. `Ok(None)` signals

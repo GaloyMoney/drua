@@ -78,6 +78,15 @@ pub trait LibraryImporter: Send + Sync + 'static {
         false
     }
 
+    /// Is the document with this id still live (present and not soft-deleted)?
+    /// Consulted by the forward-sync write job to skip a stale, replayed write
+    /// that would resurrect a deleted entity's file. Keyed by doc id (not
+    /// path) to stay robust under path aliasing. Default: always live (no
+    /// liveness gating).
+    async fn is_doc_live(&self, _id: uuid::Uuid) -> Result<bool, UpsertError> {
+        Ok(true)
+    }
+
     /// Upsert the document into its service-specific tables. Returns
     /// `Some(SearchableFields)` when the caller should also write the
     /// search index row; `None` when the importer handled everything

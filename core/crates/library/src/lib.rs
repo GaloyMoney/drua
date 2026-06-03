@@ -20,7 +20,7 @@ pub use config::LibraryConfig;
 pub use error::LibraryError;
 pub use github_app::GitHubAppTokenProvider;
 pub use importer::{DocType, GitFileHash, LibraryImporter, UpsertError};
-pub use job::{LivenessGuard, LivenessKind, WriteOp};
+pub use job::{LivenessRef, WriteOp};
 pub use primitives::SpaceId;
 pub use search::{SearchHit, SearchStore, SearchableFields};
 pub use space::{NewSpace, Space, SpaceError, SpaceEvent, Spaces, SPACE_DOC_TYPE};
@@ -80,9 +80,18 @@ impl Library {
             Arc::clone(&embedder),
         ));
 
+        // Importers registry is shared with the write job so it can delegate
+        // liveness checks to the domain (per doc type). Built before the write
+        // initializer; importers registered later via `register_importer` are
+        // visible through the shared `Arc<RwLock<…>>`.
+        let importers: ImporterRegistry =
+            Arc::new(tokio::sync::RwLock::new(vec![
+                Arc::new(spaces.clone()) as Arc<dyn LibraryImporter>
+            ]));
+
         let write_spawner = jobs.add_initializer(LibraryWriteJobInitializer::new(
             Arc::clone(&git),
-            pool.clone(),
+            Arc::clone(&importers),
         ));
 
         let (tick_tx, tick_rx) = mpsc::channel::<CommitTick>(64);
@@ -92,11 +101,6 @@ impl Library {
             Duration::from_millis(config.fetch_interval_ms),
             git.local_commit_notify(),
         );
-
-        let importers: ImporterRegistry =
-            Arc::new(tokio::sync::RwLock::new(vec![
-                Arc::new(spaces.clone()) as Arc<dyn LibraryImporter>
-            ]));
 
         let spawner = jobs.add_initializer(LibrarySyncJobInitializer::new(
             tick_rx,

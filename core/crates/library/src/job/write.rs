@@ -2,10 +2,11 @@ use std::sync::Arc;
 
 use job::{CurrentJob, Job, JobCompletion, JobInitializer, JobRunner, JobSpawner, JobType};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
 
+use super::sync::ImporterRegistry;
 use crate::attribution::CommitAttribution;
 use crate::git::GitEngine;
+use crate::importer::DocType;
 
 pub(crate) const LIBRARY_WRITE_JOB: &str = "library.write";
 
@@ -47,33 +48,19 @@ pub enum WriteOp {
     },
 }
 
-/// Identifies the DB row that a forward-sync write reflects, so the write
-/// job can re-check liveness at execution time. A persisted write job
-/// captures its bytes at enqueue time and may replay much later (restart,
-/// retry); if the source entity was soft-deleted in the meantime, applying
-/// the captured write would resurrect an orphan file. Carried as a tagged
-/// enum (not a closure) because the job config must be serializable; each
-/// variant maps to a fixed, injection-free `deleted` lookup.
+/// Identifies the DB row a forward-sync write reflects, so the write job can
+/// re-check liveness at execution time. A persisted write job captures its
+/// bytes at enqueue time and may replay much later (restart, retry); if the
+/// source entity was soft-deleted in the meantime, applying the captured
+/// write would resurrect an orphan file.
+///
+/// Opaque to this crate: just `(doc_type, id)`. The matching
+/// [`crate::LibraryImporter::is_doc_live`] owns the actual liveness query, so
+/// the generic library crate stays decoupled from concrete entity tables.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LivenessGuard {
-    pub kind: LivenessKind,
+pub struct LivenessRef {
+    pub doc_type: DocType,
     pub id: uuid::Uuid,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LivenessKind {
-    WorkflowDefinition,
-}
-
-impl LivenessKind {
-    fn is_deleted_query(self) -> &'static str {
-        match self {
-            LivenessKind::WorkflowDefinition => {
-                "SELECT deleted FROM workflow_definitions WHERE id = $1"
-            }
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,21 +71,21 @@ pub(crate) struct LibraryWriteConfig {
     /// job is replayed across a process restart.
     #[serde(default)]
     pub attribution: CommitAttribution,
-    /// When set, the write is skipped if the referenced row is soft-deleted
-    /// (or gone) by the time the job runs — guards against a stale forward
-    /// sync resurrecting a deleted entity's file.
+    /// When set, the write is skipped if its source row is soft-deleted (or
+    /// gone) by the time the job runs — guards against a stale forward sync
+    /// resurrecting a deleted entity's file.
     #[serde(default)]
-    pub liveness: Option<LivenessGuard>,
+    pub liveness: Option<LivenessRef>,
 }
 
 pub(crate) struct LibraryWriteJobInitializer {
     git: Arc<GitEngine>,
-    pool: PgPool,
+    importers: ImporterRegistry,
 }
 
 impl LibraryWriteJobInitializer {
-    pub fn new(git: Arc<GitEngine>, pool: PgPool) -> Self {
-        Self { git, pool }
+    pub fn new(git: Arc<GitEngine>, importers: ImporterRegistry) -> Self {
+        Self { git, importers }
     }
 }
 
@@ -117,7 +104,7 @@ impl JobInitializer for LibraryWriteJobInitializer {
         let config: LibraryWriteConfig = job.config()?;
         Ok(Box::new(LibraryWriteRunner {
             git: Arc::clone(&self.git),
-            pool: self.pool.clone(),
+            importers: Arc::clone(&self.importers),
             op: config.op,
             attribution: config.attribution,
             liveness: config.liveness,
@@ -127,22 +114,34 @@ impl JobInitializer for LibraryWriteJobInitializer {
 
 struct LibraryWriteRunner {
     git: Arc<GitEngine>,
-    pool: PgPool,
+    importers: ImporterRegistry,
     op: WriteOp,
     attribution: CommitAttribution,
-    liveness: Option<LivenessGuard>,
+    liveness: Option<LivenessRef>,
 }
 
 impl LibraryWriteRunner {
-    /// `true` when the guarded row is soft-deleted or absent — i.e. the
-    /// captured write is stale and must be skipped. Missing row counts as
-    /// deleted (the entity is gone; writing its file would resurrect it).
-    async fn target_is_dead(&self, guard: &LivenessGuard) -> Result<bool, sqlx::Error> {
-        let deleted: Option<(bool,)> = sqlx::query_as(guard.kind.is_deleted_query())
-            .bind(guard.id)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(deleted.map(|(d,)| d).unwrap_or(true))
+    /// `true` when the write's source entity is soft-deleted or gone, so the
+    /// captured (possibly replayed) write should be skipped. The actual check
+    /// is delegated to the registered [`crate::LibraryImporter`] for the doc
+    /// type. On a missing importer or a lookup error, treats the source as
+    /// live and proceeds — matching the no-guard default.
+    async fn source_is_dead(&self, lr: &LivenessRef) -> bool {
+        let importers = self.importers.read().await;
+        let Some(importer) = importers.iter().find(|i| i.doc_type() == lr.doc_type) else {
+            tracing::warn!(
+                doc_type = %lr.doc_type,
+                "library.write: no importer for liveness check; proceeding"
+            );
+            return false;
+        };
+        match importer.is_doc_live(lr.id).await {
+            Ok(live) => !live,
+            Err(e) => {
+                tracing::warn!(error = %e, id = %lr.id, "library.write: liveness check failed; proceeding");
+                false
+            }
+        }
     }
 }
 
@@ -153,12 +152,12 @@ impl JobRunner for LibraryWriteRunner {
         &self,
         _current_job: CurrentJob,
     ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
-        if let Some(guard) = &self.liveness {
-            if self.target_is_dead(guard).await? {
+        if let Some(lr) = &self.liveness {
+            if self.source_is_dead(lr).await {
                 tracing::info!(
-                    kind = ?guard.kind,
-                    id = %guard.id,
-                    "library.write: skipping stale write; sync target soft-deleted or gone"
+                    doc_type = %lr.doc_type,
+                    id = %lr.id,
+                    "library.write: skipping stale write; source soft-deleted or gone"
                 );
                 return Ok(JobCompletion::Complete);
             }
@@ -220,14 +219,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workflow_liveness_query_checks_deleted_column() {
-        assert_eq!(
-            LivenessKind::WorkflowDefinition.is_deleted_query(),
-            "SELECT deleted FROM workflow_definitions WHERE id = $1"
-        );
-    }
-
-    #[test]
     fn config_predating_liveness_field_still_deserializes() {
         // Write jobs persisted before `liveness` existed must keep loading
         // (serde default → None), or a restart would fail to replay them.
@@ -245,19 +236,14 @@ mod tests {
                 message: "m".into(),
             },
             attribution: CommitAttribution::default(),
-            liveness: Some(LivenessGuard {
-                kind: LivenessKind::WorkflowDefinition,
+            liveness: Some(LivenessRef {
+                doc_type: DocType::new("workflow"),
                 id: uuid::Uuid::nil(),
             }),
         };
         let back: LibraryWriteConfig =
             serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
-        assert!(matches!(
-            back.liveness,
-            Some(LivenessGuard {
-                kind: LivenessKind::WorkflowDefinition,
-                ..
-            })
-        ));
+        let lr = back.liveness.expect("liveness present");
+        assert_eq!(lr.doc_type, DocType::new("workflow"));
     }
 }

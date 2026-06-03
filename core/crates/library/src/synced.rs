@@ -3,7 +3,7 @@ use job::{JobId, JobSpawner};
 
 use crate::attribution::CommitAttribution;
 use crate::importer::DocType;
-use crate::job::{LibraryEmbedConfig, LibraryWriteConfig, LivenessGuard, WriteOp};
+use crate::job::{LibraryEmbedConfig, LibraryWriteConfig, LivenessRef, WriteOp};
 use crate::search::{SearchStore, SearchableFields};
 
 /// Implemented on entity types whose mutations should sync to the
@@ -35,11 +35,12 @@ pub trait LibrarySynced: Sized + Send + Sync + 'static {
         Vec::new()
     }
 
-    /// Optional liveness target re-checked when the upstream write job
+    /// Optional liveness reference re-checked when the upstream write job
     /// runs. Return `Some` so a forward-sync write that replays after the
-    /// entity was soft-deleted is skipped instead of resurrecting its
-    /// file. Default: no re-check.
-    fn liveness_guard(&self) -> Option<LivenessGuard> {
+    /// entity was soft-deleted is skipped instead of resurrecting its file.
+    /// The check itself is delegated to the matching importer's
+    /// [`crate::LibraryImporter::is_doc_live`]. Default: no re-check.
+    fn liveness_guard(&self) -> Option<LivenessRef> {
         None
     }
 }
@@ -50,7 +51,7 @@ pub(crate) struct HookEntry {
     pub deletes: Vec<(uuid::Uuid, DocType)>,
     pub write_op: Option<WriteOp>,
     pub attribution: CommitAttribution,
-    pub liveness: Option<LivenessGuard>,
+    pub liveness: Option<LivenessRef>,
 }
 
 /// Batches per-transaction library writes. On the per-transaction

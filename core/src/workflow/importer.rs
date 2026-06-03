@@ -50,6 +50,13 @@ impl LibraryImporter for WorkflowsImporter {
         true
     }
 
+    async fn is_doc_live(&self, id: uuid::Uuid) -> Result<bool, UpsertError> {
+        self.workflows
+            .is_live(crate::primitives::WorkflowDefinitionId::from(id))
+            .await
+            .map_err(|e| UpsertError::Other(format!("workflow liveness check: {e}")))
+    }
+
     async fn upsert_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,
