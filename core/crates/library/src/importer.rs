@@ -68,6 +68,16 @@ pub trait LibraryImporter: Send + Sync + 'static {
 
     fn doc_type(&self) -> DocType;
 
+    /// When true, reverse-sync drops deltas from drua-authored commits
+    /// (`CommitDelta::from_drua`). Set by DB-authoritative importers
+    /// (e.g. workflows) whose git files are projections of DB state, so
+    /// drua's own forward-sync writes / prune-orphans must not feed back
+    /// in. Git-authoritative importers (spaces / notes / skills are written
+    /// to git first, then imported) leave this `false`.
+    fn suppress_echo_commits(&self) -> bool {
+        false
+    }
+
     /// Upsert the document into its service-specific tables. Returns
     /// `Some(SearchableFields)` when the caller should also write the
     /// search index row; `None` when the importer handled everything

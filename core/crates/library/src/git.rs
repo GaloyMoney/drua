@@ -43,6 +43,11 @@ pub struct CommitDelta {
     pub file_hash: GitFileHash,
     /// Empty for `Deleted`.
     pub content: Vec<u8>,
+    /// True when the originating commit was authored by drua itself
+    /// (committer in the `@{AGENT_DOMAIN}` namespace). DB-authoritative
+    /// importers use this to drop echoes of their own writes/prunes;
+    /// git-authoritative importers (spaces/notes/skills) ignore it.
+    pub from_drua: bool,
 }
 
 /// Closure used by [`BatchOpKind::Rmw`]. Receives the current bytes at
@@ -220,7 +225,7 @@ impl GitEngine {
                 None => None,
             };
 
-            Self::tree_diff_deltas(&repo, from_tree.as_ref(), Some(&to_tree))
+            Self::tree_diff_deltas(&repo, from_tree.as_ref(), Some(&to_tree), false)
         })
         .await
         .map_err(|e| LibraryError::Git(format!("changes_since join: {e}")))?
@@ -228,10 +233,12 @@ impl GitEngine {
 
     /// Build [`CommitDelta`]s for a tree-to-tree diff. `Deleted` deltas carry
     /// empty content (the new side is gone); add/modify carry the new blob.
+    /// `from_drua` tags every produced delta with the commit's provenance.
     fn tree_diff_deltas(
         repo: &git2::Repository,
         from_tree: Option<&git2::Tree>,
         to_tree: Option<&git2::Tree>,
+        from_drua: bool,
     ) -> Result<Vec<CommitDelta>, LibraryError> {
         let diff = repo
             .diff_tree_to_tree(from_tree, to_tree, None)
@@ -266,24 +273,30 @@ impl GitEngine {
                 kind,
                 file_hash: GitFileHash::new(oid.to_string()),
                 content,
+                from_drua,
             });
         }
         Ok(deltas)
     }
 
-    /// Like [`Self::changes_since`] but ignores commits authored by drua
-    /// itself (committer in the `@{AGENT_DOMAIN}` namespace).
+    /// Like [`Self::changes_since`], but every delta is tagged with whether
+    /// its originating commit was authored by drua (`from_drua`). The sync
+    /// dispatcher uses that tag so DB-authoritative importers (workflows) can
+    /// drop echoes of their own forward-sync writes / prune-orphan deletes —
+    /// e.g. a prune-orphan re-read as a `Deleted` delta would otherwise
+    /// soft-delete the live workflow at that path. Git-authoritative importers
+    /// (spaces / notes / skills) are written *to git first* by drua and then
+    /// reverse-synced into the DB, so they must still process drua commits and
+    /// ignore the tag.
     ///
-    /// Reverse-sync must treat only *external* edits as authoritative inputs:
-    /// drua's own forward-sync writes (`library[bot]`) and prune-orphan
-    /// deletes (`system[bot]`) are projections of DB state that's already
-    /// persisted, so re-ingesting them feeds back into spurious deletes — e.g.
-    /// a prune-orphan re-read as a `Deleted` delta would soft-delete the live
-    /// workflow at that path. Each external commit is diffed against its first
-    /// parent rather than collapsing the whole range, so interleaved echo
-    /// churn can't mis-attribute a net deletion to the wrong blob.
-    #[tracing::instrument(name = "library.git.external_changes_since", skip_all)]
-    pub async fn external_changes_since(
+    /// Each commit is diffed against its first parent (a collapsed range diff
+    /// could mis-attribute a net deletion to the wrong blob). When `from` is
+    /// missing or not an ancestor of `to` (force-pushed `main`, GC'd
+    /// checkpoint, rebuilt clone) the revwalk's `hide` wouldn't trim history,
+    /// so we fall back to a bounded net tree diff tagged external — matching
+    /// the pre-tagging behavior instead of replaying to the root.
+    #[tracing::instrument(name = "library.git.changes_with_provenance", skip_all)]
+    pub async fn changes_with_provenance(
         &self,
         from: Option<&str>,
         to: &str,
@@ -295,34 +308,43 @@ impl GitEngine {
         tokio::task::spawn_blocking(move || -> Result<Vec<CommitDelta>, LibraryError> {
             let repo = git2::Repository::open_bare(&path)
                 .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
-            Self::external_deltas(&repo, from.as_deref(), &to)
+            Self::provenance_deltas(&repo, from.as_deref(), &to)
         })
         .await
-        .map_err(|e| LibraryError::Git(format!("external_changes_since join: {e}")))?
+        .map_err(|e| LibraryError::Git(format!("changes_with_provenance join: {e}")))?
     }
 
-    /// Blocking core of [`Self::external_changes_since`]; see its docs.
-    fn external_deltas(
+    /// Blocking core of [`Self::changes_with_provenance`]; see its docs.
+    fn provenance_deltas(
         repo: &git2::Repository,
         from: Option<&str>,
         to: &str,
     ) -> Result<Vec<CommitDelta>, LibraryError> {
         let to_oid =
             git2::Oid::from_str(to).map_err(|e| LibraryError::Git(format!("parse to oid: {e}")))?;
+        let to_tree = repo
+            .find_commit(to_oid)
+            .and_then(|c| c.tree())
+            .map_err(|e| LibraryError::Git(format!("to tree: {e}")))?;
 
         // Initial sync (no checkpoint): import the whole tree as a snapshot.
-        // Provenance is irrelevant — every present file is desired state —
-        // and walking all history would be wasteful.
+        // Every present file is desired state, tagged external so all
+        // importers ingest it (workflows included, on a fresh clone).
         let Some(from) = from else {
-            let to_tree = repo
-                .find_commit(to_oid)
-                .and_then(|c| c.tree())
-                .map_err(|e| LibraryError::Git(format!("to tree: {e}")))?;
-            return Self::tree_diff_deltas(repo, None, Some(&to_tree));
+            return Self::tree_diff_deltas(repo, None, Some(&to_tree), false);
         };
-
         let from_oid = git2::Oid::from_str(from)
             .map_err(|e| LibraryError::Git(format!("parse from oid: {e}")))?;
+
+        // Fall back to a bounded net diff (tagged external) when `from` is not
+        // a strict ancestor of `to` — otherwise the walk below would re-emit
+        // every commit back to the root.
+        let from_is_ancestor = repo.find_commit(from_oid).is_ok()
+            && repo.graph_descendant_of(to_oid, from_oid).unwrap_or(false);
+        if !from_is_ancestor {
+            let from_tree = repo.find_commit(from_oid).ok().and_then(|c| c.tree().ok());
+            return Self::tree_diff_deltas(repo, from_tree.as_ref(), Some(&to_tree), false);
+        }
 
         let mut walk = repo
             .revwalk()
@@ -341,14 +363,11 @@ impl GitEngine {
             let commit = repo
                 .find_commit(oid)
                 .map_err(|e| LibraryError::Git(format!("find commit: {e}")))?;
-            let is_echo = commit
+            let from_drua = commit
                 .committer()
                 .email()
                 .map(|e| e.ends_with(&drua_suffix))
                 .unwrap_or(false);
-            if is_echo {
-                continue;
-            }
             let commit_tree = commit
                 .tree()
                 .map_err(|e| LibraryError::Git(format!("commit tree: {e}")))?;
@@ -357,6 +376,7 @@ impl GitEngine {
                 repo,
                 parent_tree.as_ref(),
                 Some(&commit_tree),
+                from_drua,
             )?);
         }
         Ok(deltas)
@@ -1299,12 +1319,12 @@ mod tests {
     }
 
     #[test]
-    fn external_deltas_ignores_drua_commits() {
+    fn provenance_deltas_tags_drua_commits() {
         let dir = unique_dir("echo");
         let repo = git2::Repository::init_bare(&dir).unwrap();
 
         let c0 = commit_file(&repo, None, "a.yml", b"v0", "human@example.com");
-        // drua echo (forward-sync style): must be suppressed.
+        // drua forward-sync style: tagged from_drua = true.
         let c1 = commit_file(
             &repo,
             Some(c0),
@@ -1312,25 +1332,29 @@ mod tests {
             b"v1",
             crate::attribution::LIBRARY_BOT_EMAIL,
         );
-        // external human edit: must surface.
+        // external human edit: tagged from_drua = false.
         let c2 = commit_file(&repo, Some(c1), "b.yml", b"hi", "human@example.com");
 
         let deltas =
-            GitEngine::external_deltas(&repo, Some(&c0.to_string()), &c2.to_string()).unwrap();
+            GitEngine::provenance_deltas(&repo, Some(&c0.to_string()), &c2.to_string()).unwrap();
 
-        assert_eq!(
-            deltas.len(),
-            1,
-            "only the external commit's change should surface"
-        );
-        assert_eq!(deltas[0].path, "b.yml");
-        assert!(matches!(deltas[0].kind, DeltaKind::Added));
+        let a = deltas
+            .iter()
+            .find(|d| d.path == "a.yml")
+            .expect("a.yml delta present");
+        assert!(a.from_drua, "drua commit's delta must be tagged from_drua");
+        let b = deltas
+            .iter()
+            .find(|d| d.path == "b.yml")
+            .expect("b.yml delta present");
+        assert!(!b.from_drua, "external commit's delta must not be tagged");
+        assert!(matches!(b.kind, DeltaKind::Added));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn external_deltas_snapshots_without_checkpoint() {
+    fn provenance_deltas_snapshots_without_checkpoint() {
         let dir = unique_dir("snapshot");
         let repo = git2::Repository::init_bare(&dir).unwrap();
         // Even a drua-authored commit is desired state on initial snapshot.
@@ -1342,10 +1366,41 @@ mod tests {
             crate::attribution::LIBRARY_BOT_EMAIL,
         );
 
-        let deltas = GitEngine::external_deltas(&repo, None, &c0.to_string()).unwrap();
+        let deltas = GitEngine::provenance_deltas(&repo, None, &c0.to_string()).unwrap();
 
         assert_eq!(deltas.len(), 1);
         assert_eq!(deltas[0].path, "a.yml");
+        // Snapshot is authoritative — workflows must import on a fresh clone.
+        assert!(!deltas[0].from_drua);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn provenance_deltas_net_diff_when_from_not_ancestor() {
+        let dir = unique_dir("forcepush");
+        let repo = git2::Repository::init_bare(&dir).unwrap();
+        let c0 = commit_file(&repo, None, "a.yml", b"v0", "human@example.com");
+        // Two divergent children of c0 — neither is an ancestor of the other,
+        // as if `main` was force-updated under a stale checkpoint.
+        let to = commit_file(&repo, Some(c0), "b.yml", b"b", "human@example.com");
+        let stale_from = commit_file(&repo, Some(c0), "c.yml", b"c", "human@example.com");
+
+        let deltas =
+            GitEngine::provenance_deltas(&repo, Some(&stale_from.to_string()), &to.to_string())
+                .unwrap();
+
+        // Bounded net diff between the two trees (b.yml added, c.yml removed) —
+        // NOT a replay of history back to the root.
+        let paths: std::collections::BTreeSet<&str> =
+            deltas.iter().map(|d| d.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["b.yml", "c.yml"]
+                .into_iter()
+                .collect::<std::collections::BTreeSet<_>>()
+        );
+        assert!(deltas.iter().all(|d| !d.from_drua));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
