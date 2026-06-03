@@ -14,7 +14,8 @@ oauth:
   github_client_id: ''
   github_allowed_teams: []
   dev_mode_agent_tokens: false
-db: {}
+db:
+  max_connections: 30
 providers: []
 agents:
   builtin_roles: {}
