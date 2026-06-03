@@ -284,10 +284,11 @@ impl GitEngine {
     ///
     /// Each surviving commit is diffed against its first parent (a collapsed
     /// range diff could mis-attribute a net deletion to the wrong blob). When
-    /// `from` is missing or not an ancestor of `to` (force-pushed `main`, GC'd
-    /// checkpoint, rebuilt clone) the revwalk's `hide` wouldn't trim history,
-    /// so we fall back to a bounded net tree diff instead of replaying to the
-    /// root (provenance can't be recovered for a rewritten range anyway).
+    /// `from` is not a strict ancestor of `to` (force-pushed `main`) the walk
+    /// is bounded by the merge-base instead of replaying to the root, so the
+    /// projection filter still applies. A `from` whose commit is gone (GC'd /
+    /// force-pushed away) fails the tick rather than silently resyncing and
+    /// dropping deletions.
     #[tracing::instrument(name = "library.git.external_changes_since", skip_all)]
     pub async fn external_changes_since(
         &self,
@@ -328,15 +329,23 @@ impl GitEngine {
         let from_oid = git2::Oid::from_str(from)
             .map_err(|e| LibraryError::Git(format!("parse from oid: {e}")))?;
 
-        // Fall back to a bounded net diff when `from` is not a strict ancestor
-        // of `to` — otherwise the walk below would re-emit every commit back to
-        // the root.
-        let from_is_ancestor = repo.find_commit(from_oid).is_ok()
-            && repo.graph_descendant_of(to_oid, from_oid).unwrap_or(false);
-        if !from_is_ancestor {
-            let from_tree = repo.find_commit(from_oid).ok().and_then(|c| c.tree().ok());
-            return Self::tree_diff_deltas(repo, from_tree.as_ref(), Some(&to_tree));
-        }
+        // A missing checkpoint commit (GC'd, or a tip that was force-pushed
+        // away) must FAIL the tick — not silently resync. Diffing from an empty
+        // tree would drop every deletion since the lost commit yet still advance
+        // the checkpoint, diverging DB from git. Erroring keeps the checkpoint
+        // so the next tick retries (matches the pre-walk `changes_since`).
+        repo.find_commit(from_oid)
+            .map_err(|e| LibraryError::Git(format!("checkpoint commit {from} missing: {e}")))?;
+
+        // Bound the walk by the merge-base so a force-updated `main` (where
+        // `from` is not a strict ancestor of `to`) doesn't replay history to the
+        // root — while still running every surviving commit through the
+        // projection filter below (a flat net diff would let drua's own
+        // prune/delete net-removals resurface as external `Deleted` deltas and
+        // reopen the domino). In the normal case the merge-base IS `from`.
+        let base = repo
+            .merge_base(from_oid, to_oid)
+            .map_err(|e| LibraryError::Git(format!("merge-base of checkpoint and head: {e}")))?;
 
         let mut walk = repo
             .revwalk()
@@ -345,7 +354,7 @@ impl GitEngine {
             .map_err(|e| LibraryError::Git(format!("revwalk sort: {e}")))?;
         walk.push(to_oid)
             .map_err(|e| LibraryError::Git(format!("revwalk push: {e}")))?;
-        walk.hide(from_oid)
+        walk.hide(base)
             .map_err(|e| LibraryError::Git(format!("revwalk hide: {e}")))?;
 
         let drua_suffix = format!("@{}", crate::attribution::AGENT_DOMAIN);
@@ -1391,30 +1400,54 @@ mod tests {
     }
 
     #[test]
-    fn external_deltas_net_diff_when_from_not_ancestor() {
+    fn external_deltas_force_push_bounds_by_merge_base_and_filters_projections() {
         let dir = unique_dir("forcepush");
         let repo = git2::Repository::init_bare(&dir).unwrap();
         let c0 = commit_file(&repo, None, "a.yml", b"v0", "human@example.com", "init");
-        // Two divergent children of c0 — neither is an ancestor of the other,
-        // as if `main` was force-updated under a stale checkpoint.
-        let to = commit_file(&repo, Some(c0), "b.yml", b"b", "human@example.com", "x");
-        let stale_from = commit_file(&repo, Some(c0), "c.yml", b"c", "human@example.com", "y");
+        // New `main` since divergence: a drua projection then an external edit.
+        let c1 = commit_file(
+            &repo,
+            Some(c0),
+            "proj.yml",
+            b"p",
+            LIB_BOT,
+            &projection_msg(),
+        );
+        let to = commit_file(
+            &repo,
+            Some(c1),
+            "ext.yml",
+            b"e",
+            "human@example.com",
+            "edit",
+        );
+        // Stale checkpoint on an abandoned branch — not an ancestor of `to`.
+        let stale_from = commit_file(&repo, Some(c0), "gone.yml", b"g", "human@example.com", "y");
 
         let deltas =
             GitEngine::external_deltas(&repo, Some(&stale_from.to_string()), &to.to_string())
                 .unwrap();
 
-        // Bounded net diff between the two trees (b.yml added, c.yml removed) —
-        // NOT a replay of history back to the root.
+        // Walk is bounded by the merge-base (c0), so only the new-main commits
+        // are considered; the projection is still filtered and the abandoned
+        // branch's file is not replayed.
         let paths: std::collections::BTreeSet<&str> =
             deltas.iter().map(|d| d.path.as_str()).collect();
-        assert_eq!(
-            paths,
-            ["b.yml", "c.yml"]
-                .into_iter()
-                .collect::<std::collections::BTreeSet<_>>()
-        );
+        assert_eq!(paths, ["ext.yml"].into_iter().collect());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
+    #[test]
+    fn external_deltas_fails_on_missing_checkpoint() {
+        let dir = unique_dir("missing");
+        let repo = git2::Repository::init_bare(&dir).unwrap();
+        let c0 = commit_file(&repo, None, "a.yml", b"v0", "human@example.com", "init");
+        // Checkpoint OID that doesn't exist in the repo (GC'd / force-pushed
+        // away). Must error so the tick keeps the checkpoint instead of
+        // silently resyncing from an empty tree and dropping deletions.
+        let missing = "1111111111111111111111111111111111111111";
+        let res = GitEngine::external_deltas(&repo, Some(missing), &c0.to_string());
+        assert!(res.is_err(), "missing checkpoint must fail the tick");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
