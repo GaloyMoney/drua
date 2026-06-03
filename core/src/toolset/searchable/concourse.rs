@@ -93,6 +93,12 @@ struct ListBuildsParams {
     limit: Option<i64>,
 }
 
+#[derive(Deserialize, schemars::JsonSchema)]
+struct PipelineResourceParams {
+    pipeline: String,
+    resource: String,
+}
+
 static EMPTY_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     serde_json::json!({
         "type": "object",
@@ -107,6 +113,8 @@ static PIPELINE_JOB_SCHEMA: LazyLock<serde_json::Value> =
 static BUILD_ID_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<BuildIdParams>);
 static LIST_BUILDS_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<ListBuildsParams>);
+static PIPELINE_RESOURCE_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<PipelineResourceParams>);
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct PipelineOutput {
@@ -243,6 +251,7 @@ mod schema_tests {
             (&*OUT_PIPELINE_CONFIG, "jobs"),
             (&*OUT_LIST_BUILDS, "builds"),
             (&*OUT_BUILD_RESOURCES, "resources"),
+            (&*OUT_LIST_RESOURCES, "resources"),
         ] {
             assert_eq!(
                 schema.get("type").and_then(|v| v.as_str()),
@@ -293,6 +302,8 @@ mod schema_tests {
             ("OUT_PIPELINE_CONFIG", &*OUT_PIPELINE_CONFIG),
             ("OUT_LIST_BUILDS", &*OUT_LIST_BUILDS),
             ("OUT_BUILD_RESOURCES", &*OUT_BUILD_RESOURCES),
+            ("OUT_LIST_RESOURCES", &*OUT_LIST_RESOURCES),
+            ("OUT_RESOURCE_CHECK_LOGS", &*OUT_RESOURCE_CHECK_LOGS),
         ] {
             assert_no_bool_schemas(schema, name);
         }
@@ -336,6 +347,48 @@ struct BuildResourceListOutput {
     resources: Vec<BuildResourceOutput>,
 }
 
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct ResourceOutput {
+    name: String,
+    #[serde(rename = "type")]
+    resource_type: String,
+    pipeline: String,
+    /// Last successful check time as Unix epoch **seconds** (multiply by
+    /// 1000 for `new Date(last_checked * 1000)` in JavaScript).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_checked: Option<i64>,
+    failing_to_check: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    check_error: Option<String>,
+    /// Numeric `build_id` of the most recent check build, if one has run.
+    /// Pass this to `get_build_logs` (or use `get_resource_check_logs`
+    /// directly) to fetch the check output.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_check_build_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_check_build_status: Option<String>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct ResourceListOutput {
+    resources: Vec<ResourceOutput>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct ResourceCheckLogsOutput {
+    /// Numeric `build_id` of the check build whose logs are returned.
+    build_id: u64,
+    /// e.g. `succeeded`, `failed`, `errored`, `started`.
+    build_status: String,
+    /// Check build start time as Unix epoch **seconds**.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_time: Option<i64>,
+    /// Check build end time as Unix epoch **seconds**.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_time: Option<i64>,
+    logs: String,
+}
+
 static OUT_LIST_PIPELINES: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<PipelineListOutput>);
 static OUT_LIST_JOBS: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<JobListOutput>);
@@ -349,6 +402,10 @@ static OUT_PIPELINE_CONFIG: LazyLock<serde_json::Value> =
 static OUT_LIST_BUILDS: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<BuildListOutput>);
 static OUT_BUILD_RESOURCES: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<BuildResourceListOutput>);
+static OUT_LIST_RESOURCES: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<ResourceListOutput>);
+static OUT_RESOURCE_CHECK_LOGS: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<ResourceCheckLogsOutput>);
 
 pub struct ConcourseToolSet {
     client: Arc<ConcourseClient>,
@@ -405,6 +462,18 @@ impl ConcourseToolSet {
                 "Get the resource versions (e.g. git commit SHA) that were inputs to a Concourse build. Use this to correlate a commit to the builds it triggered.",
                 (*BUILD_ID_SCHEMA).clone(),
                 (*OUT_BUILD_RESOURCES).clone(),
+            ),
+            tool_entry(
+                "list_resources",
+                "List resources in a Concourse pipeline. Returns each resource's name, type, last check time, and the build_id + status of its most recent check build.",
+                (*PIPELINE_SCHEMA).clone(),
+                (*OUT_LIST_RESOURCES).clone(),
+            ),
+            tool_entry(
+                "get_resource_check_logs",
+                "Get the check-build logs for a Concourse pipeline resource (the output of the resource's `check` step — useful for debugging `failing_to_check` resources). Returns the latest check build's id, status, timestamps, and log text. Oversize logs are summarised on the way back and the full bytes are persisted; recover specific slices via tool_output_fetch(invocation_id, path, query={mode:'range'|'lines'|'json_array_slice', offset, len}).",
+                (*PIPELINE_RESOURCE_SCHEMA).clone(),
+                (*OUT_RESOURCE_CHECK_LOGS).clone(),
             ),
         ];
 
@@ -585,6 +654,63 @@ impl SearchableToolSet for ConcourseToolSet {
                         .collect(),
                 };
                 Ok(typed_result(&out))
+            }
+            "list_resources" => {
+                let params: PipelineParams = parse_params(arguments)?;
+                let resources = self.client.list_resources(&params.pipeline).await?;
+                let out = ResourceListOutput {
+                    resources: resources
+                        .iter()
+                        .map(|r| ResourceOutput {
+                            name: r.name.clone(),
+                            resource_type: r.resource_type.clone(),
+                            pipeline: r.pipeline_name.clone(),
+                            last_checked: r.last_checked,
+                            failing_to_check: r.failing_to_check,
+                            check_error: r
+                                .check_error
+                                .clone()
+                                .or_else(|| r.check_setup_error.clone()),
+                            last_check_build_id: r.build.as_ref().map(|b| b.id),
+                            last_check_build_status: r.build.as_ref().map(|b| b.status.clone()),
+                        })
+                        .collect(),
+                };
+                Ok(typed_result(&out))
+            }
+            "get_resource_check_logs" => {
+                let params: PipelineResourceParams = parse_params(arguments)?;
+                let resource = self
+                    .client
+                    .get_resource(&params.pipeline, &params.resource)
+                    .await?;
+                let Some(build) = resource.build else {
+                    let msg = format!(
+                        "No check build available for resource `{}` in pipeline `{}` yet.",
+                        params.resource, params.pipeline
+                    );
+                    return Ok(CallToolResult::success(vec![Content::text(msg)]));
+                };
+                let logs = self.client.get_build_logs(build.id as i64).await?;
+                let text = if logs.is_empty() {
+                    format!(
+                        "No log output for check build {} (status: {}).",
+                        build.id, build.status
+                    )
+                } else {
+                    logs.clone()
+                };
+                let out = ResourceCheckLogsOutput {
+                    build_id: build.id,
+                    build_status: build.status.clone(),
+                    start_time: build.start_time,
+                    end_time: build.end_time,
+                    logs,
+                };
+                let structured = serde_json::to_value(&out).expect("serialization");
+                let mut result = CallToolResult::success(vec![Content::text(text)]);
+                result.structured_content = Some(structured);
+                Ok(result)
             }
             _ => Err(ToolSetsError::ToolNotFound(tool_name.to_string())),
         }

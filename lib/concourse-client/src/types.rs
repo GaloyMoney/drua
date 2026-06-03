@@ -127,6 +127,38 @@ pub struct PipelineResourceConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Resource {
+    pub name: String,
+    #[serde(default)]
+    pub pipeline_id: u64,
+    #[serde(default)]
+    pub pipeline_name: String,
+    #[serde(default)]
+    pub team_name: String,
+    #[serde(default, rename = "type")]
+    pub resource_type: String,
+    #[serde(default)]
+    pub last_checked: Option<i64>,
+    #[serde(default)]
+    pub icon: Option<String>,
+    #[serde(default)]
+    pub pinned_version: Option<serde_json::Value>,
+    #[serde(default)]
+    pub pin_comment: Option<String>,
+    #[serde(default)]
+    pub pinned_in_config: bool,
+    #[serde(default)]
+    pub failing_to_check: bool,
+    #[serde(default)]
+    pub check_error: Option<String>,
+    #[serde(default)]
+    pub check_setup_error: Option<String>,
+    /// Most recent check build for this resource, if one has run.
+    #[serde(default)]
+    pub build: Option<Build>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildResources {
     #[serde(default)]
     pub inputs: Vec<BuildResourceInput>,
