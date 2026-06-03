@@ -205,6 +205,26 @@ impl ConcourseClient {
         self.get(&format!("/builds/{build_id}/resources")).await
     }
 
+    #[tracing::instrument(name = "concourse_client.list_resources", skip_all)]
+    pub async fn list_resources(&self, pipeline: &str) -> Result<Vec<Resource>, ConcourseError> {
+        let team = self.resolve_pipeline_team(pipeline).await?;
+        self.get(&format!("/teams/{team}/pipelines/{pipeline}/resources"))
+            .await
+    }
+
+    #[tracing::instrument(name = "concourse_client.get_resource", skip_all)]
+    pub async fn get_resource(
+        &self,
+        pipeline: &str,
+        resource: &str,
+    ) -> Result<Resource, ConcourseError> {
+        let team = self.resolve_pipeline_team(pipeline).await?;
+        self.get(&format!(
+            "/teams/{team}/pipelines/{pipeline}/resources/{resource}"
+        ))
+        .await
+    }
+
     /// Streams build events and extracts log lines from `"log"` events. Stops
     /// when an `"end"` event arrives or after a 30s per-chunk read timeout
     /// (SSE streams don't close naturally).

@@ -18,11 +18,16 @@ use serde_json::Value;
 use super::PreprocessedRoot;
 
 /// Tool-name suffixes this preprocessor matches. Production concourse
-/// tools use `concourse_get_build_logs`; the bats fake-upstream fixture
+/// tools use `concourse_get_build_logs` (and `concourse_get_resource_check_logs`,
+/// which streams the same SSE event shape); the bats fake-upstream fixture
 /// uses `concourse-build-log` (catalog naming convention). Matched by
 /// suffix so a catalog prefix (e.g. `fake_upstream_concourse-build-log`)
 /// doesn't break detection.
-const TOOL_NAMES: &[&str] = &["concourse_get_build_logs", "concourse-build-log"];
+const TOOL_NAMES: &[&str] = &[
+    "concourse_get_build_logs",
+    "concourse_get_resource_check_logs",
+    "concourse-build-log",
+];
 
 fn tool_name_matches(tool_name: &str) -> bool {
     TOOL_NAMES.iter().any(|n| tool_name.ends_with(n))
