@@ -135,6 +135,7 @@ impl LibraryImporter for NotesImporter {
         &self,
         op: &mut es_entity::DbOp<'_>,
         path: &str,
+        _content: &[u8],
     ) -> Result<Option<uuid::Uuid>, UpsertError> {
         let deleted = self
             .notes

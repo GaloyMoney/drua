@@ -439,6 +439,7 @@ impl LibraryImporter for Spaces {
         &self,
         _op: &mut es_entity::DbOp<'_>,
         path: &str,
+        _content: &[u8],
     ) -> Result<Option<uuid::Uuid>, UpsertError> {
         if path.ends_with("/.gitkeep") {
             return Ok(None);

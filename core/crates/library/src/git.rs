@@ -226,8 +226,9 @@ impl GitEngine {
         .map_err(|e| LibraryError::Git(format!("changes_since join: {e}")))?
     }
 
-    /// Build [`CommitDelta`]s for a tree-to-tree diff. `Deleted` deltas carry
-    /// empty content (the new side is gone); add/modify carry the new blob.
+    /// Build [`CommitDelta`]s for a tree-to-tree diff. For `Deleted` the
+    /// `content` is the removed file's old blob (so importers can make
+    /// id-aware delete decisions); add/modify carry the new blob.
     fn tree_diff_deltas(
         repo: &git2::Repository,
         from_tree: Option<&git2::Tree>,
@@ -254,12 +255,13 @@ impl GitEngine {
                 None => continue,
             };
             let oid = entry.id();
-            let content = match kind {
-                DeltaKind::Deleted => Vec::new(),
-                _ => match repo.find_blob(oid) {
-                    Ok(b) => b.content().to_vec(),
-                    Err(_) => continue,
-                },
+            // For deletes, `oid` is the removed blob (still in the object DB via
+            // the parent commit). Empty on read failure → importers fall back
+            // to a path lookup / skip.
+            let content = match repo.find_blob(oid) {
+                Ok(b) => b.content().to_vec(),
+                Err(_) if matches!(kind, DeltaKind::Deleted) => Vec::new(),
+                Err(_) => continue,
             };
             deltas.push(CommitDelta {
                 path: path_str,
@@ -730,24 +732,28 @@ impl GitEngine {
         // Cluster-wide push serialization (HA): the per-pod `repo_mutex` only
         // orders writes within a pod; this advisory lock ensures at most one
         // pod mutates `main` at a time, so divergent ephemeral clones can't
-        // race the remote into non-ff retries / lost commits. `xact`-scoped so
-        // it always releases (commit, rollback, or connection drop). Best
-        // effort: a DB hiccup degrades to the prior unlocked behavior rather
-        // than wedging all library writes.
-        let mut push_lock = match pool.begin().await {
-            Ok(mut tx) => match sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        // race the remote into non-ff retries / lost commits.
+        //
+        // SESSION-scoped (not `xact`): the git fetch/commit/push below runs
+        // with no open transaction, so `idle_in_transaction_session_timeout`
+        // can't reap it and drop the lock mid-push. Released explicitly after;
+        // a crashed/closed connection releases it server-side too. Best effort:
+        // a DB hiccup degrades to the prior unlocked behavior rather than
+        // wedging all library writes.
+        let mut lock_conn = match pool.acquire().await {
+            Ok(mut conn) => match sqlx::query("SELECT pg_advisory_lock($1)")
                 .bind(LIBRARY_PUSH_LOCK_KEY)
-                .execute(&mut *tx)
+                .execute(&mut *conn)
                 .await
             {
-                Ok(_) => Some(tx),
+                Ok(_) => Some(conn),
                 Err(e) => {
                     tracing::warn!(error = %e, "library push lock: acquire failed; proceeding unlocked");
                     None
                 }
             },
             Err(e) => {
-                tracing::warn!(error = %e, "library push lock: begin failed; proceeding unlocked");
+                tracing::warn!(error = %e, "library push lock: connection failed; proceeding unlocked");
                 None
             }
         };
@@ -768,8 +774,12 @@ impl GitEngine {
                 .collect()
         });
 
-        if let Some(tx) = push_lock.take() {
-            if let Err(e) = tx.commit().await {
+        if let Some(mut conn) = lock_conn.take() {
+            if let Err(e) = sqlx::query("SELECT pg_advisory_unlock($1)")
+                .bind(LIBRARY_PUSH_LOCK_KEY)
+                .execute(&mut *conn)
+                .await
+            {
                 tracing::warn!(error = %e, "library push lock: release failed");
             }
         }
@@ -1434,6 +1444,39 @@ mod tests {
         let paths: std::collections::BTreeSet<&str> =
             deltas.iter().map(|d| d.path.as_str()).collect();
         assert_eq!(paths, ["ext.yml"].into_iter().collect());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deleted_delta_carries_removed_blob() {
+        let dir = unique_dir("del");
+        let repo = git2::Repository::init_bare(&dir).unwrap();
+        let c0 = commit_file(
+            &repo,
+            None,
+            "a.yml",
+            b"removed-bytes",
+            "human@example.com",
+            "init",
+        );
+        // c1 removes a.yml (external human commit → empty tree).
+        let c1 = {
+            let tb = repo.treebuilder(None).unwrap();
+            let tree = repo.find_tree(tb.write().unwrap()).unwrap();
+            let sig = git2::Signature::now("tester", "human@example.com").unwrap();
+            let parent = repo.find_commit(c0).unwrap();
+            repo.commit(None, &sig, &sig, "rm", &tree, &[&parent])
+                .unwrap()
+        };
+
+        let deltas =
+            GitEngine::external_deltas(&repo, Some(&c0.to_string()), &c1.to_string()).unwrap();
+
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].path, "a.yml");
+        assert!(matches!(deltas[0].kind, DeltaKind::Deleted));
+        // The removed blob is carried so the importer can do an id-aware delete.
+        assert_eq!(deltas[0].content, b"removed-bytes");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

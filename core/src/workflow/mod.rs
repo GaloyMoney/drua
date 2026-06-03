@@ -1256,6 +1256,7 @@ impl Workflows {
         op: &mut es_entity::DbOp<'_>,
         project_id: ProjectId,
         path: &str,
+        expected_id: Option<WorkflowDefinitionId>,
     ) -> Result<Option<WorkflowDefinitionId>, WorkflowError> {
         let Some(workflow) = self
             .repo
@@ -1264,6 +1265,19 @@ impl Workflows {
         else {
             return Ok(None);
         };
+        // Only delete the workflow whose file was actually removed. A stale
+        // generation's file removal (e.g. an untrailered historical prune,
+        // replayed on deploy) must not take down the live workflow that now
+        // owns this (project, name) path.
+        if expected_id != Some(workflow.id) {
+            tracing::info!(
+                %path,
+                ?expected_id,
+                live_id = %workflow.id,
+                "library reverse-delete skipped: removed file id does not match live workflow at path"
+            );
+            return Ok(None);
+        }
         let id = workflow.id;
         self.library
             .search()

@@ -189,7 +189,10 @@ impl LibrarySyncRunner {
         let mut op = current_job.begin_op().await?;
         match delta.kind {
             DeltaKind::Deleted => {
-                if let Some(doc_id) = importer.delete_in_op(&mut op, &delta.path).await? {
+                if let Some(doc_id) = importer
+                    .delete_in_op(&mut op, &delta.path, &delta.content)
+                    .await?
+                {
                     self.search
                         .delete_in_op(&mut op, doc_id, importer.doc_type())
                         .await?;

@@ -102,6 +102,7 @@ impl LibraryImporter for WorkflowsImporter {
         &self,
         op: &mut es_entity::DbOp<'_>,
         path: &str,
+        content: &[u8],
     ) -> Result<Option<uuid::Uuid>, UpsertError> {
         let Some(project_name) = crate::workflow::yaml::project_name_from_workflow_path(path)
         else {
@@ -123,9 +124,19 @@ impl LibraryImporter for WorkflowsImporter {
                 )))
             }
         };
+        // Id-aware backstop to the projection trailer: only soft-delete when
+        // the removed blob's embedded id matches the live workflow at this
+        // (project, name) path. A historical (pre-trailer) prune-orphan or an
+        // external removal of a stale generation's file thus can't take down a
+        // freshly recreated workflow sharing the path. Unparseable content →
+        // `None` → skip (fail-safe).
+        let removed_id = std::str::from_utf8(content)
+            .ok()
+            .and_then(|c| parse_workflow_yaml(c, path))
+            .map(|p| p.workflow_id);
         let deleted = self
             .workflows
-            .delete_by_path_in_op(op, project.id, path)
+            .delete_by_path_in_op(op, project.id, path, removed_id)
             .await
             .map_err(|e| UpsertError::Other(format!("workflow reverse-delete: {e}")))?;
         Ok(deleted.map(uuid::Uuid::from))
