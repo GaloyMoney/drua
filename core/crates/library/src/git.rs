@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use sqlx::PgPool;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use tokio::task::JoinHandle;
 
@@ -16,6 +17,10 @@ use crate::{GitHubAppTokenProvider, LibraryError};
 const BATCH_WINDOW: Duration = Duration::from_millis(25);
 const MAX_BATCH: usize = 32;
 const QUEUE_CAPACITY: usize = 256;
+
+/// Cluster-wide Postgres advisory-lock key for serializing pushes to the
+/// library repo's `main`. Fixed (one library repo per deployment); `0x647275616c6962` = "drualib".
+const LIBRARY_PUSH_LOCK_KEY: i64 = 0x647275616c6962;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeltaKind {
@@ -141,6 +146,7 @@ impl GitEngine {
         repo_url: &str,
         repo_path: PathBuf,
         github_app: Option<Arc<GitHubAppTokenProvider>>,
+        pool: PgPool,
     ) -> Result<Self, LibraryError> {
         if repo_url.is_empty() {
             return Err(LibraryError::Config("repo_url is empty".into()));
@@ -164,6 +170,7 @@ impl GitEngine {
             Arc::clone(&repo_mutex),
             Arc::clone(&local_commit_notify),
             write_rx,
+            pool,
         ));
 
         Ok(Self {
@@ -213,45 +220,146 @@ impl GitEngine {
                 None => None,
             };
 
-            let diff = repo
-                .diff_tree_to_tree(from_tree.as_ref(), Some(&to_tree), None)
-                .map_err(|e| LibraryError::Git(format!("diff: {e}")))?;
-
-            let mut deltas: Vec<CommitDelta> = Vec::new();
-            for delta in diff.deltas() {
-                let kind = match delta.status() {
-                    git2::Delta::Added => DeltaKind::Added,
-                    git2::Delta::Modified => DeltaKind::Modified,
-                    git2::Delta::Deleted => DeltaKind::Deleted,
-                    _ => continue,
-                };
-                let entry = match kind {
-                    DeltaKind::Deleted => delta.old_file(),
-                    _ => delta.new_file(),
-                };
-                let path_str = match entry.path() {
-                    Some(p) => p.to_string_lossy().into_owned(),
-                    None => continue,
-                };
-                let oid = entry.id();
-                let content = match kind {
-                    DeltaKind::Deleted => Vec::new(),
-                    _ => match repo.find_blob(oid) {
-                        Ok(b) => b.content().to_vec(),
-                        Err(_) => continue,
-                    },
-                };
-                deltas.push(CommitDelta {
-                    path: path_str,
-                    kind,
-                    file_hash: GitFileHash::new(oid.to_string()),
-                    content,
-                });
-            }
-            Ok(deltas)
+            Self::tree_diff_deltas(&repo, from_tree.as_ref(), Some(&to_tree))
         })
         .await
         .map_err(|e| LibraryError::Git(format!("changes_since join: {e}")))?
+    }
+
+    /// Build [`CommitDelta`]s for a tree-to-tree diff. `Deleted` deltas carry
+    /// empty content (the new side is gone); add/modify carry the new blob.
+    fn tree_diff_deltas(
+        repo: &git2::Repository,
+        from_tree: Option<&git2::Tree>,
+        to_tree: Option<&git2::Tree>,
+    ) -> Result<Vec<CommitDelta>, LibraryError> {
+        let diff = repo
+            .diff_tree_to_tree(from_tree, to_tree, None)
+            .map_err(|e| LibraryError::Git(format!("diff: {e}")))?;
+
+        let mut deltas: Vec<CommitDelta> = Vec::new();
+        for delta in diff.deltas() {
+            let kind = match delta.status() {
+                git2::Delta::Added => DeltaKind::Added,
+                git2::Delta::Modified => DeltaKind::Modified,
+                git2::Delta::Deleted => DeltaKind::Deleted,
+                _ => continue,
+            };
+            let entry = match kind {
+                DeltaKind::Deleted => delta.old_file(),
+                _ => delta.new_file(),
+            };
+            let path_str = match entry.path() {
+                Some(p) => p.to_string_lossy().into_owned(),
+                None => continue,
+            };
+            let oid = entry.id();
+            let content = match kind {
+                DeltaKind::Deleted => Vec::new(),
+                _ => match repo.find_blob(oid) {
+                    Ok(b) => b.content().to_vec(),
+                    Err(_) => continue,
+                },
+            };
+            deltas.push(CommitDelta {
+                path: path_str,
+                kind,
+                file_hash: GitFileHash::new(oid.to_string()),
+                content,
+            });
+        }
+        Ok(deltas)
+    }
+
+    /// Like [`Self::changes_since`] but ignores commits authored by drua
+    /// itself (committer in the `@{AGENT_DOMAIN}` namespace).
+    ///
+    /// Reverse-sync must treat only *external* edits as authoritative inputs:
+    /// drua's own forward-sync writes (`library[bot]`) and prune-orphan
+    /// deletes (`system[bot]`) are projections of DB state that's already
+    /// persisted, so re-ingesting them feeds back into spurious deletes — e.g.
+    /// a prune-orphan re-read as a `Deleted` delta would soft-delete the live
+    /// workflow at that path. Each external commit is diffed against its first
+    /// parent rather than collapsing the whole range, so interleaved echo
+    /// churn can't mis-attribute a net deletion to the wrong blob.
+    #[tracing::instrument(name = "library.git.external_changes_since", skip_all)]
+    pub async fn external_changes_since(
+        &self,
+        from: Option<&str>,
+        to: &str,
+    ) -> Result<Vec<CommitDelta>, LibraryError> {
+        let path = self.repo_path.clone();
+        let from = from.map(String::from);
+        let to = to.to_string();
+
+        tokio::task::spawn_blocking(move || -> Result<Vec<CommitDelta>, LibraryError> {
+            let repo = git2::Repository::open_bare(&path)
+                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
+            Self::external_deltas(&repo, from.as_deref(), &to)
+        })
+        .await
+        .map_err(|e| LibraryError::Git(format!("external_changes_since join: {e}")))?
+    }
+
+    /// Blocking core of [`Self::external_changes_since`]; see its docs.
+    fn external_deltas(
+        repo: &git2::Repository,
+        from: Option<&str>,
+        to: &str,
+    ) -> Result<Vec<CommitDelta>, LibraryError> {
+        let to_oid =
+            git2::Oid::from_str(to).map_err(|e| LibraryError::Git(format!("parse to oid: {e}")))?;
+
+        // Initial sync (no checkpoint): import the whole tree as a snapshot.
+        // Provenance is irrelevant — every present file is desired state —
+        // and walking all history would be wasteful.
+        let Some(from) = from else {
+            let to_tree = repo
+                .find_commit(to_oid)
+                .and_then(|c| c.tree())
+                .map_err(|e| LibraryError::Git(format!("to tree: {e}")))?;
+            return Self::tree_diff_deltas(repo, None, Some(&to_tree));
+        };
+
+        let from_oid = git2::Oid::from_str(from)
+            .map_err(|e| LibraryError::Git(format!("parse from oid: {e}")))?;
+
+        let mut walk = repo
+            .revwalk()
+            .map_err(|e| LibraryError::Git(format!("revwalk: {e}")))?;
+        walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::REVERSE)
+            .map_err(|e| LibraryError::Git(format!("revwalk sort: {e}")))?;
+        walk.push(to_oid)
+            .map_err(|e| LibraryError::Git(format!("revwalk push: {e}")))?;
+        walk.hide(from_oid)
+            .map_err(|e| LibraryError::Git(format!("revwalk hide: {e}")))?;
+
+        let drua_suffix = format!("@{}", crate::attribution::AGENT_DOMAIN);
+        let mut deltas: Vec<CommitDelta> = Vec::new();
+        for oid in walk {
+            let oid = oid.map_err(|e| LibraryError::Git(format!("revwalk next: {e}")))?;
+            let commit = repo
+                .find_commit(oid)
+                .map_err(|e| LibraryError::Git(format!("find commit: {e}")))?;
+            let is_echo = commit
+                .committer()
+                .email()
+                .map(|e| e.ends_with(&drua_suffix))
+                .unwrap_or(false);
+            if is_echo {
+                continue;
+            }
+            let commit_tree = commit
+                .tree()
+                .map_err(|e| LibraryError::Git(format!("commit tree: {e}")))?;
+            let parent_tree = commit.parent(0).ok().and_then(|p| p.tree().ok());
+            deltas.extend(Self::tree_diff_deltas(
+                repo,
+                parent_tree.as_ref(),
+                Some(&commit_tree),
+            )?);
+        }
+        Ok(deltas)
     }
 
     /// Read the blob at `path` from HEAD's tree. `Ok(None)` when the
@@ -555,6 +663,7 @@ impl GitEngine {
         repo_mutex: Arc<Mutex<()>>,
         local_commit_notify: Arc<Notify>,
         mut rx: mpsc::Receiver<QueuedOp>,
+        pool: PgPool,
     ) {
         while let Some(first) = rx.recv().await {
             let mut batch = vec![first];
@@ -572,7 +681,8 @@ impl GitEngine {
                 }
             }
             let any_ok =
-                Self::process_batch(&repo_path, github_app.as_ref(), &repo_mutex, batch).await;
+                Self::process_batch(&repo_path, github_app.as_ref(), &repo_mutex, &pool, batch)
+                    .await;
             if any_ok {
                 local_commit_notify.notify_waiters();
             }
@@ -584,9 +694,34 @@ impl GitEngine {
         repo_path: &Path,
         github_app: Option<&Arc<GitHubAppTokenProvider>>,
         repo_mutex: &Mutex<()>,
+        pool: &PgPool,
         batch: Vec<QueuedOp>,
     ) -> bool {
         let _guard = repo_mutex.lock().await;
+        // Cluster-wide push serialization (HA): the per-pod `repo_mutex` only
+        // orders writes within a pod; this advisory lock ensures at most one
+        // pod mutates `main` at a time, so divergent ephemeral clones can't
+        // race the remote into non-ff retries / lost commits. `xact`-scoped so
+        // it always releases (commit, rollback, or connection drop). Best
+        // effort: a DB hiccup degrades to the prior unlocked behavior rather
+        // than wedging all library writes.
+        let mut push_lock = match pool.begin().await {
+            Ok(mut tx) => match sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(LIBRARY_PUSH_LOCK_KEY)
+                .execute(&mut *tx)
+                .await
+            {
+                Ok(_) => Some(tx),
+                Err(e) => {
+                    tracing::warn!(error = %e, "library push lock: acquire failed; proceeding unlocked");
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "library push lock: begin failed; proceeding unlocked");
+                None
+            }
+        };
         let token = Self::fresh_token(github_app).await;
         let path = repo_path.to_path_buf();
         let n = batch.len();
@@ -603,6 +738,12 @@ impl GitEngine {
                 .map(|_| Err(LibraryError::Git(msg.clone())))
                 .collect()
         });
+
+        if let Some(tx) = push_lock.take() {
+            if let Err(e) = tx.commit().await {
+                tracing::warn!(error = %e, "library push lock: release failed");
+            }
+        }
 
         let any_ok = results.iter().any(|r| r.is_ok());
         for (resp, res) in responders.into_iter().zip(results) {
@@ -1115,5 +1256,97 @@ impl GitEngine {
             git2::Cred::default()
         });
         cb
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unique_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "drua-git-test-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn commit_file(
+        repo: &git2::Repository,
+        parent: Option<git2::Oid>,
+        path: &str,
+        content: &[u8],
+        committer_email: &str,
+    ) -> git2::Oid {
+        let base = parent.map(|p| repo.find_commit(p).unwrap().tree().unwrap());
+        let mut tb = repo.treebuilder(base.as_ref()).unwrap();
+        let blob = repo.blob(content).unwrap();
+        tb.insert(path, blob, 0o100644).unwrap();
+        let tree = repo.find_tree(tb.write().unwrap()).unwrap();
+        let sig = git2::Signature::now("tester", committer_email).unwrap();
+        let parents: Vec<git2::Commit> = parent
+            .into_iter()
+            .map(|p| repo.find_commit(p).unwrap())
+            .collect();
+        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+        repo.commit(None, &sig, &sig, "msg", &tree, &parent_refs)
+            .unwrap()
+    }
+
+    #[test]
+    fn external_deltas_ignores_drua_commits() {
+        let dir = unique_dir("echo");
+        let repo = git2::Repository::init_bare(&dir).unwrap();
+
+        let c0 = commit_file(&repo, None, "a.yml", b"v0", "human@example.com");
+        // drua echo (forward-sync style): must be suppressed.
+        let c1 = commit_file(
+            &repo,
+            Some(c0),
+            "a.yml",
+            b"v1",
+            crate::attribution::LIBRARY_BOT_EMAIL,
+        );
+        // external human edit: must surface.
+        let c2 = commit_file(&repo, Some(c1), "b.yml", b"hi", "human@example.com");
+
+        let deltas =
+            GitEngine::external_deltas(&repo, Some(&c0.to_string()), &c2.to_string()).unwrap();
+
+        assert_eq!(
+            deltas.len(),
+            1,
+            "only the external commit's change should surface"
+        );
+        assert_eq!(deltas[0].path, "b.yml");
+        assert!(matches!(deltas[0].kind, DeltaKind::Added));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn external_deltas_snapshots_without_checkpoint() {
+        let dir = unique_dir("snapshot");
+        let repo = git2::Repository::init_bare(&dir).unwrap();
+        // Even a drua-authored commit is desired state on initial snapshot.
+        let c0 = commit_file(
+            &repo,
+            None,
+            "a.yml",
+            b"v0",
+            crate::attribution::LIBRARY_BOT_EMAIL,
+        );
+
+        let deltas = GitEngine::external_deltas(&repo, None, &c0.to_string()).unwrap();
+
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].path, "a.yml");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

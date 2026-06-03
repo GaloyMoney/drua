@@ -106,7 +106,7 @@ impl JobRunner for LibrarySyncRunner {
                             tracing::debug!(head = %tick.head, "library.sync: processing tick");
                             // Advance `last_processed_head` only if the tick was
                             // actually processed. If `process_tick` fails before
-                            // computing deltas (e.g. `changes_since` errors), the
+                            // computing deltas (e.g. `external_changes_since` errors), the
                             // next tick must diff forward from the same start
                             // point or we'd lose every change in this commit
                             // range.
@@ -154,10 +154,17 @@ impl LibrarySyncRunner {
         from: Option<&str>,
         to: &str,
     ) -> Result<(), crate::LibraryError> {
-        let deltas = self.git.changes_since(from, to).await.map_err(|e| {
-            tracing::warn!(error = %e, ?from, to, "changes_since failed");
-            e
-        })?;
+        // Echo-suppressed: only external (non-drua) commits are authoritative
+        // reverse-sync inputs. drua's own writes/prunes are already in the DB;
+        // re-ingesting them is what produced the spurious workflow deletes.
+        let deltas = self
+            .git
+            .external_changes_since(from, to)
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, ?from, to, "external_changes_since failed");
+                e
+            })?;
 
         let importers = self.importers.read().await;
         for delta in deltas {

@@ -20,7 +20,7 @@ pub use config::LibraryConfig;
 pub use error::LibraryError;
 pub use github_app::GitHubAppTokenProvider;
 pub use importer::{DocType, GitFileHash, LibraryImporter, UpsertError};
-pub use job::WriteOp;
+pub use job::{LivenessGuard, LivenessKind, WriteOp};
 pub use primitives::SpaceId;
 pub use search::{SearchHit, SearchStore, SearchableFields};
 pub use space::{NewSpace, Space, SpaceError, SpaceEvent, Spaces, SPACE_DOC_TYPE};
@@ -62,7 +62,15 @@ impl Library {
         github_app: Option<Arc<GitHubAppTokenProvider>>,
     ) -> Result<Self, LibraryError> {
         let repo_path = PathBuf::from(&config.data_dir);
-        let git = Arc::new(GitEngine::init(&config.repo_url, repo_path, github_app.clone()).await?);
+        let git = Arc::new(
+            GitEngine::init(
+                &config.repo_url,
+                repo_path,
+                github_app.clone(),
+                pool.clone(),
+            )
+            .await?,
+        );
 
         let search = SearchStore::new(pool, Arc::clone(&embedder));
         let spaces = Spaces::new(&git, pool);
@@ -72,7 +80,10 @@ impl Library {
             Arc::clone(&embedder),
         ));
 
-        let write_spawner = jobs.add_initializer(LibraryWriteJobInitializer::new(Arc::clone(&git)));
+        let write_spawner = jobs.add_initializer(LibraryWriteJobInitializer::new(
+            Arc::clone(&git),
+            pool.clone(),
+        ));
 
         let (tick_tx, tick_rx) = mpsc::channel::<CommitTick>(64);
         let fetcher = Self::spawn_fetcher(
@@ -232,6 +243,7 @@ impl Library {
                 deletes: entity.extra_search_deletes(),
                 write_op: Some(entity.write_op()),
                 attribution: CommitAttribution::from_event_context(),
+                liveness: entity.liveness_guard(),
             },
         )
         .await
@@ -254,6 +266,7 @@ impl Library {
                 deletes: Vec::new(),
                 write_op: Some(write_op),
                 attribution,
+                liveness: None,
             },
         )
         .await
@@ -281,6 +294,7 @@ impl Library {
                 deletes,
                 write_op,
                 attribution,
+                liveness: None,
             },
         )
         .await
