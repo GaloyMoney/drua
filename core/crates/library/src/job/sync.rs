@@ -106,7 +106,7 @@ impl JobRunner for LibrarySyncRunner {
                             tracing::debug!(head = %tick.head, "library.sync: processing tick");
                             // Advance `last_processed_head` only if the tick was
                             // actually processed. If `process_tick` fails before
-                            // computing deltas (e.g. `changes_since` errors), the
+                            // computing deltas (e.g. `external_changes_since` errors), the
                             // next tick must diff forward from the same start
                             // point or we'd lose every change in this commit
                             // range.
@@ -154,10 +154,18 @@ impl LibrarySyncRunner {
         from: Option<&str>,
         to: &str,
     ) -> Result<(), crate::LibraryError> {
-        let deltas = self.git.changes_since(from, to).await.map_err(|e| {
-            tracing::warn!(error = %e, ?from, to, "changes_since failed");
-            e
-        })?;
+        // Only authoritative (non-projection) commits are reverse-sync inputs.
+        // drua's own forward-sync writes and prune-orphan deletes carry the
+        // `Drua-Projection` trailer and are dropped by `external_changes_since`
+        // — re-ingesting them is what produced the spurious workflow deletes.
+        let deltas = self
+            .git
+            .external_changes_since(from, to)
+            .await
+            .map_err(|e| {
+                tracing::warn!(error = %e, ?from, to, "external_changes_since failed");
+                e
+            })?;
 
         let importers = self.importers.read().await;
         for delta in deltas {
@@ -181,7 +189,10 @@ impl LibrarySyncRunner {
         let mut op = current_job.begin_op().await?;
         match delta.kind {
             DeltaKind::Deleted => {
-                if let Some(doc_id) = importer.delete_in_op(&mut op, &delta.path).await? {
+                if let Some(doc_id) = importer
+                    .delete_in_op(&mut op, &delta.path, &delta.content)
+                    .await?
+                {
                     self.search
                         .delete_in_op(&mut op, doc_id, importer.doc_type())
                         .await?;

@@ -29,6 +29,19 @@ pub const AGENT_BOT_EMAIL: &str = "agent@agent.galoy.io";
 pub const WORKFLOW_BOT_NAME: &str = "drua-workflow[bot]";
 pub const WORKFLOW_BOT_EMAIL: &str = "workflow@agent.galoy.io";
 
+/// Trailer key stamped on commits that merely project DB state into git
+/// (forward-sync writes, orphan/delete cleanup). See
+/// [`CommitAttribution::mark_projection`].
+pub const PROJECTION_TRAILER_KEY: &str = "Drua-Projection";
+
+/// True if `message` carries the [`PROJECTION_TRAILER_KEY`] trailer — i.e.
+/// the commit is drua's own DB→git projection and reverse-sync should ignore
+/// it. Matches the rendered `Drua-Projection: <value>` trailer line.
+pub fn message_is_projection(message: &str) -> bool {
+    let prefix = format!("{PROJECTION_TRAILER_KEY}:");
+    message.lines().any(|l| l.trim_start().starts_with(&prefix))
+}
+
 /// Stable subject-type tag rendered into the `Drua-Subject-Type:` trailer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -123,6 +136,15 @@ impl CommitAttribution {
         }
     }
 
+    /// Mark this commit as a DB→git projection (forward-sync write or
+    /// orphan/delete cleanup). Reverse-sync skips such commits: their content
+    /// is already persisted in the DB, so re-ingesting them is what caused the
+    /// workflow-delete domino. Direct authoring writes (e.g. `spaces edit`)
+    /// must NOT call this, so reverse-sync still imports them.
+    pub fn mark_projection(&mut self) {
+        self.add_trailer(PROJECTION_TRAILER_KEY, "true");
+    }
+
     pub fn add_co_authored_by(&mut self, name: impl Into<String>, email: impl Into<String>) {
         let entry = (name.into(), email.into());
         if !self.co_authored_by.contains(&entry) {
@@ -186,6 +208,20 @@ impl CommitAttribution {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projection_mark_renders_and_is_detected() {
+        // The rendered trailer must be recognised by `message_is_projection`,
+        // so a render-format change can't silently defeat echo-suppression.
+        let mut a = CommitAttribution::library_default();
+        a.mark_projection();
+        let message = format!("workflow: foo-abcd1234{}", a.render_message_suffix());
+        assert!(message_is_projection(&message));
+
+        let plain = CommitAttribution::library_default();
+        let plain_message = format!("spaces: edit{}", plain.render_message_suffix());
+        assert!(!message_is_projection(&plain_message));
+    }
 
     #[test]
     fn library_default_has_minimal_subject_type() {

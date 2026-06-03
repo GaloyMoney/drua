@@ -68,6 +68,18 @@ impl WorkflowDefinitionRepo {
         Ok(row.map(|(d,)| d).unwrap_or(false))
     }
 
+    /// Standalone liveness read (no op): `true` when the row is present and
+    /// not soft-deleted. A missing row reads as not-live. Used by the library
+    /// forward-sync write job's liveness check.
+    pub async fn is_live(&self, id: WorkflowDefinitionId) -> Result<bool, sqlx::Error> {
+        let row: Option<(bool,)> =
+            sqlx::query_as("SELECT deleted FROM workflow_definitions WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(matches!(row, Some((false,))))
+    }
+
     pub async fn maybe_find_by_canonical_path_in_op(
         &self,
         op: &mut es_entity::DbOp<'_>,

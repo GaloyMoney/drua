@@ -68,6 +68,15 @@ pub trait LibraryImporter: Send + Sync + 'static {
 
     fn doc_type(&self) -> DocType;
 
+    /// Is the document with this id still live (present and not soft-deleted)?
+    /// Consulted by the forward-sync write job to skip a stale, replayed write
+    /// that would resurrect a deleted entity's file. Keyed by doc id (not
+    /// path) to stay robust under path aliasing. Default: always live (no
+    /// liveness gating).
+    async fn is_doc_live(&self, _id: uuid::Uuid) -> Result<bool, UpsertError> {
+        Ok(true)
+    }
+
     /// Upsert the document into its service-specific tables. Returns
     /// `Some(SearchableFields)` when the caller should also write the
     /// search index row; `None` when the importer handled everything
@@ -84,10 +93,17 @@ pub trait LibraryImporter: Send + Sync + 'static {
     /// Reverse of [`Self::upsert_in_op`]. Returns `Some(doc_id)` to signal
     /// the runner should also delete the search-store row (paired with
     /// [`Self::doc_type`]); `None` skips. Default: warn-and-skip.
+    ///
+    /// `content` is the removed file's old blob bytes (empty if unreadable),
+    /// so importers can make id-aware delete decisions — only delete the
+    /// entity whose file this actually was. This backstops the projection
+    /// trailer: a historical (pre-trailer) or external removal still can't
+    /// soft-delete a different generation that now owns the same path.
     async fn delete_in_op(
         &self,
         _op: &mut es_entity::DbOp<'_>,
         path: &str,
+        _content: &[u8],
     ) -> Result<Option<uuid::Uuid>, UpsertError> {
         tracing::warn!(%path, doc_type = self.doc_type().as_str(), "delete_in_op not implemented; skipping");
         Ok(None)

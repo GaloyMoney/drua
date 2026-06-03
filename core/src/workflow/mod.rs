@@ -254,6 +254,13 @@ impl Workflows {
         }
     }
 
+    /// Liveness probe for the library forward-sync write job: `true` when
+    /// the definition is present and not soft-deleted. Owns the SQL so the
+    /// generic library crate stays decoupled from `workflow_definitions`.
+    pub(crate) async fn is_live(&self, id: WorkflowDefinitionId) -> Result<bool, WorkflowError> {
+        Ok(self.repo.is_live(id).await?)
+    }
+
     /// Reverse-sync entry point: persist a `ParsedWorkflow` produced
     /// by the library importer. Creates or updates depending on
     /// whether the workflow already exists. `Ok(None)` signals
@@ -297,6 +304,8 @@ impl Workflows {
                 slugify(&name),
                 &id_uuid.to_string()[..8]
             );
+            let mut attribution = CommitAttribution::system();
+            attribution.mark_projection();
             self.library
                 .enqueue_write_in_op(
                     op,
@@ -304,7 +313,7 @@ impl Workflows {
                         path: original_path.clone(),
                         message,
                     },
-                    CommitAttribution::system(),
+                    attribution,
                 )
                 .await?;
             tracing::info!(
@@ -750,7 +759,7 @@ impl Workflows {
         &self,
         op: &mut es_entity::DbOp<'_>,
         workflow: &WorkflowDefinition,
-        attribution: CommitAttribution,
+        mut attribution: CommitAttribution,
     ) -> Result<(), WorkflowError> {
         let path = canonical_workflow_path(&workflow.name, workflow.project_name.as_deref());
         let id_uuid: uuid::Uuid = workflow.id.into();
@@ -759,6 +768,8 @@ impl Workflows {
             slugify(&workflow.name),
             &id_uuid.to_string()[..8]
         );
+        // DB→git projection of the deletion — reverse-sync must skip it.
+        attribution.mark_projection();
         self.library
             .enqueue_full_in_op(
                 op,
@@ -1245,6 +1256,7 @@ impl Workflows {
         op: &mut es_entity::DbOp<'_>,
         project_id: ProjectId,
         path: &str,
+        expected_id: Option<WorkflowDefinitionId>,
     ) -> Result<Option<WorkflowDefinitionId>, WorkflowError> {
         let Some(workflow) = self
             .repo
@@ -1253,6 +1265,19 @@ impl Workflows {
         else {
             return Ok(None);
         };
+        // Only delete the workflow whose file was actually removed. A stale
+        // generation's file removal (e.g. an untrailered historical prune,
+        // replayed on deploy) must not take down the live workflow that now
+        // owns this (project, name) path.
+        if expected_id != Some(workflow.id) {
+            tracing::info!(
+                %path,
+                ?expected_id,
+                live_id = %workflow.id,
+                "library reverse-delete skipped: removed file id does not match live workflow at path"
+            );
+            return Ok(None);
+        }
         let id = workflow.id;
         self.library
             .search()

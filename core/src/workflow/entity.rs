@@ -1,5 +1,5 @@
 use derive_builder::Builder;
-use drua_library::{GitFileHash, SearchableFields, WriteOp};
+use drua_library::{GitFileHash, LivenessRef, SearchableFields, WriteOp};
 use llm::ModelChain;
 use serde::{Deserialize, Serialize};
 
@@ -313,6 +313,13 @@ impl drua_library::LibrarySynced for WorkflowDefinition {
                 message,
             },
         }
+    }
+
+    fn liveness_guard(&self) -> Option<LivenessRef> {
+        Some(LivenessRef {
+            doc_type: crate::workflow::WORKFLOW_DOC_TYPE,
+            id: self.id.into(),
+        })
     }
 }
 

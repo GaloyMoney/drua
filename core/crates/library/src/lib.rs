@@ -20,7 +20,7 @@ pub use config::LibraryConfig;
 pub use error::LibraryError;
 pub use github_app::GitHubAppTokenProvider;
 pub use importer::{DocType, GitFileHash, LibraryImporter, UpsertError};
-pub use job::WriteOp;
+pub use job::{LivenessRef, WriteOp};
 pub use primitives::SpaceId;
 pub use search::{SearchHit, SearchStore, SearchableFields};
 pub use space::{NewSpace, Space, SpaceError, SpaceEvent, Spaces, SPACE_DOC_TYPE};
@@ -62,7 +62,15 @@ impl Library {
         github_app: Option<Arc<GitHubAppTokenProvider>>,
     ) -> Result<Self, LibraryError> {
         let repo_path = PathBuf::from(&config.data_dir);
-        let git = Arc::new(GitEngine::init(&config.repo_url, repo_path, github_app.clone()).await?);
+        let git = Arc::new(
+            GitEngine::init(
+                &config.repo_url,
+                repo_path,
+                github_app.clone(),
+                pool.clone(),
+            )
+            .await?,
+        );
 
         let search = SearchStore::new(pool, Arc::clone(&embedder));
         let spaces = Spaces::new(&git, pool);
@@ -72,7 +80,19 @@ impl Library {
             Arc::clone(&embedder),
         ));
 
-        let write_spawner = jobs.add_initializer(LibraryWriteJobInitializer::new(Arc::clone(&git)));
+        // Importers registry is shared with the write job so it can delegate
+        // liveness checks to the domain (per doc type). Built before the write
+        // initializer; importers registered later via `register_importer` are
+        // visible through the shared `Arc<RwLock<…>>`.
+        let importers: ImporterRegistry =
+            Arc::new(tokio::sync::RwLock::new(vec![
+                Arc::new(spaces.clone()) as Arc<dyn LibraryImporter>
+            ]));
+
+        let write_spawner = jobs.add_initializer(LibraryWriteJobInitializer::new(
+            Arc::clone(&git),
+            Arc::clone(&importers),
+        ));
 
         let (tick_tx, tick_rx) = mpsc::channel::<CommitTick>(64);
         let fetcher = Self::spawn_fetcher(
@@ -81,11 +101,6 @@ impl Library {
             Duration::from_millis(config.fetch_interval_ms),
             git.local_commit_notify(),
         );
-
-        let importers: ImporterRegistry =
-            Arc::new(tokio::sync::RwLock::new(vec![
-                Arc::new(spaces.clone()) as Arc<dyn LibraryImporter>
-            ]));
 
         let spawner = jobs.add_initializer(LibrarySyncJobInitializer::new(
             tick_rx,
@@ -225,13 +240,20 @@ impl Library {
         if !new_events.any(|p| E::is_content_event(&p.event)) {
             return Ok(());
         }
+        // A forward-sync write only projects already-persisted DB state into
+        // git, so mark it: reverse-sync drops it instead of re-ingesting (the
+        // workflow-delete domino). Direct authoring writes (`spaces edit`) go
+        // through their own path unmarked and still import.
+        let mut attribution = CommitAttribution::from_event_context();
+        attribution.mark_projection();
         self.enqueue_in_op(
             op,
             HookEntry {
                 fields: Some(entity.searchable_fields()),
                 deletes: entity.extra_search_deletes(),
                 write_op: Some(entity.write_op()),
-                attribution: CommitAttribution::from_event_context(),
+                attribution,
+                liveness: entity.liveness_guard(),
             },
         )
         .await
@@ -254,6 +276,7 @@ impl Library {
                 deletes: Vec::new(),
                 write_op: Some(write_op),
                 attribution,
+                liveness: None,
             },
         )
         .await
@@ -281,6 +304,7 @@ impl Library {
                 deletes,
                 write_op,
                 attribution,
+                liveness: None,
             },
         )
         .await

@@ -2,6 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use sqlx::PgPool;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use tokio::task::JoinHandle;
 
@@ -16,6 +17,10 @@ use crate::{GitHubAppTokenProvider, LibraryError};
 const BATCH_WINDOW: Duration = Duration::from_millis(25);
 const MAX_BATCH: usize = 32;
 const QUEUE_CAPACITY: usize = 256;
+
+/// Cluster-wide Postgres advisory-lock key for serializing pushes to the
+/// library repo's `main`. Fixed (one library repo per deployment); `0x647275616c6962` = "drualib".
+const LIBRARY_PUSH_LOCK_KEY: i64 = 0x647275616c6962;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeltaKind {
@@ -141,6 +146,7 @@ impl GitEngine {
         repo_url: &str,
         repo_path: PathBuf,
         github_app: Option<Arc<GitHubAppTokenProvider>>,
+        pool: PgPool,
     ) -> Result<Self, LibraryError> {
         if repo_url.is_empty() {
             return Err(LibraryError::Config("repo_url is empty".into()));
@@ -164,6 +170,7 @@ impl GitEngine {
             Arc::clone(&repo_mutex),
             Arc::clone(&local_commit_notify),
             write_rx,
+            pool,
         ));
 
         Ok(Self {
@@ -213,45 +220,177 @@ impl GitEngine {
                 None => None,
             };
 
-            let diff = repo
-                .diff_tree_to_tree(from_tree.as_ref(), Some(&to_tree), None)
-                .map_err(|e| LibraryError::Git(format!("diff: {e}")))?;
-
-            let mut deltas: Vec<CommitDelta> = Vec::new();
-            for delta in diff.deltas() {
-                let kind = match delta.status() {
-                    git2::Delta::Added => DeltaKind::Added,
-                    git2::Delta::Modified => DeltaKind::Modified,
-                    git2::Delta::Deleted => DeltaKind::Deleted,
-                    _ => continue,
-                };
-                let entry = match kind {
-                    DeltaKind::Deleted => delta.old_file(),
-                    _ => delta.new_file(),
-                };
-                let path_str = match entry.path() {
-                    Some(p) => p.to_string_lossy().into_owned(),
-                    None => continue,
-                };
-                let oid = entry.id();
-                let content = match kind {
-                    DeltaKind::Deleted => Vec::new(),
-                    _ => match repo.find_blob(oid) {
-                        Ok(b) => b.content().to_vec(),
-                        Err(_) => continue,
-                    },
-                };
-                deltas.push(CommitDelta {
-                    path: path_str,
-                    kind,
-                    file_hash: GitFileHash::new(oid.to_string()),
-                    content,
-                });
-            }
-            Ok(deltas)
+            Self::tree_diff_deltas(&repo, from_tree.as_ref(), Some(&to_tree))
         })
         .await
         .map_err(|e| LibraryError::Git(format!("changes_since join: {e}")))?
+    }
+
+    /// Build [`CommitDelta`]s for a tree-to-tree diff. For `Deleted` the
+    /// `content` is the removed file's old blob (so importers can make
+    /// id-aware delete decisions); add/modify carry the new blob.
+    fn tree_diff_deltas(
+        repo: &git2::Repository,
+        from_tree: Option<&git2::Tree>,
+        to_tree: Option<&git2::Tree>,
+    ) -> Result<Vec<CommitDelta>, LibraryError> {
+        let diff = repo
+            .diff_tree_to_tree(from_tree, to_tree, None)
+            .map_err(|e| LibraryError::Git(format!("diff: {e}")))?;
+
+        let mut deltas: Vec<CommitDelta> = Vec::new();
+        for delta in diff.deltas() {
+            let kind = match delta.status() {
+                git2::Delta::Added => DeltaKind::Added,
+                git2::Delta::Modified => DeltaKind::Modified,
+                git2::Delta::Deleted => DeltaKind::Deleted,
+                _ => continue,
+            };
+            let entry = match kind {
+                DeltaKind::Deleted => delta.old_file(),
+                _ => delta.new_file(),
+            };
+            let path_str = match entry.path() {
+                Some(p) => p.to_string_lossy().into_owned(),
+                None => continue,
+            };
+            let oid = entry.id();
+            // For deletes, `oid` is the removed blob (still in the object DB via
+            // the parent commit). Empty on read failure → importers fall back
+            // to a path lookup / skip.
+            let content = match repo.find_blob(oid) {
+                Ok(b) => b.content().to_vec(),
+                Err(_) if matches!(kind, DeltaKind::Deleted) => Vec::new(),
+                Err(_) => continue,
+            };
+            deltas.push(CommitDelta {
+                path: path_str,
+                kind,
+                file_hash: GitFileHash::new(oid.to_string()),
+                content,
+            });
+        }
+        Ok(deltas)
+    }
+
+    /// Like [`Self::changes_since`], but ignores commits drua made to merely
+    /// project DB state into git — those carrying the `Drua-Projection`
+    /// trailer ([`crate::attribution::message_is_projection`]) committed by a
+    /// drua bot. Reverse-sync must treat only *authoritative* edits as inputs:
+    /// a forward-sync write or prune-orphan delete already reflects persisted
+    /// DB state, so re-ingesting it feeds back into spurious deletes — e.g. a
+    /// prune-orphan re-read as a `Deleted` delta would soft-delete the live
+    /// workflow at that path. Direct authoring writes (`spaces edit`, human
+    /// commits) lack the trailer and are imported normally — that's how a
+    /// space-authored note/skill lands in the DB.
+    ///
+    /// Each surviving commit is diffed against its first parent (a collapsed
+    /// range diff could mis-attribute a net deletion to the wrong blob). When
+    /// `from` is not a strict ancestor of `to` (force-pushed `main`) the walk
+    /// is bounded by the merge-base instead of replaying to the root, so the
+    /// projection filter still applies. A `from` whose commit is gone (GC'd /
+    /// force-pushed away) fails the tick rather than silently resyncing and
+    /// dropping deletions.
+    #[tracing::instrument(name = "library.git.external_changes_since", skip_all)]
+    pub async fn external_changes_since(
+        &self,
+        from: Option<&str>,
+        to: &str,
+    ) -> Result<Vec<CommitDelta>, LibraryError> {
+        let path = self.repo_path.clone();
+        let from = from.map(String::from);
+        let to = to.to_string();
+
+        tokio::task::spawn_blocking(move || -> Result<Vec<CommitDelta>, LibraryError> {
+            let repo = git2::Repository::open_bare(&path)
+                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
+            Self::external_deltas(&repo, from.as_deref(), &to)
+        })
+        .await
+        .map_err(|e| LibraryError::Git(format!("external_changes_since join: {e}")))?
+    }
+
+    /// Blocking core of [`Self::external_changes_since`]; see its docs.
+    fn external_deltas(
+        repo: &git2::Repository,
+        from: Option<&str>,
+        to: &str,
+    ) -> Result<Vec<CommitDelta>, LibraryError> {
+        let to_oid =
+            git2::Oid::from_str(to).map_err(|e| LibraryError::Git(format!("parse to oid: {e}")))?;
+        let to_tree = repo
+            .find_commit(to_oid)
+            .and_then(|c| c.tree())
+            .map_err(|e| LibraryError::Git(format!("to tree: {e}")))?;
+
+        // Initial sync (no checkpoint): import the whole tree as a snapshot —
+        // every present file is desired state (workflows included, fresh clone).
+        let Some(from) = from else {
+            return Self::tree_diff_deltas(repo, None, Some(&to_tree));
+        };
+        let from_oid = git2::Oid::from_str(from)
+            .map_err(|e| LibraryError::Git(format!("parse from oid: {e}")))?;
+
+        // A missing checkpoint commit (GC'd, or a tip that was force-pushed
+        // away) must FAIL the tick — not silently resync. Diffing from an empty
+        // tree would drop every deletion since the lost commit yet still advance
+        // the checkpoint, diverging DB from git. Erroring keeps the checkpoint
+        // so the next tick retries (matches the pre-walk `changes_since`).
+        repo.find_commit(from_oid)
+            .map_err(|e| LibraryError::Git(format!("checkpoint commit {from} missing: {e}")))?;
+
+        // Bound the walk by the merge-base so a force-updated `main` (where
+        // `from` is not a strict ancestor of `to`) doesn't replay history to the
+        // root — while still running every surviving commit through the
+        // projection filter below (a flat net diff would let drua's own
+        // prune/delete net-removals resurface as external `Deleted` deltas and
+        // reopen the domino). In the normal case the merge-base IS `from`.
+        let base = repo
+            .merge_base(from_oid, to_oid)
+            .map_err(|e| LibraryError::Git(format!("merge-base of checkpoint and head: {e}")))?;
+
+        let mut walk = repo
+            .revwalk()
+            .map_err(|e| LibraryError::Git(format!("revwalk: {e}")))?;
+        walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::REVERSE)
+            .map_err(|e| LibraryError::Git(format!("revwalk sort: {e}")))?;
+        walk.push(to_oid)
+            .map_err(|e| LibraryError::Git(format!("revwalk push: {e}")))?;
+        walk.hide(base)
+            .map_err(|e| LibraryError::Git(format!("revwalk hide: {e}")))?;
+
+        let drua_suffix = format!("@{}", crate::attribution::AGENT_DOMAIN);
+        let mut deltas: Vec<CommitDelta> = Vec::new();
+        for oid in walk {
+            let oid = oid.map_err(|e| LibraryError::Git(format!("revwalk next: {e}")))?;
+            let commit = repo
+                .find_commit(oid)
+                .map_err(|e| LibraryError::Git(format!("find commit: {e}")))?;
+            // Skip drua's own projection commits. Gate on the drua committer too
+            // so an external actor can't forge the trailer to suppress a commit.
+            let by_drua = commit
+                .committer()
+                .email()
+                .map(|e| e.ends_with(&drua_suffix))
+                .unwrap_or(false);
+            let is_projection = commit
+                .message()
+                .map(crate::attribution::message_is_projection)
+                .unwrap_or(false);
+            if by_drua && is_projection {
+                continue;
+            }
+            let commit_tree = commit
+                .tree()
+                .map_err(|e| LibraryError::Git(format!("commit tree: {e}")))?;
+            let parent_tree = commit.parent(0).ok().and_then(|p| p.tree().ok());
+            deltas.extend(Self::tree_diff_deltas(
+                repo,
+                parent_tree.as_ref(),
+                Some(&commit_tree),
+            )?);
+        }
+        Ok(deltas)
     }
 
     /// Read the blob at `path` from HEAD's tree. `Ok(None)` when the
@@ -555,6 +694,7 @@ impl GitEngine {
         repo_mutex: Arc<Mutex<()>>,
         local_commit_notify: Arc<Notify>,
         mut rx: mpsc::Receiver<QueuedOp>,
+        pool: PgPool,
     ) {
         while let Some(first) = rx.recv().await {
             let mut batch = vec![first];
@@ -572,7 +712,8 @@ impl GitEngine {
                 }
             }
             let any_ok =
-                Self::process_batch(&repo_path, github_app.as_ref(), &repo_mutex, batch).await;
+                Self::process_batch(&repo_path, github_app.as_ref(), &repo_mutex, &pool, batch)
+                    .await;
             if any_ok {
                 local_commit_notify.notify_waiters();
             }
@@ -584,9 +725,38 @@ impl GitEngine {
         repo_path: &Path,
         github_app: Option<&Arc<GitHubAppTokenProvider>>,
         repo_mutex: &Mutex<()>,
+        pool: &PgPool,
         batch: Vec<QueuedOp>,
     ) -> bool {
         let _guard = repo_mutex.lock().await;
+        // Cluster-wide push serialization (HA): the per-pod `repo_mutex` only
+        // orders writes within a pod; this advisory lock ensures at most one
+        // pod mutates `main` at a time, so divergent ephemeral clones can't
+        // race the remote into non-ff retries / lost commits.
+        //
+        // SESSION-scoped (not `xact`): the git fetch/commit/push below runs
+        // with no open transaction, so `idle_in_transaction_session_timeout`
+        // can't reap it and drop the lock mid-push. Released explicitly after;
+        // a crashed/closed connection releases it server-side too. Best effort:
+        // a DB hiccup degrades to the prior unlocked behavior rather than
+        // wedging all library writes.
+        let mut lock_conn = match pool.acquire().await {
+            Ok(mut conn) => match sqlx::query("SELECT pg_advisory_lock($1)")
+                .bind(LIBRARY_PUSH_LOCK_KEY)
+                .execute(&mut *conn)
+                .await
+            {
+                Ok(_) => Some(conn),
+                Err(e) => {
+                    tracing::warn!(error = %e, "library push lock: acquire failed; proceeding unlocked");
+                    None
+                }
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "library push lock: connection failed; proceeding unlocked");
+                None
+            }
+        };
         let token = Self::fresh_token(github_app).await;
         let path = repo_path.to_path_buf();
         let n = batch.len();
@@ -603,6 +773,16 @@ impl GitEngine {
                 .map(|_| Err(LibraryError::Git(msg.clone())))
                 .collect()
         });
+
+        if let Some(mut conn) = lock_conn.take() {
+            if let Err(e) = sqlx::query("SELECT pg_advisory_unlock($1)")
+                .bind(LIBRARY_PUSH_LOCK_KEY)
+                .execute(&mut *conn)
+                .await
+            {
+                tracing::warn!(error = %e, "library push lock: release failed");
+            }
+        }
 
         let any_ok = results.iter().any(|r| r.is_ok());
         for (resp, res) in responders.into_iter().zip(results) {
@@ -1115,5 +1295,202 @@ impl GitEngine {
             git2::Cred::default()
         });
         cb
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn unique_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "drua-git-test-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn commit_file(
+        repo: &git2::Repository,
+        parent: Option<git2::Oid>,
+        path: &str,
+        content: &[u8],
+        committer_email: &str,
+        message: &str,
+    ) -> git2::Oid {
+        let base = parent.map(|p| repo.find_commit(p).unwrap().tree().unwrap());
+        let mut tb = repo.treebuilder(base.as_ref()).unwrap();
+        let blob = repo.blob(content).unwrap();
+        tb.insert(path, blob, 0o100644).unwrap();
+        let tree = repo.find_tree(tb.write().unwrap()).unwrap();
+        let sig = git2::Signature::now("tester", committer_email).unwrap();
+        let parents: Vec<git2::Commit> = parent
+            .into_iter()
+            .map(|p| repo.find_commit(p).unwrap())
+            .collect();
+        let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
+        repo.commit(None, &sig, &sig, message, &tree, &parent_refs)
+            .unwrap()
+    }
+
+    fn projection_msg() -> String {
+        format!(
+            "msg\n\n{}: true",
+            crate::attribution::PROJECTION_TRAILER_KEY
+        )
+    }
+
+    const LIB_BOT: &str = crate::attribution::LIBRARY_BOT_EMAIL;
+
+    #[test]
+    fn external_deltas_skips_projections_keeps_authoring() {
+        let dir = unique_dir("echo");
+        let repo = git2::Repository::init_bare(&dir).unwrap();
+
+        let c0 = commit_file(&repo, None, "a.yml", b"v0", "human@example.com", "init");
+        // drua forward-sync projection (committer drua + trailer) → dropped.
+        let c1 = commit_file(&repo, Some(c0), "a.yml", b"v1", LIB_BOT, &projection_msg());
+        // drua authoring write (e.g. `spaces edit`, committer drua, NO trailer)
+        // → kept, so space-authored docs still import.
+        let c2 = commit_file(&repo, Some(c1), "note.md", b"hi", LIB_BOT, "spaces: edit");
+
+        let deltas =
+            GitEngine::external_deltas(&repo, Some(&c0.to_string()), &c2.to_string()).unwrap();
+
+        let paths: std::collections::BTreeSet<&str> =
+            deltas.iter().map(|d| d.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["note.md"].into_iter().collect(),
+            "projection dropped, authoring kept"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn external_deltas_ignores_forged_projection_trailer() {
+        let dir = unique_dir("forge");
+        let repo = git2::Repository::init_bare(&dir).unwrap();
+        let c0 = commit_file(&repo, None, "a.yml", b"v0", "human@example.com", "init");
+        // Non-drua committer carrying the trailer must NOT be suppressed.
+        let c1 = commit_file(
+            &repo,
+            Some(c0),
+            "b.yml",
+            b"b",
+            "attacker@example.com",
+            &projection_msg(),
+        );
+
+        let deltas =
+            GitEngine::external_deltas(&repo, Some(&c0.to_string()), &c1.to_string()).unwrap();
+
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].path, "b.yml");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn external_deltas_snapshots_without_checkpoint() {
+        let dir = unique_dir("snapshot");
+        let repo = git2::Repository::init_bare(&dir).unwrap();
+        // Even a projection commit is desired state on initial snapshot.
+        let c0 = commit_file(&repo, None, "a.yml", b"v0", LIB_BOT, &projection_msg());
+
+        let deltas = GitEngine::external_deltas(&repo, None, &c0.to_string()).unwrap();
+
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].path, "a.yml");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn external_deltas_force_push_bounds_by_merge_base_and_filters_projections() {
+        let dir = unique_dir("forcepush");
+        let repo = git2::Repository::init_bare(&dir).unwrap();
+        let c0 = commit_file(&repo, None, "a.yml", b"v0", "human@example.com", "init");
+        // New `main` since divergence: a drua projection then an external edit.
+        let c1 = commit_file(
+            &repo,
+            Some(c0),
+            "proj.yml",
+            b"p",
+            LIB_BOT,
+            &projection_msg(),
+        );
+        let to = commit_file(
+            &repo,
+            Some(c1),
+            "ext.yml",
+            b"e",
+            "human@example.com",
+            "edit",
+        );
+        // Stale checkpoint on an abandoned branch — not an ancestor of `to`.
+        let stale_from = commit_file(&repo, Some(c0), "gone.yml", b"g", "human@example.com", "y");
+
+        let deltas =
+            GitEngine::external_deltas(&repo, Some(&stale_from.to_string()), &to.to_string())
+                .unwrap();
+
+        // Walk is bounded by the merge-base (c0), so only the new-main commits
+        // are considered; the projection is still filtered and the abandoned
+        // branch's file is not replayed.
+        let paths: std::collections::BTreeSet<&str> =
+            deltas.iter().map(|d| d.path.as_str()).collect();
+        assert_eq!(paths, ["ext.yml"].into_iter().collect());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn deleted_delta_carries_removed_blob() {
+        let dir = unique_dir("del");
+        let repo = git2::Repository::init_bare(&dir).unwrap();
+        let c0 = commit_file(
+            &repo,
+            None,
+            "a.yml",
+            b"removed-bytes",
+            "human@example.com",
+            "init",
+        );
+        // c1 removes a.yml (external human commit → empty tree).
+        let c1 = {
+            let tb = repo.treebuilder(None).unwrap();
+            let tree = repo.find_tree(tb.write().unwrap()).unwrap();
+            let sig = git2::Signature::now("tester", "human@example.com").unwrap();
+            let parent = repo.find_commit(c0).unwrap();
+            repo.commit(None, &sig, &sig, "rm", &tree, &[&parent])
+                .unwrap()
+        };
+
+        let deltas =
+            GitEngine::external_deltas(&repo, Some(&c0.to_string()), &c1.to_string()).unwrap();
+
+        assert_eq!(deltas.len(), 1);
+        assert_eq!(deltas[0].path, "a.yml");
+        assert!(matches!(deltas[0].kind, DeltaKind::Deleted));
+        // The removed blob is carried so the importer can do an id-aware delete.
+        assert_eq!(deltas[0].content, b"removed-bytes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn external_deltas_fails_on_missing_checkpoint() {
+        let dir = unique_dir("missing");
+        let repo = git2::Repository::init_bare(&dir).unwrap();
+        let c0 = commit_file(&repo, None, "a.yml", b"v0", "human@example.com", "init");
+        // Checkpoint OID that doesn't exist in the repo (GC'd / force-pushed
+        // away). Must error so the tick keeps the checkpoint instead of
+        // silently resyncing from an empty tree and dropping deletions.
+        let missing = "1111111111111111111111111111111111111111";
+        let res = GitEngine::external_deltas(&repo, Some(missing), &c0.to_string());
+        assert!(res.is_err(), "missing checkpoint must fail the tick");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
