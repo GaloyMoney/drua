@@ -68,16 +68,6 @@ pub trait LibraryImporter: Send + Sync + 'static {
 
     fn doc_type(&self) -> DocType;
 
-    /// When true, reverse-sync drops deltas from drua-authored commits
-    /// (`CommitDelta::from_drua`). Set by DB-authoritative importers
-    /// (e.g. workflows) whose git files are projections of DB state, so
-    /// drua's own forward-sync writes / prune-orphans must not feed back
-    /// in. Git-authoritative importers (spaces / notes / skills are written
-    /// to git first, then imported) leave this `false`.
-    fn suppress_echo_commits(&self) -> bool {
-        false
-    }
-
     /// Is the document with this id still live (present and not soft-deleted)?
     /// Consulted by the forward-sync write job to skip a stale, replayed write
     /// that would resurrect a deleted entity's file. Keyed by doc id (not

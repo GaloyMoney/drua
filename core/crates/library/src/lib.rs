@@ -240,13 +240,19 @@ impl Library {
         if !new_events.any(|p| E::is_content_event(&p.event)) {
             return Ok(());
         }
+        // A forward-sync write only projects already-persisted DB state into
+        // git, so mark it: reverse-sync drops it instead of re-ingesting (the
+        // workflow-delete domino). Direct authoring writes (`spaces edit`) go
+        // through their own path unmarked and still import.
+        let mut attribution = CommitAttribution::from_event_context();
+        attribution.mark_projection();
         self.enqueue_in_op(
             op,
             HookEntry {
                 fields: Some(entity.searchable_fields()),
                 deletes: entity.extra_search_deletes(),
                 write_op: Some(entity.write_op()),
-                attribution: CommitAttribution::from_event_context(),
+                attribution,
                 liveness: entity.liveness_guard(),
             },
         )

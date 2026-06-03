@@ -42,14 +42,6 @@ impl LibraryImporter for WorkflowsImporter {
         DruaDocType::new("workflow")
     }
 
-    /// Workflows are DB-authoritative: the git YAML is a projection of the
-    /// definition. drua's own forward-sync writes and prune-orphan deletes
-    /// must not reverse-sync back in (re-ingesting a prune-orphan as a
-    /// `Deleted` delta is what soft-deleted live workflows).
-    fn suppress_echo_commits(&self) -> bool {
-        true
-    }
-
     async fn is_doc_live(&self, id: uuid::Uuid) -> Result<bool, UpsertError> {
         self.workflows
             .is_live(crate::primitives::WorkflowDefinitionId::from(id))

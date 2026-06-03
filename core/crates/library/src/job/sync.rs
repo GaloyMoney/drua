@@ -106,7 +106,7 @@ impl JobRunner for LibrarySyncRunner {
                             tracing::debug!(head = %tick.head, "library.sync: processing tick");
                             // Advance `last_processed_head` only if the tick was
                             // actually processed. If `process_tick` fails before
-                            // computing deltas (e.g. `changes_with_provenance` errors), the
+                            // computing deltas (e.g. `external_changes_since` errors), the
                             // next tick must diff forward from the same start
                             // point or we'd lose every change in this commit
                             // range.
@@ -154,16 +154,16 @@ impl LibrarySyncRunner {
         from: Option<&str>,
         to: &str,
     ) -> Result<(), crate::LibraryError> {
-        // Deltas tagged with commit provenance (`from_drua`). DB-authoritative
-        // importers (workflows) drop echoes of their own writes/prunes — that
-        // feedback is what produced the spurious workflow deletes — while
-        // git-authoritative importers (spaces/notes/skills) ingest everything.
+        // Only authoritative (non-projection) commits are reverse-sync inputs.
+        // drua's own forward-sync writes and prune-orphan deletes carry the
+        // `Drua-Projection` trailer and are dropped by `external_changes_since`
+        // — re-ingesting them is what produced the spurious workflow deletes.
         let deltas = self
             .git
-            .changes_with_provenance(from, to)
+            .external_changes_since(from, to)
             .await
             .map_err(|e| {
-                tracing::warn!(error = %e, ?from, to, "changes_with_provenance failed");
+                tracing::warn!(error = %e, ?from, to, "external_changes_since failed");
                 e
             })?;
 
@@ -173,9 +173,6 @@ impl LibrarySyncRunner {
                 Some(i) => i,
                 None => continue,
             };
-            if delta.from_drua && importer.suppress_echo_commits() {
-                continue;
-            }
             if let Err(e) = self.dispatch(current_job, importer.as_ref(), &delta).await {
                 tracing::warn!(error = %e, path = %delta.path, "library.sync: dispatch failed");
             }

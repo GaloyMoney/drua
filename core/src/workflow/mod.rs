@@ -304,6 +304,8 @@ impl Workflows {
                 slugify(&name),
                 &id_uuid.to_string()[..8]
             );
+            let mut attribution = CommitAttribution::system();
+            attribution.mark_projection();
             self.library
                 .enqueue_write_in_op(
                     op,
@@ -311,7 +313,7 @@ impl Workflows {
                         path: original_path.clone(),
                         message,
                     },
-                    CommitAttribution::system(),
+                    attribution,
                 )
                 .await?;
             tracing::info!(
@@ -757,7 +759,7 @@ impl Workflows {
         &self,
         op: &mut es_entity::DbOp<'_>,
         workflow: &WorkflowDefinition,
-        attribution: CommitAttribution,
+        mut attribution: CommitAttribution,
     ) -> Result<(), WorkflowError> {
         let path = canonical_workflow_path(&workflow.name, workflow.project_name.as_deref());
         let id_uuid: uuid::Uuid = workflow.id.into();
@@ -766,6 +768,8 @@ impl Workflows {
             slugify(&workflow.name),
             &id_uuid.to_string()[..8]
         );
+        // DB→git projection of the deletion — reverse-sync must skip it.
+        attribution.mark_projection();
         self.library
             .enqueue_full_in_op(
                 op,
