@@ -158,9 +158,10 @@ galoyAgents:
         toolPrefix: github_issues
         authMode: github_app
         category: source-control-write
-        categoryDescription: "GitHub issue mutations — comments"
+        categoryDescription: "GitHub issue mutations — create + comments"
         internalOnly: true
         allowedTools:
+          - issue_write
           - add_issue_comment
   postgresMcp:
     enabled: true
