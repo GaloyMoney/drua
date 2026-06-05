@@ -65,6 +65,10 @@ pub(crate) fn prompt_to_request(
     let tool_choice = prompt.tool_choice.as_ref().map(convert_tool_choice);
 
     let effort = reasoning_effort_str(prompt.effort);
+    let (reasoning_effort, reasoning) = match reasoning_dialect {
+        ReasoningDialect::OpenAi => (Some(effort), None),
+        ReasoningDialect::OpenRouter => (None, Some(ReasoningConfig { effort })),
+    };
     let mut request = OpenAiRequest {
         model: prompt.chain.primary.name.clone(),
         messages,
@@ -77,14 +81,8 @@ pub(crate) fn prompt_to_request(
         stream_options: Some(StreamOptions {
             include_usage: true,
         }),
-        reasoning_effort: match reasoning_dialect {
-            ReasoningDialect::OpenAi => Some(effort),
-            ReasoningDialect::OpenRouter => None,
-        },
-        reasoning: match reasoning_dialect {
-            ReasoningDialect::OpenAi => None,
-            ReasoningDialect::OpenRouter => Some(ReasoningConfig { effort }),
-        },
+        reasoning_effort,
+        reasoning,
     };
 
     if request.model.starts_with(ANTHROPIC_MODEL_PREFIX) {
