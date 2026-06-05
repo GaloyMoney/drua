@@ -13,34 +13,13 @@ use drua_core::{
 };
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(remote = "DomainReasoningEffort")]
 pub enum ReasoningEffort {
     Low,
     Medium,
     High,
     #[graphql(name = "XHIGH")]
     XHigh,
-}
-
-impl From<DomainReasoningEffort> for ReasoningEffort {
-    fn from(e: DomainReasoningEffort) -> Self {
-        match e {
-            DomainReasoningEffort::Low => Self::Low,
-            DomainReasoningEffort::Medium => Self::Medium,
-            DomainReasoningEffort::High => Self::High,
-            DomainReasoningEffort::XHigh => Self::XHigh,
-        }
-    }
-}
-
-impl From<ReasoningEffort> for DomainReasoningEffort {
-    fn from(e: ReasoningEffort) -> Self {
-        match e {
-            ReasoningEffort::Low => Self::Low,
-            ReasoningEffort::Medium => Self::Medium,
-            ReasoningEffort::High => Self::High,
-            ReasoningEffort::XHigh => Self::XHigh,
-        }
-    }
 }
 
 #[derive(SimpleObject, InputObject, Clone)]
