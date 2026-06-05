@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::config::{AuthConfig, LoginMethod};
 use drua_core::agent::{AgentsConfig, ModelDefaults};
-use drua_core::ReasoningEffort;
 use drua_core::library::LibraryConfig;
 use drua_core::prompt_executor::{
     ModelConfig, OpenAiResponsesAuth, PromptExecutorConfig, Provider,
@@ -13,6 +12,7 @@ use drua_core::prompt_executor::{
 use drua_core::sandbox::SandboxConfig;
 use drua_core::toolset::ToolSetsConfig;
 use drua_core::GitProxyAppConfig;
+use drua_core::ReasoningEffort;
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

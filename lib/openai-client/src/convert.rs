@@ -67,11 +67,9 @@ pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> OpenAiRequest {
         stream_options: Some(StreamOptions {
             include_usage: true,
         }),
-        reasoning: prompt
-            .effort
-            .map(|e| ReasoningConfig {
-                effort: reasoning_effort_str(e),
-            }),
+        reasoning: prompt.effort.map(|e| ReasoningConfig {
+            effort: reasoning_effort_str(e),
+        }),
     };
 
     if request.model.starts_with(ANTHROPIC_MODEL_PREFIX) {

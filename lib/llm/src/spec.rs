@@ -5,9 +5,7 @@ use serde::{Deserialize, Serialize};
 /// Provider-agnostic reasoning level; each client maps it to its own wire
 /// shape (OpenAI `reasoning_effort`, OpenRouter `reasoning.effort`,
 /// Anthropic thinking `budget_tokens`).
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningEffort {
     Minimal,
