@@ -54,12 +54,11 @@ pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> AnthropicRequest {
     let tool_choice = prompt.tool_choice.as_ref().map(convert_tool_choice);
 
     let max_tokens = prompt.max_tokens.unwrap_or(8192);
-    let thinking = prompt.effort.and_then(|e| {
-        thinking_budget(e, max_tokens).map(|budget_tokens| AnthropicThinking {
+    let thinking =
+        thinking_budget(prompt.effort, max_tokens).map(|budget_tokens| AnthropicThinking {
             r#type: "enabled",
             budget_tokens,
-        })
-    });
+        });
 
     let mut request = AnthropicRequest {
         model: prompt.chain.primary.name.clone(),
@@ -85,10 +84,10 @@ fn thinking_budget(effort: llm::ReasoningEffort, max_tokens: u32) -> Option<u32>
         return None;
     }
     let frac = match effort {
-        llm::ReasoningEffort::Minimal => 0.1,
         llm::ReasoningEffort::Low => 0.25,
         llm::ReasoningEffort::Medium => 0.5,
         llm::ReasoningEffort::High => 0.75,
+        llm::ReasoningEffort::XHigh => 0.9,
     };
     let budget = (max_tokens as f32 * frac) as u32;
     Some(budget.clamp(1024, max_tokens - 1))
@@ -421,7 +420,7 @@ mod tests {
     fn base_prompt() -> Prompt {
         Prompt {
             chain: ModelChain::new("claude-sonnet-4"),
-            effort: None,
+            effort: llm::ReasoningEffort::Low,
             system: vec![SystemBlock::Text { text: "sys".into() }],
             messages: vec![Message::User {
                 content: vec![UserBlock::Text { text: "hi".into() }],

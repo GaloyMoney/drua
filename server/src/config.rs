@@ -58,8 +58,8 @@ pub struct ProviderModelConfig {
     pub max_tokens_per_response: u32,
     #[serde(default = "default_context_window")]
     pub context_window_tokens: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<ReasoningEffort>,
+    #[serde(default, skip_serializing_if = "ReasoningEffort::is_low")]
+    pub effort: ReasoningEffort,
 }
 
 fn default_context_window() -> u64 {

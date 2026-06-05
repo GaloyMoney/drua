@@ -1182,7 +1182,7 @@ mod tests {
                     model: "test-model".into(),
                     max_tokens_per_response: 1024,
                     context_window_tokens: 200_000,
-                    effort: None,
+                    effort: llm::ReasoningEffort::Low,
                 },
                 fallbacks: Vec::new(),
             })
@@ -1672,7 +1672,7 @@ mod tests {
                     model: "test-model".into(),
                     max_tokens_per_response: 1024,
                     context_window_tokens: 100,
-                    effort: None,
+                    effort: llm::ReasoningEffort::Low,
                 },
                 fallbacks: Vec::new(),
             })

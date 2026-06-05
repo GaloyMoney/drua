@@ -14,19 +14,20 @@ use drua_core::{
 
 #[derive(Enum, Copy, Clone, Eq, PartialEq)]
 pub enum ReasoningEffort {
-    Minimal,
     Low,
     Medium,
     High,
+    #[graphql(name = "XHIGH")]
+    XHigh,
 }
 
 impl From<DomainReasoningEffort> for ReasoningEffort {
     fn from(e: DomainReasoningEffort) -> Self {
         match e {
-            DomainReasoningEffort::Minimal => Self::Minimal,
             DomainReasoningEffort::Low => Self::Low,
             DomainReasoningEffort::Medium => Self::Medium,
             DomainReasoningEffort::High => Self::High,
+            DomainReasoningEffort::XHigh => Self::XHigh,
         }
     }
 }
@@ -34,10 +35,10 @@ impl From<DomainReasoningEffort> for ReasoningEffort {
 impl From<ReasoningEffort> for DomainReasoningEffort {
     fn from(e: ReasoningEffort) -> Self {
         match e {
-            ReasoningEffort::Minimal => Self::Minimal,
             ReasoningEffort::Low => Self::Low,
             ReasoningEffort::Medium => Self::Medium,
             ReasoningEffort::High => Self::High,
+            ReasoningEffort::XHigh => Self::XHigh,
         }
     }
 }
@@ -105,7 +106,7 @@ impl From<drua_core::agent::ModelChain> for ModelChain {
             primary: ModelSpec {
                 name: c.primary.model,
                 max_tokens: Some(c.primary.max_tokens_per_response as i32),
-                effort: c.primary.effort.map(Into::into),
+                effort: Some(c.primary.effort.into()),
             },
             fallbacks: c
                 .fallbacks
@@ -113,7 +114,7 @@ impl From<drua_core::agent::ModelChain> for ModelChain {
                 .map(|m| ModelSpec {
                     name: m.model,
                     max_tokens: Some(m.max_tokens_per_response as i32),
-                    effort: m.effort.map(Into::into),
+                    effort: Some(m.effort.into()),
                 })
                 .collect(),
         }

@@ -26,8 +26,8 @@ pub struct ModelDefaults {
     pub model: String,
     pub max_tokens_per_response: u32,
     pub context_window_tokens: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub effort: Option<ReasoningEffort>,
+    #[serde(default, skip_serializing_if = "ReasoningEffort::is_low")]
+    pub effort: ReasoningEffort,
 }
 
 impl Default for ModelDefaults {
@@ -36,7 +36,7 @@ impl Default for ModelDefaults {
             model: String::new(),
             max_tokens_per_response: 4096,
             context_window_tokens: 200_000,
-            effort: None,
+            effort: ReasoningEffort::Low,
         }
     }
 }
@@ -79,7 +79,7 @@ fn resolve_entry(
         defaults.max_tokens_per_response = mt;
     }
     if let Some(effort) = spec.effort {
-        defaults.effort = Some(effort);
+        defaults.effort = effort;
     }
     Ok(defaults)
 }
@@ -179,7 +179,7 @@ mod tests {
             model: name.to_string(),
             max_tokens_per_response: 4096,
             context_window_tokens: 100_000,
-            effort: None,
+            effort: ReasoningEffort::Low,
         }
     }
 
@@ -228,7 +228,7 @@ mod tests {
                 model: "primary".into(),
                 max_tokens_per_response: 8192,
                 context_window_tokens: 200_000,
-                effort: None,
+                effort: ReasoningEffort::Low,
             },
         );
         cfg.models.insert(
@@ -237,7 +237,7 @@ mod tests {
                 model: "backup".into(),
                 max_tokens_per_response: 4096,
                 context_window_tokens: 128_000,
-                effort: None,
+                effort: ReasoningEffort::Low,
             },
         );
         cfg.builtin_roles
@@ -268,7 +268,7 @@ mod tests {
                 model: "primary".into(),
                 max_tokens_per_response: 8192,
                 context_window_tokens: 200_000,
-                effort: None,
+                effort: ReasoningEffort::Low,
             },
         );
         cfg.models.insert(
@@ -277,7 +277,7 @@ mod tests {
                 model: "backup".into(),
                 max_tokens_per_response: 4096,
                 context_window_tokens: 128_000,
-                effort: None,
+                effort: ReasoningEffort::Low,
             },
         );
         cfg.builtin_roles
@@ -300,7 +300,7 @@ mod tests {
         cfg.builtin_roles
             .insert(AgentRole::Agent, RoleConfig::default());
         let chain = cfg.resolve_chain(AgentRole::Agent, None).unwrap();
-        assert_eq!(chain.primary.effort, Some(ReasoningEffort::High));
+        assert_eq!(chain.primary.effort, ReasoningEffort::High);
     }
 
     #[test]

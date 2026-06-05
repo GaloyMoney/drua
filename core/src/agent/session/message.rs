@@ -197,18 +197,14 @@ impl From<Prompt> for llm::Prompt {
     fn from(p: Prompt) -> Self {
         let primary_effort = p.model_chain.primary.effort;
         let max_tokens = Some(p.model_chain.primary.max_tokens_per_response);
-        let mut primary = llm::ModelSpec::new(p.model_chain.primary.model)
-            .with_max_tokens(p.model_chain.primary.max_tokens_per_response);
-        if let Some(effort) = primary_effort {
-            primary = primary.with_effort(effort);
-        }
+        let primary = llm::ModelSpec::new(p.model_chain.primary.model)
+            .with_max_tokens(p.model_chain.primary.max_tokens_per_response)
+            .with_effort(primary_effort);
         let mut chain = llm::ModelChain::new(primary);
         for fallback in p.model_chain.fallbacks {
-            let mut spec = llm::ModelSpec::new(fallback.model)
-                .with_max_tokens(fallback.max_tokens_per_response);
-            if let Some(effort) = fallback.effort {
-                spec = spec.with_effort(effort);
-            }
+            let spec = llm::ModelSpec::new(fallback.model)
+                .with_max_tokens(fallback.max_tokens_per_response)
+                .with_effort(fallback.effort);
             chain = chain.with_fallback(spec);
         }
         llm::Prompt {

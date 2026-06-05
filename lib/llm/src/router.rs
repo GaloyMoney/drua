@@ -14,7 +14,7 @@ use crate::{Prompt, StreamHandle};
 pub struct ChainEntry {
     pub model_id: String,
     pub max_tokens: Option<u32>,
-    pub effort: Option<ReasoningEffort>,
+    pub effort: ReasoningEffort,
     pub provider: Arc<dyn LlmProvider>,
 }
 
@@ -200,7 +200,7 @@ mod tests {
         ChainEntry {
             model_id: model_id.to_string(),
             max_tokens: None,
-            effort: None,
+            effort: ReasoningEffort::Low,
             provider,
         }
     }

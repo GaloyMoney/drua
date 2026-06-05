@@ -259,7 +259,7 @@ impl ExecutorState {
                 Some(model) => entries.push(ChainEntry {
                     model_id: spec.name.clone(),
                     max_tokens: spec.max_tokens.or(model.default_max_tokens),
-                    effort: spec.effort,
+                    effort: spec.effort.unwrap_or(prompt.effort),
                     provider: model.client.clone(),
                 }),
                 None => {

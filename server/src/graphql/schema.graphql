@@ -498,7 +498,7 @@ enum ReasoningEffort {
 	HIGH
 	LOW
 	MEDIUM
-	MINIMAL
+	XHIGH
 }
 
 type Sandbox {
