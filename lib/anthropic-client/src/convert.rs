@@ -35,7 +35,7 @@ impl AnthropicCacheTtl {
     }
 }
 
-pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> AnthropicRequest {
+pub(crate) fn prompt_to_request(prompt: &llm::Prompt, spec: &llm::ModelSpec) -> AnthropicRequest {
     let messages: Vec<AnthropicMessage> = prompt.messages.iter().map(convert_message).collect();
 
     let system = if prompt.system.is_empty() {
@@ -53,10 +53,10 @@ pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> AnthropicRequest {
     let tool_choice = prompt.tool_choice.as_ref().map(convert_tool_choice);
 
     let mut request = AnthropicRequest {
-        model: prompt.chain.primary.name.clone(),
+        model: spec.name.clone(),
         messages,
         system,
-        max_tokens: prompt.max_tokens.unwrap_or(8192),
+        max_tokens: spec.max_tokens.unwrap_or(8192),
         temperature: None,
         tools,
         tool_choice,
@@ -390,7 +390,7 @@ impl AnthropicDeltaConverter {
 mod tests {
     use super::*;
     use llm::prompt::{Message, Prompt, SystemBlock, UserBlock};
-    use llm::ModelChain;
+    use llm::{ModelChain, ModelSpec};
 
     fn base_prompt() -> Prompt {
         Prompt {
@@ -401,14 +401,17 @@ mod tests {
             }],
             tools: vec![],
             tool_choice: None,
-            max_tokens: Some(1024),
             cache_key: None,
         }
     }
 
+    fn base_spec() -> ModelSpec {
+        ModelSpec::new("claude-fallback-id").with_max_tokens(1024)
+    }
+
     #[test]
     fn cache_marker_lands_on_last_user_block() {
-        let req = prompt_to_request(&base_prompt());
+        let req = prompt_to_request(&base_prompt(), &base_spec());
         let last = req.messages.last().unwrap();
         match &last.content[0] {
             AnthropicContent::Text { cache_control, .. } => {
@@ -425,14 +428,14 @@ mod tests {
     fn cache_marker_falls_through_to_system_when_no_messages() {
         let mut p = base_prompt();
         p.messages.clear();
-        let req = prompt_to_request(&p);
+        let req = prompt_to_request(&p, &base_spec());
         let sys = req.system.as_ref().unwrap().last().unwrap();
         assert!(sys.cache_control.is_some());
     }
 
     #[test]
-    fn primary_model_id_is_used() {
-        let req = prompt_to_request(&base_prompt());
-        assert_eq!(req.model, "claude-sonnet-4");
+    fn spec_model_id_lands_on_request_not_prompt_primary() {
+        let req = prompt_to_request(&base_prompt(), &base_spec());
+        assert_eq!(req.model, "claude-fallback-id");
     }
 }

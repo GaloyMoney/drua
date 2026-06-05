@@ -18,14 +18,13 @@ async fn anthropic_round_trip_via_executor() {
                 api_key,
                 base_url: None,
             },
-            default_max_tokens: Some(64),
         }],
     };
 
     let (_executor, prompt_tx) = PromptExecutor::init(config).await;
 
     let prompt = Prompt {
-        chain: llm::ModelChain::new(MODEL),
+        chain: llm::ModelChain::new(llm::ModelSpec::new(MODEL).with_max_tokens(64)),
         messages: vec![Message::User {
             content: vec![UserBlock::Text {
                 text: "Reply with the single word: pong".to_string(),
@@ -34,7 +33,6 @@ async fn anthropic_round_trip_via_executor() {
         system: Vec::new(),
         tools: Vec::new(),
         tool_choice: None,
-        max_tokens: None, // executor should fill this in from default_max_tokens
         cache_key: None,
     };
 

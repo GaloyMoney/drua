@@ -14,7 +14,7 @@ use tracing::{instrument, Instrument};
 
 use llm::provider::LlmProvider;
 use llm::stream::StreamDelta;
-use llm::{Prompt, PromptError, PromptResponse};
+use llm::{ModelSpec, Prompt, PromptError, PromptResponse};
 
 use crate::convert::{prompt_to_request, DeltaSynthesizer, EMPTY_COMPLETION_ERR};
 use crate::sse::{parse_sse_stream, SseError};
@@ -87,8 +87,9 @@ impl OpenAiClient {
     pub async fn send_prompt(
         &self,
         prompt: &Prompt,
+        spec: &ModelSpec,
     ) -> Result<PromptResponse, OpenAiChatCompletionsError> {
-        let rx = self.send_prompt_streaming_internal(prompt).await?;
+        let rx = self.send_prompt_streaming_internal(prompt, spec).await?;
         let mut rx = rx;
 
         let mut accumulator = llm::stream::StreamAccumulator::new();
@@ -174,11 +175,12 @@ impl OpenAiClient {
     async fn send_prompt_streaming_internal(
         &self,
         prompt: &Prompt,
+        spec: &ModelSpec,
     ) -> Result<
         tokio::sync::mpsc::Receiver<Result<StreamDelta, OpenAiChatCompletionsError>>,
         OpenAiChatCompletionsError,
     > {
-        let request_body = prompt_to_request(prompt);
+        let request_body = prompt_to_request(prompt, spec);
         let body_bytes = Arc::new(
             serde_json::to_vec(&request_body)
                 .map_err(|e| OpenAiChatCompletionsError::Stream(format!("body serialize: {e}")))?,
@@ -392,9 +394,10 @@ impl LlmProvider for OpenAiClient {
     async fn send_prompt_streaming(
         &self,
         prompt: &Prompt,
+        spec: &ModelSpec,
     ) -> Result<tokio::sync::mpsc::Receiver<Result<StreamDelta, PromptError>>, PromptError> {
         let rx = self
-            .send_prompt_streaming_internal(prompt)
+            .send_prompt_streaming_internal(prompt, spec)
             .await
             .map_err(classify)?;
 

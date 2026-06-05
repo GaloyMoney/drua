@@ -26,8 +26,6 @@ pub struct PromptExecutorConfig {
 pub struct ModelConfig {
     pub name: String,
     pub provider: Provider,
-    #[serde(default)]
-    pub default_max_tokens: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,8 +255,7 @@ impl ExecutorState {
         for spec in prompt.chain.iter() {
             match self.find(&spec.name) {
                 Some(model) => entries.push(ChainEntry {
-                    model_id: spec.name.clone(),
-                    max_tokens: spec.max_tokens.or(model.default_max_tokens),
+                    spec: spec.clone(),
                     provider: model.client.clone(),
                 }),
                 None => {
@@ -329,7 +326,6 @@ async fn evaluate_chain(entries: Vec<ChainEntry>, prompt: Prompt, response: Prom
 #[derive(Clone)]
 struct ResolvedModel {
     name: String,
-    default_max_tokens: Option<u32>,
     client: Arc<dyn LlmProvider>,
 }
 
@@ -354,7 +350,6 @@ impl ResolvedModel {
         };
         Self {
             name: config.name,
-            default_max_tokens: config.default_max_tokens,
             client,
         }
     }

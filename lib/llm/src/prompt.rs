@@ -13,8 +13,6 @@ pub struct Prompt {
     pub tools: Vec<Tool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_key: Option<String>,
 }
@@ -27,7 +25,6 @@ impl Default for Prompt {
             system: Vec::new(),
             tools: Vec::new(),
             tool_choice: None,
-            max_tokens: None,
             cache_key: None,
         }
     }
@@ -136,19 +133,19 @@ impl Prompt {
         #[derive(Serialize)]
         struct Hashable<'a> {
             primary_model: &'a str,
+            primary_max_tokens: Option<u32>,
             messages: &'a [Message],
             system: &'a [SystemBlock],
             tools: &'a [Tool],
             tool_choice: Option<&'a ToolChoice>,
-            max_tokens: Option<u32>,
         }
         let hashable = Hashable {
             primary_model: &self.chain.primary.name,
+            primary_max_tokens: self.chain.primary.max_tokens,
             messages: &self.messages,
             system: &self.system,
             tools: &self.tools,
             tool_choice: self.tool_choice.as_ref(),
-            max_tokens: self.max_tokens,
         };
         let value = serde_json::to_value(&hashable).expect("hashable is always serializable");
         let canonical = canonicalize(&value);
@@ -233,7 +230,9 @@ mod tests {
 
     fn sample_prompt(msg_text: &str) -> Prompt {
         Prompt {
-            chain: ModelChain::new(ModelSpec::new("claude-sonnet-4-20250514")),
+            chain: ModelChain::new(
+                ModelSpec::new("claude-sonnet-4-20250514").with_max_tokens(1024),
+            ),
             system: vec![SystemBlock::Text {
                 text: "You are a helpful assistant.".to_string(),
             }],
@@ -255,7 +254,6 @@ mod tests {
                 strict: false,
             }],
             tool_choice: None,
-            max_tokens: Some(1024),
             cache_key: None,
         }
     }
@@ -298,7 +296,6 @@ mod tests {
             }],
             tools: vec![],
             tool_choice: None,
-            max_tokens: None,
             cache_key: None,
         };
 

@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anthropic_client::AnthropicClient;
 use llm::prompt::{Message, SystemBlock, UserBlock};
-use llm::{ModelChain, Prompt};
+use llm::{ModelChain, ModelSpec, Prompt};
 
 const LIVE_TESTS_ENV: &str = "DRUA_LIVE_CACHE_TESTS";
 const API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
@@ -36,7 +36,7 @@ fn unique_nonce() -> String {
 /// `lib/llm` `Prompt` shape carries no cache hints.
 fn build_prompt(model: &str, system_text: String, user_text: impl Into<String>) -> Prompt {
     Prompt {
-        chain: ModelChain::new(model),
+        chain: ModelChain::new(ModelSpec::new(model).with_max_tokens(64)),
         messages: vec![Message::User {
             content: vec![UserBlock::Text {
                 text: user_text.into(),
@@ -45,7 +45,6 @@ fn build_prompt(model: &str, system_text: String, user_text: impl Into<String>) 
         system: vec![SystemBlock::Text { text: system_text }],
         tools: Vec::new(),
         tool_choice: None,
-        max_tokens: Some(64),
         cache_key: None,
     }
 }
@@ -99,8 +98,9 @@ async fn anthropic_reports_cache_write_then_cache_read_on_follow_up_prompt() {
         system_text.clone(),
         "Reply with the single word: seeded",
     );
+    let warm_spec = warm_prompt.chain.primary.clone();
     let warm_response = client
-        .send_prompt(&warm_prompt)
+        .send_prompt(&warm_prompt, &warm_spec)
         .await
         .expect("warm request should succeed");
     assert!(
@@ -121,8 +121,9 @@ async fn anthropic_reports_cache_write_then_cache_read_on_follow_up_prompt() {
             format!("Reply with the single word: warmed-{attempt}"),
         );
 
+        let spec = prompt.chain.primary.clone();
         let response = client
-            .send_prompt(&prompt)
+            .send_prompt(&prompt, &spec)
             .await
             .expect("follow-up request should succeed");
         cache_reads.push(response.usage.cache_read_input_tokens);

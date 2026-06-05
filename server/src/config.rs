@@ -95,7 +95,6 @@ impl Config {
                 models.push(ModelConfig {
                     name: model.name.clone(),
                     provider: provider.clone(),
-                    default_max_tokens: None,
                 });
             }
         }
