@@ -83,9 +83,7 @@ pub async fn walk(chain: &[ChainEntry], base: &Prompt) -> Result<WalkOutcome, Pr
         if let Some(mt) = entry.max_tokens {
             prompt.max_tokens = Some(mt);
         }
-        if let Some(effort) = entry.effort {
-            prompt.effort = Some(effort);
-        }
+        prompt.effort = entry.effort;
 
         match entry.provider.send_prompt_streaming(&prompt).await {
             Ok(rx) => {

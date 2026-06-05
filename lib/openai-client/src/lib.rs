@@ -16,7 +16,7 @@ use llm::provider::LlmProvider;
 use llm::stream::StreamDelta;
 use llm::{Prompt, PromptError, PromptResponse};
 
-use crate::convert::{prompt_to_request, DeltaSynthesizer, EMPTY_COMPLETION_ERR};
+use crate::convert::{prompt_to_request, DeltaSynthesizer, ReasoningDialect, EMPTY_COMPLETION_ERR};
 use crate::sse::{parse_sse_stream, SseError};
 
 pub use responses::{OpenAiResponsesAuth, OpenAiResponsesClient, OpenAiResponsesError};
@@ -36,6 +36,14 @@ const DEFAULT_RETRY_DELAY_SECS: u64 = 1;
 /// the gateway appears to synthesise a stop response when its own provider
 /// times out. Retrying once usually succeeds.
 const MAX_EMPTY_COMPLETION_RETRIES: u32 = 1;
+
+fn reasoning_dialect_for_base_url(base_url: &str) -> ReasoningDialect {
+    if base_url.to_ascii_lowercase().contains("openrouter.ai") {
+        ReasoningDialect::OpenRouter
+    } else {
+        ReasoningDialect::OpenAi
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum OpenAiChatCompletionsError {
@@ -63,6 +71,7 @@ pub struct OpenAiClient {
     http: reqwest::Client,
     api_key: String,
     api_url: String,
+    reasoning_dialect: ReasoningDialect,
 }
 
 impl OpenAiClient {
@@ -71,11 +80,13 @@ impl OpenAiClient {
             http: reqwest::Client::new(),
             api_key: api_key.into(),
             api_url: DEFAULT_API_URL.to_string(),
+            reasoning_dialect: ReasoningDialect::OpenAi,
         }
     }
 
     pub fn with_base_url(mut self, base_url: Option<String>) -> Self {
         if let Some(base) = base_url {
+            self.reasoning_dialect = reasoning_dialect_for_base_url(&base);
             let base = base.trim_end_matches('/');
             self.api_url = format!("{base}{API_PATH}");
         }
@@ -178,7 +189,7 @@ impl OpenAiClient {
         tokio::sync::mpsc::Receiver<Result<StreamDelta, OpenAiChatCompletionsError>>,
         OpenAiChatCompletionsError,
     > {
-        let request_body = prompt_to_request(prompt);
+        let request_body = prompt_to_request(prompt, self.reasoning_dialect);
         let body_bytes = Arc::new(
             serde_json::to_vec(&request_body)
                 .map_err(|e| OpenAiChatCompletionsError::Stream(format!("body serialize: {e}")))?,
@@ -414,7 +425,7 @@ impl LlmProvider for OpenAiClient {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_retry_after_seconds;
+    use super::{parse_retry_after_seconds, reasoning_dialect_for_base_url, ReasoningDialect};
 
     #[test]
     fn parses_openrouter_429_metadata() {
@@ -427,5 +438,17 @@ mod tests {
         assert_eq!(parse_retry_after_seconds(r#"{"error":{"code":500}}"#), None);
         assert_eq!(parse_retry_after_seconds("not json"), None);
         assert_eq!(parse_retry_after_seconds(""), None);
+    }
+
+    #[test]
+    fn reasoning_dialect_detects_openrouter() {
+        assert_eq!(
+            reasoning_dialect_for_base_url("https://openrouter.ai/api"),
+            ReasoningDialect::OpenRouter
+        );
+        assert_eq!(
+            reasoning_dialect_for_base_url("https://api.openai.com"),
+            ReasoningDialect::OpenAi
+        );
     }
 }

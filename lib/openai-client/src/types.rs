@@ -21,13 +21,11 @@ pub(crate) struct OpenAiRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<StreamOptions>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningConfig>,
 }
 
-/// OpenRouter's unified reasoning param. For OpenAI models `effort` maps to
-/// `reasoning_effort`; for Anthropic models OpenRouter translates it to a
-/// thinking `budget_tokens`. Drua's `openai` provider targets OpenRouter,
-/// so this single shape covers every configured model.
 #[derive(Debug, Serialize)]
 pub(crate) struct ReasoningConfig {
     pub effort: &'static str,

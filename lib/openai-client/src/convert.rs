@@ -12,6 +12,12 @@ use crate::types::{
     OpenAiToolChoiceFunction, OpenAiToolFunction, ReasoningConfig, StreamOptions,
 };
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReasoningDialect {
+    OpenAi,
+    OpenRouter,
+}
+
 fn reasoning_effort_str(effort: llm::ReasoningEffort) -> &'static str {
     match effort {
         llm::ReasoningEffort::Minimal => "minimal",
@@ -27,7 +33,10 @@ fn reasoning_effort_str(effort: llm::ReasoningEffort) -> &'static str {
 /// these as a passthrough field.
 const ANTHROPIC_MODEL_PREFIX: &str = "anthropic/";
 
-pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> OpenAiRequest {
+pub(crate) fn prompt_to_request(
+    prompt: &llm::Prompt,
+    reasoning_dialect: ReasoningDialect,
+) -> OpenAiRequest {
     let mut messages: Vec<OpenAiMessage> = Vec::new();
 
     for block in &prompt.system {
@@ -55,6 +64,7 @@ pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> OpenAiRequest {
 
     let tool_choice = prompt.tool_choice.as_ref().map(convert_tool_choice);
 
+    let effort = prompt.effort.map(reasoning_effort_str);
     let mut request = OpenAiRequest {
         model: prompt.chain.primary.name.clone(),
         messages,
@@ -67,9 +77,14 @@ pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> OpenAiRequest {
         stream_options: Some(StreamOptions {
             include_usage: true,
         }),
-        reasoning: prompt.effort.map(|e| ReasoningConfig {
-            effort: reasoning_effort_str(e),
-        }),
+        reasoning_effort: match reasoning_dialect {
+            ReasoningDialect::OpenAi => effort,
+            ReasoningDialect::OpenRouter => None,
+        },
+        reasoning: match reasoning_dialect {
+            ReasoningDialect::OpenAi => None,
+            ReasoningDialect::OpenRouter => effort.map(|effort| ReasoningConfig { effort }),
+        },
     };
 
     if request.model.starts_with(ANTHROPIC_MODEL_PREFIX) {
@@ -466,22 +481,34 @@ mod tests {
     fn reasoning_effort_serialized_when_set() {
         let mut prompt = sample_prompt();
         prompt.effort = Some(llm::ReasoningEffort::High);
-        let req = prompt_to_request(&prompt);
+        let req = prompt_to_request(&prompt, ReasoningDialect::OpenAi);
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["reasoning_effort"], "high");
+        assert!(json.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn openrouter_reasoning_serialized_when_set() {
+        let mut prompt = sample_prompt();
+        prompt.effort = Some(llm::ReasoningEffort::High);
+        let req = prompt_to_request(&prompt, ReasoningDialect::OpenRouter);
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["reasoning"]["effort"], "high");
+        assert!(json.get("reasoning_effort").is_none());
     }
 
     #[test]
     fn reasoning_omitted_when_effort_unset() {
-        let req = prompt_to_request(&sample_prompt());
+        let req = prompt_to_request(&sample_prompt(), ReasoningDialect::OpenAi);
         let json = serde_json::to_value(&req).unwrap();
         assert!(json.get("reasoning").is_none());
+        assert!(json.get("reasoning_effort").is_none());
     }
 
     #[test]
     fn prompt_to_request_basic() {
         let prompt = sample_prompt();
-        let req = prompt_to_request(&prompt);
+        let req = prompt_to_request(&prompt, ReasoningDialect::OpenAi);
 
         assert_eq!(req.model, "gpt-4o");
         assert!(req.stream);
@@ -500,7 +527,7 @@ mod tests {
         let mut prompt = sample_prompt();
         prompt.cache_key = Some("agent-session:test".to_string());
 
-        let req = prompt_to_request(&prompt);
+        let req = prompt_to_request(&prompt, ReasoningDialect::OpenAi);
         assert_eq!(req.prompt_cache_key.as_deref(), Some("agent-session:test"));
     }
 
@@ -534,7 +561,7 @@ mod tests {
             cache_key: None,
         };
 
-        let req = prompt_to_request(&prompt);
+        let req = prompt_to_request(&prompt, ReasoningDialect::OpenAi);
         assert_eq!(req.messages.len(), 2);
         assert_eq!(req.messages[0].role, "assistant");
         assert!(req.messages[0].tool_calls.is_some());
@@ -566,7 +593,7 @@ mod tests {
             cache_key: None,
         };
 
-        let req = prompt_to_request(&prompt);
+        let req = prompt_to_request(&prompt, ReasoningDialect::OpenAi);
         assert_eq!(req.messages.len(), 1);
         assert_eq!(
             content_text(&req.messages[0]),
@@ -894,7 +921,10 @@ mod tests {
 
     #[test]
     fn anthropic_via_openrouter_marks_last_user_text_block() {
-        let req = prompt_to_request(&anthropic_via_openrouter_prompt());
+        let req = prompt_to_request(
+            &anthropic_via_openrouter_prompt(),
+            ReasoningDialect::OpenRouter,
+        );
 
         let last = req.messages.last().expect("messages present");
         assert_eq!(last.role, "user");
@@ -928,7 +958,7 @@ mod tests {
         let mut prompt = anthropic_via_openrouter_prompt();
         prompt.chain = llm::ModelChain::new("openai/gpt-5-mini");
 
-        let req = prompt_to_request(&prompt);
+        let req = prompt_to_request(&prompt, ReasoningDialect::OpenRouter);
 
         for msg in &req.messages {
             assert!(
@@ -956,7 +986,7 @@ mod tests {
         prompt.messages.clear();
         prompt.system.clear();
 
-        let req = prompt_to_request(&prompt);
+        let req = prompt_to_request(&prompt, ReasoningDialect::OpenRouter);
 
         let tool = req
             .tools
@@ -969,7 +999,10 @@ mod tests {
 
     #[test]
     fn anthropic_serialised_request_has_cache_control_inside_content_block() {
-        let req = prompt_to_request(&anthropic_via_openrouter_prompt());
+        let req = prompt_to_request(
+            &anthropic_via_openrouter_prompt(),
+            ReasoningDialect::OpenRouter,
+        );
         let json = serde_json::to_value(&req).unwrap();
 
         // Wire-format check: the marker is nested inside a content block on
