@@ -1,4 +1,5 @@
 use drua_core::prompt_executor::{ModelConfig, PromptExecutor, PromptExecutorConfig, Provider};
+use drua_core::ReasoningEffort;
 use llm::prompt::{Message, UserBlock};
 use llm::{Prompt, PromptRequest};
 
@@ -35,7 +36,7 @@ async fn anthropic_round_trip_via_executor() {
         tools: Vec::new(),
         tool_choice: None,
         max_tokens: None, // executor should fill this in from default_max_tokens
-        effort: llm::ReasoningEffort::Low,
+        effort: ReasoningEffort::Low,
         cache_key: None,
     };
 

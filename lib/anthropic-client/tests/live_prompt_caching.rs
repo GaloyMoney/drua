@@ -3,7 +3,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anthropic_client::AnthropicClient;
 use llm::prompt::{Message, SystemBlock, UserBlock};
-use llm::{ModelChain, Prompt};
+use llm::{ModelChain, Prompt, ReasoningEffort};
 
 const LIVE_TESTS_ENV: &str = "DRUA_LIVE_CACHE_TESTS";
 const API_KEY_ENV: &str = "ANTHROPIC_API_KEY";
@@ -37,7 +37,7 @@ fn unique_nonce() -> String {
 fn build_prompt(model: &str, system_text: String, user_text: impl Into<String>) -> Prompt {
     Prompt {
         chain: ModelChain::new(model),
-        effort: llm::ReasoningEffort::Low,
+        effort: ReasoningEffort::Low,
         messages: vec![Message::User {
             content: vec![UserBlock::Text {
                 text: user_text.into(),

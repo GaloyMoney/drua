@@ -7,6 +7,8 @@
 ///   DATABASE_URL=postgres://user:password@localhost:5432/drua cargo nextest run -p drua-server
 use std::collections::HashMap;
 
+use drua_core::ReasoningEffort;
+
 const PG_CON: &str = "postgres://user:password@localhost:5432/drua";
 
 async fn pool() -> sqlx::PgPool {
@@ -96,7 +98,7 @@ async fn test_app(pool: &sqlx::PgPool) -> drua_core::App {
             model: model_name,
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
-            effort: drua_core::ReasoningEffort::Low,
+            effort: ReasoningEffort::Low,
         },
     );
 

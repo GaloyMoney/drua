@@ -27,7 +27,7 @@ use drua_core::agent::{AgentRole, AgentsConfig, ModelDefaults, RoleConfig};
 use drua_core::library::LibraryConfig;
 use drua_core::primitives::{AuthSubject, UserId};
 use drua_core::skill::SKILL_DOC_TYPE;
-use drua_core::{App, AppConfig};
+use drua_core::{App, AppConfig, ReasoningEffort};
 
 const PG_CON: &str = "postgres://user:password@localhost:5432/drua";
 
@@ -146,7 +146,7 @@ fn agents_config_for_tests() -> AgentsConfig {
             model,
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
-            effort: drua_core::ReasoningEffort::Low,
+            effort: ReasoningEffort::Low,
         },
     );
     AgentsConfig {

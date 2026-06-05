@@ -443,6 +443,7 @@ impl PromptDefinition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ReasoningEffort;
 
     fn tool_def(name: &str) -> ToolDefinition {
         ToolDefinition {
@@ -465,7 +466,7 @@ mod tests {
                 model: "test-model".into(),
                 max_tokens_per_response: 8192,
                 context_window_tokens: 200_000,
-                effort: llm::ReasoningEffort::Low,
+                effort: ReasoningEffort::Low,
             },
             fallbacks: Vec::new(),
         }
