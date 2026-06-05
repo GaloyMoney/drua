@@ -96,6 +96,7 @@ async fn test_app(pool: &sqlx::PgPool) -> drua_core::App {
             model: model_name,
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
+            effort: None,
         },
     );
 

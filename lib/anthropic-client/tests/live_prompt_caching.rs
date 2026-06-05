@@ -37,6 +37,7 @@ fn unique_nonce() -> String {
 fn build_prompt(model: &str, system_text: String, user_text: impl Into<String>) -> Prompt {
     Prompt {
         chain: ModelChain::new(model),
+        effort: None,
         messages: vec![Message::User {
             content: vec![UserBlock::Text {
                 text: user_text.into(),

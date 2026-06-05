@@ -42,6 +42,7 @@ fn build_prompt(
 ) -> Prompt {
     Prompt {
         chain: ModelChain::new(model),
+        effort: None,
         messages: vec![Message::User {
             content: vec![UserBlock::Text {
                 text: user_text.into(),

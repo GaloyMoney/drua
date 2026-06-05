@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::config::{AuthConfig, LoginMethod};
 use drua_core::agent::{AgentsConfig, ModelDefaults};
+use drua_core::ReasoningEffort;
 use drua_core::library::LibraryConfig;
 use drua_core::prompt_executor::{
     ModelConfig, OpenAiResponsesAuth, PromptExecutorConfig, Provider,
@@ -57,6 +58,8 @@ pub struct ProviderModelConfig {
     pub max_tokens_per_response: u32,
     #[serde(default = "default_context_window")]
     pub context_window_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReasoningEffort>,
 }
 
 fn default_context_window() -> u64 {
@@ -273,6 +276,7 @@ impl Config {
                         model: model.name.clone(),
                         max_tokens_per_response: model.max_tokens_per_response,
                         context_window_tokens: model.context_window_tokens,
+                        effort: model.effort,
                     },
                 );
             }

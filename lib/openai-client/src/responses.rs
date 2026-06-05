@@ -7,7 +7,7 @@ use llm::prompt::{
 };
 use llm::provider::LlmProvider;
 use llm::stream::StreamDelta;
-use llm::{Prompt, PromptError};
+use llm::{Prompt, PromptError, ReasoningEffort};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -320,6 +320,15 @@ struct ResponsesReasoningConfig {
     summary: &'static str,
 }
 
+fn responses_effort_str(effort: ReasoningEffort) -> &'static str {
+    match effort {
+        ReasoningEffort::Minimal => "minimal",
+        ReasoningEffort::Low => "low",
+        ReasoningEffort::Medium => "medium",
+        ReasoningEffort::High => "high",
+    }
+}
+
 fn prompt_to_responses_request(prompt: &Prompt, auth: &OpenAiResponsesAuth) -> ResponsesRequest {
     let mut input = Vec::new();
 
@@ -363,7 +372,10 @@ fn prompt_to_responses_request(prompt: &Prompt, auth: &OpenAiResponsesAuth) -> R
         },
         include: vec!["reasoning.encrypted_content"],
         reasoning: ResponsesReasoningConfig {
-            effort: DEFAULT_REASONING_EFFORT,
+            effort: prompt
+                .effort
+                .map(responses_effort_str)
+                .unwrap_or(DEFAULT_REASONING_EFFORT),
             summary: "auto",
         },
     }
@@ -1050,6 +1062,7 @@ mod tests {
     fn sample_prompt() -> Prompt {
         Prompt {
             chain: llm::ModelChain::new("gpt-5.4-mini"),
+            effort: None,
             messages: vec![Message::User {
                 content: vec![UserBlock::Text {
                     text: "hello".to_string(),

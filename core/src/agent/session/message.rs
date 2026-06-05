@@ -195,20 +195,26 @@ pub enum StopReason {
 
 impl From<Prompt> for llm::Prompt {
     fn from(p: Prompt) -> Self {
+        let primary_effort = p.model_chain.primary.effort;
         let max_tokens = Some(p.model_chain.primary.max_tokens_per_response);
-        let mut chain = llm::ModelChain::new(
-            llm::ModelSpec::new(p.model_chain.primary.model)
-                .with_max_tokens(p.model_chain.primary.max_tokens_per_response),
-        );
+        let mut primary = llm::ModelSpec::new(p.model_chain.primary.model)
+            .with_max_tokens(p.model_chain.primary.max_tokens_per_response);
+        if let Some(effort) = primary_effort {
+            primary = primary.with_effort(effort);
+        }
+        let mut chain = llm::ModelChain::new(primary);
         for fallback in p.model_chain.fallbacks {
-            chain = chain.with_fallback(
-                llm::ModelSpec::new(fallback.model)
-                    .with_max_tokens(fallback.max_tokens_per_response),
-            );
+            let mut spec = llm::ModelSpec::new(fallback.model)
+                .with_max_tokens(fallback.max_tokens_per_response);
+            if let Some(effort) = fallback.effort {
+                spec = spec.with_effort(effort);
+            }
+            chain = chain.with_fallback(spec);
         }
         llm::Prompt {
             chain,
             max_tokens,
+            effort: primary_effort,
             cache_key: p.cache_key,
             system: p
                 .system

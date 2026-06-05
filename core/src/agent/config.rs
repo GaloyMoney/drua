@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use llm::ModelChain as LlmModelChain;
+use llm::{ModelChain as LlmModelChain, ReasoningEffort};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::error::AgentError;
@@ -26,6 +26,8 @@ pub struct ModelDefaults {
     pub model: String,
     pub max_tokens_per_response: u32,
     pub context_window_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReasoningEffort>,
 }
 
 impl Default for ModelDefaults {
@@ -34,6 +36,7 @@ impl Default for ModelDefaults {
             model: String::new(),
             max_tokens_per_response: 4096,
             context_window_tokens: 200_000,
+            effort: None,
         }
     }
 }
@@ -74,6 +77,9 @@ fn resolve_entry(
         .ok_or_else(|| AgentError::ModelNotConfigured(spec.name.clone()))?;
     if let Some(mt) = spec.max_tokens {
         defaults.max_tokens_per_response = mt;
+    }
+    if let Some(effort) = spec.effort {
+        defaults.effort = Some(effort);
     }
     Ok(defaults)
 }
@@ -173,6 +179,7 @@ mod tests {
             model: name.to_string(),
             max_tokens_per_response: 4096,
             context_window_tokens: 100_000,
+            effort: None,
         }
     }
 
@@ -221,6 +228,7 @@ mod tests {
                 model: "primary".into(),
                 max_tokens_per_response: 8192,
                 context_window_tokens: 200_000,
+                effort: None,
             },
         );
         cfg.models.insert(
@@ -229,6 +237,7 @@ mod tests {
                 model: "backup".into(),
                 max_tokens_per_response: 4096,
                 context_window_tokens: 128_000,
+                effort: None,
             },
         );
         cfg.builtin_roles
@@ -259,6 +268,7 @@ mod tests {
                 model: "primary".into(),
                 max_tokens_per_response: 8192,
                 context_window_tokens: 200_000,
+                effort: None,
             },
         );
         cfg.models.insert(
@@ -267,6 +277,7 @@ mod tests {
                 model: "backup".into(),
                 max_tokens_per_response: 4096,
                 context_window_tokens: 128_000,
+                effort: None,
             },
         );
         cfg.builtin_roles
@@ -275,6 +286,21 @@ mod tests {
         assert_eq!(chain.primary.max_tokens_per_response, 2048);
         assert_eq!(chain.fallbacks[0].max_tokens_per_response, 1024);
         assert_eq!(chain.fallbacks[1].max_tokens_per_response, 4096);
+    }
+
+    #[test]
+    fn spec_effort_overrides_registry() {
+        let mut cfg = AgentsConfig {
+            default_chain: Some(LlmModelChain::new(
+                llm::ModelSpec::new("primary").with_effort(ReasoningEffort::High),
+            )),
+            ..Default::default()
+        };
+        cfg.models.insert("primary".into(), defaults_for("primary"));
+        cfg.builtin_roles
+            .insert(AgentRole::Agent, RoleConfig::default());
+        let chain = cfg.resolve_chain(AgentRole::Agent, None).unwrap();
+        assert_eq!(chain.primary.effort, Some(ReasoningEffort::High));
     }
 
     #[test]

@@ -146,6 +146,7 @@ fn agents_config_for_tests() -> AgentsConfig {
             model,
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
+            effort: None,
         },
     );
     AgentsConfig {

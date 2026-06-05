@@ -14,7 +14,7 @@ pub use request::{
     StreamHandle, TerminalKind, TransientKind,
 };
 pub use response::{PromptResponse, RequestToolUse, StopReason, Usage};
-pub use spec::{ModelChain, ModelSpec};
+pub use spec::{ModelChain, ModelSpec, ReasoningEffort};
 pub use tool::{
     ToolUseError, ToolUseRequest, ToolUseRequestChannel, ToolUseResponseChannel, ToolUseResult,
 };

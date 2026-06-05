@@ -9,8 +9,17 @@ use llm::StopReason;
 use crate::types::{
     OpenAiCacheControl, OpenAiContentBlock, OpenAiFunction, OpenAiMessage, OpenAiMessageContent,
     OpenAiRequest, OpenAiRequestToolCall, OpenAiStreamChunk, OpenAiTool, OpenAiToolChoice,
-    OpenAiToolChoiceFunction, OpenAiToolFunction, StreamOptions,
+    OpenAiToolChoiceFunction, OpenAiToolFunction, ReasoningConfig, StreamOptions,
 };
+
+fn reasoning_effort_str(effort: llm::ReasoningEffort) -> &'static str {
+    match effort {
+        llm::ReasoningEffort::Minimal => "minimal",
+        llm::ReasoningEffort::Low => "low",
+        llm::ReasoningEffort::Medium => "medium",
+        llm::ReasoningEffort::High => "high",
+    }
+}
 
 /// OpenRouter routes any model id starting with `anthropic/` to Anthropic
 /// upstream, where prompt caching only engages on requests carrying explicit
@@ -58,6 +67,11 @@ pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> OpenAiRequest {
         stream_options: Some(StreamOptions {
             include_usage: true,
         }),
+        reasoning: prompt
+            .effort
+            .map(|e| ReasoningConfig {
+                effort: reasoning_effort_str(e),
+            }),
     };
 
     if request.model.starts_with(ANTHROPIC_MODEL_PREFIX) {
@@ -429,6 +443,7 @@ mod tests {
     fn sample_prompt() -> llm::Prompt {
         llm::Prompt {
             chain: llm::ModelChain::new("gpt-4o"),
+            effort: None,
             system: vec![SystemBlock::Text {
                 text: "You are a helpful assistant.".to_string(),
             }],
@@ -447,6 +462,22 @@ mod tests {
             max_tokens: Some(1024),
             cache_key: None,
         }
+    }
+
+    #[test]
+    fn reasoning_effort_serialized_when_set() {
+        let mut prompt = sample_prompt();
+        prompt.effort = Some(llm::ReasoningEffort::High);
+        let req = prompt_to_request(&prompt);
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["reasoning"]["effort"], "high");
+    }
+
+    #[test]
+    fn reasoning_omitted_when_effort_unset() {
+        let req = prompt_to_request(&sample_prompt());
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("reasoning").is_none());
     }
 
     #[test]
@@ -479,6 +510,7 @@ mod tests {
     fn prompt_with_tool_results() {
         let prompt = llm::Prompt {
             chain: llm::ModelChain::new("gpt-4o"),
+            effort: None,
             system: vec![],
             messages: vec![
                 Message::Assistant {
@@ -517,6 +549,7 @@ mod tests {
     fn thinking_blocks_dropped() {
         let prompt = llm::Prompt {
             chain: llm::ModelChain::new("gpt-4o"),
+            effort: None,
             system: vec![],
             messages: vec![Message::Assistant {
                 content: vec![
@@ -840,6 +873,7 @@ mod tests {
     fn anthropic_via_openrouter_prompt() -> llm::Prompt {
         llm::Prompt {
             chain: llm::ModelChain::new("anthropic/claude-sonnet-4.6"),
+            effort: None,
             system: vec![SystemBlock::Text {
                 text: "system instructions".to_string(),
             }],

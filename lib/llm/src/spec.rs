@@ -2,11 +2,27 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Provider-agnostic reasoning level; each client maps it to its own wire
+/// shape (OpenAI `reasoning_effort`, OpenRouter `reasoning.effort`,
+/// Anthropic thinking `budget_tokens`).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    Minimal,
+    Low,
+    Medium,
+    High,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ModelSpec {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReasoningEffort>,
 }
 
 impl ModelSpec {
@@ -14,11 +30,17 @@ impl ModelSpec {
         Self {
             name: name.into(),
             max_tokens: None,
+            effort: None,
         }
     }
 
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = Some(max_tokens);
+        self
+    }
+
+    pub fn with_effort(mut self, effort: ReasoningEffort) -> Self {
+        self.effort = Some(effort);
         self
     }
 }
