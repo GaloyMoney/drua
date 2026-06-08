@@ -542,6 +542,7 @@ mod tests {
                 schedule: "0 */6 * * * *".to_string(),
                 timezone: Some("UTC".to_string()),
                 condition: None,
+                paused: false,
             })
             .steps(vec![sample_step()])
             .build()

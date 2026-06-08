@@ -326,6 +326,11 @@ type Mutation {
 	sandboxSuspend(input: SandboxSuspendInput!): SandboxSuspendPayload!
 	skillDelete(input: SkillDeleteInput!): SkillDeletePayload!
 	workflowDelete(input: WorkflowDeleteInput!): WorkflowDeletePayload!
+	"""
+	Pause or resume a cron workflow without deleting it. Errors if
+	the workflow is not cron-triggered.
+	"""
+	workflowSetPaused(input: WorkflowSetPausedInput!): WorkflowSetPausedPayload!
 	workflowTrigger(input: WorkflowTriggerInput!): WorkflowTriggerPayload!
 }
 
@@ -844,6 +849,15 @@ enum WorkflowSandboxKind {
 	SCRATCH
 }
 
+input WorkflowSetPausedInput {
+	definitionId: WorkflowDefinitionId!
+	paused: Boolean!
+}
+
+type WorkflowSetPausedPayload {
+	workflow: WorkflowDefinition!
+}
+
 type WorkflowStep {
 	condition: String
 	name: String!
@@ -899,6 +913,11 @@ type WorkflowTrigger {
 	cronTimezone: String
 	kind: WorkflowTriggerKind!
 	nextRunAt: Timestamp
+	"""
+	`true` when a cron workflow is paused — its schedule is retained
+	but runs are suspended. Always `false` for non-cron triggers.
+	"""
+	paused: Boolean!
 	provider: String
 	webhookUrl: String
 }

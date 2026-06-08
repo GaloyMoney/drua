@@ -115,6 +115,14 @@ enum WorkflowParams {
     Delete {
         definition_id: WorkflowDefinitionId,
     },
+    /// Temporarily stop a cron workflow without deleting it. The
+    /// schedule survives and is restored by `resume`.
+    Pause {
+        definition_id: WorkflowDefinitionId,
+    },
+    Resume {
+        definition_id: WorkflowDefinitionId,
+    },
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -309,6 +317,8 @@ impl WorkflowParams {
             Self::Run { .. } => "workflow.run",
             Self::Update { .. } => "workflow.update",
             Self::Delete { .. } => "workflow.delete",
+            Self::Pause { .. } => "workflow.pause",
+            Self::Resume { .. } => "workflow.resume",
         }
     }
 }
@@ -354,6 +364,10 @@ struct WorkflowDefinitionOutput {
     /// RFC3339 timestamp of the next scheduled fire for cron triggers.
     #[serde(skip_serializing_if = "Option::is_none")]
     next_run_at: Option<String>,
+    /// `true` when a cron workflow is paused (schedule retained, runs
+    /// suspended). Omitted for non-cron and unpaused workflows.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    paused: bool,
     steps: Vec<WorkflowStepOutput>,
     sandboxes: Vec<WorkflowSandboxOutput>,
 }
@@ -471,8 +485,8 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
         "properties": {
             "command": {
                 "type": "string",
-                "enum": ["create", "list", "get", "trigger", "runs", "run", "update", "delete"],
-                "description": "Which workflow operation to perform. `trigger` returns immediately with the freshly-spawned run. `runs` lists runs (truncated outputs); `run` returns a single run with full per-step output."
+                "enum": ["create", "list", "get", "trigger", "runs", "run", "update", "delete", "pause", "resume"],
+                "description": "Which workflow operation to perform. `trigger` returns immediately with the freshly-spawned run. `runs` lists runs (truncated outputs); `run` returns a single run with full per-step output. `pause`/`resume` temporarily stop/restart a cron workflow without deleting it."
             },
             "name": {
                 "type": "string",
@@ -622,7 +636,9 @@ impl TopLevelTool for WorkflowTool {
          `provider`/`manual`/`trigger_condition`+`update_trigger`, \
          `model_chain`+`clear_model_chain`), \
          `delete` (requires `definition_id`; cascades to runs and queues \
-         a `DeleteFile` on the canonical YAML)."
+         a `DeleteFile` on the canonical YAML), \
+         `pause`/`resume` (requires `definition_id`; cron workflows only — \
+         temporarily stop the schedule without deleting it, then restart it)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -925,6 +941,40 @@ impl TopLevelTool for WorkflowTool {
                 };
                 (text, out)
             }
+
+            WorkflowParams::Pause { definition_id } => {
+                let definition = self
+                    .workflows
+                    .set_cron_paused(subject, definition_id, true)
+                    .await
+                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                let text = format!("Workflow paused (id {definition_id}). Schedule is suspended; runs will not fire until resumed.");
+                let out = WorkflowOutput {
+                    command: "pause".to_string(),
+                    definition: Some(definition_to_output(&definition)),
+                    ..Default::default()
+                };
+                (text, out)
+            }
+
+            WorkflowParams::Resume { definition_id } => {
+                let definition = self
+                    .workflows
+                    .set_cron_paused(subject, definition_id, false)
+                    .await
+                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                let next = match definition.trigger.next_fire_at(chrono::Utc::now()) {
+                    Ok(Some(t)) => format!(" Next run at {}.", t.to_rfc3339()),
+                    _ => String::new(),
+                };
+                let text = format!("Workflow resumed (id {definition_id}).{next}");
+                let out = WorkflowOutput {
+                    command: "resume".to_string(),
+                    definition: Some(definition_to_output(&definition)),
+                    ..Default::default()
+                };
+                (text, out)
+            }
         };
 
         let structured = serde_json::to_value(&out).expect("WorkflowOutput serialization");
@@ -965,6 +1015,7 @@ fn definition_to_output(d: &WorkflowDefinition) -> WorkflowDefinitionOutput {
         cron_schedule,
         cron_timezone,
         next_run_at,
+        paused: d.trigger.is_paused(),
         steps: d.steps.iter().map(step_to_output).collect(),
         sandboxes: d.sandboxes.iter().map(sandbox_to_output).collect(),
     }
@@ -1164,7 +1215,15 @@ fn format_list_text(defs: &[WorkflowDefinition]) -> String {
                 Some(p) => format!("webhook:{p}"),
                 None => "webhook".to_string(),
             },
-            WorkflowTrigger::Cron { schedule, .. } => format!("cron:{schedule}"),
+            WorkflowTrigger::Cron {
+                schedule, paused, ..
+            } => {
+                if *paused {
+                    format!("cron:{schedule} (paused)")
+                } else {
+                    format!("cron:{schedule}")
+                }
+            }
         };
         lines.push(format!(
             "{:<38} {:<24} {:<14} {}",
@@ -1190,13 +1249,22 @@ fn format_get_text(d: &WorkflowDefinition) -> String {
             format!("{label}\n  webhook_secret: {secret}")
         }
         trigger @ WorkflowTrigger::Cron {
-            schedule, timezone, ..
+            schedule,
+            timezone,
+            paused,
+            ..
         } => {
             let mut s = format!("cron\n  schedule:    {schedule}");
             let tz_label = timezone.as_deref().unwrap_or("UTC");
             s.push_str(&format!("\n  timezone:    {tz_label}"));
-            if let Ok(Some(next)) = trigger.next_fire_at(chrono::Utc::now()) {
-                s.push_str(&format!("\n  next_run_at: {}", next.to_rfc3339()));
+            s.push_str(&format!(
+                "\n  status:      {}",
+                if *paused { "paused" } else { "active" }
+            ));
+            if !*paused {
+                if let Ok(Some(next)) = trigger.next_fire_at(chrono::Utc::now()) {
+                    s.push_str(&format!("\n  next_run_at: {}", next.to_rfc3339()));
+                }
             }
             s
         }

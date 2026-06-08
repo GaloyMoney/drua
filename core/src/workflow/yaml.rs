@@ -190,6 +190,8 @@ enum WorkflowTriggerYaml {
         timezone: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         condition: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        paused: bool,
     },
 }
 
@@ -217,10 +219,12 @@ impl WorkflowTriggerYaml {
                 schedule,
                 timezone,
                 condition,
+                paused,
             } => WorkflowTriggerYaml::Cron {
                 schedule: schedule.clone(),
                 timezone: timezone.clone(),
                 condition: condition.clone(),
+                paused: *paused,
             },
         }
     }
@@ -453,10 +457,12 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
             schedule,
             timezone,
             condition,
+            paused,
         } => WorkflowTrigger::Cron {
             schedule,
             timezone,
             condition,
+            paused,
         },
     };
 
@@ -685,6 +691,7 @@ steps:
             schedule: "0 */6 * * * *".to_string(),
             timezone: Some("America/New_York".to_string()),
             condition: None,
+            paused: false,
         };
         let content = render(id, "scheduled", None, &trigger, &sample_sandboxes());
         assert!(content.contains("type: cron"));
@@ -702,6 +709,23 @@ steps:
             }
             _ => panic!("expected cron trigger"),
         }
+    }
+
+    #[test]
+    fn workflow_yaml_roundtrip_cron_trigger_paused() {
+        let id = WorkflowDefinitionId::new();
+        let trigger = WorkflowTrigger::Cron {
+            schedule: "0 */6 * * * *".to_string(),
+            timezone: None,
+            condition: None,
+            paused: true,
+        };
+        let content = render(id, "scheduled", None, &trigger, &sample_sandboxes());
+        assert!(content.contains("paused: true"));
+
+        let path = canonical_workflow_path("scheduled", None);
+        let parsed = parse_workflow_yaml(&content, &path).expect("parses");
+        assert!(parsed.trigger.is_paused());
     }
 
     #[test]

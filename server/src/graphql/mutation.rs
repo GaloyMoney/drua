@@ -281,6 +281,23 @@ impl Mutation {
         })
     }
 
+    /// Pause or resume a cron workflow without deleting it. Errors if
+    /// the workflow is not cron-triggered.
+    async fn workflow_set_paused(
+        &self,
+        ctx: &Context<'_>,
+        input: WorkflowSetPausedInput,
+    ) -> async_graphql::Result<WorkflowSetPausedPayload> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        let definition = app
+            .workflows()
+            .set_cron_paused(sub, input.definition_id, input.paused)
+            .await?;
+        Ok(WorkflowSetPausedPayload {
+            workflow: WorkflowDefinition::from(definition),
+        })
+    }
+
     async fn mcp_credentials_create(
         &self,
         ctx: &Context<'_>,

@@ -93,6 +93,9 @@ pub struct WorkflowTrigger {
     next_run_at: Option<Timestamp>,
     condition: Option<String>,
     webhook_url: Option<String>,
+    /// `true` when a cron workflow is paused — its schedule is retained
+    /// but runs are suspended. Always `false` for non-cron triggers.
+    paused: bool,
 }
 
 impl From<&DomainWorkflowTrigger> for WorkflowTrigger {
@@ -106,6 +109,7 @@ impl From<&DomainWorkflowTrigger> for WorkflowTrigger {
                 next_run_at: None,
                 condition: condition.clone(),
                 webhook_url: None,
+                paused: false,
             },
             DomainWorkflowTrigger::Webhook {
                 provider,
@@ -119,23 +123,30 @@ impl From<&DomainWorkflowTrigger> for WorkflowTrigger {
                 next_run_at: None,
                 condition: condition.clone(),
                 webhook_url: None,
+                paused: false,
             },
             DomainWorkflowTrigger::Cron {
                 schedule,
                 timezone,
                 condition,
+                paused,
             } => Self {
                 kind: WorkflowTriggerKind::Cron,
                 provider: None,
                 cron_schedule: Some(schedule.clone()),
                 cron_timezone: timezone.clone(),
-                next_run_at: trigger
-                    .next_fire_at(chrono::Utc::now())
-                    .ok()
-                    .flatten()
-                    .map(Into::into),
+                next_run_at: if *paused {
+                    None
+                } else {
+                    trigger
+                        .next_fire_at(chrono::Utc::now())
+                        .ok()
+                        .flatten()
+                        .map(Into::into)
+                },
                 condition: condition.clone(),
                 webhook_url: None,
+                paused: *paused,
             },
         }
     }
@@ -446,6 +457,17 @@ pub struct WorkflowTriggerInput {
 pub struct WorkflowTriggerPayload {
     pub run: Option<WorkflowRun>,
     pub filtered: bool,
+}
+
+#[derive(InputObject)]
+pub struct WorkflowSetPausedInput {
+    pub definition_id: WorkflowDefinitionId,
+    pub paused: bool,
+}
+
+#[derive(SimpleObject)]
+pub struct WorkflowSetPausedPayload {
+    pub workflow: WorkflowDefinition,
 }
 
 pub fn limit<T>(items: Vec<T>, first: i32) -> Vec<T> {

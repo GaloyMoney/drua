@@ -126,6 +126,11 @@ pub enum WorkflowTrigger {
         /// today for uniformity.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         condition: Option<String>,
+        /// Temporary stop. The self-rescheduling cron job keeps
+        /// ticking but skips firing runs while this is `true`, so the
+        /// schedule survives and resume needs no re-registration.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        paused: bool,
     },
 }
 
@@ -147,6 +152,10 @@ impl WorkflowTrigger {
             Self::Webhook { .. } => "webhook",
             Self::Cron { .. } => "cron",
         }
+    }
+
+    pub fn is_paused(&self) -> bool {
+        matches!(self, Self::Cron { paused: true, .. })
     }
 
     /// `None` when this is not a cron trigger, or when the cron
@@ -608,6 +617,7 @@ mod tests {
             schedule: "0 0 */6 * * *".to_string(),
             timezone: None,
             condition: None,
+            paused: false,
         };
         let next = trigger
             .next_fire_at(now)
@@ -622,6 +632,7 @@ mod tests {
             schedule: "0 0 */6 * * *".to_string(),
             timezone: Some("Not/AZone".to_string()),
             condition: None,
+            paused: false,
         };
         let err = trigger.next_fire_at(chrono::Utc::now()).unwrap_err();
         assert!(err.contains("invalid timezone"));
@@ -633,6 +644,7 @@ mod tests {
             schedule: "0 */6 * * * *".to_string(),
             timezone: Some("UTC".to_string()),
             condition: None,
+            paused: false,
         };
         let s = serde_yaml::to_string(&trigger).unwrap();
         assert!(s.contains("type: cron"));
@@ -645,6 +657,7 @@ mod tests {
                 schedule,
                 timezone,
                 condition,
+                ..
             } => {
                 assert_eq!(schedule, "0 */6 * * * *");
                 assert_eq!(timezone.as_deref(), Some("UTC"));
@@ -660,9 +673,43 @@ mod tests {
             schedule: "0 */6 * * * *".to_string(),
             timezone: None,
             condition: None,
+            paused: false,
         };
         let s = serde_yaml::to_string(&trigger).unwrap();
         assert!(!s.contains("timezone"));
+    }
+
+    #[test]
+    fn cron_trigger_paused_round_trips_and_omits_when_false() {
+        let active = WorkflowTrigger::Cron {
+            schedule: "0 */6 * * * *".to_string(),
+            timezone: None,
+            condition: None,
+            paused: false,
+        };
+        let s = serde_yaml::to_string(&active).unwrap();
+        assert!(!s.contains("paused"), "paused omitted when false");
+        assert!(!active.is_paused());
+
+        let paused = WorkflowTrigger::Cron {
+            schedule: "0 */6 * * * *".to_string(),
+            timezone: None,
+            condition: None,
+            paused: true,
+        };
+        let s = serde_yaml::to_string(&paused).unwrap();
+        assert!(s.contains("paused: true"));
+        let back: WorkflowTrigger = serde_yaml::from_str(&s).unwrap();
+        assert!(back.is_paused());
+    }
+
+    /// Legacy cron triggers serialized before the `paused` field hydrate
+    /// to `false` (replay-safety on `WorkflowDefinitionEvent`).
+    #[test]
+    fn legacy_cron_trigger_without_paused_hydrates_unpaused() {
+        let yaml = "type: cron\nschedule: '0 0 * * * *'\n";
+        let trigger: WorkflowTrigger = serde_yaml::from_str(yaml).unwrap();
+        assert!(!trigger.is_paused());
     }
 
     #[test]

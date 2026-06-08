@@ -6,8 +6,10 @@
 //!   2. If the definition was deleted or its trigger is no longer
 //!      `Cron`, exits without rescheduling.
 //!   3. Otherwise spawns a run via [`Workflows::trigger_run_for_definition`]
-//!      with a `triggered_by: cron` context, then schedules the next
-//!      job at the cron expression's next fire time.
+//!      with a `triggered_by: cron` context (unless the trigger is
+//!      `paused`, in which case the run is skipped), then schedules the
+//!      next job at the cron expression's next fire time. A paused
+//!      schedule keeps ticking so resume needs no re-registration.
 //!
 //! Concurrency: every cron-fired run shares the existing
 //! `workflow:{definition_id}` queue used by `ExecuteRunConfig`, and the
@@ -108,10 +110,13 @@ impl JobRunner for TriggerCronRunner {
             }
         };
 
-        let (schedule, timezone) = match &definition.trigger {
+        let (schedule, timezone, paused) = match &definition.trigger {
             WorkflowTrigger::Cron {
-                schedule, timezone, ..
-            } => (schedule.clone(), timezone.clone()),
+                schedule,
+                timezone,
+                paused,
+                ..
+            } => (schedule.clone(), timezone.clone(), *paused),
             _ => {
                 tracing::info!("trigger no longer cron; schedule terminating");
                 return Ok(JobCompletion::Complete);
@@ -121,31 +126,36 @@ impl JobRunner for TriggerCronRunner {
         let definition_id = definition.id;
         let fired_at = chrono::Utc::now();
         let next_fire = definition.trigger.next_fire_at(fired_at);
-        let trigger_context = serde_json::json!({
-            "triggered_by": "cron",
-            "fired_at": fired_at.to_rfc3339(),
-            "schedule": schedule,
-            "timezone": timezone,
-        });
 
-        match super::Workflows::spawn_run_static(
-            &self.runs,
-            &self.execute_run_spawner,
-            definition,
-            trigger_context,
-        )
-        .await
-        {
-            Ok(Some(run)) => {
-                tracing::info!(run_id = %run.id, "cron-triggered workflow run spawned");
-            }
-            Ok(None) => {
-                tracing::info!(
-                    "cron-triggered run suppressed by trigger condition; schedule continues"
-                );
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "cron-triggered run spawn failed; continuing schedule");
+        if paused {
+            tracing::info!("cron schedule paused; skipping run, rescheduling next fire");
+        } else {
+            let trigger_context = serde_json::json!({
+                "triggered_by": "cron",
+                "fired_at": fired_at.to_rfc3339(),
+                "schedule": schedule,
+                "timezone": timezone,
+            });
+
+            match super::Workflows::spawn_run_static(
+                &self.runs,
+                &self.execute_run_spawner,
+                definition,
+                trigger_context,
+            )
+            .await
+            {
+                Ok(Some(run)) => {
+                    tracing::info!(run_id = %run.id, "cron-triggered workflow run spawned");
+                }
+                Ok(None) => {
+                    tracing::info!(
+                        "cron-triggered run suppressed by trigger condition; schedule continues"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "cron-triggered run spawn failed; continuing schedule");
+                }
             }
         }
 

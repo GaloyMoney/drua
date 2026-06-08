@@ -751,6 +751,46 @@ impl Workflows {
         Ok(definition)
     }
 
+    /// Temporarily stop (or resume) a cron workflow without deleting
+    /// it. Rebuilds the existing `Cron` trigger with `paused` flipped;
+    /// the in-flight cron job observes the change on its next tick.
+    /// Errors if the workflow is not cron-triggered.
+    #[instrument(name = "core.workflow.set_cron_paused", skip_all)]
+    pub async fn set_cron_paused(
+        &self,
+        sub: &AuthSubject,
+        id: WorkflowDefinitionId,
+        paused: bool,
+    ) -> Result<WorkflowDefinition, WorkflowError> {
+        let definition = self.repo.find_by_id(id).await?;
+        sub.can(
+            AuthVerb::Update,
+            AuthResource::Workflow(definition.project_id, Some(definition.id)),
+        )?;
+        let new_trigger = match &definition.trigger {
+            WorkflowTrigger::Cron {
+                schedule,
+                timezone,
+                condition,
+                ..
+            } => WorkflowTrigger::Cron {
+                schedule: schedule.clone(),
+                timezone: timezone.clone(),
+                condition: condition.clone(),
+                paused,
+            },
+            other => {
+                return Err(WorkflowError::InvalidDefinition(format!(
+                    "workflow '{}' is {}-triggered; only cron workflows can be paused/resumed",
+                    definition.name,
+                    other.kind_label()
+                )));
+            }
+        };
+        self.update(sub, id, None, None, Some(new_trigger), None, None, None)
+            .await
+    }
+
     async fn populate_attribution(&self) -> CommitAttribution {
         self.users.commit_attribution().await
     }
@@ -1318,6 +1358,7 @@ mod tests {
             schedule: "0 */6 * * * *".into(),
             timezone: Some("UTC".into()),
             condition: None,
+            paused: false,
         })
         .unwrap();
     }
@@ -1328,6 +1369,7 @@ mod tests {
             schedule: "not a cron".into(),
             timezone: None,
             condition: None,
+            paused: false,
         })
         .unwrap_err();
         assert!(matches!(err, WorkflowError::InvalidCronExpression(_)));
@@ -1339,6 +1381,7 @@ mod tests {
             schedule: "0 */6 * * * *".into(),
             timezone: Some("Mars/Olympus_Mons".into()),
             condition: None,
+            paused: false,
         })
         .unwrap_err();
         assert!(matches!(err, WorkflowError::InvalidTimezone(_)));
