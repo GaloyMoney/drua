@@ -751,33 +751,14 @@ impl Workflows {
         Ok(definition)
     }
 
-    /// Temporarily stop a cron workflow without deleting it. The
-    /// in-flight cron job observes the change on its next tick and
-    /// stops firing, while the schedule itself keeps ticking.
-    #[instrument(name = "core.workflow.pause", skip_all)]
-    pub async fn pause(
-        &self,
-        sub: &AuthSubject,
-        id: WorkflowDefinitionId,
-    ) -> Result<WorkflowDefinition, WorkflowError> {
-        self.set_paused(sub, id, true).await
-    }
-
-    /// Resume a paused cron workflow. Firing restarts at the next
-    /// scheduled tick; fires missed while paused are not backfilled.
-    #[instrument(name = "core.workflow.resume", skip_all)]
-    pub async fn resume(
-        &self,
-        sub: &AuthSubject,
-        id: WorkflowDefinitionId,
-    ) -> Result<WorkflowDefinition, WorkflowError> {
-        self.set_paused(sub, id, false).await
-    }
-
-    /// Rebuilds the `Cron` trigger with `paused` flipped. Errors if the
-    /// workflow is not cron-triggered; returns the definition unchanged
-    /// (no event, no commit) when already in the target state.
-    async fn set_paused(
+    /// Pause or resume a cron workflow without deleting it. While
+    /// paused the in-flight cron job keeps ticking but skips firing, so
+    /// resume needs no re-registration and fires missed while paused
+    /// are not backfilled. Errors if the workflow is not cron-triggered;
+    /// returns the definition unchanged (no event, no commit) when
+    /// already in the target state.
+    #[instrument(name = "core.workflow.set_paused", skip_all)]
+    pub async fn set_paused(
         &self,
         sub: &AuthSubject,
         id: WorkflowDefinitionId,

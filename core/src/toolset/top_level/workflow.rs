@@ -945,7 +945,7 @@ impl TopLevelTool for WorkflowTool {
             WorkflowParams::Pause { definition_id } => {
                 let definition = self
                     .workflows
-                    .pause(subject, definition_id)
+                    .set_paused(subject, definition_id, true)
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
                 let text = format!("Workflow paused (id {definition_id}). The schedule is retained; runs will not fire until resumed.");
@@ -960,7 +960,7 @@ impl TopLevelTool for WorkflowTool {
             WorkflowParams::Resume { definition_id } => {
                 let definition = self
                     .workflows
-                    .resume(subject, definition_id)
+                    .set_paused(subject, definition_id, false)
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
                 let next = match definition.trigger.next_run_at(chrono::Utc::now()) {

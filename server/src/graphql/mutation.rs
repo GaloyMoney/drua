@@ -289,11 +289,10 @@ impl Mutation {
         input: WorkflowSetPausedInput,
     ) -> async_graphql::Result<WorkflowSetPausedPayload> {
         let (app, sub) = app_and_sub_from_ctx!(ctx);
-        let definition = if input.paused {
-            app.workflows().pause(sub, input.definition_id).await?
-        } else {
-            app.workflows().resume(sub, input.definition_id).await?
-        };
+        let definition = app
+            .workflows()
+            .set_paused(sub, input.definition_id, input.paused)
+            .await?;
         Ok(WorkflowSetPausedPayload {
             workflow: WorkflowDefinition::from(definition),
         })
