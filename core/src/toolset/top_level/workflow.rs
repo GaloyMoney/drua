@@ -533,7 +533,7 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "definition_id": {
                 "type": "string",
-                "description": "Workflow definition ID — UUID for `get`/`runs`/`update`, UUID-or-name for `trigger` (the project-scoped workflow name resolves identically)."
+                "description": "Workflow definition ID — UUID for `get`/`runs`/`update`/`pause`/`resume`, UUID-or-name for `trigger` (the project-scoped workflow name resolves identically)."
             },
             "run_id": {
                 "type": "string",

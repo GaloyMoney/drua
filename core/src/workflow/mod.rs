@@ -764,38 +764,64 @@ impl Workflows {
         id: WorkflowDefinitionId,
         paused: bool,
     ) -> Result<WorkflowDefinition, WorkflowError> {
-        let definition = self.repo.find_by_id(id).await?;
-        sub.can(
-            AuthVerb::Update,
-            AuthResource::Workflow(definition.project_id, Some(definition.id)),
-        )?;
-        let new_trigger = match &definition.trigger {
-            WorkflowTrigger::Cron {
-                schedule,
-                timezone,
-                condition,
-                paused: current,
-            } => {
-                if *current == paused {
-                    return Ok(definition);
-                }
+        Audit::record_action_if_unset(if paused {
+            "workflow.pause"
+        } else {
+            "workflow.resume"
+        });
+
+        let result: Result<WorkflowDefinition, WorkflowError> = async {
+            let mut op = self.repo.begin_op().await?;
+            let mut definition = self.repo.find_by_id_in_op(&mut op, id).await?;
+            Audit::record_project_id(definition.project_id);
+            Audit::record_workflow_id(definition.id);
+            sub.can(
+                AuthVerb::Update,
+                AuthResource::Workflow(definition.project_id, Some(definition.id)),
+            )?;
+
+            let new_trigger = match &definition.trigger {
                 WorkflowTrigger::Cron {
-                    schedule: schedule.clone(),
-                    timezone: timezone.clone(),
-                    condition: condition.clone(),
-                    paused,
+                    schedule,
+                    timezone,
+                    condition,
+                    paused: current,
+                } => {
+                    if *current == paused {
+                        return Ok(definition);
+                    }
+                    WorkflowTrigger::Cron {
+                        schedule: schedule.clone(),
+                        timezone: timezone.clone(),
+                        condition: condition.clone(),
+                        paused,
+                    }
                 }
+                other => {
+                    return Err(WorkflowError::InvalidDefinition(format!(
+                        "workflow '{}' is {}-triggered; only cron workflows can be paused/resumed",
+                        definition.name,
+                        other.kind_label()
+                    )));
+                }
+            };
+
+            Self::validate_trigger(&new_trigger)?;
+            if definition
+                .update_content(None, None, Some(new_trigger), None, None, None)
+                .did_execute()
+            {
+                self.populate_attribution().await;
+                self.repo.update_in_op(&mut op, &mut definition).await?;
+                op.commit().await?;
             }
-            other => {
-                return Err(WorkflowError::InvalidDefinition(format!(
-                    "workflow '{}' is {}-triggered; only cron workflows can be paused/resumed",
-                    definition.name,
-                    other.kind_label()
-                )));
-            }
-        };
-        self.update(sub, id, None, None, Some(new_trigger), None, None, None)
-            .await
+            Ok(definition)
+        }
+        .await;
+        if let Err(e) = &result {
+            Audit::record_error(e.to_string());
+        }
+        result
     }
 
     async fn populate_attribution(&self) -> CommitAttribution {
