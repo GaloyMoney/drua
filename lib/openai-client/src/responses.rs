@@ -7,7 +7,7 @@ use llm::prompt::{
 };
 use llm::provider::LlmProvider;
 use llm::stream::StreamDelta;
-use llm::{Prompt, PromptError};
+use llm::{Prompt, PromptError, ReasoningEffort};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -20,7 +20,6 @@ const DEFAULT_SUBSCRIPTION_API_URL: &str = "https://chatgpt.com/backend-api/code
 const RESPONSES_API_PATH: &str = "/v1/responses";
 const SUBSCRIPTION_API_PATH: &str = "/backend-api/codex/responses";
 const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 4096;
-const DEFAULT_REASONING_EFFORT: &str = "low";
 const DEFAULT_TEXT_VERBOSITY: &str = "medium";
 const OPENAI_RESPONSES_SUBSCRIPTION_TOKEN_ENV: &str = "OPENAI_CODEX_ACCESS_TOKEN";
 
@@ -320,6 +319,15 @@ struct ResponsesReasoningConfig {
     summary: &'static str,
 }
 
+fn responses_effort_str(effort: ReasoningEffort) -> &'static str {
+    match effort {
+        ReasoningEffort::Low => "low",
+        ReasoningEffort::Medium => "medium",
+        ReasoningEffort::High => "high",
+        ReasoningEffort::XHigh => "xhigh",
+    }
+}
+
 fn prompt_to_responses_request(prompt: &Prompt, auth: &OpenAiResponsesAuth) -> ResponsesRequest {
     let mut input = Vec::new();
 
@@ -363,7 +371,7 @@ fn prompt_to_responses_request(prompt: &Prompt, auth: &OpenAiResponsesAuth) -> R
         },
         include: vec!["reasoning.encrypted_content"],
         reasoning: ResponsesReasoningConfig {
-            effort: DEFAULT_REASONING_EFFORT,
+            effort: responses_effort_str(prompt.effort),
             summary: "auto",
         },
     }
@@ -1050,6 +1058,7 @@ mod tests {
     fn sample_prompt() -> Prompt {
         Prompt {
             chain: llm::ModelChain::new("gpt-5.4-mini"),
+            effort: ReasoningEffort::Low,
             messages: vec![Message::User {
                 content: vec![UserBlock::Text {
                     text: "hello".to_string(),

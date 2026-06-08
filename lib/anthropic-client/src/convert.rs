@@ -13,7 +13,8 @@ use crate::stream::{AccumulatedBlock, AccumulatedResponse, AccumulatedStopReason
 use crate::types::{
     AnthropicCacheControl, AnthropicContent, AnthropicContentBlock, AnthropicDelta,
     AnthropicMessage, AnthropicRequest, AnthropicStopReason, AnthropicStreamEvent,
-    AnthropicSystemBlock, AnthropicTool, AnthropicToolChoice, AnthropicToolResultContent,
+    AnthropicSystemBlock, AnthropicThinking, AnthropicTool, AnthropicToolChoice,
+    AnthropicToolResultContent,
 };
 
 /// 5m matches Anthropic's default cache window.
@@ -52,20 +53,44 @@ pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> AnthropicRequest {
 
     let tool_choice = prompt.tool_choice.as_ref().map(convert_tool_choice);
 
+    let max_tokens = prompt.max_tokens.unwrap_or(8192);
+    let thinking =
+        thinking_budget(prompt.effort, max_tokens).map(|budget_tokens| AnthropicThinking {
+            r#type: "enabled",
+            budget_tokens,
+        });
+
     let mut request = AnthropicRequest {
         model: prompt.chain.primary.name.clone(),
         messages,
         system,
-        max_tokens: prompt.max_tokens.unwrap_or(8192),
+        max_tokens,
         temperature: None,
         tools,
         tool_choice,
         stream: true,
-        thinking: None,
+        thinking,
     };
 
     apply_prompt_caching(&mut request, DEFAULT_CACHE_TTL);
     request
+}
+
+/// Anthropic expresses reasoning as an explicit token budget drawn from
+/// `max_tokens`, and the API requires `1024 <= budget_tokens < max_tokens`.
+/// Returns `None` when `max_tokens` leaves no room for a valid budget.
+fn thinking_budget(effort: llm::ReasoningEffort, max_tokens: u32) -> Option<u32> {
+    if max_tokens <= 1024 {
+        return None;
+    }
+    let frac = match effort {
+        llm::ReasoningEffort::Low => 0.25,
+        llm::ReasoningEffort::Medium => 0.5,
+        llm::ReasoningEffort::High => 0.75,
+        llm::ReasoningEffort::XHigh => 0.9,
+    };
+    let budget = (max_tokens as f32 * frac) as u32;
+    Some(budget.clamp(1024, max_tokens - 1))
 }
 
 /// Anthropic auto-checks earlier breakpoints, so one marker on the
@@ -395,6 +420,7 @@ mod tests {
     fn base_prompt() -> Prompt {
         Prompt {
             chain: ModelChain::new("claude-sonnet-4"),
+            effort: llm::ReasoningEffort::Low,
             system: vec![SystemBlock::Text { text: "sys".into() }],
             messages: vec![Message::User {
                 content: vec![UserBlock::Text { text: "hi".into() }],

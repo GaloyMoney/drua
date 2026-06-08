@@ -20,6 +20,15 @@ pub(crate) struct OpenAiRequest {
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_options: Option<StreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<ReasoningConfig>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct ReasoningConfig {
+    pub effort: &'static str,
 }
 
 #[derive(Debug, Serialize)]

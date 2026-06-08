@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::spec::ModelChain;
+use crate::spec::{ModelChain, ReasoningEffort};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Prompt {
@@ -15,6 +15,8 @@ pub struct Prompt {
     pub tool_choice: Option<ToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "ReasoningEffort::is_low")]
+    pub effort: ReasoningEffort,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_key: Option<String>,
 }
@@ -28,6 +30,7 @@ impl Default for Prompt {
             tools: Vec::new(),
             tool_choice: None,
             max_tokens: None,
+            effort: ReasoningEffort::Low,
             cache_key: None,
         }
     }
@@ -256,6 +259,7 @@ mod tests {
             }],
             tool_choice: None,
             max_tokens: Some(1024),
+            effort: ReasoningEffort::Low,
             cache_key: None,
         }
     }
@@ -299,6 +303,7 @@ mod tests {
             tools: vec![],
             tool_choice: None,
             max_tokens: None,
+            effort: ReasoningEffort::Low,
             cache_key: None,
         };
 

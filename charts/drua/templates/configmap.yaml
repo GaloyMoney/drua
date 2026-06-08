@@ -37,6 +37,9 @@ data:
           - name: {{ .name | quote }}
             max_tokens_per_response: {{ printf "%d" (int .maxTokensPerResponse) }}
             context_window_tokens: {{ printf "%d" (int .contextWindowTokens) }}
+            {{- with .effort }}
+            effort: {{ . | quote }}
+            {{- end }}
             {{- if hasKey . "cacheTtlSeconds" }}
             cache_ttl_seconds: {{ printf "%d" (int .cacheTtlSeconds) }}
             {{- end }}
@@ -51,12 +54,18 @@ data:
           {{- with .primary.maxTokens }}
           max_tokens: {{ . }}
           {{- end }}
+          {{- with .primary.effort }}
+          effort: {{ . | quote }}
+          {{- end }}
         {{- with .fallbacks }}
         fallbacks:
           {{- range . }}
           - name: {{ .name | quote }}
             {{- with .maxTokens }}
             max_tokens: {{ . }}
+            {{- end }}
+            {{- with .effort }}
+            effort: {{ . | quote }}
             {{- end }}
           {{- end }}
         {{- end }}
@@ -70,12 +79,18 @@ data:
               {{- with .primary.maxTokens }}
               max_tokens: {{ . }}
               {{- end }}
+              {{- with .primary.effort }}
+              effort: {{ . | quote }}
+              {{- end }}
             {{- with .fallbacks }}
             fallbacks:
               {{- range . }}
               - name: {{ .name | quote }}
                 {{- with .maxTokens }}
                 max_tokens: {{ . }}
+                {{- end }}
+                {{- with .effort }}
+                effort: {{ . | quote }}
                 {{- end }}
               {{- end }}
             {{- end }}
@@ -98,12 +113,18 @@ data:
               {{- with .primary.maxTokens }}
               max_tokens: {{ . }}
               {{- end }}
+              {{- with .primary.effort }}
+              effort: {{ . | quote }}
+              {{- end }}
             {{- with .fallbacks }}
             fallbacks:
               {{- range . }}
               - name: {{ .name | quote }}
                 {{- with .maxTokens }}
                 max_tokens: {{ . }}
+                {{- end }}
+                {{- with .effort }}
+                effort: {{ . | quote }}
                 {{- end }}
               {{- end }}
             {{- end }}
@@ -127,12 +148,18 @@ data:
               {{- with .primary.maxTokens }}
               max_tokens: {{ . }}
               {{- end }}
+              {{- with .primary.effort }}
+              effort: {{ . | quote }}
+              {{- end }}
             {{- with .fallbacks }}
             fallbacks:
               {{- range . }}
               - name: {{ .name | quote }}
                 {{- with .maxTokens }}
                 max_tokens: {{ . }}
+                {{- end }}
+                {{- with .effort }}
+                effort: {{ . | quote }}
                 {{- end }}
               {{- end }}
             {{- end }}

@@ -4,7 +4,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use llm::prompt::{Message, SystemBlock, UserBlock};
 use llm::provider::LlmProvider;
 use llm::stream::StreamAccumulator;
-use llm::{ModelChain, Prompt, PromptResponse};
+use llm::{ModelChain, Prompt, PromptResponse, ReasoningEffort};
 use openai_client::{OpenAiResponsesAuth, OpenAiResponsesClient};
 
 const LIVE_TESTS_ENV: &str = "DRUA_LIVE_CACHE_TESTS";
@@ -42,6 +42,7 @@ fn build_prompt(
 ) -> Prompt {
     Prompt {
         chain: ModelChain::new(model),
+        effort: ReasoningEffort::Low,
         messages: vec![Message::User {
             content: vec![UserBlock::Text {
                 text: user_text.into(),

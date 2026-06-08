@@ -25,7 +25,7 @@ pub mod workflow;
 
 pub use config::*;
 
-pub use llm::{ModelChain, ModelSpec};
+pub use llm::{ModelChain, ModelSpec, ReasoningEffort};
 
 use std::sync::Arc;
 

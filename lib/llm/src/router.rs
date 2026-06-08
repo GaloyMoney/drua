@@ -7,13 +7,14 @@ use std::sync::Arc;
 use crate::provider::LlmProvider;
 use crate::request::PromptError;
 use crate::response::Usage;
+use crate::spec::ReasoningEffort;
 use crate::{Prompt, StreamHandle};
 
 #[derive(Clone)]
 pub struct ChainEntry {
     pub model_id: String,
-    /// Today only `max_tokens` is plumbed through per-attempt.
     pub max_tokens: Option<u32>,
+    pub effort: ReasoningEffort,
     pub provider: Arc<dyn LlmProvider>,
 }
 
@@ -82,6 +83,7 @@ pub async fn walk(chain: &[ChainEntry], base: &Prompt) -> Result<WalkOutcome, Pr
         if let Some(mt) = entry.max_tokens {
             prompt.max_tokens = Some(mt);
         }
+        prompt.effort = entry.effort;
 
         match entry.provider.send_prompt_streaming(&prompt).await {
             Ok(rx) => {
@@ -198,6 +200,7 @@ mod tests {
         ChainEntry {
             model_id: model_id.to_string(),
             max_tokens: None,
+            effort: ReasoningEffort::Low,
             provider,
         }
     }

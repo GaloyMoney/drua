@@ -1169,6 +1169,7 @@ impl IntoEvents<AgentSessionEvent> for NewAgentSession {
 mod tests {
     use crate::agent::config::ModelDefaults;
     use crate::primitives::UserId;
+    use crate::ReasoningEffort;
     use es_entity::{IntoEvents as _, TryFromEvents as _};
 
     use super::*;
@@ -1182,6 +1183,7 @@ mod tests {
                     model: "test-model".into(),
                     max_tokens_per_response: 1024,
                     context_window_tokens: 200_000,
+                    effort: ReasoningEffort::Low,
                 },
                 fallbacks: Vec::new(),
             })
@@ -1671,6 +1673,7 @@ mod tests {
                     model: "test-model".into(),
                     max_tokens_per_response: 1024,
                     context_window_tokens: 100,
+                    effort: ReasoningEffort::Low,
                 },
                 fallbacks: Vec::new(),
             })

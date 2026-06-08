@@ -7,7 +7,20 @@ use super::primitives::*;
 use drua_core::agent::Agent as DomainAgent;
 use drua_core::agent::AgentRole as DomainAgentRole;
 use drua_core::sandbox::SandboxAgentMode;
-use drua_core::{ModelChain as DomainModelChain, ModelSpec as DomainModelSpec};
+use drua_core::{
+    ModelChain as DomainModelChain, ModelSpec as DomainModelSpec,
+    ReasoningEffort as DomainReasoningEffort,
+};
+
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+#[graphql(remote = "DomainReasoningEffort")]
+pub enum ReasoningEffort {
+    Low,
+    Medium,
+    High,
+    #[graphql(name = "XHIGH")]
+    XHigh,
+}
 
 #[derive(SimpleObject, InputObject, Clone)]
 #[graphql(input_name = "ModelSpecInput")]
@@ -16,6 +29,9 @@ pub struct ModelSpec {
     /// Input: optional override of the registry's `max_tokens_per_response`.
     /// Output: the effective max_tokens currently in force (registry value or override).
     pub max_tokens: Option<i32>,
+    /// Reasoning effort override; raise alongside `max_tokens` since reasoning
+    /// tokens are drawn from the output budget.
+    pub effort: Option<ReasoningEffort>,
 }
 
 impl From<DomainModelSpec> for ModelSpec {
@@ -23,6 +39,7 @@ impl From<DomainModelSpec> for ModelSpec {
         Self {
             name: s.name,
             max_tokens: s.max_tokens.map(|n| n as i32),
+            effort: s.effort.map(Into::into),
         }
     }
 }
@@ -32,6 +49,7 @@ impl From<ModelSpec> for DomainModelSpec {
         DomainModelSpec {
             name: s.name,
             max_tokens: s.max_tokens.map(|n| n.max(0) as u32),
+            effort: s.effort.map(Into::into),
         }
     }
 }
@@ -67,6 +85,7 @@ impl From<drua_core::agent::ModelChain> for ModelChain {
             primary: ModelSpec {
                 name: c.primary.model,
                 max_tokens: Some(c.primary.max_tokens_per_response as i32),
+                effort: Some(c.primary.effort.into()),
             },
             fallbacks: c
                 .fallbacks
@@ -74,6 +93,7 @@ impl From<drua_core::agent::ModelChain> for ModelChain {
                 .map(|m| ModelSpec {
                     name: m.model,
                     max_tokens: Some(m.max_tokens_per_response as i32),
+                    effort: Some(m.effort.into()),
                 })
                 .collect(),
         }
