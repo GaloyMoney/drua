@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -8,10 +7,23 @@ use ed25519_dalek::{
     SigningKey,
 };
 use fake_mcp_upstream::FakeUpstream;
-use tokio::sync::{oneshot, watch};
+use futures::StreamExt;
+use tokio::sync::oneshot;
+use tokio_tungstenite::tungstenite;
 
 use super::*;
-use crate::postgres_mcp::{PostgresSource, RegistryEntry};
+use crate::cli::Cli;
+use crate::mcp_upstream::{registration_fingerprint, RegisteredToolSet};
+use crate::postgres_mcp::{
+    PostgresMcpConfig, PostgresMcpHandler, PostgresSource, PostgresSourceDiscoverer,
+    PostgresSourceRole, DEFAULT_POSTGRES_MCP_CONFIG_SECRET,
+    DEFAULT_POSTGRES_MCP_CONNECT_TIMEOUT_SECS, DEFAULT_POSTGRES_MCP_IMAGE,
+    DEFAULT_POSTGRES_MCP_LIMIT_CPU, DEFAULT_POSTGRES_MCP_LIMIT_MEMORY,
+    DEFAULT_POSTGRES_MCP_MAX_ROWS, DEFAULT_POSTGRES_MCP_QUERY_TIMEOUT,
+    DEFAULT_POSTGRES_MCP_REQUEST_CPU, DEFAULT_POSTGRES_MCP_REQUEST_MEMORY,
+    DEFAULT_POSTGRES_MCP_UPSTREAM_NAME,
+};
+use crate::tunnel_protocol::TunnelMessage;
 
 fn registration(tool_name: &str) -> RegisteredToolSet {
     RegisteredToolSet {
@@ -42,19 +54,21 @@ async fn registers_reconciled_postgres_mcp_tools() -> anyhow::Result<()> {
     let (_private_key_dir, private_key_file) = write_test_private_key()?;
     let applied_dbhub_toml = Arc::new(Mutex::new(None));
     let handler = FakePostgresMcpHandler {
-        registry_yaml: r#"
-main:
-  runtime_pg_con: "postgres://mcp:secret@postgres.local:5432/lana"
-"#
-        .to_string(),
         applied_dbhub_toml: applied_dbhub_toml.clone(),
+    };
+    let discoverer = FakePostgresSourceDiscoverer {
+        sources: vec![PostgresSource::from_database_name(
+            "lana-bank-lana-bank-main",
+            PostgresSourceRole::Runtime,
+            "postgres://mcp:secret@postgres.local:5432/lana-bank-lana-bank-main".to_string(),
+            12345,
+        )
+        .unwrap()],
     };
 
     let postgres_mcp = PostgresMcpController::try_new(
         PostgresMcpConfig {
             namespace: "test".to_string(),
-            registry_secret: DEFAULT_POSTGRES_MCP_REGISTRY_SECRET.to_string(),
-            registry_key: DEFAULT_POSTGRES_MCP_REGISTRY_KEY.to_string(),
             resource_name: "127.0.0.1".to_string(),
             config_secret: DEFAULT_POSTGRES_MCP_CONFIG_SECRET.to_string(),
             upstream_name: DEFAULT_POSTGRES_MCP_UPSTREAM_NAME.to_string(),
@@ -68,9 +82,11 @@ main:
             request_memory: DEFAULT_POSTGRES_MCP_REQUEST_MEMORY.to_string(),
             limit_cpu: DEFAULT_POSTGRES_MCP_LIMIT_CPU.to_string(),
             limit_memory: DEFAULT_POSTGRES_MCP_LIMIT_MEMORY.to_string(),
+            runtime_seed_dsn: "postgres://mcp:secret@postgres.local:5432/postgres".to_string(),
+            datawarehouse_seed_dsn: None,
         },
         handler,
-        AcceptAllPostgresSourceValidator,
+        discoverer,
     )?;
 
     let cli = Cli {
@@ -80,8 +96,8 @@ main:
         upstreams: "".to_string(),
         tool_refresh_interval_secs: 0,
         postgres_mcp_namespace: Some("test".to_string()),
-        postgres_mcp_registry_secret: DEFAULT_POSTGRES_MCP_REGISTRY_SECRET.to_string(),
-        postgres_mcp_registry_key: DEFAULT_POSTGRES_MCP_REGISTRY_KEY.to_string(),
+        postgres_mcp_runtime_dsn: "postgres://mcp:secret@postgres.local:5432/postgres".to_string(),
+        postgres_mcp_datawarehouse_dsn: None,
         postgres_mcp_resource_name: "127.0.0.1".to_string(),
         postgres_mcp_config_secret: DEFAULT_POSTGRES_MCP_CONFIG_SECRET.to_string(),
         postgres_mcp_upstream_name: DEFAULT_POSTGRES_MCP_UPSTREAM_NAME.to_string(),
@@ -97,18 +113,10 @@ main:
         postgres_mcp_limit_memory: DEFAULT_POSTGRES_MCP_LIMIT_MEMORY.to_string(),
     };
     let static_upstreams = Vec::new();
-    let (_postgres_tx, mut postgres_changes) = watch::channel(0_u64);
     let mut backoff = INITIAL_BACKOFF;
 
     let tunnel_task = tokio::spawn(async move {
-        run_tunnel(
-            &cli,
-            &static_upstreams,
-            &postgres_mcp,
-            &mut postgres_changes,
-            &mut backoff,
-        )
-        .await
+        run_tunnel(&cli, &static_upstreams, &postgres_mcp, &mut backoff).await
     });
 
     let registered = tokio::time::timeout(Duration::from_secs(5), registered_rx).await??;
@@ -148,24 +156,11 @@ main:
 
 #[derive(Clone)]
 struct FakePostgresMcpHandler {
-    registry_yaml: String,
     applied_dbhub_toml: Arc<Mutex<Option<String>>>,
 }
 
 #[async_trait::async_trait]
 impl PostgresMcpHandler for FakePostgresMcpHandler {
-    fn spawn_registry_watcher(&self, _config: &PostgresMcpConfig) -> watch::Receiver<u64> {
-        let (_tx, rx) = watch::channel(0_u64);
-        rx
-    }
-
-    async fn read_registry(
-        &self,
-        _config: &PostgresMcpConfig,
-    ) -> anyhow::Result<BTreeMap<String, RegistryEntry>> {
-        crate::postgres_mcp::parse_registry_yaml(&self.registry_yaml)
-    }
-
     async fn apply_dbhub(
         &self,
         _config: &PostgresMcpConfig,
@@ -173,19 +168,24 @@ impl PostgresMcpHandler for FakePostgresMcpHandler {
         _checksum: &str,
         enabled: bool,
     ) -> anyhow::Result<()> {
-        assert!(enabled, "expected valid registry source to enable DBHub");
+        assert!(enabled, "expected valid discovered source to enable DBHub");
         *self.applied_dbhub_toml.lock().expect("dbhub config lock") = Some(dbhub_toml.to_string());
         Ok(())
     }
 }
 
 #[derive(Clone)]
-struct AcceptAllPostgresSourceValidator;
+struct FakePostgresSourceDiscoverer {
+    sources: Vec<PostgresSource>,
+}
 
 #[async_trait::async_trait]
-impl PostgresSourceValidator for AcceptAllPostgresSourceValidator {
-    async fn validate(&self, _source: &PostgresSource, _timeout: Duration) -> anyhow::Result<()> {
-        Ok(())
+impl PostgresSourceDiscoverer for FakePostgresSourceDiscoverer {
+    async fn discover_sources(
+        &self,
+        _config: &PostgresMcpConfig,
+    ) -> anyhow::Result<Vec<PostgresSource>> {
+        Ok(self.sources.clone())
     }
 }
 

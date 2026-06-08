@@ -1,14 +1,8 @@
-use std::collections::BTreeMap;
-
 use async_trait::async_trait;
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use tokio::sync::watch;
 
 use crate::mcp_upstream::UpstreamConfig;
 
-pub(crate) const DEFAULT_POSTGRES_MCP_REGISTRY_SECRET: &str = "lana-postgres-mcp-registry";
-pub(crate) const DEFAULT_POSTGRES_MCP_REGISTRY_KEY: &str = "registry.yaml";
 pub(crate) const DEFAULT_POSTGRES_MCP_RESOURCE_NAME: &str = "lana-postgres-mcp";
 pub(crate) const DEFAULT_POSTGRES_MCP_CONFIG_SECRET: &str = "lana-postgres-mcp-config";
 pub(crate) const DEFAULT_POSTGRES_MCP_UPSTREAM_NAME: &str = "lana_postgres";
@@ -25,8 +19,6 @@ pub(crate) const DEFAULT_POSTGRES_MCP_LIMIT_MEMORY: &str = "256Mi";
 #[derive(Clone, Debug)]
 pub(crate) struct PostgresMcpConfig {
     pub(crate) namespace: String,
-    pub(crate) registry_secret: String,
-    pub(crate) registry_key: String,
     pub(crate) resource_name: String,
     pub(crate) config_secret: String,
     pub(crate) upstream_name: String,
@@ -40,18 +32,13 @@ pub(crate) struct PostgresMcpConfig {
     pub(crate) request_memory: String,
     pub(crate) limit_cpu: String,
     pub(crate) limit_memory: String,
+    pub(crate) runtime_seed_dsn: String,
+    pub(crate) datawarehouse_seed_dsn: Option<String>,
 }
 
-/// Outbound platform operations used by the Postgres MCP application service.
+/// Outbound Kubernetes operations used by the Postgres MCP application service.
 #[async_trait]
 pub(crate) trait PostgresMcpHandler: Clone + Send + Sync + 'static {
-    fn spawn_registry_watcher(&self, config: &PostgresMcpConfig) -> watch::Receiver<u64>;
-
-    async fn read_registry(
-        &self,
-        config: &PostgresMcpConfig,
-    ) -> anyhow::Result<BTreeMap<String, RegistryEntry>>;
-
     async fn apply_dbhub(
         &self,
         config: &PostgresMcpConfig,
@@ -61,45 +48,41 @@ pub(crate) trait PostgresMcpHandler: Clone + Send + Sync + 'static {
     ) -> anyhow::Result<()>;
 }
 
-/// Outbound credential probe used to omit unusable database sources.
+/// Outbound Postgres discovery port. Implementations must omit unusable
+/// databases and return the still-valid set; a bad database should not break the
+/// whole aggregate DBHub toolset.
 #[async_trait]
-pub(crate) trait PostgresSourceValidator: Clone + Send + Sync + 'static {
-    async fn validate(
+pub(crate) trait PostgresSourceDiscoverer: Clone + Send + Sync + 'static {
+    async fn discover_sources(
         &self,
-        source: &PostgresSource,
-        timeout: std::time::Duration,
-    ) -> anyhow::Result<()>;
+        config: &PostgresMcpConfig,
+    ) -> anyhow::Result<Vec<PostgresSource>>;
 }
 
 #[derive(Clone)]
-pub(crate) struct PostgresMcpController<H, V> {
+pub(crate) struct PostgresMcpController<H, D> {
     handler: H,
-    validator: V,
+    discoverer: D,
     config: PostgresMcpConfig,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct RegistryEntry {
-    runtime_pg_con: Option<String>,
-    datawarehouse_pg_con: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PostgresSource {
-    id: String,
-    instance: String,
+    pub(crate) id: String,
+    pub(crate) instance: String,
+    pub(crate) database_oid: u32,
     role: PostgresSourceRole,
     pub(crate) dsn: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum PostgresSourceRole {
+pub(crate) enum PostgresSourceRole {
     Runtime,
     Datawarehouse,
 }
 
 impl PostgresSourceRole {
-    fn suffix(&self) -> &'static str {
+    pub(crate) fn suffix(&self) -> &'static str {
         match self {
             Self::Runtime => "runtime",
             Self::Datawarehouse => "datawarehouse",
@@ -118,21 +101,42 @@ impl PostgresSourceRole {
     }
 }
 
-impl<H, V> PostgresMcpController<H, V>
+impl PostgresSource {
+    pub(crate) fn from_database_name(
+        database_name: &str,
+        role: PostgresSourceRole,
+        dsn: String,
+        database_oid: u32,
+    ) -> Option<Self> {
+        let instance = instance_from_database_name(database_name, &role)?;
+        let source_instance = normalize_source_component(&instance)?;
+        let id = format!("{}_{}", source_instance, role.suffix());
+
+        Some(Self {
+            id,
+            instance,
+            database_oid,
+            role,
+            dsn,
+        })
+    }
+}
+
+impl<H, D> PostgresMcpController<H, D>
 where
     H: PostgresMcpHandler,
-    V: PostgresSourceValidator,
+    D: PostgresSourceDiscoverer,
 {
     pub(crate) fn try_new(
         config: PostgresMcpConfig,
         handler: H,
-        validator: V,
+        discoverer: D,
     ) -> anyhow::Result<Self> {
         config.validate()?;
 
         Ok(Self {
             handler,
-            validator,
+            discoverer,
             config,
         })
     }
@@ -141,33 +145,19 @@ where
         &self.config.upstream_name
     }
 
-    pub(crate) fn spawn_registry_watcher(&self) -> watch::Receiver<u64> {
-        self.handler.spawn_registry_watcher(&self.config)
-    }
-
     pub(crate) async fn reconcile(&self) -> anyhow::Result<Option<UpstreamConfig>> {
-        let registry = self.handler.read_registry(&self.config).await?;
-        let candidates = build_postgres_sources(&registry);
-        let valid_sources = self.validate_sources(candidates).await;
-        let dbhub_toml = render_dbhub_toml(
-            &valid_sources,
-            self.config.query_timeout,
-            self.config.max_rows,
-        );
+        let sources = self.discoverer.discover_sources(&self.config).await?;
+        let dbhub_toml =
+            render_dbhub_toml(&sources, self.config.query_timeout, self.config.max_rows);
         let checksum = sha256_hex(dbhub_toml.as_bytes());
 
         self.handler
-            .apply_dbhub(
-                &self.config,
-                &dbhub_toml,
-                &checksum,
-                !valid_sources.is_empty(),
-            )
+            .apply_dbhub(&self.config, &dbhub_toml, &checksum, !sources.is_empty())
             .await?;
 
-        if valid_sources.is_empty() {
+        if sources.is_empty() {
             tracing::warn!(
-                "postgres mcp registry has no valid sources; aggregate DBHub scaled to zero"
+                "postgres mcp discovery found no valid sources; aggregate DBHub scaled to zero"
             );
             return Ok(None);
         }
@@ -180,41 +170,16 @@ where
             ),
         }))
     }
-
-    async fn validate_sources(&self, sources: Vec<PostgresSource>) -> Vec<PostgresSource> {
-        let mut valid_sources = Vec::with_capacity(sources.len());
-
-        for source in sources {
-            match self
-                .validator
-                .validate(&source, self.config.connect_timeout)
-                .await
-            {
-                Ok(()) => valid_sources.push(source),
-                Err(e) => {
-                    tracing::warn!(
-                        instance = %source.instance,
-                        source = %source.id,
-                        error = %e,
-                        "omitting unusable postgres mcp source"
-                    );
-                }
-            }
-        }
-
-        valid_sources
-    }
 }
 
 impl PostgresMcpConfig {
     fn validate(&self) -> anyhow::Result<()> {
         for (field, value) in [
-            ("registry_secret", &self.registry_secret),
-            ("registry_key", &self.registry_key),
             ("resource_name", &self.resource_name),
             ("config_secret", &self.config_secret),
             ("upstream_name", &self.upstream_name),
             ("image", &self.image),
+            ("runtime_seed_dsn", &self.runtime_seed_dsn),
         ] {
             if value.trim().is_empty() {
                 anyhow::bail!("postgres mcp {field} must not be empty");
@@ -229,91 +194,45 @@ impl PostgresMcpConfig {
     }
 }
 
-pub(crate) fn parse_registry_yaml(raw: &str) -> anyhow::Result<BTreeMap<String, RegistryEntry>> {
-    let root: serde_yaml::Value = serde_yaml::from_str(raw)?;
-    let instances = match root {
-        serde_yaml::Value::Mapping(mut mapping) => mapping
-            .remove(serde_yaml::Value::String("instances".to_string()))
-            .unwrap_or(serde_yaml::Value::Mapping(mapping)),
-        _ => anyhow::bail!("postgres mcp registry must be a YAML mapping"),
-    };
+fn instance_from_database_name(database_name: &str, role: &PostgresSourceRole) -> Option<String> {
+    match role {
+        PostgresSourceRole::Runtime => {
+            if database_name == "lana-bank" {
+                return Some("main".to_string());
+            }
 
-    let registry: BTreeMap<String, RegistryEntry> = serde_yaml::from_value(instances)?;
-    Ok(registry)
-}
-
-fn build_postgres_sources(registry: &BTreeMap<String, RegistryEntry>) -> Vec<PostgresSource> {
-    let mut sources = Vec::new();
-
-    for (instance, entry) in registry {
-        if let Err(e) = validate_instance_name(instance) {
-            tracing::warn!(
-                instance = %instance,
-                error = %e,
-                "omitting postgres mcp registry instance with invalid name"
-            );
-            continue;
+            database_name
+                .strip_prefix("lana-bank-lana-bank-")
+                .or_else(|| database_name.strip_prefix("lana-bank-"))
+                .map(str::to_string)
         }
+        PostgresSourceRole::Datawarehouse => {
+            if database_name == "datawarehouse" {
+                return Some("main".to_string());
+            }
 
-        let Some(runtime_dsn) = entry
-            .runtime_pg_con
-            .as_deref()
-            .map(str::trim)
-            .filter(|dsn| !dsn.is_empty())
-        else {
-            tracing::warn!(
-                instance = %instance,
-                "omitting postgres mcp registry instance missing runtime_pg_con"
-            );
-            continue;
-        };
-
-        sources.push(PostgresSource {
-            id: source_id(instance, PostgresSourceRole::Runtime),
-            instance: instance.clone(),
-            role: PostgresSourceRole::Runtime,
-            dsn: runtime_dsn.to_string(),
-        });
-
-        if let Some(dw_dsn) = entry
-            .datawarehouse_pg_con
-            .as_deref()
-            .map(str::trim)
-            .filter(|dsn| !dsn.is_empty())
-        {
-            sources.push(PostgresSource {
-                id: source_id(instance, PostgresSourceRole::Datawarehouse),
-                instance: instance.clone(),
-                role: PostgresSourceRole::Datawarehouse,
-                dsn: dw_dsn.to_string(),
-            });
+            database_name
+                .strip_prefix("datawarehouse-lana-bank-")
+                .or_else(|| database_name.strip_prefix("datawarehouse-"))
+                .map(str::to_string)
         }
     }
-
-    sources
 }
 
-fn validate_instance_name(instance: &str) -> anyhow::Result<()> {
-    let mut chars = instance.chars();
-    let Some(first) = chars.next() else {
-        anyhow::bail!("postgres mcp instance name must not be empty");
-    };
+fn normalize_source_component(value: &str) -> Option<String> {
+    let normalized = value.replace('-', "_");
+    let mut chars = normalized.chars();
+    let first = chars.next()?;
 
     if !first.is_ascii_lowercase() {
-        anyhow::bail!(
-            "postgres mcp instance name {instance:?} must start with a lowercase ASCII letter"
-        );
+        return None;
     }
 
     if !chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') {
-        anyhow::bail!("postgres mcp instance name {instance:?} must match ^[a-z][a-z0-9_]*$");
+        return None;
     }
 
-    Ok(())
-}
-
-fn source_id(instance: &str, role: PostgresSourceRole) -> String {
-    format!("{}_{}", instance, role.suffix())
+    Some(normalized)
 }
 
 fn render_dbhub_toml(sources: &[PostgresSource], query_timeout: u32, max_rows: u32) -> String {
@@ -325,6 +244,7 @@ fn render_dbhub_toml(sources: &[PostgresSource], query_timeout: u32, max_rows: u
         }
 
         rendered.push_str("[[sources]]\n");
+        rendered.push_str(&format!("# database_oid = {}\n", source.database_oid));
         rendered.push_str(&format!("id = \"{}\"\n", toml_escape(&source.id)));
         rendered.push_str(&format!(
             "description = \"{}\"\n",
@@ -361,59 +281,58 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_registry_with_instance_names_as_top_level_keys() {
-        let registry = parse_registry_yaml(
-            r#"
-main:
-  runtime_pg_con: "postgres://runtime"
-  datawarehouse_pg_con: "postgres://dw"
-vanilla:
-  runtime_pg_con: "postgres://vanilla"
-"#,
+    fn derives_stable_sources_from_current_lana_database_names() {
+        let runtime = PostgresSource::from_database_name(
+            "lana-bank-lana-bank-main",
+            PostgresSourceRole::Runtime,
+            "postgres://runtime".to_string(),
+            1,
+        )
+        .unwrap();
+        let dw = PostgresSource::from_database_name(
+            "datawarehouse-lana-bank-vanilla",
+            PostgresSourceRole::Datawarehouse,
+            "postgres://dw".to_string(),
+            2,
         )
         .unwrap();
 
-        let sources = build_postgres_sources(&registry);
-
-        assert_eq!(
-            sources
-                .iter()
-                .map(|source| source.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["main_runtime", "main_datawarehouse", "vanilla_runtime"]
-        );
+        assert_eq!(runtime.instance, "main");
+        assert_eq!(runtime.id, "main_runtime");
+        assert_eq!(dw.instance, "vanilla");
+        assert_eq!(dw.id, "vanilla_datawarehouse");
     }
 
     #[test]
-    fn parses_registry_with_instances_wrapper_for_forward_compatibility() {
-        let registry = parse_registry_yaml(
-            r#"
-instances:
-  main:
-    runtime_pg_con: "postgres://runtime"
-"#,
+    fn supports_legacy_main_database_names() {
+        let runtime = PostgresSource::from_database_name(
+            "lana-bank",
+            PostgresSourceRole::Runtime,
+            "postgres://runtime".to_string(),
+            1,
+        )
+        .unwrap();
+        let dw = PostgresSource::from_database_name(
+            "datawarehouse",
+            PostgresSourceRole::Datawarehouse,
+            "postgres://dw".to_string(),
+            2,
         )
         .unwrap();
 
-        let sources = build_postgres_sources(&registry);
-
-        assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].id, "main_runtime");
+        assert_eq!(runtime.id, "main_runtime");
+        assert_eq!(dw.id, "main_datawarehouse");
     }
 
     #[test]
-    fn omits_instance_names_that_would_make_unstable_tool_names() {
-        let registry = parse_registry_yaml(
-            r#"
-Main:
-  runtime_pg_con: "postgres://runtime"
-"#,
+    fn omits_unrecognized_database_names() {
+        assert!(PostgresSource::from_database_name(
+            "postgres",
+            PostgresSourceRole::Runtime,
+            "postgres://seed".to_string(),
+            1,
         )
-        .unwrap();
-
-        let sources = build_postgres_sources(&registry);
-
-        assert!(sources.is_empty());
+        .is_none());
     }
 
     #[test]
@@ -422,12 +341,14 @@ Main:
             PostgresSource {
                 id: "main_runtime".to_string(),
                 instance: "main".to_string(),
+                database_oid: 42,
                 role: PostgresSourceRole::Runtime,
                 dsn: "postgres://runtime".to_string(),
             },
             PostgresSource {
                 id: "main_datawarehouse".to_string(),
                 instance: "main".to_string(),
+                database_oid: 84,
                 role: PostgresSourceRole::Datawarehouse,
                 dsn: "postgres://dw".to_string(),
             },
@@ -436,8 +357,10 @@ Main:
         let rendered = render_dbhub_toml(&sources, 30, 1000);
 
         assert!(rendered.contains("id = \"main_runtime\""));
+        assert!(rendered.contains("# database_oid = 42"));
         assert!(rendered.contains("source = \"main_runtime\""));
         assert!(rendered.contains("id = \"main_datawarehouse\""));
+        assert!(rendered.contains("# database_oid = 84"));
         assert!(rendered.contains("source = \"main_datawarehouse\""));
         assert!(rendered.contains("readonly = true"));
         assert!(rendered.contains("max_rows = 1000"));

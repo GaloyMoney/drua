@@ -2,21 +2,16 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use base64::Engine;
-use futures::StreamExt;
 use k8s_openapi::api::{
     apps::v1::Deployment,
     core::v1::{Secret, Service},
 };
 use kube::{
     api::{Api, Patch, PatchParams},
-    runtime::watcher::{watcher, Config as WatcherConfig, Event as WatcherEvent},
     Client,
 };
-use tokio::sync::watch;
 
-use crate::postgres_mcp::{
-    parse_registry_yaml, PostgresMcpConfig, PostgresMcpHandler, RegistryEntry,
-};
+use crate::postgres_mcp::{PostgresMcpConfig, PostgresMcpHandler};
 
 const POSTGRES_MCP_FIELD_MANAGER: &str = "tunnel-connector";
 const POSTGRES_MCP_CONFIG_KEY: &str = "dbhub.toml";
@@ -192,91 +187,6 @@ impl KubernetesPostgresMcpHandler {
 
 #[async_trait]
 impl PostgresMcpHandler for KubernetesPostgresMcpHandler {
-    fn spawn_registry_watcher(&self, config: &PostgresMcpConfig) -> watch::Receiver<u64> {
-        let (tx, rx) = watch::channel(0_u64);
-        let client = self.client.clone();
-        let namespace = config.namespace.clone();
-        let registry_secret = config.registry_secret.clone();
-
-        tokio::spawn(async move {
-            let secrets: Api<Secret> = Api::namespaced(client, &namespace);
-            let field_selector = format!("metadata.name={registry_secret}");
-            let events = watcher(secrets, WatcherConfig::default().fields(&field_selector));
-            futures::pin_mut!(events);
-            let mut version = 0_u64;
-
-            while let Some(event) = events.next().await {
-                match event {
-                    Ok(
-                        WatcherEvent::Apply(_)
-                        | WatcherEvent::Delete(_)
-                        | WatcherEvent::InitApply(_)
-                        | WatcherEvent::InitDone,
-                    ) => {
-                        version = version.wrapping_add(1);
-                        if tx.send(version).is_err() {
-                            break;
-                        }
-                    }
-                    Ok(WatcherEvent::Init) => {}
-                    Err(e) => {
-                        tracing::warn!(error = %e, "postgres mcp registry watch failed; watcher will retry");
-                    }
-                }
-            }
-        });
-
-        rx
-    }
-
-    async fn read_registry(
-        &self,
-        config: &PostgresMcpConfig,
-    ) -> anyhow::Result<BTreeMap<String, RegistryEntry>> {
-        let secrets: Api<Secret> = Api::namespaced(self.client.clone(), &config.namespace);
-        let secret = match secrets.get(&config.registry_secret).await {
-            Ok(secret) => secret,
-            Err(kube::Error::Api(resp)) if resp.code == 404 => {
-                tracing::warn!(
-                    secret = %config.registry_secret,
-                    namespace = %config.namespace,
-                    "postgres mcp registry Secret not found"
-                );
-                return Ok(BTreeMap::new());
-            }
-            Err(e) => return Err(e.into()),
-        };
-
-        let Some(raw) = secret
-            .data
-            .as_ref()
-            .and_then(|data| data.get(&config.registry_key))
-        else {
-            tracing::warn!(
-                secret = %config.registry_secret,
-                key = %config.registry_key,
-                "postgres mcp registry Secret is missing key; treating registry as empty"
-            );
-            return Ok(BTreeMap::new());
-        };
-
-        let yaml = match std::str::from_utf8(&raw.0) {
-            Ok(yaml) => yaml,
-            Err(e) => {
-                tracing::warn!(error = %e, "postgres mcp registry YAML is not UTF-8; treating registry as empty");
-                return Ok(BTreeMap::new());
-            }
-        };
-
-        match parse_registry_yaml(yaml) {
-            Ok(registry) => Ok(registry),
-            Err(e) => {
-                tracing::warn!(error = %e, "postgres mcp registry YAML is invalid; treating registry as empty");
-                Ok(BTreeMap::new())
-            }
-        }
-    }
-
     async fn apply_dbhub(
         &self,
         config: &PostgresMcpConfig,
