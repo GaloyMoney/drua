@@ -56,6 +56,18 @@ galoyAgents:
           - name: anthropic/claude-sonnet-4.6
             maxTokensPerResponse: 8192
             contextWindowTokens: 200000
+          - name: minimax/minimax-m3
+            maxTokensPerResponse: 8192
+            contextWindowTokens: 1048576
+          - name: qwen/qwen3.7-plus
+            maxTokensPerResponse: 8192
+            contextWindowTokens: 1000000
+          - name: moonshotai/kimi-k2.6:free
+            maxTokensPerResponse: 8192
+            contextWindowTokens: 262144
+          - name: moonshotai/kimi-k2.6
+            maxTokensPerResponse: 8192
+            contextWindowTokens: 262144
     ## Per-role defaults applied when an agent with that role is created.
     ## All three of `projectLead`, `agent`, and `workflowStepAgent` are
     ## REQUIRED — the binary refuses to start if any of
