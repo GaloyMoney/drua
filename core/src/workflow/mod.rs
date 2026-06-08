@@ -751,12 +751,33 @@ impl Workflows {
         Ok(definition)
     }
 
-    /// Temporarily stop (or resume) a cron workflow without deleting
-    /// it. Rebuilds the existing `Cron` trigger with `paused` flipped;
-    /// the in-flight cron job observes the change on its next tick.
-    /// Errors if the workflow is not cron-triggered.
-    #[instrument(name = "core.workflow.set_cron_paused", skip_all)]
-    pub async fn set_cron_paused(
+    /// Temporarily stop a cron workflow without deleting it. The
+    /// in-flight cron job observes the change on its next tick and
+    /// stops firing, while the schedule itself keeps ticking.
+    #[instrument(name = "core.workflow.pause", skip_all)]
+    pub async fn pause(
+        &self,
+        sub: &AuthSubject,
+        id: WorkflowDefinitionId,
+    ) -> Result<WorkflowDefinition, WorkflowError> {
+        self.set_paused(sub, id, true).await
+    }
+
+    /// Resume a paused cron workflow. Firing restarts at the next
+    /// scheduled tick; fires missed while paused are not backfilled.
+    #[instrument(name = "core.workflow.resume", skip_all)]
+    pub async fn resume(
+        &self,
+        sub: &AuthSubject,
+        id: WorkflowDefinitionId,
+    ) -> Result<WorkflowDefinition, WorkflowError> {
+        self.set_paused(sub, id, false).await
+    }
+
+    /// Rebuilds the `Cron` trigger with `paused` flipped. Errors if the
+    /// workflow is not cron-triggered; returns the definition unchanged
+    /// (no event, no commit) when already in the target state.
+    async fn set_paused(
         &self,
         sub: &AuthSubject,
         id: WorkflowDefinitionId,
@@ -772,13 +793,18 @@ impl Workflows {
                 schedule,
                 timezone,
                 condition,
-                ..
-            } => WorkflowTrigger::Cron {
-                schedule: schedule.clone(),
-                timezone: timezone.clone(),
-                condition: condition.clone(),
-                paused,
-            },
+                paused: current,
+            } => {
+                if *current == paused {
+                    return Ok(definition);
+                }
+                WorkflowTrigger::Cron {
+                    schedule: schedule.clone(),
+                    timezone: timezone.clone(),
+                    condition: condition.clone(),
+                    paused,
+                }
+            }
             other => {
                 return Err(WorkflowError::InvalidDefinition(format!(
                     "workflow '{}' is {}-triggered; only cron workflows can be paused/resumed",

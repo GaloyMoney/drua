@@ -945,10 +945,10 @@ impl TopLevelTool for WorkflowTool {
             WorkflowParams::Pause { definition_id } => {
                 let definition = self
                     .workflows
-                    .set_cron_paused(subject, definition_id, true)
+                    .pause(subject, definition_id)
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
-                let text = format!("Workflow paused (id {definition_id}). Schedule is suspended; runs will not fire until resumed.");
+                let text = format!("Workflow paused (id {definition_id}). The schedule is retained; runs will not fire until resumed.");
                 let out = WorkflowOutput {
                     command: "pause".to_string(),
                     definition: Some(definition_to_output(&definition)),
@@ -960,12 +960,12 @@ impl TopLevelTool for WorkflowTool {
             WorkflowParams::Resume { definition_id } => {
                 let definition = self
                     .workflows
-                    .set_cron_paused(subject, definition_id, false)
+                    .resume(subject, definition_id)
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
-                let next = match definition.trigger.next_fire_at(chrono::Utc::now()) {
-                    Ok(Some(t)) => format!(" Next run at {}.", t.to_rfc3339()),
-                    _ => String::new(),
+                let next = match definition.trigger.next_run_at(chrono::Utc::now()) {
+                    Some(t) => format!(" Next scheduled run: {}.", t.to_rfc3339()),
+                    None => String::new(),
                 };
                 let text = format!("Workflow resumed (id {definition_id}).{next}");
                 let out = WorkflowOutput {
@@ -998,9 +998,7 @@ fn definition_to_output(d: &WorkflowDefinition) -> WorkflowDefinitionOutput {
             cron_timezone = timezone.clone();
             next_run_at = d
                 .trigger
-                .next_fire_at(chrono::Utc::now())
-                .ok()
-                .flatten()
+                .next_run_at(chrono::Utc::now())
                 .map(|t| t.to_rfc3339());
             ("cron".to_string(), None)
         }
@@ -1257,14 +1255,10 @@ fn format_get_text(d: &WorkflowDefinition) -> String {
             let mut s = format!("cron\n  schedule:    {schedule}");
             let tz_label = timezone.as_deref().unwrap_or("UTC");
             s.push_str(&format!("\n  timezone:    {tz_label}"));
-            s.push_str(&format!(
-                "\n  status:      {}",
-                if *paused { "paused" } else { "active" }
-            ));
-            if !*paused {
-                if let Ok(Some(next)) = trigger.next_fire_at(chrono::Utc::now()) {
-                    s.push_str(&format!("\n  next_run_at: {}", next.to_rfc3339()));
-                }
+            if *paused {
+                s.push_str("\n  status:      paused");
+            } else if let Some(next) = trigger.next_run_at(chrono::Utc::now()) {
+                s.push_str(&format!("\n  next_run_at: {}", next.to_rfc3339()));
             }
             s
         }

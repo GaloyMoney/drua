@@ -135,15 +135,7 @@ impl From<&DomainWorkflowTrigger> for WorkflowTrigger {
                 provider: None,
                 cron_schedule: Some(schedule.clone()),
                 cron_timezone: timezone.clone(),
-                next_run_at: if *paused {
-                    None
-                } else {
-                    trigger
-                        .next_fire_at(chrono::Utc::now())
-                        .ok()
-                        .flatten()
-                        .map(Into::into)
-                },
+                next_run_at: trigger.next_run_at(chrono::Utc::now()).map(Into::into),
                 condition: condition.clone(),
                 webhook_url: None,
                 paused: *paused,

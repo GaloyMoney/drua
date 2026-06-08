@@ -175,6 +175,16 @@ impl WorkflowTrigger {
             _ => Ok(None),
         }
     }
+
+    /// Next fire to surface to a user — `None` while paused or when the
+    /// schedule has no future fire. The scheduler uses raw
+    /// [`Self::next_fire_at`], which keeps advancing even while paused.
+    pub fn next_run_at(&self, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        if self.is_paused() {
+            return None;
+        }
+        self.next_fire_at(after).ok().flatten()
+    }
 }
 
 /// IANA name parses through `chrono_tz`; `None` → `UTC`. Surfaces a
@@ -701,6 +711,30 @@ mod tests {
         assert!(s.contains("paused: true"));
         let back: WorkflowTrigger = serde_yaml::from_str(&s).unwrap();
         assert!(back.is_paused());
+    }
+
+    #[test]
+    fn next_run_at_is_none_while_paused_but_raw_next_fire_advances() {
+        let now = chrono::Utc::now();
+        let active = WorkflowTrigger::Cron {
+            schedule: "0 0 */6 * * *".to_string(),
+            timezone: None,
+            condition: None,
+            paused: false,
+        };
+        assert!(active.next_run_at(now).is_some());
+
+        let paused = WorkflowTrigger::Cron {
+            schedule: "0 0 */6 * * *".to_string(),
+            timezone: None,
+            condition: None,
+            paused: true,
+        };
+        assert!(paused.next_run_at(now).is_none(), "paused hides next run");
+        assert!(
+            paused.next_fire_at(now).unwrap().is_some(),
+            "raw next_fire_at keeps advancing so the scheduler can reschedule"
+        );
     }
 
     /// Legacy cron triggers serialized before the `paused` field hydrate
