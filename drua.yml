@@ -32,6 +32,18 @@ providers:
       - name: anthropic/claude-sonnet-4.6
         max_tokens_per_response: 8192
         context_window_tokens: 200000
+      - name: minimax/minimax-m3
+        max_tokens_per_response: 8192
+        context_window_tokens: 1048576
+      - name: qwen/qwen3.7-plus
+        max_tokens_per_response: 8192
+        context_window_tokens: 1000000
+      - name: moonshotai/kimi-k2.6:free
+        max_tokens_per_response: 8192
+        context_window_tokens: 262144
+      - name: moonshotai/kimi-k2.6
+        max_tokens_per_response: 8192
+        context_window_tokens: 262144
 agents:
   # Resolution precedence (highest first):
   #   1. chain_override passed at the call site (workflow definition /
