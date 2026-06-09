@@ -1,0 +1,163 @@
+use clap::Parser;
+
+use crate::postgres_mcp::{
+    DEFAULT_POSTGRES_MCP_CONFIG_SECRET, DEFAULT_POSTGRES_MCP_CONNECT_TIMEOUT_SECS,
+    DEFAULT_POSTGRES_MCP_IMAGE, DEFAULT_POSTGRES_MCP_LIMIT_CPU, DEFAULT_POSTGRES_MCP_LIMIT_MEMORY,
+    DEFAULT_POSTGRES_MCP_MAX_ROWS, DEFAULT_POSTGRES_MCP_QUERY_TIMEOUT,
+    DEFAULT_POSTGRES_MCP_REQUEST_CPU, DEFAULT_POSTGRES_MCP_REQUEST_MEMORY,
+    DEFAULT_POSTGRES_MCP_RESOURCE_NAME, DEFAULT_POSTGRES_MCP_SERVICE_PORT,
+    DEFAULT_POSTGRES_MCP_UPSTREAM_NAME,
+};
+
+pub(crate) const DEFAULT_TOOL_REFRESH_INTERVAL_SECS: u64 = 30;
+
+#[derive(Parser)]
+#[command(
+    name = "tunnel-connector",
+    about = "Outbound tunnel from a deployment cluster to drua"
+)]
+pub(crate) struct Cli {
+    /// drua tunnel WebSocket URL
+    #[arg(long, env = "TUNNEL_SERVER_URL")]
+    pub(crate) server_url: String,
+
+    /// Path to the PEM-encoded Ed25519 private key that identifies this
+    /// deployment. The matching public key must be registered on drua
+    /// under `server.tunnel.deployments.<deployment_id>`. Mounted from
+    /// a Kubernetes Secret in production.
+    #[arg(long, env = "TUNNEL_PRIVATE_KEY_FILE")]
+    pub(crate) private_key_file: std::path::PathBuf,
+
+    /// Deployment identifier (e.g. "galoy-staging"). Must match the
+    /// key under `server.tunnel.deployments` in drua's config.
+    #[arg(long, env = "TUNNEL_DEPLOYMENT_ID")]
+    pub(crate) deployment_id: String,
+
+    /// Comma-separated upstream MCP servers: name=url[,name=url,...].
+    #[arg(long, env = "TUNNEL_UPSTREAMS", default_value = "")]
+    pub(crate) upstreams: String,
+
+    /// Poll interval for upstream MCP tool catalog changes. A value of 0 disables refresh.
+    #[arg(
+        long,
+        env = "TUNNEL_TOOL_REFRESH_INTERVAL_SECS",
+        default_value_t = DEFAULT_TOOL_REFRESH_INTERVAL_SECS
+    )]
+    pub(crate) tool_refresh_interval_secs: u64,
+
+    /// Namespace containing the generated DBHub resources. Defaults to the pod namespace.
+    #[arg(long, env = "TUNNEL_POSTGRES_MCP_NAMESPACE")]
+    pub(crate) postgres_mcp_namespace: Option<String>,
+
+    /// Seed readonly DSN for the Lana runtime PostgreSQL instance.
+    #[arg(long, env = "TUNNEL_POSTGRES_MCP_RUNTIME_DSN")]
+    pub(crate) postgres_mcp_runtime_dsn: String,
+
+    /// Optional seed readonly DSN for the Lana datawarehouse PostgreSQL instance.
+    #[arg(long, env = "TUNNEL_POSTGRES_MCP_DATAWAREHOUSE_DSN")]
+    pub(crate) postgres_mcp_datawarehouse_dsn: Option<String>,
+
+    /// Fixed name for the generated aggregate DBHub Deployment and Service.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_RESOURCE_NAME",
+        default_value = DEFAULT_POSTGRES_MCP_RESOURCE_NAME
+    )]
+    pub(crate) postgres_mcp_resource_name: String,
+
+    /// Fixed name for the generated DBHub config Secret.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_CONFIG_SECRET",
+        default_value = DEFAULT_POSTGRES_MCP_CONFIG_SECRET
+    )]
+    pub(crate) postgres_mcp_config_secret: String,
+
+    /// Drua upstream name used for the aggregate DBHub MCP service.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_UPSTREAM_NAME",
+        default_value = DEFAULT_POSTGRES_MCP_UPSTREAM_NAME
+    )]
+    pub(crate) postgres_mcp_upstream_name: String,
+
+    /// DBHub image used for the aggregate Postgres MCP server.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_IMAGE",
+        default_value = DEFAULT_POSTGRES_MCP_IMAGE
+    )]
+    pub(crate) postgres_mcp_image: String,
+
+    /// Image pull policy for the DBHub container.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_IMAGE_PULL_POLICY",
+        default_value = "IfNotPresent"
+    )]
+    pub(crate) postgres_mcp_image_pull_policy: String,
+
+    /// DBHub HTTP port.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_SERVICE_PORT",
+        default_value_t = DEFAULT_POSTGRES_MCP_SERVICE_PORT
+    )]
+    pub(crate) postgres_mcp_service_port: u16,
+
+    /// DBHub query timeout, in seconds, rendered into each source.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_QUERY_TIMEOUT",
+        default_value_t = DEFAULT_POSTGRES_MCP_QUERY_TIMEOUT
+    )]
+    pub(crate) postgres_mcp_query_timeout: u32,
+
+    /// DBHub maximum rows returned by execute_sql.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_MAX_ROWS",
+        default_value_t = DEFAULT_POSTGRES_MCP_MAX_ROWS
+    )]
+    pub(crate) postgres_mcp_max_rows: u32,
+
+    /// Timeout for Postgres discovery and validation checks.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_CONNECT_TIMEOUT_SECS",
+        default_value_t = DEFAULT_POSTGRES_MCP_CONNECT_TIMEOUT_SECS
+    )]
+    pub(crate) postgres_mcp_connect_timeout_secs: u64,
+
+    /// CPU request for generated DBHub pods.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_REQUEST_CPU",
+        default_value = DEFAULT_POSTGRES_MCP_REQUEST_CPU
+    )]
+    pub(crate) postgres_mcp_request_cpu: String,
+
+    /// Memory request for generated DBHub pods.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_REQUEST_MEMORY",
+        default_value = DEFAULT_POSTGRES_MCP_REQUEST_MEMORY
+    )]
+    pub(crate) postgres_mcp_request_memory: String,
+
+    /// CPU limit for generated DBHub pods.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_LIMIT_CPU",
+        default_value = DEFAULT_POSTGRES_MCP_LIMIT_CPU
+    )]
+    pub(crate) postgres_mcp_limit_cpu: String,
+
+    /// Memory limit for generated DBHub pods.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_LIMIT_MEMORY",
+        default_value = DEFAULT_POSTGRES_MCP_LIMIT_MEMORY
+    )]
+    pub(crate) postgres_mcp_limit_memory: String,
+}
