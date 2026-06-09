@@ -33,6 +33,7 @@ const JITTER_MS_MAX: u64 = 1_000;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    install_rustls_crypto_provider();
     tracing_subscriber::fmt::init();
 
     let cli = cli::Cli::parse();
@@ -51,6 +52,12 @@ async fn main() -> anyhow::Result<()> {
         tokio::time::sleep(delay).await;
         backoff = (backoff * 2).min(MAX_BACKOFF);
     }
+}
+
+fn install_rustls_crypto_provider() {
+    // This binary links Rustls through multiple clients, which enables both
+    // provider features and disables Rustls' automatic provider selection.
+    let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 async fn build_postgres_mcp(cli: &cli::Cli) -> anyhow::Result<Arc<ManagedPostgresMcpController>> {
