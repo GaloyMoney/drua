@@ -17,7 +17,6 @@ use sandbox::DeleteInput;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
-use crate::primitives::{AuthScope, SandboxId};
 use crate::sandbox::Sandboxes;
 use crate::space_fs::SpaceFs;
 
@@ -41,13 +40,6 @@ impl Delete {
 
 static DELETE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<DeleteInput>);
 static DELETE_OUTPUT: LazyLock<OutputSchema<TextOutput>> = LazyLock::new(OutputSchema::new);
-
-fn writable_sandbox_id(subject: &AuthSubject) -> Option<SandboxId> {
-    subject.scopes().iter().find_map(|s| match s {
-        AuthScope::SandboxUse(id) => Some(*id),
-        _ => None,
-    })
-}
 
 #[async_trait::async_trait]
 impl TopLevelTool for Delete {
@@ -90,7 +82,9 @@ impl TopLevelTool for Delete {
             return Ok(DELETE_OUTPUT.success(text, &out));
         }
 
-        let sandbox_id = writable_sandbox_id(subject).ok_or(ToolSetsError::Unauthorized)?;
+        let sandbox_id = subject
+            .writable_sandbox_id()
+            .ok_or_else(|| super::sandbox_write_denied(subject, "Delete"))?;
         Audit::record_sandbox_id(sandbox_id);
 
         let client = self

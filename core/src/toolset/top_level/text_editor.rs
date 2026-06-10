@@ -23,7 +23,6 @@ use sandbox::{TextEditorAction, TextEditorInput};
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
-use crate::primitives::{AuthScope, SandboxId};
 use crate::sandbox::Sandboxes;
 use crate::space_fs::{FileView, SpaceFs};
 
@@ -48,13 +47,6 @@ impl TextEditor {
 static TEXT_EDITOR_OUTPUT: LazyLock<OutputSchema<TextOutput>> = LazyLock::new(OutputSchema::new);
 static TEXT_EDITOR_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<TextEditorInput>);
-
-fn writable_sandbox_id(subject: &AuthSubject) -> Option<SandboxId> {
-    subject.scopes().iter().find_map(|s| match s {
-        AuthScope::SandboxUse(id) => Some(*id),
-        _ => None,
-    })
-}
 
 #[async_trait::async_trait]
 impl TopLevelTool for TextEditor {
@@ -152,11 +144,13 @@ impl TopLevelTool for TextEditor {
         }
 
         let sandbox_id = if is_mutating {
-            writable_sandbox_id(subject).ok_or(ToolSetsError::Unauthorized)?
+            subject
+                .writable_sandbox_id()
+                .ok_or_else(|| super::sandbox_write_denied(subject, "Edit"))?
         } else {
             subject
                 .readable_sandbox_id()
-                .ok_or(ToolSetsError::Unauthorized)?
+                .ok_or_else(|| super::sandbox_read_denied("Edit"))?
         };
         Audit::record_sandbox_id(sandbox_id);
 

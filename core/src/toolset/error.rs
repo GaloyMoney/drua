@@ -50,6 +50,8 @@ pub enum ToolSetsError {
     Workflow(String),
     #[error("ToolSetsError - Unauthorized")]
     Unauthorized,
+    #[error("ToolSetsError - Unauthorized: {0}")]
+    UnauthorizedReason(String),
 }
 
 /// Why a top-level tool can't be invoked from a workflow `tool_step`.

@@ -84,7 +84,7 @@ impl TopLevelTool for GlobTool {
 
         let sandbox_id = subject
             .readable_sandbox_id()
-            .ok_or(ToolSetsError::Unauthorized)?;
+            .ok_or_else(|| super::sandbox_read_denied("Glob"))?;
         Audit::record_sandbox_id(sandbox_id);
 
         let client = self

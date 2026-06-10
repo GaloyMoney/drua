@@ -43,6 +43,31 @@ mod liberal {
     }
 }
 
+/// Actionable denial for sandbox-mutating tools — a bare "Unauthorized"
+/// sends agents into retry loops (audit: ~4 attempts each), so name the
+/// missing capability and the alternative.
+pub(super) fn sandbox_write_denied(
+    subject: &crate::auth::AuthSubject,
+    tool: &str,
+) -> ToolSetsError {
+    let reason = if subject.readable_sandbox_id().is_some() {
+        format!(
+            "sandbox is attached read-only; {tool} requires a write-mode \
+             attachment — use the read-only tools (Read, Grep, Glob, LS, \
+             Edit view) instead"
+        )
+    } else {
+        format!("no sandbox attached; {tool} requires a write-mode sandbox attachment")
+    };
+    ToolSetsError::UnauthorizedReason(reason)
+}
+
+pub(super) fn sandbox_read_denied(tool: &str) -> ToolSetsError {
+    ToolSetsError::UnauthorizedReason(format!(
+        "no sandbox attached; {tool} requires an attached sandbox"
+    ))
+}
+
 /// Missing arguments are treated as an empty object.
 pub(super) fn parse_params<T: serde::de::DeserializeOwned>(
     arguments: Option<JsonObject>,
