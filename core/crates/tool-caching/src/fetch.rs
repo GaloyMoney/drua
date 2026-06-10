@@ -8,6 +8,37 @@ use serde_json::Value;
 use crate::error::ToolCachingError;
 use crate::repo::StoredInvocation;
 
+/// Liberal numeric deserialization — some models send `"200"` instead of
+/// `200`; coerce numeric strings rather than failing the whole fetch.
+mod liberal {
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrInt {
+        Int(i64),
+        Str(String),
+    }
+
+    pub(super) fn deserialize_i64<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<i64, D::Error> {
+        match StringOrInt::deserialize(deserializer)? {
+            StringOrInt::Int(v) => Ok(v),
+            StringOrInt::Str(s) => s.trim().parse().map_err(serde::de::Error::custom),
+        }
+    }
+
+    pub(super) fn deserialize_usize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<usize, D::Error> {
+        match StringOrInt::deserialize(deserializer)? {
+            StringOrInt::Int(v) => usize::try_from(v).map_err(serde::de::Error::custom),
+            StringOrInt::Str(s) => s.trim().parse().map_err(serde::de::Error::custom),
+        }
+    }
+}
+
 /// Slice operation applied at the resolved json-path. When absent, the
 /// whole value at the path is returned. Mirrors the recovery template
 /// the walker emits.
@@ -23,16 +54,31 @@ pub enum FetchQuery {
     /// requested byte boundaries land inside a UTF-8 codepoint, they are
     /// moved inward to the nearest valid character boundaries instead of
     /// failing the recovery request.
-    Range { offset: i64, len: usize },
+    Range {
+        #[serde(deserialize_with = "liberal::deserialize_i64")]
+        offset: i64,
+        #[serde(deserialize_with = "liberal::deserialize_usize")]
+        len: usize,
+    },
     /// Line range on a string-typed value at `path`. `offset` is the
     /// zero-indexed first line to return; `len` is the line count.
     /// `offset` may be negative to count from the end (e.g.
     /// `offset:-80, len:80` returns the last 80 lines).
-    Lines { offset: i64, len: usize },
+    Lines {
+        #[serde(deserialize_with = "liberal::deserialize_i64")]
+        offset: i64,
+        #[serde(deserialize_with = "liberal::deserialize_usize")]
+        len: usize,
+    },
     /// Item range on an array-typed value at `path`. Returns the slice
     /// `arr[offset..offset+len]` as a `Value::Array`. `offset` may be
     /// negative to count from the end of the array.
-    JsonArraySlice { offset: i64, len: usize },
+    JsonArraySlice {
+        #[serde(deserialize_with = "liberal::deserialize_i64")]
+        offset: i64,
+        #[serde(deserialize_with = "liberal::deserialize_usize")]
+        len: usize,
+    },
     /// Return the persisted curated `<summary>+<recovery>` envelope —
     /// the same view the agent would have seen from a top-level
     /// `call_tool` invocation. Useful for inspecting a compose
@@ -676,6 +722,41 @@ mod tests {
             },
             original_structured: None,
         }
+    }
+
+    #[test]
+    fn fetch_query_coerces_numeric_strings() {
+        let q: FetchQuery = serde_json::from_value(
+            serde_json::json!({"mode": "lines", "offset": "-80", "len": "200"}),
+        )
+        .unwrap();
+        assert!(matches!(
+            q,
+            FetchQuery::Lines {
+                offset: -80,
+                len: 200
+            }
+        ));
+        let q: FetchQuery =
+            serde_json::from_value(serde_json::json!({"mode": "range", "offset": "0", "len": 64}))
+                .unwrap();
+        assert!(matches!(q, FetchQuery::Range { offset: 0, len: 64 }));
+        let q: FetchQuery = serde_json::from_value(
+            serde_json::json!({"mode": "json_array_slice", "offset": 5, "len": "10"}),
+        )
+        .unwrap();
+        assert!(matches!(
+            q,
+            FetchQuery::JsonArraySlice { offset: 5, len: 10 }
+        ));
+        assert!(serde_json::from_value::<FetchQuery>(
+            serde_json::json!({"mode": "lines", "offset": 0, "len": "abc"})
+        )
+        .is_err());
+        assert!(serde_json::from_value::<FetchQuery>(
+            serde_json::json!({"mode": "lines", "offset": 0, "len": "-5"})
+        )
+        .is_err());
     }
 
     #[test]
