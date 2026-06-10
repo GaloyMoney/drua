@@ -395,14 +395,15 @@ impl CallCatalogTool {
     }
 
     /// Top-level tools that models route through call_tool (audit:
-    /// tool_output_fetch, submit_output, workflow). Proxying keeps each
-    /// tool's own authz checks; only self-dispatch is refused.
-    fn find_top_level(&self, name: &str) -> Option<Arc<dyn TopLevelTool>> {
+    /// tool_output_fetch, submit_output, workflow). Hidden tools stay
+    /// hidden — the proxy must not be a side door past `is_visible`
+    /// (e.g. bash for read-only agents). Self-dispatch is refused.
+    fn find_top_level(&self, subject: &AuthSubject, name: &str) -> Option<Arc<dyn TopLevelTool>> {
         if name == "call_tool" {
             return None;
         }
         let map = self.top_level.read().expect("top_level lock poisoned");
-        map.get(name).cloned()
+        map.get(name).filter(|t| t.is_visible(subject)).cloned()
     }
 
     fn not_found(&self, subject: &AuthSubject, requested: &str) -> ToolSetsError {
@@ -547,8 +548,16 @@ impl TopLevelTool for CallCatalogTool {
         {
             Some(found) => found,
             None => {
-                if let Some(tool) = self.find_top_level(&canonical) {
+                if let Some(tool) = self.find_top_level(subject, &canonical) {
                     Audit::record_action(tool.name());
+                    // Same arg-coercion treatment as direct top-level dispatch.
+                    let inner_args = inner_args.map(|mut a| {
+                        super::super::auto_parse_args::coerce_args_to_schema(
+                            &mut a,
+                            tool.input_schema(),
+                        );
+                        a
+                    });
                     return tool.call(subject, inner_args).await;
                 }
                 return Err(self.not_found(subject, &tool_name));
@@ -1054,6 +1063,7 @@ mod tests {
 
     struct StubTopLevel {
         schema: serde_json::Value,
+        visible: bool,
     }
 
     #[async_trait::async_trait]
@@ -1067,47 +1077,89 @@ mod tests {
         fn input_schema(&self) -> &serde_json::Value {
             &self.schema
         }
+        fn is_visible(&self, _subject: &AuthSubject) -> bool {
+            self.visible
+        }
         async fn call(
             &self,
             _subject: &AuthSubject,
-            _arguments: Option<JsonObject>,
+            arguments: Option<JsonObject>,
         ) -> Result<CallToolResult, ToolSetsError> {
-            Ok(CallToolResult::success(vec![Content::text("proxied")]))
+            let echo = serde_json::to_string(&arguments.unwrap_or_default()).unwrap();
+            Ok(CallToolResult::success(vec![Content::text(echo)]))
         }
     }
 
-    #[tokio::test]
-    async fn call_tool_proxies_registered_top_level_tools() {
+    fn call_tool_with_stub_top_level(visible: bool) -> CallCatalogTool {
         let mut top_level: std::collections::HashMap<String, Arc<dyn TopLevelTool>> =
             Default::default();
         top_level.insert(
             "submit_output".to_string(),
-            Arc::new(StubTopLevel { schema: json!({}) }),
+            Arc::new(StubTopLevel {
+                schema: json!({"properties": {"len": {"type": "integer"}}}),
+                visible,
+            }),
         );
         let sets: Vec<Arc<dyn SearchableToolSet>> = vec![];
-        let call = CallCatalogTool::new(
+        CallCatalogTool::new(
             Arc::new(RwLock::new(sets)),
             Arc::new(RwLock::new(top_level)),
             None,
-        );
+        )
+    }
+
+    fn call_tool_args(tool_name: &str) -> JsonObject {
+        let mut args = JsonObject::default();
+        args.insert("tool_name".to_string(), json!(tool_name));
+        args
+    }
+
+    #[tokio::test]
+    async fn call_tool_proxies_registered_top_level_tools() {
+        let call = call_tool_with_stub_top_level(true);
 
         for requested in ["submit_output", "mcp__drua__submit_output"] {
-            let mut args = JsonObject::default();
-            args.insert("tool_name".to_string(), json!(requested));
             let result = call
-                .call(&AuthSubject::Anonymous, Some(args))
+                .call(&AuthSubject::Anonymous, Some(call_tool_args(requested)))
                 .await
                 .unwrap();
             assert_ne!(result.is_error, Some(true), "requested: {requested}");
         }
 
         // Self-dispatch is refused, not recursed.
-        let mut args = JsonObject::default();
-        args.insert("tool_name".to_string(), json!("call_tool"));
         assert!(call
-            .call(&AuthSubject::Anonymous, Some(args))
+            .call(&AuthSubject::Anonymous, Some(call_tool_args("call_tool")))
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn call_tool_proxy_coerces_args_against_tool_schema() {
+        let call = call_tool_with_stub_top_level(true);
+
+        let mut args = call_tool_args("submit_output");
+        args.insert("arguments".to_string(), json!({"len": "200"}));
+        let result = call
+            .call(&AuthSubject::Anonymous, Some(args))
+            .await
+            .unwrap();
+        let echoed = result.content[0].as_text().unwrap().text.clone();
+        assert!(echoed.contains("\"len\":200"), "got: {echoed}");
+    }
+
+    #[tokio::test]
+    async fn call_tool_does_not_proxy_hidden_top_level_tools() {
+        let call = call_tool_with_stub_top_level(false);
+
+        let err = call
+            .call(
+                &AuthSubject::Anonymous,
+                Some(call_tool_args("submit_output")),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ToolNotFound"), "got: {err}");
     }
 
     /// Strict MCP clients (e.g. Claude Code) reject boolean schemas inside
