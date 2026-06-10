@@ -203,6 +203,7 @@ impl ToolSets {
         let describe = Arc::new(DescribeCatalogTool::new(Arc::clone(&sets)));
         let call = Arc::new(CallCatalogTool::new(
             Arc::clone(&sets),
+            Arc::clone(&top_level),
             tool_caching.clone(),
         ));
         let compose = Arc::new(ComposeTool::new(
