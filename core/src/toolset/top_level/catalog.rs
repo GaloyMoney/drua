@@ -438,7 +438,22 @@ impl TopLevelTool for CallCatalogTool {
         let tool_name = args
             .remove("tool_name")
             .and_then(|v| v.as_str().map(str::to_string))
-            .ok_or_else(|| ToolSetsError::ToolNotFound("missing tool_name".to_string()))?;
+            .ok_or_else(|| {
+                let received: Vec<&String> = args.keys().collect();
+                let msg = if received.is_empty() {
+                    "missing required field `tool_name` — call_tool envelope is \
+                     {tool_name: \"<prefixed name from search_tools>\", arguments: {…}}"
+                        .to_string()
+                } else {
+                    format!(
+                        "missing required field `tool_name`; received keys: {received:?}. \
+                         call_tool envelope is {{tool_name: \"<prefixed name from \
+                         search_tools>\", arguments: {{…}}}} — put the tool's own \
+                         parameters inside `arguments`."
+                    )
+                };
+                ToolSetsError::InvalidArgument(msg)
+            })?;
         let inner_args = args.remove("arguments").and_then(|v| match v {
             serde_json::Value::Object(obj) => Some(obj),
             _ => None,
@@ -873,6 +888,36 @@ mod tests {
             Ok(CallToolResult::success(vec![Content::text("ok")]));
         let out = annotate_envelope_mistake(ok, "x", &["stray".to_string()]);
         assert!(out.is_ok());
+    }
+
+    #[tokio::test]
+    async fn missing_tool_name_echoes_received_keys() {
+        let sets: Vec<Arc<dyn SearchableToolSet>> = vec![];
+        let call = CallCatalogTool::new(Arc::new(RwLock::new(sets)), None);
+
+        let err = call
+            .call(&AuthSubject::Anonymous, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("InvalidArgument"), "got: {err}");
+        assert!(
+            err.contains("missing required field `tool_name`"),
+            "got: {err}"
+        );
+
+        let mut args = JsonObject::default();
+        args.insert("incident_id".to_string(), json!("123"));
+        let err = call
+            .call(&AuthSubject::Anonymous, Some(args))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("received keys: [\"incident_id\"]"),
+            "got: {err}"
+        );
+        assert!(err.contains("inside `arguments`"), "got: {err}");
     }
 
     /// Strict MCP clients (e.g. Claude Code) reject boolean schemas inside
