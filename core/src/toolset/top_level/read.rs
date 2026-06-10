@@ -105,7 +105,7 @@ impl TopLevelTool for Read {
 
         let sandbox_id = subject
             .readable_sandbox_id()
-            .ok_or(ToolSetsError::Unauthorized)?;
+            .ok_or_else(|| super::sandbox_read_denied("Read"))?;
         Audit::record_sandbox_id(sandbox_id);
 
         let mut editor_input = serde_json::json!({

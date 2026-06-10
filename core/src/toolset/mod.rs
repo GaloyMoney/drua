@@ -203,6 +203,7 @@ impl ToolSets {
         let describe = Arc::new(DescribeCatalogTool::new(Arc::clone(&sets)));
         let call = Arc::new(CallCatalogTool::new(
             Arc::clone(&sets),
+            Arc::clone(&top_level),
             tool_caching.clone(),
         ));
         let compose = Arc::new(ComposeTool::new(
@@ -589,7 +590,7 @@ impl ToolSets {
             // Auto-parse them in place against the tool's input schema before
             // dispatch, so per-tool deserialization sees the intended shape.
             let arguments = arguments.map(|mut args| {
-                auto_parse_args::auto_parse_stringified_json_args(&mut args, tool.input_schema());
+                auto_parse_args::coerce_args_to_schema(&mut args, tool.input_schema());
                 args
             });
 

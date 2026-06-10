@@ -19,7 +19,6 @@ use sandbox::MoveInput;
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
-use crate::primitives::{AuthScope, SandboxId};
 use crate::sandbox::Sandboxes;
 use crate::space_fs::SpaceFs;
 
@@ -43,13 +42,6 @@ impl MoveFile {
 
 static MOVE_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(schema_for::<MoveInput>);
 static MOVE_OUTPUT: LazyLock<OutputSchema<TextOutput>> = LazyLock::new(OutputSchema::new);
-
-fn writable_sandbox_id(subject: &AuthSubject) -> Option<SandboxId> {
-    subject.scopes().iter().find_map(|s| match s {
-        AuthScope::SandboxUse(id) => Some(*id),
-        _ => None,
-    })
-}
 
 #[async_trait::async_trait]
 impl TopLevelTool for MoveFile {
@@ -97,7 +89,9 @@ impl TopLevelTool for MoveFile {
             return Ok(MOVE_OUTPUT.success(text, &out));
         }
 
-        let sandbox_id = writable_sandbox_id(subject).ok_or(ToolSetsError::Unauthorized)?;
+        let sandbox_id = subject
+            .writable_sandbox_id()
+            .ok_or_else(|| super::sandbox_write_denied(subject, "Move"))?;
         Audit::record_sandbox_id(sandbox_id);
 
         let client = self

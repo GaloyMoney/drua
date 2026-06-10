@@ -90,7 +90,7 @@ impl TopLevelTool for Ls {
 
         let sandbox_id = subject
             .readable_sandbox_id()
-            .ok_or(ToolSetsError::Unauthorized)?;
+            .ok_or_else(|| super::sandbox_read_denied("LS"))?;
         Audit::record_sandbox_id(sandbox_id);
 
         let client = self

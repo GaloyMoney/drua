@@ -172,6 +172,17 @@ impl AuthSubject {
         })
     }
 
+    /// First `SandboxUse` scope (writer attachment). Read-only attachments
+    /// don't qualify — mutating tools (bash, Edit, Delete, Move) must not
+    /// run against them. Entity enforces a single active attachment per
+    /// agent, but first-wins regardless.
+    pub fn writable_sandbox_id(&self) -> Option<SandboxId> {
+        self.scopes().iter().find_map(|s| match s {
+            AuthScope::SandboxUse(id) => Some(*id),
+            _ => None,
+        })
+    }
+
     /// Panics for `Anonymous` and `WorkflowExecutor` — neither sends
     /// chat messages directly (the executor dispatches top-level tools
     /// rather than driving an agent session).

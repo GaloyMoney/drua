@@ -368,15 +368,21 @@ impl TopLevelTool for DescribeCatalogTool {
 
 pub struct CallCatalogTool {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
+    top_level: Arc<RwLock<std::collections::HashMap<String, Arc<dyn TopLevelTool>>>>,
     tool_caching: Option<Arc<ToolCaching>>,
 }
 
 impl CallCatalogTool {
     pub fn new(
         sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
+        top_level: Arc<RwLock<std::collections::HashMap<String, Arc<dyn TopLevelTool>>>>,
         tool_caching: Option<Arc<ToolCaching>>,
     ) -> Self {
-        Self { sets, tool_caching }
+        Self {
+            sets,
+            top_level,
+            tool_caching,
+        }
     }
 
     fn find_set(
@@ -387,6 +393,80 @@ impl CallCatalogTool {
         let sets = self.sets.read().expect("toolset lock poisoned");
         super::super::dispatch::find_searchable(sets.iter(), subject, prefixed_name)
     }
+
+    /// Top-level tools that models route through call_tool (audit:
+    /// tool_output_fetch, submit_output, workflow). Hidden tools stay
+    /// hidden — the proxy must not be a side door past `is_visible`
+    /// (e.g. bash for read-only agents). Self-dispatch is refused.
+    fn find_top_level(&self, subject: &AuthSubject, name: &str) -> Option<Arc<dyn TopLevelTool>> {
+        if name == "call_tool" {
+            return None;
+        }
+        let map = self.top_level.read().expect("top_level lock poisoned");
+        map.get(name).filter(|t| t.is_visible(subject)).cloned()
+    }
+
+    fn not_found(&self, subject: &AuthSubject, requested: &str) -> ToolSetsError {
+        let mut candidates: Vec<String> = {
+            let sets = self.sets.read().expect("toolset lock poisoned");
+            visible_entries(subject, &sets)
+                .into_iter()
+                .map(|e| e.prefixed_name)
+                .collect()
+        };
+        {
+            let map = self.top_level.read().expect("top_level lock poisoned");
+            candidates.extend(
+                map.values()
+                    .filter(|t| t.is_visible(subject))
+                    .map(|t| t.name().to_string()),
+            );
+        }
+        let suggestions = closest_tool_names(requested, &candidates);
+        let msg = if suggestions.is_empty() {
+            format!("{requested} — no such tool; use search_tools to discover available tools")
+        } else {
+            format!(
+                "{requested} — no such tool. Did you mean: {}? \
+                 Use search_tools to discover available tools.",
+                suggestions.join(", ")
+            )
+        };
+        ToolSetsError::ToolNotFound(msg)
+    }
+}
+
+/// Models confuse naming conventions (audit: `github.pull_request_read`,
+/// `mcp__drua__tool_output_fetch`) — map those spellings back to the
+/// canonical prefixed name before declaring a miss.
+fn canonicalize_tool_name(name: &str) -> String {
+    let stripped = name.strip_prefix("mcp__drua__").unwrap_or(name);
+    stripped.replace('.', "_")
+}
+
+fn name_tokens(s: &str) -> Vec<String> {
+    s.to_lowercase()
+        .split(['_', '-', '.', ' '])
+        .filter(|t| !t.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+fn closest_tool_names(requested: &str, candidates: &[String]) -> Vec<String> {
+    let req = name_tokens(requested);
+    if req.is_empty() {
+        return Vec::new();
+    }
+    let mut scored: Vec<(usize, &String)> = candidates
+        .iter()
+        .filter_map(|c| {
+            let toks = name_tokens(c);
+            let score = req.iter().filter(|t| toks.contains(t)).count();
+            (score > 0).then_some((score, c))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+    scored.into_iter().take(3).map(|(_, c)| c.clone()).collect()
 }
 
 static CALL_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
@@ -438,7 +518,22 @@ impl TopLevelTool for CallCatalogTool {
         let tool_name = args
             .remove("tool_name")
             .and_then(|v| v.as_str().map(str::to_string))
-            .ok_or_else(|| ToolSetsError::ToolNotFound("missing tool_name".to_string()))?;
+            .ok_or_else(|| {
+                let received: Vec<&String> = args.keys().collect();
+                let msg = if received.is_empty() {
+                    "missing required field `tool_name` — call_tool envelope is \
+                     {tool_name: \"<prefixed name from search_tools>\", arguments: {…}}"
+                        .to_string()
+                } else {
+                    format!(
+                        "missing required field `tool_name`; received keys: {received:?}. \
+                         call_tool envelope is {{tool_name: \"<prefixed name from \
+                         search_tools>\", arguments: {{…}}}} — put the tool's own \
+                         parameters inside `arguments`."
+                    )
+                };
+                ToolSetsError::InvalidArgument(msg)
+            })?;
         let inner_args = args.remove("arguments").and_then(|v| match v {
             serde_json::Value::Object(obj) => Some(obj),
             _ => None,
@@ -446,21 +541,27 @@ impl TopLevelTool for CallCatalogTool {
 
         let extra_keys: Vec<String> = args.keys().cloned().collect();
 
-        let (set, name) = match self.find_set(subject, &tool_name) {
+        let canonical = canonicalize_tool_name(&tool_name);
+        let (set, name) = match self
+            .find_set(subject, &tool_name)
+            .or_else(|| self.find_set(subject, &canonical))
+        {
             Some(found) => found,
-            None if tool_name == "tool_output_fetch"
-                || tool_name == "mcp__drua__tool_output_fetch" =>
-            {
-                let tc = self
-                    .tool_caching
-                    .as_ref()
-                    .ok_or_else(|| ToolSetsError::ToolNotFound(tool_name.clone()))?;
-                let fetch =
-                    super::tool_output_fetch::ToolOutputFetch::new(std::sync::Arc::clone(tc));
-                Audit::record_action("tool_output_fetch");
-                return fetch.call(subject, inner_args).await;
+            None => {
+                if let Some(tool) = self.find_top_level(subject, &canonical) {
+                    Audit::record_action(tool.name());
+                    // Same arg-coercion treatment as direct top-level dispatch.
+                    let inner_args = inner_args.map(|mut a| {
+                        super::super::auto_parse_args::coerce_args_to_schema(
+                            &mut a,
+                            tool.input_schema(),
+                        );
+                        a
+                    });
+                    return tool.call(subject, inner_args).await;
+                }
+                return Err(self.not_found(subject, &tool_name));
             }
-            None => return Err(ToolSetsError::ToolNotFound(tool_name.clone())),
         };
 
         // Auto-parse inner_args against the upstream tool's input schema —
@@ -471,7 +572,7 @@ impl TopLevelTool for CallCatalogTool {
             if let Some(entry) = set.tools().iter().find(|t| t.name == name) {
                 let schema =
                     serde_json::Value::Object(entry.description.input_schema.as_ref().clone());
-                super::super::auto_parse_args::auto_parse_stringified_json_args(&mut a, &schema);
+                super::super::auto_parse_args::coerce_args_to_schema(&mut a, &schema);
             }
             a
         });
@@ -873,6 +974,192 @@ mod tests {
             Ok(CallToolResult::success(vec![Content::text("ok")]));
         let out = annotate_envelope_mistake(ok, "x", &["stray".to_string()]);
         assert!(out.is_ok());
+    }
+
+    #[tokio::test]
+    async fn missing_tool_name_echoes_received_keys() {
+        let sets: Vec<Arc<dyn SearchableToolSet>> = vec![];
+        let call = CallCatalogTool::new(
+            Arc::new(RwLock::new(sets)),
+            Arc::new(RwLock::new(Default::default())),
+            None,
+        );
+
+        let err = call
+            .call(&AuthSubject::Anonymous, None)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("InvalidArgument"), "got: {err}");
+        assert!(
+            err.contains("missing required field `tool_name`"),
+            "got: {err}"
+        );
+
+        let mut args = JsonObject::default();
+        args.insert("incident_id".to_string(), json!("123"));
+        let err = call
+            .call(&AuthSubject::Anonymous, Some(args))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("received keys: [\"incident_id\"]"),
+            "got: {err}"
+        );
+        assert!(err.contains("inside `arguments`"), "got: {err}");
+    }
+
+    #[test]
+    fn canonicalize_handles_dots_and_mcp_prefix() {
+        assert_eq!(
+            canonicalize_tool_name("github.pull_request_read"),
+            "github_pull_request_read"
+        );
+        assert_eq!(
+            canonicalize_tool_name("mcp__drua__tool_output_fetch"),
+            "tool_output_fetch"
+        );
+        assert_eq!(
+            canonicalize_tool_name("zenduty_get_incident"),
+            "zenduty_get_incident"
+        );
+    }
+
+    #[test]
+    fn closest_tool_names_ranks_by_shared_tokens() {
+        let candidates = vec![
+            "github_pull_request_read".to_string(),
+            "github_get_file_contents".to_string(),
+            "zenduty_get_incident".to_string(),
+        ];
+        let got = closest_tool_names("github_pull_request_review_write", &candidates);
+        assert_eq!(got[0], "github_pull_request_read");
+        assert!(!got.contains(&"zenduty_get_incident".to_string()));
+
+        assert!(closest_tool_names("xyzzy", &candidates).is_empty());
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_error_suggests_close_names() {
+        let stub = StubToolSet::with_tools(vec![("pull_request_read", "Read a PR")]);
+        let sets: Vec<Arc<dyn SearchableToolSet>> = vec![Arc::new(stub)];
+        let call = CallCatalogTool::new(
+            Arc::new(RwLock::new(sets)),
+            Arc::new(RwLock::new(Default::default())),
+            None,
+        );
+
+        let mut args = JsonObject::default();
+        args.insert("tool_name".to_string(), json!("stub.pull_request_reed"));
+        let err = call
+            .call(&AuthSubject::Anonymous, Some(args))
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Did you mean"), "got: {err}");
+        assert!(err.contains("stub_pull_request_read"), "got: {err}");
+    }
+
+    struct StubTopLevel {
+        schema: serde_json::Value,
+        visible: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl TopLevelTool for StubTopLevel {
+        fn name(&self) -> &str {
+            "submit_output"
+        }
+        fn description(&self) -> &str {
+            "stub"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            &self.schema
+        }
+        fn is_visible(&self, _subject: &AuthSubject) -> bool {
+            self.visible
+        }
+        async fn call(
+            &self,
+            _subject: &AuthSubject,
+            arguments: Option<JsonObject>,
+        ) -> Result<CallToolResult, ToolSetsError> {
+            let echo = serde_json::to_string(&arguments.unwrap_or_default()).unwrap();
+            Ok(CallToolResult::success(vec![Content::text(echo)]))
+        }
+    }
+
+    fn call_tool_with_stub_top_level(visible: bool) -> CallCatalogTool {
+        let mut top_level: std::collections::HashMap<String, Arc<dyn TopLevelTool>> =
+            Default::default();
+        top_level.insert(
+            "submit_output".to_string(),
+            Arc::new(StubTopLevel {
+                schema: json!({"properties": {"len": {"type": "integer"}}}),
+                visible,
+            }),
+        );
+        let sets: Vec<Arc<dyn SearchableToolSet>> = vec![];
+        CallCatalogTool::new(
+            Arc::new(RwLock::new(sets)),
+            Arc::new(RwLock::new(top_level)),
+            None,
+        )
+    }
+
+    fn call_tool_args(tool_name: &str) -> JsonObject {
+        let mut args = JsonObject::default();
+        args.insert("tool_name".to_string(), json!(tool_name));
+        args
+    }
+
+    #[tokio::test]
+    async fn call_tool_proxies_registered_top_level_tools() {
+        let call = call_tool_with_stub_top_level(true);
+
+        for requested in ["submit_output", "mcp__drua__submit_output"] {
+            let result = call
+                .call(&AuthSubject::Anonymous, Some(call_tool_args(requested)))
+                .await
+                .unwrap();
+            assert_ne!(result.is_error, Some(true), "requested: {requested}");
+        }
+
+        // Self-dispatch is refused, not recursed.
+        assert!(call
+            .call(&AuthSubject::Anonymous, Some(call_tool_args("call_tool")))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn call_tool_proxy_coerces_args_against_tool_schema() {
+        let call = call_tool_with_stub_top_level(true);
+
+        let mut args = call_tool_args("submit_output");
+        args.insert("arguments".to_string(), json!({"len": "200"}));
+        let result = call
+            .call(&AuthSubject::Anonymous, Some(args))
+            .await
+            .unwrap();
+        let echoed = result.content[0].as_text().unwrap().text.clone();
+        assert!(echoed.contains("\"len\":200"), "got: {echoed}");
+    }
+
+    #[tokio::test]
+    async fn call_tool_does_not_proxy_hidden_top_level_tools() {
+        let call = call_tool_with_stub_top_level(false);
+
+        let err = call
+            .call(
+                &AuthSubject::Anonymous,
+                Some(call_tool_args("submit_output")),
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ToolNotFound"), "got: {err}");
     }
 
     /// Strict MCP clients (e.g. Claude Code) reject boolean schemas inside

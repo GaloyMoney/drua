@@ -8,11 +8,11 @@
 //! Visibility / authz:
 //! - Visible only to [`AuthSubject::Agent`] / [`AuthSubject::AgentOnBehalfOfUser`]
 //!   — users / exported-agent tokens / anonymous never see it.
-//! - Executable only when the subject carries a [`AuthScope::SandboxUse`]
-//!   (granted by attaching as Write). Read-only attachment isn't enough —
-//!   bash can mutate sandbox state. Visible-but-unauthorized when an agent
-//!   has no write attachment yet, so the model can ask to attach and try
-//!   again instead of being baffled by a missing tool.
+//! - Visible and executable only when the subject carries a
+//!   [`AuthScope::SandboxUse`] (granted by attaching as Write). Read-only
+//!   attachment isn't enough — bash can mutate sandbox state, and unlike
+//!   the other file tools there is no space-path fallback, so a bash
+//!   without write attachment can never succeed and is hidden entirely.
 
 use std::sync::{Arc, LazyLock};
 
@@ -21,7 +21,6 @@ use sandbox::{BashCommandInput, BashCommandOutput};
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
-use crate::primitives::{AuthScope, SandboxId};
 use crate::sandbox::Sandboxes;
 
 use super::super::error::ToolSetsError;
@@ -64,16 +63,6 @@ static BASH_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     })
 });
 
-/// First `SandboxUse` scope (writer attachment). Read-only attachments don't
-/// qualify because `bash` can mutate state. Entity enforces a single active
-/// attachment per agent, but first-wins regardless.
-fn sandbox_use_id(subject: &AuthSubject) -> Option<SandboxId> {
-    subject.scopes().iter().find_map(|s| match s {
-        AuthScope::SandboxUse(id) => Some(*id),
-        _ => None,
-    })
-}
-
 #[async_trait::async_trait]
 impl TopLevelTool for Bash {
     fn name(&self) -> &str {
@@ -97,8 +86,11 @@ impl TopLevelTool for Bash {
         Some(&BASH_OUTPUT_SCHEMA)
     }
 
+    // Unlike the other file tools, bash has no space-path fallback — without
+    // a write-mode sandbox it can never succeed, so don't advertise it
+    // (audit: 414 Unauthorized/week from read-only workflow agents).
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.can_use_agent_file_tools()
+        subject.can_use_agent_file_tools() && subject.writable_sandbox_id().is_some()
     }
 
     async fn call(
@@ -106,7 +98,9 @@ impl TopLevelTool for Bash {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let sandbox_id = sandbox_use_id(subject).ok_or(ToolSetsError::Unauthorized)?;
+        let sandbox_id = subject
+            .writable_sandbox_id()
+            .ok_or_else(|| super::sandbox_write_denied(subject, "bash"))?;
         Audit::record_action("bash");
         Audit::record_sandbox_id(sandbox_id);
 

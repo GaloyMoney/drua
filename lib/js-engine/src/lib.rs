@@ -580,6 +580,15 @@ const tools = new Proxy({{}}, {{
     }}
 }});
 
+// ── Node-ism stubs: fail with guidance, not ReferenceError ──
+const __noNode = (name) => () => {{
+    throw new Error(name + " is not available in compose scripts — plain JavaScript \
+plus the `tools` namespace only (no Node.js builtins).");
+}};
+const require = __noNode("require");
+const module = {{ get exports() {{ return __noNode("module")(); }} }};
+const process = new Proxy({{}}, {{ get: (_, p) => __noNode("process." + String(p))() }});
+
 // ── user script (wrapped for top-level await + return) ──
 (async () => {{
 {user_script}
@@ -642,6 +651,25 @@ mod tests {
             .unwrap();
         assert_eq!(result.value, serde_json::json!(3));
         assert_eq!(result.tool_calls_made, 0);
+    }
+
+    #[tokio::test]
+    async fn node_isms_fail_with_guidance() {
+        for script in [
+            r#"const x = require("fs"); return x;"#,
+            r#"return module.exports;"#,
+            r#"return process.env.HOME;"#,
+        ] {
+            let err = engine()
+                .execute(script, Arc::new(EchoDispatcher), timeout())
+                .await
+                .unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("not available in compose scripts"),
+                "script {script:?} got: {msg}"
+            );
+        }
     }
 
     #[tokio::test]
