@@ -513,7 +513,7 @@ async fn run_searchable_call(
     let inner_args = inner_args.map(|mut a| {
         if let Some(entry) = set.tools().iter().find(|t| t.name == tool_name) {
             let schema = serde_json::Value::Object(entry.description.input_schema.as_ref().clone());
-            super::super::auto_parse_args::auto_parse_stringified_json_args(&mut a, &schema);
+            super::super::auto_parse_args::coerce_args_to_schema(&mut a, &schema);
         }
         a
     });
@@ -544,10 +544,7 @@ async fn run_top_level_call(
 
     // Same defense-in-depth as searchable runner.
     let inner_args = inner_args.map(|mut a| {
-        super::super::auto_parse_args::auto_parse_stringified_json_args(
-            &mut a,
-            tool.input_schema(),
-        );
+        super::super::auto_parse_args::coerce_args_to_schema(&mut a, tool.input_schema());
         a
     });
 

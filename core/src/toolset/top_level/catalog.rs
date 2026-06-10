@@ -563,7 +563,7 @@ impl TopLevelTool for CallCatalogTool {
             if let Some(entry) = set.tools().iter().find(|t| t.name == name) {
                 let schema =
                     serde_json::Value::Object(entry.description.input_schema.as_ref().clone());
-                super::super::auto_parse_args::auto_parse_stringified_json_args(&mut a, &schema);
+                super::super::auto_parse_args::coerce_args_to_schema(&mut a, &schema);
             }
             a
         });
