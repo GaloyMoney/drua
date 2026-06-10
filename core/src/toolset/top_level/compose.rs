@@ -91,7 +91,9 @@ impl TopLevelTool for ComposeTool {
          (e.g. `tools.honeycomb_list_environments({...})`). \
          Use `return` for the final value. Top-level `await` and `Promise.all()` are supported. \
          **Call `compose_types` first** to fetch exact tool signatures and parameter names \
-         — guessing leads to runtime errors that waste a round trip.\n\n\
+         — guessing leads to runtime errors that waste a round trip. \
+         Scope is plain JavaScript plus `tools`, `console`, and `setTimeout` — \
+         no Node.js builtins (`require`, `module`, `process`, `fs` are unavailable).\n\n\
          Example:\n```js\nconst envs = await tools.honeycomb.list_environments({});\n\
          const issues = await tools.github.list_issues({ repo: 'org/repo', state: 'open' });\n\
          const stale = issues.filter(i => Date.now() - Date.parse(i.updated_at) > 7*86400*1000);\n\
@@ -328,10 +330,19 @@ impl CatalogDispatcher {
     ) -> Result<serde_json::Value, String> {
         let tool = {
             let map = self.top_level.read().expect("top_level lock poisoned");
-            map.get(name)
-                .filter(|t| t.composable() && t.is_visible(&self.subject))
-                .cloned()
-                .ok_or_else(|| with_hint(name, format!("Tool not found: {name}")))?
+            match map.get(name) {
+                Some(t) if t.is_visible(&self.subject) && t.composable() => Arc::clone(t),
+                // Registered but non-composable (compose, call_tool): say so
+                // instead of "not found" + a hint that suggests the failing
+                // call itself.
+                Some(t) if t.is_visible(&self.subject) => {
+                    return Err(format!(
+                        "Tool not callable inside compose scripts: {name} is a \
+                         top-level MCP tool — call it directly, outside compose."
+                    ));
+                }
+                _ => return Err(with_hint(name, format!("Tool not found: {name}"))),
+            }
         };
 
         let action = format!("compose > top_level: {name}");

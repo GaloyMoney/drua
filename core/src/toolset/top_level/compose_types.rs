@@ -81,10 +81,6 @@ impl TopLevelTool for ComposeTypes {
         Some(&COMPOSE_TYPES_OUTPUT_SCHEMA)
     }
 
-    fn composable(&self) -> bool {
-        false
-    }
-
     async fn call(
         &self,
         subject: &AuthSubject,
