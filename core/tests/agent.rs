@@ -881,6 +881,48 @@ async fn detach_conflicting_writer_is_noop_when_unattached() {
 }
 
 #[tokio::test]
+async fn list_for_project_returns_lead_past_100_workflow_agents() {
+    let pool = pool().await;
+    let (agents, _sandboxes) = build_agents(&pool).await;
+    let project_id = insert_project(&pool).await;
+    let sub = AuthSubject::User(UserId::new());
+
+    let lead = agents
+        .create_project_lead(&sub, project_id, "lead", "test-project")
+        .await
+        .expect("create lead");
+
+    let (workflow_id, run_id) = seed_workflow_run(&pool, project_id).await;
+    let mut op = agents.begin_op().await.expect("begin op");
+    for i in 0..101 {
+        agents
+            .create_for_workflow_run_in_op(
+                &mut op,
+                project_id,
+                workflow_id,
+                run_id,
+                &format!("wf-step-{i}"),
+                None,
+                None,
+                drua_core::workflow::default_output_schema(),
+            )
+            .await
+            .expect("create workflow agent");
+    }
+    op.commit().await.expect("commit");
+
+    let listed = agents
+        .list_for_project(&sub, project_id)
+        .await
+        .expect("list");
+    assert_eq!(
+        listed.iter().map(|a| a.id).collect::<Vec<_>>(),
+        vec![lead.id],
+        "lead must stay visible after 100+ newer workflow agents accumulate"
+    );
+}
+
+#[tokio::test]
 async fn update_session_chain_rejects_workflow_agents() {
     let pool = pool().await;
     let (agents, _sandboxes, _sandbox_id, project_id) =
