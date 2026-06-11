@@ -54,7 +54,7 @@ use crate::sandbox::{Sandbox, SandboxAgentMode, Sandboxes};
 pub use config::{AgentsConfig, ModelChain, ModelDefaults, RoleConfig};
 pub use entity::*;
 pub use error::AgentError;
-use repo::AgentRepo;
+use repo::{AgentFilters, AgentRepo};
 use session::Sessions;
 
 /// Snapshot of dynamic system blocks (notes + skills + spaces) for one
@@ -632,20 +632,22 @@ impl Agents {
             first: 100,
             after: None,
         };
+        // `workflow_id: Some(None)` ⇒ `workflow_id IS NULL`: the page must be
+        // filtered in SQL, or workflow-spawned agents crowd out user-owned
+        // ones once a project accumulates 100 of them.
         let result = self
             .repo
-            .list_for_project_id_by_created_at(
-                project_id,
+            .list_for_filters_by_created_at(
+                AgentFilters {
+                    project_id: Some(project_id),
+                    workflow_id: Some(None),
+                    ..Default::default()
+                },
                 query,
                 es_entity::ListDirection::Descending,
             )
             .await?;
-        // Covered by the `idx_agents_project_id_user_owned` partial index.
-        Ok(result
-            .entities
-            .into_iter()
-            .filter(|a| a.workflow_id.is_none())
-            .collect())
+        Ok(result.entities)
     }
 
     #[instrument(name = "domain.agent.list_for_workflow_run", skip(self, sub))]
