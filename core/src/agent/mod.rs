@@ -431,21 +431,6 @@ impl Agents {
 
         let mut agent = self.repo.create_in_op(op, new_agent).await?;
 
-        // Apply attach to the entity first so the subject used for tool
-        // defs / system blocks carries the sandbox scope (scope-gated
-        // tools like bash are otherwise invisible) and the initial skills
-        // block reflects the attached sandbox's exported skills. Rejects
-        // ProjectLead before the sandbox round-trip (`sandbox_attached`
-        // enforces it).
-        let initial_sandbox_id = if let Some((sandbox_id, mode)) = attach_sandbox {
-            if agent.sandbox_attached(sandbox_id, mode)?.did_execute() {
-                self.repo.update_in_op(op, &mut agent).await?;
-            }
-            Some(sandbox_id)
-        } else {
-            None
-        };
-
         let agent_subject = agent.auth_subject();
         let tool_defs = self
             .toolsets
@@ -457,6 +442,18 @@ impl Agents {
             &agent.project_name,
             output_schema.as_ref(),
         );
+
+        // Apply attach to the entity first so the initial skills block reflects
+        // the attached sandbox's exported skills. Rejects ProjectLead before
+        // the sandbox round-trip (`sandbox_attached` enforces it).
+        let initial_sandbox_id = if let Some((sandbox_id, mode)) = attach_sandbox {
+            if agent.sandbox_attached(sandbox_id, mode)?.did_execute() {
+                self.repo.update_in_op(op, &mut agent).await?;
+            }
+            Some(sandbox_id)
+        } else {
+            None
+        };
 
         // Resolve scope once; both notes (auto-pin from mounted spaces)
         // and skills consume it.
