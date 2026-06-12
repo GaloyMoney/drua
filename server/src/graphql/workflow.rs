@@ -34,6 +34,10 @@ pub struct WorkflowDefinition {
     steps: Vec<WorkflowStep>,
     sandboxes: Vec<WorkflowSandbox>,
     model_chain: Option<ModelChain>,
+    /// `true` when the workflow is paused — no runs fire (cron fires
+    /// are skipped, webhook deliveries suppressed, manual triggers
+    /// error) until resumed.
+    paused: bool,
     created_at: Timestamp,
     updated_at: Timestamp,
     yaml: String,
@@ -66,6 +70,9 @@ impl From<DomainWorkflowDefinition> for WorkflowDefinition {
         if matches!(entity.trigger, DomainWorkflowTrigger::Webhook { .. }) {
             trigger.webhook_url = Some(format!("/webhooks/{}", entity.id));
         }
+        if entity.paused {
+            trigger.next_run_at = None;
+        }
         let yaml = entity.canonical_yaml();
         Self {
             id: entity.id,
@@ -76,6 +83,7 @@ impl From<DomainWorkflowDefinition> for WorkflowDefinition {
             steps: entity.steps.iter().map(WorkflowStep::from).collect(),
             sandboxes: entity.sandboxes.iter().map(WorkflowSandbox::from).collect(),
             model_chain: entity.model_chain.clone().map(Into::into),
+            paused: entity.paused,
             created_at: created_at.into(),
             updated_at: updated_at.into(),
             yaml,
@@ -93,9 +101,6 @@ pub struct WorkflowTrigger {
     next_run_at: Option<Timestamp>,
     condition: Option<String>,
     webhook_url: Option<String>,
-    /// `true` when a cron workflow is paused — its schedule is retained
-    /// but runs are suspended. Always `false` for non-cron triggers.
-    paused: bool,
 }
 
 impl From<&DomainWorkflowTrigger> for WorkflowTrigger {
@@ -109,7 +114,6 @@ impl From<&DomainWorkflowTrigger> for WorkflowTrigger {
                 next_run_at: None,
                 condition: condition.clone(),
                 webhook_url: None,
-                paused: false,
             },
             DomainWorkflowTrigger::Webhook {
                 provider,
@@ -123,22 +127,23 @@ impl From<&DomainWorkflowTrigger> for WorkflowTrigger {
                 next_run_at: None,
                 condition: condition.clone(),
                 webhook_url: None,
-                paused: false,
             },
             DomainWorkflowTrigger::Cron {
                 schedule,
                 timezone,
                 condition,
-                paused,
             } => Self {
                 kind: WorkflowTriggerKind::Cron,
                 provider: None,
                 cron_schedule: Some(schedule.clone()),
                 cron_timezone: timezone.clone(),
-                next_run_at: trigger.next_run_at(chrono::Utc::now()).map(Into::into),
+                next_run_at: trigger
+                    .next_fire_at(chrono::Utc::now())
+                    .ok()
+                    .flatten()
+                    .map(Into::into),
                 condition: condition.clone(),
                 webhook_url: None,
-                paused: *paused,
             },
         }
     }

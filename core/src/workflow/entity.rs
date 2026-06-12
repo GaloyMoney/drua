@@ -31,6 +31,8 @@ pub enum WorkflowDefinitionEvent {
         /// the role/config default when unset.
         #[serde(default)]
         model_chain: Option<ModelChain>,
+        #[serde(default)]
+        paused: bool,
         /// On-disk path before sync canonicalisation; the
         /// `WriteToRuntime` job uses it to remove the old file.
         #[serde(default)]
@@ -47,6 +49,8 @@ pub enum WorkflowDefinitionEvent {
         /// `None` leaves the field untouched.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_chain: Option<Option<ModelChain>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        paused: Option<bool>,
     },
 }
 
@@ -67,6 +71,11 @@ pub struct WorkflowDefinition {
     /// Per-step `model_chain` wins; both fall through to role/config.
     #[builder(default)]
     pub model_chain: Option<ModelChain>,
+    /// While `true` no runs fire: cron fires are skipped (the schedule
+    /// keeps ticking), webhook deliveries are suppressed, and manual
+    /// triggers error. Resume is a data flip — no job re-registration.
+    #[builder(default)]
+    pub paused: bool,
     #[builder(default)]
     pub(crate) original_path: Option<String>,
     events: EntityEvents<WorkflowDefinitionEvent>,
@@ -106,12 +115,44 @@ impl WorkflowDefinition {
             &self.name,
             self.description.as_deref(),
             &self.trigger,
+            self.paused,
             &self.steps,
             &self.sandboxes,
             self.model_chain.as_ref(),
             &self.created_at().to_rfc3339(),
             &self.updated_at().to_rfc3339(),
         )
+    }
+
+    /// Next fire to surface to a user — `None` while paused, for
+    /// non-cron triggers, or when the schedule has no future fire. The
+    /// scheduler uses raw [`WorkflowTrigger::next_fire_at`], which
+    /// keeps advancing even while paused.
+    pub fn next_run_at(
+        &self,
+        after: chrono::DateTime<chrono::Utc>,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        if self.paused {
+            return None;
+        }
+        self.trigger.next_fire_at(after).ok().flatten()
+    }
+
+    pub fn set_paused(&mut self, paused: bool) -> Idempotent<()> {
+        if self.paused == paused {
+            return Idempotent::AlreadyApplied;
+        }
+        self.paused = paused;
+        self.events.push(WorkflowDefinitionEvent::Updated {
+            name: None,
+            description: None,
+            trigger: None,
+            steps: None,
+            sandboxes: None,
+            model_chain: None,
+            paused: Some(paused),
+        });
+        Idempotent::Executed(())
     }
 
     /// Computed (not stored) so it matches what `WriteToRuntime` writes;
@@ -132,6 +173,7 @@ impl WorkflowDefinition {
         steps: Option<Vec<WorkflowStepDef>>,
         sandboxes: Option<Vec<WorkflowSandboxDecl>>,
         model_chain: Option<Option<ModelChain>>,
+        paused: Option<bool>,
         incoming_file_hash: GitFileHash,
     ) -> Idempotent<()> {
         if self.file_hash() == incoming_file_hash {
@@ -173,6 +215,9 @@ impl WorkflowDefinition {
         if let Some(mc) = &model_chain {
             self.model_chain = mc.clone();
         }
+        if let Some(p) = paused {
+            self.paused = p;
+        }
 
         self.events.push(WorkflowDefinitionEvent::Updated {
             name,
@@ -181,6 +226,7 @@ impl WorkflowDefinition {
             steps,
             sandboxes,
             model_chain,
+            paused,
         });
         Idempotent::Executed(())
     }
@@ -250,6 +296,7 @@ impl WorkflowDefinition {
             steps,
             sandboxes,
             model_chain,
+            paused: None,
         });
         Idempotent::Executed(())
     }
@@ -341,6 +388,7 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     steps,
                     sandboxes,
                     model_chain,
+                    paused,
                     original_path,
                     ..
                 } => {
@@ -354,6 +402,7 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                         .steps(steps.clone())
                         .sandboxes(sandboxes.clone())
                         .model_chain(model_chain.clone())
+                        .paused(*paused)
                         .original_path(original_path.clone());
                 }
                 WorkflowDefinitionEvent::Updated {
@@ -363,6 +412,7 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     steps,
                     sandboxes,
                     model_chain,
+                    paused,
                     ..
                 } => {
                     if let Some(n) = name {
@@ -382,6 +432,9 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     }
                     if let Some(mc) = model_chain {
                         builder = builder.model_chain(mc.clone());
+                    }
+                    if let Some(p) = paused {
+                        builder = builder.paused(*p);
                     }
                 }
             }
@@ -410,6 +463,8 @@ pub struct NewWorkflowDefinition {
     pub(super) sandboxes: Vec<WorkflowSandboxDecl>,
     #[builder(default)]
     pub(super) model_chain: Option<ModelChain>,
+    #[builder(default)]
+    pub(super) paused: bool,
     #[builder(default, setter(into, strip_option))]
     pub(super) original_path: Option<String>,
 }
@@ -443,6 +498,7 @@ impl IntoEvents<WorkflowDefinitionEvent> for NewWorkflowDefinition {
                 steps: self.steps,
                 sandboxes: self.sandboxes,
                 model_chain: self.model_chain,
+                paused: self.paused,
                 original_path: self.original_path,
             }],
         )
@@ -542,7 +598,6 @@ mod tests {
                 schedule: "0 */6 * * * *".to_string(),
                 timezone: Some("UTC".to_string()),
                 condition: None,
-                paused: false,
             })
             .steps(vec![sample_step()])
             .build()
@@ -592,6 +647,45 @@ mod tests {
             Some("trigger.payload.env == 'staging'"),
             "hydrated trigger should carry the condition from the Updated event"
         );
+    }
+
+    #[test]
+    fn set_paused_round_trips_through_hydration() {
+        let mut def = build();
+        assert!(!def.paused);
+        assert!(matches!(def.set_paused(true), Idempotent::Executed(())));
+        assert!(matches!(def.set_paused(true), Idempotent::AlreadyApplied));
+        assert!(def.paused);
+
+        let hydrated = WorkflowDefinition::try_from_events(def.events.clone()).unwrap();
+        assert!(hydrated.paused);
+
+        let mut def = hydrated;
+        assert!(matches!(def.set_paused(false), Idempotent::Executed(())));
+        let hydrated = WorkflowDefinition::try_from_events(def.events.clone()).unwrap();
+        assert!(!hydrated.paused);
+    }
+
+    /// Events serialized before the `paused` field hydrate to `false`
+    /// (replay-safety on the JSONB event log).
+    #[test]
+    fn legacy_events_without_paused_hydrate_unpaused() {
+        let def = build();
+        let mut raw: Vec<serde_json::Value> = def
+            .events
+            .iter_all()
+            .map(|e| serde_json::to_value(e).unwrap())
+            .collect();
+        for v in &mut raw {
+            v.as_object_mut().unwrap().remove("paused");
+        }
+        let events: Vec<WorkflowDefinitionEvent> = raw
+            .into_iter()
+            .map(|v| serde_json::from_value(v).unwrap())
+            .collect();
+        let hydrated =
+            WorkflowDefinition::try_from_events(EntityEvents::init(def.id, events)).unwrap();
+        assert!(!hydrated.paused);
     }
 
     /// Serialize a definition's events to JSON and back, then hydrate.

@@ -6,7 +6,7 @@
 //!   2. If the definition was deleted or its trigger is no longer
 //!      `Cron`, exits without rescheduling.
 //!   3. Otherwise spawns a run via [`Workflows::trigger_run_for_definition`]
-//!      with a `triggered_by: cron` context (unless the trigger is
+//!      with a `triggered_by: cron` context (unless the definition is
 //!      `paused`, in which case the run is skipped), then schedules the
 //!      next job at the cron expression's next fire time. A paused
 //!      schedule keeps ticking so resume needs no re-registration.
@@ -110,13 +110,10 @@ impl JobRunner for TriggerCronRunner {
             }
         };
 
-        let (schedule, timezone, paused) = match &definition.trigger {
+        let (schedule, timezone) = match &definition.trigger {
             WorkflowTrigger::Cron {
-                schedule,
-                timezone,
-                paused,
-                ..
-            } => (schedule.clone(), timezone.clone(), *paused),
+                schedule, timezone, ..
+            } => (schedule.clone(), timezone.clone()),
             _ => {
                 tracing::info!("trigger no longer cron; schedule terminating");
                 return Ok(JobCompletion::Complete);
@@ -127,7 +124,7 @@ impl JobRunner for TriggerCronRunner {
         let fired_at = chrono::Utc::now();
         let next_fire = definition.trigger.next_fire_at(fired_at);
 
-        if paused {
+        if definition.paused {
             tracing::info!("cron schedule paused; skipping run, rescheduling next fire");
         } else {
             let trigger_context = serde_json::json!({

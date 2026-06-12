@@ -25,6 +25,8 @@ struct WorkflowYaml {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     description: Option<String>,
     trigger: WorkflowTriggerYaml,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    paused: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model_chain: Option<ModelChain>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -190,8 +192,6 @@ enum WorkflowTriggerYaml {
         timezone: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         condition: Option<String>,
-        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-        paused: bool,
     },
 }
 
@@ -219,12 +219,10 @@ impl WorkflowTriggerYaml {
                 schedule,
                 timezone,
                 condition,
-                paused,
             } => WorkflowTriggerYaml::Cron {
                 schedule: schedule.clone(),
                 timezone: timezone.clone(),
                 condition: condition.clone(),
-                paused: *paused,
             },
         }
     }
@@ -378,6 +376,7 @@ pub fn render_workflow_yaml(
     name: &str,
     description: Option<&str>,
     trigger: &WorkflowTrigger,
+    paused: bool,
     steps: &[WorkflowStepDef],
     sandboxes: &[WorkflowSandboxDecl],
     model_chain: Option<&ModelChain>,
@@ -389,6 +388,7 @@ pub fn render_workflow_yaml(
         name: name.to_string(),
         description: description.map(|s| s.to_string()),
         trigger: WorkflowTriggerYaml::from_runtime(trigger),
+        paused,
         model_chain: model_chain.cloned(),
         sandboxes: sandboxes
             .iter()
@@ -410,6 +410,7 @@ pub struct ParsedWorkflow {
     pub name: String,
     pub description: Option<String>,
     pub trigger: WorkflowTrigger,
+    pub paused: bool,
     pub steps: Vec<WorkflowStepDef>,
     pub sandboxes: Vec<WorkflowSandboxDecl>,
     pub model_chain: Option<ModelChain>,
@@ -457,12 +458,10 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
             schedule,
             timezone,
             condition,
-            paused,
         } => WorkflowTrigger::Cron {
             schedule,
             timezone,
             condition,
-            paused,
         },
     };
 
@@ -485,6 +484,7 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
         &name,
         description.as_deref(),
         &trigger,
+        yaml.paused,
         &steps,
         &sandboxes,
         model_chain.as_ref(),
@@ -501,6 +501,7 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
         name,
         description,
         trigger,
+        paused: yaml.paused,
         steps,
         sandboxes,
         model_chain,
@@ -572,6 +573,7 @@ mod tests {
             name,
             description,
             trigger,
+            false,
             &sample_steps(),
             sandboxes,
             None,
@@ -691,7 +693,6 @@ steps:
             schedule: "0 */6 * * * *".to_string(),
             timezone: Some("America/New_York".to_string()),
             condition: None,
-            paused: false,
         };
         let content = render(id, "scheduled", None, &trigger, &sample_sandboxes());
         assert!(content.contains("type: cron"));
@@ -712,20 +713,32 @@ steps:
     }
 
     #[test]
-    fn workflow_yaml_roundtrip_cron_trigger_paused() {
+    fn workflow_yaml_roundtrip_paused_and_omits_when_false() {
         let id = WorkflowDefinitionId::new();
-        let trigger = WorkflowTrigger::Cron {
-            schedule: "0 */6 * * * *".to_string(),
-            timezone: None,
-            condition: None,
-            paused: true,
-        };
-        let content = render(id, "scheduled", None, &trigger, &sample_sandboxes());
-        assert!(content.contains("paused: true"));
+        let trigger = WorkflowTrigger::Manual { condition: None };
 
-        let path = canonical_workflow_path("scheduled", None);
-        let parsed = parse_workflow_yaml(&content, &path).expect("parses");
-        assert!(parsed.trigger.is_paused());
+        let active = render(id, "flow", None, &trigger, &sample_sandboxes());
+        assert!(!active.contains("paused"), "paused omitted when false");
+        let path = canonical_workflow_path("flow", None);
+        let parsed = parse_workflow_yaml(&active, &path).expect("parses");
+        assert!(!parsed.paused);
+
+        let paused = render_workflow_yaml(
+            id,
+            "flow",
+            None,
+            &trigger,
+            true,
+            &sample_steps(),
+            &sample_sandboxes(),
+            None,
+            "2026-04-29T00:00:00Z",
+            "2026-04-29T00:00:00Z",
+        );
+        assert!(paused.contains("paused: true"));
+        let parsed = parse_workflow_yaml(&paused, &path).expect("parses");
+        assert!(parsed.paused);
+        assert!(!parsed.needs_rewrite, "paused round-trips canonically");
     }
 
     #[test]
@@ -784,6 +797,7 @@ steps:
             "judge-flow",
             None,
             &WorkflowTrigger::Manual { condition: None },
+            false,
             &steps,
             &[],
             None,

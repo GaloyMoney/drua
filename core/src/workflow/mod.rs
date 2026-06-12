@@ -57,6 +57,10 @@ const AUDIT_ACTION_TRIGGER_FILTERED: &str = "workflow.trigger_filtered";
 /// Audit action recorded when a `trigger.condition:` errors at
 /// runtime (compile, runtime, non-boolean result).
 const AUDIT_ACTION_TRIGGER_CONDITION_ERRORED: &str = "workflow.trigger_condition_errored";
+/// Audit action recorded when a run is suppressed because the
+/// workflow is paused (webhook paths; manual triggers error instead
+/// and the cron job skips before reaching the spawn).
+const AUDIT_ACTION_TRIGGER_PAUSED: &str = "workflow.trigger_paused";
 
 /// Evaluate each output's CEL expression against the resume context.
 /// Builds the CEL context once and reuses it across all expressions.
@@ -124,6 +128,25 @@ fn record_trigger_filtered_audit(
         definition_id = %definition.id,
         condition_body,
         "workflow run suppressed by trigger condition"
+    );
+}
+
+fn record_trigger_paused_audit(
+    definition: &WorkflowDefinition,
+    trigger_context: &serde_json::Value,
+) {
+    // See `record_trigger_filtered_audit` — same overwrite rationale.
+    Audit::record_action(AUDIT_ACTION_TRIGGER_PAUSED);
+    Audit::record_workflow_id(definition.id);
+    Audit::record_metadata(serde_json::json!({
+        "definition_id": definition.id.to_string(),
+        "trigger_kind": definition.trigger.kind_label(),
+        "payload_digest": payload_digest(trigger_context),
+    }));
+    Audit::record_outcome_if_unset(InteractionOutcome::Success);
+    tracing::info!(
+        definition_id = %definition.id,
+        "workflow run suppressed: workflow is paused"
     );
 }
 
@@ -279,6 +302,7 @@ impl Workflows {
             name,
             description,
             trigger,
+            paused,
             steps,
             sandboxes,
             model_chain,
@@ -342,6 +366,7 @@ impl Workflows {
                     Some(steps),
                     Some(sandboxes),
                     Some(model_chain.clone()),
+                    Some(paused),
                     file_hash,
                 )
                 .did_execute()
@@ -374,6 +399,7 @@ impl Workflows {
             .project_id(project_id)
             .name(name)
             .trigger(trigger)
+            .paused(paused)
             .steps(steps)
             .sandboxes(sandboxes)
             .model_chain(model_chain);
@@ -751,12 +777,12 @@ impl Workflows {
         Ok(definition)
     }
 
-    /// Pause or resume a cron workflow without deleting it. While
-    /// paused the in-flight cron job keeps ticking but skips firing, so
-    /// resume needs no re-registration and fires missed while paused
-    /// are not backfilled. Errors if the workflow is not cron-triggered;
-    /// returns the definition unchanged (no event, no commit) when
-    /// already in the target state.
+    /// Pause or resume a workflow without deleting it. While paused no
+    /// runs fire: cron fires are skipped (the in-flight cron job keeps
+    /// ticking, so resume needs no re-registration and missed fires are
+    /// not backfilled), webhook deliveries are suppressed with an audit
+    /// row, and manual triggers error. Returns the definition unchanged
+    /// (no event, no commit) when already in the target state.
     #[instrument(name = "core.workflow.set_paused", skip_all)]
     pub async fn set_paused(
         &self,
@@ -771,37 +797,7 @@ impl Workflows {
             AuthResource::Workflow(definition.project_id, Some(definition.id)),
         )?;
 
-        let new_trigger = match &definition.trigger {
-            WorkflowTrigger::Cron {
-                schedule,
-                timezone,
-                condition,
-                paused: current,
-            } => {
-                if *current == paused {
-                    return Ok(definition);
-                }
-                WorkflowTrigger::Cron {
-                    schedule: schedule.clone(),
-                    timezone: timezone.clone(),
-                    condition: condition.clone(),
-                    paused,
-                }
-            }
-            other => {
-                return Err(WorkflowError::InvalidDefinition(format!(
-                    "workflow '{}' is {}-triggered; only cron workflows can be paused/resumed",
-                    definition.name,
-                    other.kind_label()
-                )));
-            }
-        };
-
-        Self::validate_trigger(&new_trigger)?;
-        if definition
-            .update_content(None, None, Some(new_trigger), None, None, None)
-            .did_execute()
-        {
+        if definition.set_paused(paused).did_execute() {
             self.populate_attribution().await;
             self.repo.update_in_op(&mut op, &mut definition).await?;
             op.commit().await?;
@@ -932,7 +928,9 @@ impl Workflows {
     /// Spawns the executor as a job and returns the run synchronously.
     /// `Ok(None)` means the trigger's `condition:` evaluated to false
     /// and the run was deliberately suppressed (an audit row was
-    /// written).
+    /// written). Errors with [`WorkflowError::WorkflowPaused`] on a
+    /// paused workflow — this is the explicit-trigger path, so the
+    /// caller deserves a loud answer rather than a silent skip.
     #[instrument(name = "core.workflow.trigger_run", skip_all)]
     pub async fn trigger_run(
         &self,
@@ -945,6 +943,9 @@ impl Workflows {
             AuthVerb::Use,
             AuthResource::Workflow(definition.project_id, Some(definition.id)),
         )?;
+        if definition.paused {
+            return Err(WorkflowError::WorkflowPaused(definition.name));
+        }
         self.spawn_run(definition, trigger_context).await
     }
 
@@ -1165,6 +1166,11 @@ impl Workflows {
         definition: WorkflowDefinition,
         trigger_context: serde_json::Value,
     ) -> Result<Option<WorkflowRun>, WorkflowError> {
+        if definition.paused {
+            record_trigger_paused_audit(&definition, &trigger_context);
+            return Ok(None);
+        }
+
         if let Some(body) = definition.trigger.condition() {
             match template::evaluate_trigger_condition(body, &trigger_context) {
                 Ok(template::ConditionOutcome::True) => {}
@@ -1376,7 +1382,6 @@ mod tests {
             schedule: "0 */6 * * * *".into(),
             timezone: Some("UTC".into()),
             condition: None,
-            paused: false,
         })
         .unwrap();
     }
@@ -1387,7 +1392,6 @@ mod tests {
             schedule: "not a cron".into(),
             timezone: None,
             condition: None,
-            paused: false,
         })
         .unwrap_err();
         assert!(matches!(err, WorkflowError::InvalidCronExpression(_)));
@@ -1399,7 +1403,6 @@ mod tests {
             schedule: "0 */6 * * * *".into(),
             timezone: Some("Mars/Olympus_Mons".into()),
             condition: None,
-            paused: false,
         })
         .unwrap_err();
         assert!(matches!(err, WorkflowError::InvalidTimezone(_)));

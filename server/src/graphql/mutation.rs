@@ -281,8 +281,9 @@ impl Mutation {
         })
     }
 
-    /// Pause or resume a cron workflow without deleting it. Errors if
-    /// the workflow is not cron-triggered.
+    /// Pause or resume a workflow without deleting it. While paused no
+    /// runs fire: cron fires are skipped, webhook deliveries are
+    /// suppressed, and manual triggers error.
     async fn workflow_set_paused(
         &self,
         ctx: &Context<'_>,

@@ -1704,7 +1704,7 @@ fn encode_query_value(s: &str) -> String {
 fn workflow_definition_to_view_for_list(
     d: &domain::workflow::WorkflowDefinition,
 ) -> WorkflowDefinitionView {
-    let (trigger_type, trigger_provider, secret) = match &d.trigger {
+    let (mut trigger_type, trigger_provider, secret) = match &d.trigger {
         WorkflowTrigger::Manual { .. } => ("manual".to_string(), None, None),
         WorkflowTrigger::Webhook {
             provider, secret, ..
@@ -1715,6 +1715,9 @@ fn workflow_definition_to_view_for_list(
         ),
         WorkflowTrigger::Cron { schedule, .. } => (format!("cron ({schedule})"), None, None),
     };
+    if d.paused {
+        trigger_type.push_str(" (paused)");
+    }
     // The list view never surfaces the secret — only the detail page does.
     let _ = secret;
     WorkflowDefinitionView {
@@ -1735,7 +1738,7 @@ fn workflow_definition_to_view_for_detail(
     d: &domain::workflow::WorkflowDefinition,
     public_host: Option<&str>,
 ) -> WorkflowDefinitionView {
-    let (trigger_type, trigger_provider, secret) = match &d.trigger {
+    let (mut trigger_type, trigger_provider, secret) = match &d.trigger {
         WorkflowTrigger::Manual { .. } => ("manual".to_string(), None, None),
         WorkflowTrigger::Webhook {
             provider, secret, ..
@@ -1754,6 +1757,9 @@ fn workflow_definition_to_view_for_detail(
             (label, None, None)
         }
     };
+    if d.paused {
+        trigger_type.push_str(" (paused)");
+    }
     let webhook_url = secret.as_ref().map(|_| match public_host {
         Some(host) => format!("{host}/webhooks/{}", d.id),
         None => format!("/webhooks/{}", d.id),
