@@ -105,73 +105,7 @@ impl KubernetesPostgresMcpHandler {
         enabled: bool,
     ) -> anyhow::Result<()> {
         let deployments: Api<Deployment> = Api::namespaced(self.client.clone(), &config.namespace);
-        let replicas = if enabled { 1 } else { 0 };
-        let manifest = serde_json::json!({
-            "apiVersion": "apps/v1",
-            "kind": "Deployment",
-            "metadata": {
-                "name": config.resource_name,
-                "namespace": config.namespace,
-                "labels": managed_labels("dbhub"),
-            },
-            "spec": {
-                "replicas": replicas,
-                "selector": {
-                    "matchLabels": dbhub_selector_labels(),
-                },
-                "template": {
-                    "metadata": {
-                        "labels": managed_labels("dbhub"),
-                        "annotations": {
-                            "checksum/postgres-mcp-config": checksum,
-                        },
-                    },
-                    "spec": {
-                        "automountServiceAccountToken": false,
-                        "containers": [{
-                            "name": "postgres-mcp",
-                            "image": config.image,
-                            "imagePullPolicy": config.image_pull_policy,
-                            "args": [
-                                "--transport=http",
-                                format!("--port={}", config.service_port),
-                                format!("--config=/etc/dbhub/{POSTGRES_MCP_CONFIG_KEY}"),
-                            ],
-                            "ports": [{
-                                "name": "http",
-                                "containerPort": config.service_port,
-                                "protocol": "TCP",
-                            }],
-                            "volumeMounts": [{
-                                "name": "dbhub-config",
-                                "mountPath": "/etc/dbhub",
-                                "readOnly": true,
-                            }],
-                            "resources": {
-                                "requests": {
-                                    "cpu": config.request_cpu,
-                                    "memory": config.request_memory,
-                                },
-                                "limits": {
-                                    "cpu": config.limit_cpu,
-                                    "memory": config.limit_memory,
-                                },
-                            },
-                        }],
-                        "volumes": [{
-                            "name": "dbhub-config",
-                            "secret": {
-                                "secretName": config.config_secret,
-                                "items": [{
-                                    "key": POSTGRES_MCP_CONFIG_KEY,
-                                    "path": POSTGRES_MCP_CONFIG_KEY,
-                                }],
-                            },
-                        }],
-                    },
-                },
-            },
-        });
+        let manifest = deployment_manifest(config, checksum, enabled);
 
         deployments
             .patch(
@@ -245,4 +179,241 @@ fn dbhub_selector_labels() -> BTreeMap<&'static str, String> {
 
 fn apply_params() -> PatchParams {
     PatchParams::apply(POSTGRES_MCP_FIELD_MANAGER).force()
+}
+
+fn deployment_manifest(
+    config: &PostgresMcpConfig,
+    checksum: &str,
+    enabled: bool,
+) -> serde_json::Value {
+    let replicas = if enabled { 1 } else { 0 };
+    let mut pod_spec = serde_json::Map::from_iter([
+        (
+            "automountServiceAccountToken".to_string(),
+            serde_json::json!(config.cloud_sql_proxy.is_some()),
+        ),
+        (
+            "containers".to_string(),
+            serde_json::json!(dbhub_containers(config)),
+        ),
+        (
+            "volumes".to_string(),
+            serde_json::json!([{
+                "name": "dbhub-config",
+                "secret": {
+                    "secretName": config.config_secret,
+                    "items": [{
+                        "key": POSTGRES_MCP_CONFIG_KEY,
+                        "path": POSTGRES_MCP_CONFIG_KEY,
+                    }],
+                },
+            }]),
+        ),
+    ]);
+
+    if let Some(service_account_name) = &config.service_account_name {
+        pod_spec.insert(
+            "serviceAccountName".to_string(),
+            serde_json::json!(service_account_name),
+        );
+    }
+
+    serde_json::json!({
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {
+            "name": config.resource_name,
+            "namespace": config.namespace,
+            "labels": managed_labels("dbhub"),
+        },
+        "spec": {
+            "replicas": replicas,
+            "selector": {
+                "matchLabels": dbhub_selector_labels(),
+            },
+            "template": {
+                "metadata": {
+                    "labels": managed_labels("dbhub"),
+                    "annotations": {
+                        "checksum/postgres-mcp-config": checksum,
+                    },
+                },
+                "spec": pod_spec,
+            },
+        },
+    })
+}
+
+fn dbhub_containers(config: &PostgresMcpConfig) -> Vec<serde_json::Value> {
+    let mut containers = vec![serde_json::json!({
+        "name": "postgres-mcp",
+        "image": config.image,
+        "imagePullPolicy": config.image_pull_policy,
+        "args": [
+            "--transport=http",
+            format!("--port={}", config.service_port),
+            format!("--config=/etc/dbhub/{POSTGRES_MCP_CONFIG_KEY}"),
+        ],
+        "ports": [{
+            "name": "http",
+            "containerPort": config.service_port,
+            "protocol": "TCP",
+        }],
+        "volumeMounts": [{
+            "name": "dbhub-config",
+            "mountPath": "/etc/dbhub",
+            "readOnly": true,
+        }],
+        "resources": {
+            "requests": {
+                "cpu": config.request_cpu,
+                "memory": config.request_memory,
+            },
+            "limits": {
+                "cpu": config.limit_cpu,
+                "memory": config.limit_memory,
+            },
+        },
+    })];
+
+    if let Some(proxy) = &config.cloud_sql_proxy {
+        if let Some(runtime_arg) = &proxy.runtime_arg {
+            containers.push(cloud_sql_proxy_container(
+                "cloud-sql-proxy-runtime",
+                &proxy.image,
+                &proxy.image_pull_policy,
+                runtime_arg,
+            ));
+        }
+
+        if let Some(datawarehouse_arg) = &proxy.datawarehouse_arg {
+            containers.push(cloud_sql_proxy_container(
+                "cloud-sql-proxy-datawarehouse",
+                &proxy.image,
+                &proxy.image_pull_policy,
+                datawarehouse_arg,
+            ));
+        }
+    }
+
+    containers
+}
+
+fn cloud_sql_proxy_container(
+    name: &str,
+    image: &str,
+    image_pull_policy: &str,
+    instance_arg: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "image": image,
+        "imagePullPolicy": image_pull_policy,
+        "args": [
+            "--auto-iam-authn",
+            "--structured-logs",
+            instance_arg,
+        ],
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use crate::postgres_mcp::{
+        PostgresMcpCloudSqlProxyConfig, PostgresMcpConfig, DEFAULT_POSTGRES_MCP_CONFIG_SECRET,
+        DEFAULT_POSTGRES_MCP_IMAGE, DEFAULT_POSTGRES_MCP_LIMIT_CPU,
+        DEFAULT_POSTGRES_MCP_LIMIT_MEMORY, DEFAULT_POSTGRES_MCP_MAX_ROWS,
+        DEFAULT_POSTGRES_MCP_QUERY_TIMEOUT, DEFAULT_POSTGRES_MCP_REQUEST_CPU,
+        DEFAULT_POSTGRES_MCP_REQUEST_MEMORY, DEFAULT_POSTGRES_MCP_UPSTREAM_NAME,
+    };
+
+    use super::deployment_manifest;
+
+    #[test]
+    fn renders_dbhub_deployment_without_service_account_or_proxy() {
+        let manifest = deployment_manifest(&test_config(), "abc123", true);
+        let pod_spec = &manifest["spec"]["template"]["spec"];
+
+        assert_eq!(pod_spec["automountServiceAccountToken"], false);
+        assert!(pod_spec.get("serviceAccountName").is_none());
+
+        let containers = pod_spec["containers"].as_array().unwrap();
+        assert_eq!(containers.len(), 1);
+        assert_eq!(containers[0]["name"], "postgres-mcp");
+    }
+
+    #[test]
+    fn renders_dbhub_deployment_with_cloud_sql_proxy_sidecars() {
+        let mut config = test_config();
+        config.service_account_name = Some("lana-postgres-mcp".to_string());
+        config.cloud_sql_proxy = Some(PostgresMcpCloudSqlProxyConfig {
+            image: "gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.18.3".to_string(),
+            image_pull_policy: "IfNotPresent".to_string(),
+            runtime_arg: Some("project:region:runtime?port=5432&private-ip=true".to_string()),
+            datawarehouse_arg: Some(
+                "project:region:datawarehouse?port=5433&private-ip=true".to_string(),
+            ),
+        });
+
+        let manifest = deployment_manifest(&config, "abc123", true);
+        let pod_spec = &manifest["spec"]["template"]["spec"];
+
+        assert_eq!(pod_spec["automountServiceAccountToken"], true);
+        assert_eq!(pod_spec["serviceAccountName"], "lana-postgres-mcp");
+
+        let containers = pod_spec["containers"].as_array().unwrap();
+        let names = containers
+            .iter()
+            .map(|container| container["name"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "postgres-mcp",
+                "cloud-sql-proxy-runtime",
+                "cloud-sql-proxy-datawarehouse"
+            ]
+        );
+        assert_eq!(
+            containers[1]["args"],
+            serde_json::json!([
+                "--auto-iam-authn",
+                "--structured-logs",
+                "project:region:runtime?port=5432&private-ip=true"
+            ])
+        );
+        assert_eq!(
+            containers[2]["args"],
+            serde_json::json!([
+                "--auto-iam-authn",
+                "--structured-logs",
+                "project:region:datawarehouse?port=5433&private-ip=true"
+            ])
+        );
+    }
+
+    fn test_config() -> PostgresMcpConfig {
+        PostgresMcpConfig {
+            namespace: "test".to_string(),
+            resource_name: "lana-postgres-mcp".to_string(),
+            config_secret: DEFAULT_POSTGRES_MCP_CONFIG_SECRET.to_string(),
+            upstream_name: DEFAULT_POSTGRES_MCP_UPSTREAM_NAME.to_string(),
+            image: DEFAULT_POSTGRES_MCP_IMAGE.to_string(),
+            image_pull_policy: "IfNotPresent".to_string(),
+            service_port: 8000,
+            query_timeout: DEFAULT_POSTGRES_MCP_QUERY_TIMEOUT,
+            max_rows: DEFAULT_POSTGRES_MCP_MAX_ROWS,
+            connect_timeout: Duration::from_secs(5),
+            request_cpu: DEFAULT_POSTGRES_MCP_REQUEST_CPU.to_string(),
+            request_memory: DEFAULT_POSTGRES_MCP_REQUEST_MEMORY.to_string(),
+            limit_cpu: DEFAULT_POSTGRES_MCP_LIMIT_CPU.to_string(),
+            limit_memory: DEFAULT_POSTGRES_MCP_LIMIT_MEMORY.to_string(),
+            runtime_seed_dsn: "postgres://mcp:secret@postgres.local:5432/postgres".to_string(),
+            datawarehouse_seed_dsn: None,
+            service_account_name: None,
+            cloud_sql_proxy: None,
+        }
+    }
 }

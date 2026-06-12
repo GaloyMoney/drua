@@ -170,4 +170,18 @@ mod tests {
             "postgres://lana_readonly:secret@127.0.0.1:5432/lana-bank-lana-bank-main?sslmode=require"
         );
     }
+
+    #[test]
+    fn rewrites_iam_seed_database_without_losing_role_option() {
+        let rewritten = dsn_for_database(
+            "postgres://mcp@galoystaging.iam@127.0.0.1:5432/postgres?sslmode=disable&options=-c%20role%3Dlana_readonly",
+            "lana-bank-lana-bank-main",
+        )
+        .unwrap();
+
+        assert_eq!(
+            rewritten,
+            "postgres://mcp%40galoystaging.iam@127.0.0.1:5432/lana-bank-lana-bank-main?sslmode=disable&options=-c%20role%3Dlana_readonly"
+        );
+    }
 }

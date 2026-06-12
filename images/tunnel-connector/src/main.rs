@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use clap::Parser;
 use mcp_upstream::parse_upstreams;
-use postgres_mcp::{PostgresMcpConfig, PostgresMcpController};
+use postgres_mcp::{PostgresMcpCloudSqlProxyConfig, PostgresMcpConfig, PostgresMcpController};
 use postgres_mcp_kubernetes::{resolve_namespace, KubernetesPostgresMcpHandler};
 use postgres_mcp_postgres::SqlxPostgresSourceDiscoverer;
 use tunnel_session::run_tunnel;
@@ -61,6 +61,21 @@ fn install_rustls_crypto_provider() {
 }
 
 async fn build_postgres_mcp(cli: &cli::Cli) -> anyhow::Result<Arc<ManagedPostgresMcpController>> {
+    let runtime_cloud_sql_proxy_arg = trim_optional(&cli.postgres_mcp_runtime_cloud_sql_proxy_arg);
+    let datawarehouse_cloud_sql_proxy_arg =
+        trim_optional(&cli.postgres_mcp_datawarehouse_cloud_sql_proxy_arg);
+    let cloud_sql_proxy =
+        if runtime_cloud_sql_proxy_arg.is_some() || datawarehouse_cloud_sql_proxy_arg.is_some() {
+            Some(PostgresMcpCloudSqlProxyConfig {
+                image: cli.postgres_mcp_cloud_sql_proxy_image.clone(),
+                image_pull_policy: cli.postgres_mcp_cloud_sql_proxy_image_pull_policy.clone(),
+                runtime_arg: runtime_cloud_sql_proxy_arg,
+                datawarehouse_arg: datawarehouse_cloud_sql_proxy_arg,
+            })
+        } else {
+            None
+        };
+
     let config = PostgresMcpConfig {
         namespace: resolve_namespace(cli.postgres_mcp_namespace.clone())?,
         resource_name: cli.postgres_mcp_resource_name.clone(),
@@ -83,6 +98,8 @@ async fn build_postgres_mcp(cli: &cli::Cli) -> anyhow::Result<Arc<ManagedPostgre
             .map(str::trim)
             .filter(|dsn| !dsn.is_empty())
             .map(str::to_string),
+        service_account_name: trim_optional(&cli.postgres_mcp_service_account_name),
+        cloud_sql_proxy,
     };
 
     let handler = KubernetesPostgresMcpHandler::try_default().await?;
@@ -91,4 +108,12 @@ async fn build_postgres_mcp(cli: &cli::Cli) -> anyhow::Result<Arc<ManagedPostgre
     Ok(Arc::new(PostgresMcpController::try_new(
         config, handler, discoverer,
     )?))
+}
+
+fn trim_optional(value: &Option<String>) -> Option<String> {
+    value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }

@@ -115,6 +115,8 @@ fn test_config(runtime_seed_dsn: String) -> PostgresMcpConfig {
         limit_memory: DEFAULT_POSTGRES_MCP_LIMIT_MEMORY.to_string(),
         runtime_seed_dsn,
         datawarehouse_seed_dsn: None,
+        service_account_name: None,
+        cloud_sql_proxy: None,
     }
 }
 

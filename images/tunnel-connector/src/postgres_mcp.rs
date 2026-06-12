@@ -7,6 +7,8 @@ pub(crate) const DEFAULT_POSTGRES_MCP_RESOURCE_NAME: &str = "lana-postgres-mcp";
 pub(crate) const DEFAULT_POSTGRES_MCP_CONFIG_SECRET: &str = "lana-postgres-mcp-config";
 pub(crate) const DEFAULT_POSTGRES_MCP_UPSTREAM_NAME: &str = "lana_postgres";
 pub(crate) const DEFAULT_POSTGRES_MCP_IMAGE: &str = "bytebase/dbhub:0.21.1";
+pub(crate) const DEFAULT_POSTGRES_MCP_CLOUD_SQL_PROXY_IMAGE: &str =
+    "gcr.io/cloud-sql-connectors/cloud-sql-proxy:2.18.3";
 pub(crate) const DEFAULT_POSTGRES_MCP_SERVICE_PORT: u16 = 8000;
 pub(crate) const DEFAULT_POSTGRES_MCP_QUERY_TIMEOUT: u32 = 30;
 pub(crate) const DEFAULT_POSTGRES_MCP_MAX_ROWS: u32 = 1000;
@@ -34,6 +36,16 @@ pub(crate) struct PostgresMcpConfig {
     pub(crate) limit_memory: String,
     pub(crate) runtime_seed_dsn: String,
     pub(crate) datawarehouse_seed_dsn: Option<String>,
+    pub(crate) service_account_name: Option<String>,
+    pub(crate) cloud_sql_proxy: Option<PostgresMcpCloudSqlProxyConfig>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PostgresMcpCloudSqlProxyConfig {
+    pub(crate) image: String,
+    pub(crate) image_pull_policy: String,
+    pub(crate) runtime_arg: Option<String>,
+    pub(crate) datawarehouse_arg: Option<String>,
 }
 
 /// Outbound Kubernetes operations used by the Postgres MCP application service.
@@ -188,6 +200,55 @@ impl PostgresMcpConfig {
 
         if self.service_port == 0 {
             anyhow::bail!("postgres mcp service port must be non-zero");
+        }
+
+        if let Some(service_account_name) = &self.service_account_name {
+            if service_account_name.trim().is_empty() {
+                anyhow::bail!("postgres mcp service_account_name must not be empty when set");
+            }
+        }
+
+        if let Some(proxy) = &self.cloud_sql_proxy {
+            proxy.validate()?;
+
+            if self.service_account_name.is_none() {
+                anyhow::bail!(
+                    "postgres mcp service_account_name is required when Cloud SQL proxy sidecars are configured"
+                );
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl PostgresMcpCloudSqlProxyConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        for (field, value) in [
+            ("cloud_sql_proxy.image", &self.image),
+            ("cloud_sql_proxy.image_pull_policy", &self.image_pull_policy),
+        ] {
+            if value.trim().is_empty() {
+                anyhow::bail!("postgres mcp {field} must not be empty");
+            }
+        }
+
+        let proxy_args = [
+            ("cloud_sql_proxy.runtime_arg", &self.runtime_arg),
+            ("cloud_sql_proxy.datawarehouse_arg", &self.datawarehouse_arg),
+        ];
+
+        if proxy_args
+            .iter()
+            .all(|(_, value)| value.as_deref().is_none_or(str::is_empty))
+        {
+            anyhow::bail!("postgres mcp Cloud SQL proxy config requires at least one proxy arg");
+        }
+
+        for (field, value) in proxy_args {
+            if value.as_deref().is_some_and(|arg| arg.trim().is_empty()) {
+                anyhow::bail!("postgres mcp {field} must not be empty when set");
+            }
         }
 
         Ok(())
