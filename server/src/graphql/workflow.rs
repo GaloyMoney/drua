@@ -70,9 +70,7 @@ impl From<DomainWorkflowDefinition> for WorkflowDefinition {
         if matches!(entity.trigger, DomainWorkflowTrigger::Webhook { .. }) {
             trigger.webhook_url = Some(format!("/webhooks/{}", entity.id));
         }
-        if entity.paused {
-            trigger.next_run_at = None;
-        }
+        trigger.next_run_at = entity.next_run_at(chrono::Utc::now()).map(Into::into);
         let yaml = entity.canonical_yaml();
         Self {
             id: entity.id,
@@ -137,11 +135,9 @@ impl From<&DomainWorkflowTrigger> for WorkflowTrigger {
                 provider: None,
                 cron_schedule: Some(schedule.clone()),
                 cron_timezone: timezone.clone(),
-                next_run_at: trigger
-                    .next_fire_at(chrono::Utc::now())
-                    .ok()
-                    .flatten()
-                    .map(Into::into),
+                // Filled by the definition conversion, which knows the
+                // pause state (`WorkflowDefinition::next_run_at`).
+                next_run_at: None,
                 condition: condition.clone(),
                 webhook_url: None,
             },

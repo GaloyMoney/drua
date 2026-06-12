@@ -55,8 +55,8 @@ pub enum WorkflowError {
         "WorkflowError - TriggerConditionErrored: trigger condition `{body}` failed: {reason}"
     )]
     TriggerConditionErrored { body: String, reason: String },
-    #[error("WorkflowError - WorkflowPaused: workflow '{0}' is paused; resume it to trigger runs")]
-    WorkflowPaused(String),
+    #[error("WorkflowError - Paused: workflow '{0}' is paused; resume it to trigger runs")]
+    Paused(String),
     #[error("WorkflowError - ToolNotFound: {0}")]
     ToolNotFound(String),
     #[error("WorkflowError - ToolDispatch: {0}")]

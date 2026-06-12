@@ -4,8 +4,8 @@
 //! - `POST /webhooks/{definition_id}` — per-definition endpoint (1:1).
 //! - `POST /webhooks/providers/{provider}` — fan-out: evaluates every
 //!   definition tagged with this provider and spawns runs for those
-//!   whose `trigger.condition` passes. Auth via env var
-//!   `WEBHOOK_SECRET_{PROVIDER_UPPER}`.
+//!   that aren't paused and whose `trigger.condition` passes. Auth via
+//!   env var `WEBHOOK_SECRET_{PROVIDER_UPPER}`.
 //!
 //! Provider `github_app` uses HMAC-SHA256 verification
 //! (`X-Hub-Signature-256: sha256=<hex>`) instead of bearer tokens.
@@ -34,7 +34,7 @@ use tracing::instrument;
 use drua_core as domain;
 
 use domain::primitives::WorkflowDefinitionId;
-use domain::workflow::WorkflowTrigger;
+use domain::workflow::{TriggerOutcome, WorkflowTrigger};
 
 use crate::AppState;
 
@@ -98,13 +98,17 @@ pub async fn handle_webhook(
         .trigger_run_for_definition(definition, trigger_context)
         .await
     {
-        Ok(Some(run)) => {
+        Ok(TriggerOutcome::Spawned(run)) => {
             tracing::info!(run_id = %run.id, "workflow run triggered via webhook");
             (StatusCode::OK, run.id.to_string()).into_response()
         }
-        Ok(None) => {
+        Ok(TriggerOutcome::Filtered) => {
             tracing::info!("webhook accepted; run suppressed by trigger condition");
             (StatusCode::OK, "filtered").into_response()
+        }
+        Ok(TriggerOutcome::Paused) => {
+            tracing::info!("webhook accepted; workflow is paused, run suppressed");
+            (StatusCode::OK, "paused").into_response()
         }
         Err(e) => {
             tracing::error!(error = %e, "webhook: failed to trigger run");
@@ -117,6 +121,7 @@ pub async fn handle_webhook(
 struct ProviderFanOutResponse {
     triggered: usize,
     filtered: usize,
+    paused: usize,
     errored: usize,
     resumed: usize,
 }
@@ -186,6 +191,7 @@ pub async fn handle_provider_webhook(
             Json(ProviderFanOutResponse {
                 triggered: result.triggered,
                 filtered: result.filtered,
+                paused: result.paused,
                 errored: result.errored,
                 resumed,
             }),
