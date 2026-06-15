@@ -129,7 +129,7 @@ galoyAgents:
           - list_issues
           - search_issues
       - name: github_actions
-        url: https://api.githubcopilot.com/mcp/x/actions/readonly
+        url: https://api.githubcopilot.com/mcp/x/actions
         toolPrefix: github_actions
         authMode: github_app
         category: ci
@@ -138,6 +138,7 @@ galoyAgents:
           - actions_list
           - actions_get
           - get_job_logs
+          - actions_run_trigger
       # PR-mutation upstream — gated to internal agents (project_lead /
       # agent / workflow_step_agent) only. Users and ExportedAgents
       # don't see it. `merge_pull_request` deliberately excluded — the
