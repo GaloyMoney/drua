@@ -791,11 +791,11 @@ impl Workflows {
     /// Pause or resume a workflow without deleting it. While paused no
     /// runs fire: cron fires are skipped (the in-flight cron job keeps
     /// ticking, so resume needs no re-registration and missed fires are
-    /// not backfilled), webhook deliveries are suppressed with an audit
-    /// row, and manual triggers error. Pause gates run *creation* only —
-    /// in-flight runs, including runs parked on a `Wait` step, continue.
-    /// Returns the definition unchanged (no event, no commit) when
-    /// already in the target state.
+    /// not backfilled), and webhook deliveries and manual triggers are
+    /// suppressed with a paused disposition (each writes an audit row).
+    /// Pause gates run *creation* only — in-flight runs, including runs
+    /// parked on a `Wait` step, continue. Returns the definition
+    /// unchanged (no event, no commit) when already in the target state.
     #[instrument(name = "core.workflow.set_paused", skip_all)]
     pub async fn set_paused(
         &self,
@@ -938,30 +938,24 @@ impl Workflows {
         Ok(result.entities)
     }
 
-    /// Spawns the executor as a job and returns the run synchronously.
-    /// `Ok(None)` means the trigger's `condition:` evaluated to false
-    /// and the run was deliberately suppressed (an audit row was
-    /// written). A paused workflow errors with [`WorkflowError::Paused`]
-    /// — this is the explicit-trigger path, so the caller deserves a
-    /// loud answer rather than a silent skip.
+    /// Authenticated explicit-trigger path. Returns the full
+    /// [`TriggerOutcome`] — `Spawned` with the run, or a deliberate
+    /// `Filtered`/`Paused` suppression (each writes an audit row).
+    /// `Paused` is an expected disposition, not an error; each caller
+    /// maps the outcome to its own surface.
     #[instrument(name = "core.workflow.trigger_run", skip_all)]
     pub async fn trigger_run(
         &self,
         sub: &AuthSubject,
         definition_id: WorkflowDefinitionId,
         trigger_context: serde_json::Value,
-    ) -> Result<Option<WorkflowRun>, WorkflowError> {
+    ) -> Result<TriggerOutcome, WorkflowError> {
         let definition = self.repo.find_by_id(definition_id).await?;
         sub.can(
             AuthVerb::Use,
             AuthResource::Workflow(definition.project_id, Some(definition.id)),
         )?;
-        let name = definition.name.clone();
-        match self.spawn_run(definition, trigger_context).await? {
-            TriggerOutcome::Spawned(run) => Ok(Some(*run)),
-            TriggerOutcome::Filtered => Ok(None),
-            TriggerOutcome::Paused => Err(WorkflowError::Paused(name)),
-        }
+        self.spawn_run(definition, trigger_context).await
     }
 
     /// No auth check — pairs with [`Self::find_by_id_unchecked`] so

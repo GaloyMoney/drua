@@ -17,7 +17,7 @@ use domain::primitives::{
     AgentId, SandboxId, SkillId, SpaceId, UserId, WorkflowDefinitionId, WorkflowRunId,
 };
 use domain::sandbox::{SandboxAgentMode, SandboxMode};
-use domain::workflow::WorkflowTrigger;
+use domain::workflow::{TriggerOutcome, WorkflowTrigger};
 
 use crate::templates::*;
 use crate::AppState;
@@ -2053,10 +2053,20 @@ async fn project_workflow_trigger(
         .trigger_run(&sub, workflow_id, payload)
         .await
     {
-        Ok(Some(run)) => Redirect::to(&format!("/projects/{id}/workflows/{wf_id}/runs/{}", run.id))
-            .into_response(),
-        Ok(None) => {
+        Ok(TriggerOutcome::Spawned(run)) => {
+            Redirect::to(&format!("/projects/{id}/workflows/{wf_id}/runs/{}", run.id))
+                .into_response()
+        }
+        Ok(TriggerOutcome::Filtered) => {
             let msg = "trigger condition evaluated to false; no run created".to_string();
+            Redirect::to(&format!(
+                "/projects/{id}/workflows/{wf_id}?flash={}",
+                encode_query_value(&msg)
+            ))
+            .into_response()
+        }
+        Ok(TriggerOutcome::Paused) => {
+            let msg = "workflow is paused; no run created — resume it to trigger runs".to_string();
             Redirect::to(&format!(
                 "/projects/{id}/workflows/{wf_id}?flash={}",
                 encode_query_value(&msg)

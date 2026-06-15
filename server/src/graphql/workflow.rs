@@ -7,10 +7,11 @@ use super::primitives::*;
 
 use drua_core::sandbox::{SandboxMode, SandboxSpecs};
 use drua_core::workflow::{
-    StepResult as DomainStepResult, WorkflowDefinition as DomainWorkflowDefinition,
-    WorkflowRun as DomainWorkflowRun, WorkflowRunState as DomainWorkflowRunState,
-    WorkflowSandboxDecl as DomainWorkflowSandboxDecl, WorkflowStepDef as DomainWorkflowStepDef,
-    WorkflowStepState as DomainWorkflowStepState, WorkflowTrigger as DomainWorkflowTrigger,
+    StepResult as DomainStepResult, TriggerOutcome as DomainTriggerOutcome,
+    WorkflowDefinition as DomainWorkflowDefinition, WorkflowRun as DomainWorkflowRun,
+    WorkflowRunState as DomainWorkflowRunState, WorkflowSandboxDecl as DomainWorkflowSandboxDecl,
+    WorkflowStepDef as DomainWorkflowStepDef, WorkflowStepState as DomainWorkflowStepState,
+    WorkflowTrigger as DomainWorkflowTrigger,
 };
 
 #[derive(InputObject)]
@@ -34,9 +35,9 @@ pub struct WorkflowDefinition {
     steps: Vec<WorkflowStep>,
     sandboxes: Vec<WorkflowSandbox>,
     model_chain: Option<ModelChain>,
-    /// `true` when the workflow is paused — no runs fire (cron fires
-    /// are skipped, webhook deliveries suppressed, manual triggers
-    /// error) until resumed.
+    /// `true` when the workflow is paused — no runs fire (cron fires,
+    /// webhook deliveries, and manual triggers are all suppressed with
+    /// a paused disposition) until resumed.
     paused: bool,
     created_at: Timestamp,
     updated_at: Timestamp,
@@ -446,10 +447,40 @@ pub struct WorkflowTriggerInput {
     pub payload: Option<JsonValue>,
 }
 
+/// How an explicit `workflowTrigger` resolved: a run was `SPAWNED`, or
+/// it was deliberately suppressed because the trigger `condition` was
+/// `FILTERED` out or the workflow is `PAUSED`. Suppression is an
+/// expected outcome, not an error.
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+pub enum WorkflowTriggerDisposition {
+    Spawned,
+    Filtered,
+    Paused,
+}
+
 #[derive(SimpleObject)]
 pub struct WorkflowTriggerPayload {
     pub run: Option<WorkflowRun>,
-    pub filtered: bool,
+    pub disposition: WorkflowTriggerDisposition,
+}
+
+impl From<DomainTriggerOutcome> for WorkflowTriggerPayload {
+    fn from(outcome: DomainTriggerOutcome) -> Self {
+        match outcome {
+            DomainTriggerOutcome::Spawned(run) => Self {
+                run: Some(WorkflowRun::from(*run)),
+                disposition: WorkflowTriggerDisposition::Spawned,
+            },
+            DomainTriggerOutcome::Filtered => Self {
+                run: None,
+                disposition: WorkflowTriggerDisposition::Filtered,
+            },
+            DomainTriggerOutcome::Paused => Self {
+                run: None,
+                disposition: WorkflowTriggerDisposition::Paused,
+            },
+        }
+    }
 }
 
 #[derive(InputObject)]

@@ -151,7 +151,7 @@ const WORKFLOW_RUN_QUERY: &str = r#"
 const WORKFLOW_TRIGGER_MUTATION: &str = r#"
     mutation WorkflowTrigger($input: WorkflowTriggerInput!) {
         workflowTrigger(input: $input) {
-            filtered
+            disposition
             run {
                 id
                 definitionId
@@ -195,9 +195,17 @@ struct WorkflowTriggerResponse {
     workflow_trigger: WorkflowTriggerPayloadNode,
 }
 
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum WorkflowTriggerDisposition {
+    Spawned,
+    Filtered,
+    Paused,
+}
+
 #[derive(Debug, Deserialize)]
 struct WorkflowTriggerPayloadNode {
-    filtered: bool,
+    disposition: WorkflowTriggerDisposition,
     run: Option<WorkflowRunNode>,
 }
 
@@ -641,7 +649,7 @@ enum WorkflowEvent {
 }
 
 struct WorkflowTriggerOutcome {
-    filtered: bool,
+    disposition: Option<WorkflowTriggerDisposition>,
     run_id: Option<String>,
     run_detail: Option<WorkflowRunDetail>,
     updated_runs: Option<Vec<WorkflowRunItem>>,
@@ -1550,50 +1558,32 @@ fn spawn_workflow_trigger(
     tokio::spawn(async move {
         let client = GraphqlClient::new(&base_url, &token);
         match trigger_workflow(&client, &definition_id, payload).await {
-            Ok(result) if result.filtered => {
-                let _ = tx.send(WorkflowEvent::TriggerComplete(Box::new(
-                    WorkflowTriggerOutcome {
-                        filtered: true,
-                        run_id: None,
-                        run_detail: None,
-                        updated_runs: None,
-                        error: None,
-                    },
-                )));
-            }
             Ok(result) => {
-                if let Some(run) = result.run {
+                let (run_id, run_detail, updated_runs) = if let Some(run) = result.run {
                     let run_id = run.id.clone();
                     let run_detail = match fetch_workflow_run(&client, &run_id).await {
                         Ok(detail) => detail,
                         Err(_) => workflow_run_node_to_detail(run),
                     };
                     let updated_runs = fetch_workflow_runs(&client, &definition_id).await.ok();
-                    let _ = tx.send(WorkflowEvent::TriggerComplete(Box::new(
-                        WorkflowTriggerOutcome {
-                            filtered: false,
-                            run_id: Some(run_id),
-                            run_detail: Some(run_detail),
-                            updated_runs,
-                            error: None,
-                        },
-                    )));
+                    (Some(run_id), Some(run_detail), updated_runs)
                 } else {
-                    let _ = tx.send(WorkflowEvent::TriggerComplete(Box::new(
-                        WorkflowTriggerOutcome {
-                            filtered: false,
-                            run_id: None,
-                            run_detail: None,
-                            updated_runs: None,
-                            error: None,
-                        },
-                    )));
-                }
+                    (None, None, None)
+                };
+                let _ = tx.send(WorkflowEvent::TriggerComplete(Box::new(
+                    WorkflowTriggerOutcome {
+                        disposition: Some(result.disposition),
+                        run_id,
+                        run_detail,
+                        updated_runs,
+                        error: None,
+                    },
+                )));
             }
             Err(e) => {
                 let _ = tx.send(WorkflowEvent::TriggerComplete(Box::new(
                     WorkflowTriggerOutcome {
-                        filtered: false,
+                        disposition: None,
                         run_id: None,
                         run_detail: None,
                         updated_runs: None,
@@ -1689,10 +1679,18 @@ fn handle_workflow_event(
                 state.set_workflow_error(error);
                 return;
             }
-            if outcome.filtered {
-                state.status_message =
-                    Some("Trigger condition filtered; no run created".to_string());
-                return;
+            match outcome.disposition {
+                Some(WorkflowTriggerDisposition::Filtered) => {
+                    state.status_message =
+                        Some("Trigger condition filtered; no run created".to_string());
+                    return;
+                }
+                Some(WorkflowTriggerDisposition::Paused) => {
+                    state.status_message =
+                        Some("Workflow is paused; resume it to trigger runs".to_string());
+                    return;
+                }
+                _ => {}
             }
             if let Some(ref run_id) = outcome.run_id {
                 state.status_message = Some(format!("Workflow run {run_id} created"));

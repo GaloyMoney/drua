@@ -9,8 +9,8 @@ use crate::primitives::{WorkflowDefinitionId, WorkflowRunId};
 use crate::project::Projects;
 use crate::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
 use crate::workflow::{
-    StepResult, WorkflowDefinition, WorkflowRun, WorkflowRunState, WorkflowSandboxDecl,
-    WorkflowStepDef, WorkflowTrigger, Workflows,
+    StepResult, TriggerOutcome, WorkflowDefinition, WorkflowRun, WorkflowRunState,
+    WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger, Workflows,
 };
 
 use super::super::error::ToolSetsError;
@@ -117,8 +117,8 @@ enum WorkflowParams {
     },
     /// Temporarily stop a workflow without deleting it. No runs fire
     /// while paused — cron fires are skipped (the schedule survives),
-    /// webhook deliveries are suppressed, manual triggers error —
-    /// until `resume` restores it.
+    /// webhook deliveries and manual triggers are suppressed with a
+    /// paused disposition (no run) — until `resume` restores it.
     Pause {
         definition_id: WorkflowDefinitionId,
     },
@@ -641,7 +641,8 @@ impl TopLevelTool for WorkflowTool {
          a `DeleteFile` on the canonical YAML), \
          `pause`/`resume` (requires `definition_id`; temporarily stop any \
          workflow without deleting it — cron fires are skipped, webhook \
-         deliveries suppressed, manual triggers error — then restart it)."
+         deliveries and manual triggers are suppressed with a paused \
+         disposition (no run) — then restart it)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -805,15 +806,22 @@ impl TopLevelTool for WorkflowTool {
                 .await?;
                 let payload =
                     payload.unwrap_or_else(|| serde_json::Value::Object(Default::default()));
-                let maybe_run = self
+                let outcome = self
                     .workflows
                     .trigger_run(subject, resolved_id, payload)
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
-                let (text, run_out) = match &maybe_run {
-                    Some(run) => (format_run_text(run), Some(run_to_output(run))),
-                    None => (
+                let (text, run_out) = match &outcome {
+                    TriggerOutcome::Spawned(run) => {
+                        (format_run_text(run), Some(run_to_output(run)))
+                    }
+                    TriggerOutcome::Filtered => (
                         "Trigger condition evaluated to false; no run created.".to_string(),
+                        None,
+                    ),
+                    TriggerOutcome::Paused => (
+                        "Workflow is paused; no run created. Resume it to trigger runs."
+                            .to_string(),
                         None,
                     ),
                 };

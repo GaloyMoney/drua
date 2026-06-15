@@ -42,14 +42,11 @@ impl Mutation {
             .payload
             .map(JsonValue::into_inner)
             .unwrap_or_else(|| serde_json::json!({}));
-        let run = app
+        let outcome = app
             .workflows()
             .trigger_run(sub, input.definition_id, payload)
             .await?;
-        Ok(WorkflowTriggerPayload {
-            filtered: run.is_none(),
-            run: run.map(WorkflowRun::from),
-        })
+        Ok(WorkflowTriggerPayload::from(outcome))
     }
 
     async fn project_update(
@@ -282,8 +279,8 @@ impl Mutation {
     }
 
     /// Pause or resume a workflow without deleting it. While paused no
-    /// runs fire: cron fires are skipped, webhook deliveries are
-    /// suppressed, and manual triggers error.
+    /// runs fire: cron fires, webhook deliveries, and manual triggers
+    /// are all suppressed with a paused disposition (no run).
     async fn workflow_set_paused(
         &self,
         ctx: &Context<'_>,

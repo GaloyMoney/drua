@@ -72,8 +72,9 @@ pub struct WorkflowDefinition {
     #[builder(default)]
     pub model_chain: Option<ModelChain>,
     /// While `true` no runs fire: cron fires are skipped (the schedule
-    /// keeps ticking), webhook deliveries are suppressed, and manual
-    /// triggers error. Resume is a data flip — no job re-registration.
+    /// keeps ticking), and webhook deliveries and manual triggers are
+    /// suppressed with a paused disposition (no run). Resume is a data
+    /// flip — no job re-registration.
     #[builder(default)]
     pub paused: bool,
     #[builder(default)]
@@ -664,6 +665,31 @@ mod tests {
         assert!(matches!(def.set_paused(false), Idempotent::Executed(())));
         let hydrated = WorkflowDefinition::try_from_events(def.events.clone()).unwrap();
         assert!(!hydrated.paused);
+    }
+
+    #[test]
+    fn next_run_at_is_suppressed_while_paused() {
+        let new = NewWorkflowDefinition::builder()
+            .project_id(ProjectId::new())
+            .name("cron-flow")
+            .trigger(WorkflowTrigger::Cron {
+                schedule: "0 0 */6 * * *".to_string(),
+                timezone: None,
+                condition: None,
+            })
+            .steps(vec![sample_step()])
+            .build()
+            .unwrap();
+        let mut def = WorkflowDefinition::try_from_events(new.into_events()).unwrap();
+
+        let now = chrono::Utc::now();
+        assert!(def.next_run_at(now).is_some());
+
+        let _ = def.set_paused(true);
+        assert!(def.next_run_at(now).is_none());
+
+        let _ = def.set_paused(false);
+        assert!(def.next_run_at(now).is_some());
     }
 
     /// Events serialized before the `paused` field hydrate to `false`
