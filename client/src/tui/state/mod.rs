@@ -507,6 +507,33 @@ impl ScreenState {
         self.workflows.loading = false;
     }
 
+    pub fn set_workflow_definition_paused(
+        &mut self,
+        definition_id: &str,
+        paused: bool,
+        yaml: Option<String>,
+    ) {
+        if let Some(item) = self
+            .workflows
+            .definitions
+            .iter_mut()
+            .find(|d| d.id == definition_id)
+        {
+            item.paused = paused;
+        }
+        if let Some(detail) = self
+            .workflows
+            .selected_definition
+            .as_mut()
+            .filter(|d| d.id == definition_id)
+        {
+            detail.paused = paused;
+            if let Some(yaml) = yaml {
+                detail.yaml = yaml;
+            }
+        }
+    }
+
     pub fn replace_workflow_runs(&mut self, runs: Vec<WorkflowRunItem>) {
         self.workflows.runs = runs;
         if self.workflows.run_cursor >= self.workflows.runs.len() {
@@ -1314,6 +1341,7 @@ mod tests {
                 name: "first".into(),
                 description: None,
                 trigger: WorkflowTriggerInfo::default(),
+                paused: false,
                 steps: vec![],
                 recent_runs: vec![],
             },
@@ -1322,6 +1350,7 @@ mod tests {
                 name: "second".into(),
                 description: None,
                 trigger: WorkflowTriggerInfo::default(),
+                paused: false,
                 steps: vec![],
                 recent_runs: vec![],
             },

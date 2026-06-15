@@ -133,6 +133,23 @@
 </section>
 
 <section>
+  <h4>Status</h4>
+  {% if workflow.paused %}
+  <p><strong>Paused.</strong> No runs fire — cron fires are skipped, webhook deliveries and manual triggers are suppressed — until resumed.</p>
+  <form method="post" action="/projects/{{ project.id }}/workflows/{{ workflow.id }}/pause">
+    <input type="hidden" name="paused" value="false">
+    <button type="submit">Resume workflow</button>
+  </form>
+  {% else %}
+  <p><strong>Active.</strong></p>
+  <form method="post" action="/projects/{{ project.id }}/workflows/{{ workflow.id }}/pause">
+    <input type="hidden" name="paused" value="true">
+    <button type="submit" class="secondary">Pause workflow</button>
+  </form>
+  {% endif %}
+</section>
+
+<section>
   <h4>Sandboxes</h4>
   {% if workflow.sandboxes.is_empty() %}
   <p><em>No sandboxes declared. Steps cannot reference a sandbox.</em></p>

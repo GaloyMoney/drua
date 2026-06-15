@@ -23,6 +23,10 @@ pub enum Action {
         definition_id: String,
         payload: serde_json::Value,
     },
+    SetWorkflowPaused {
+        definition_id: String,
+        paused: bool,
+    },
     ExportThread {
         agent_id: String,
         path: String,
@@ -136,6 +140,7 @@ fn handle_workflow_definitions_key(state: &mut ScreenState, key: KeyEvent) -> Ac
             Action::None
         }
         KeyCode::Char('r') => Action::RefreshWorkflows,
+        KeyCode::Char('p') => set_paused_for_selected_workflow(state),
         KeyCode::Esc => {
             state.focus = Focus::Chat;
             Action::None
@@ -285,6 +290,16 @@ fn enter_trigger_for_selected_workflow(state: &mut ScreenState) -> Action {
             state.enter_trigger_workflow(definition_id, name);
             Action::None
         }
+        None => Action::None,
+    }
+}
+
+fn set_paused_for_selected_workflow(state: &ScreenState) -> Action {
+    match state.selected_workflow_definition() {
+        Some(def) => Action::SetWorkflowPaused {
+            definition_id: def.id.clone(),
+            paused: !def.paused,
+        },
         None => Action::None,
     }
 }

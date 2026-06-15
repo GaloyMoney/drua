@@ -244,6 +244,7 @@ pub struct WorkflowDefinitionView {
     /// `"manual"` or `"webhook"`.
     pub trigger_type: String,
     pub trigger_provider: Option<String>,
+    pub paused: bool,
     /// Detail page only — never set on listings.
     pub webhook_secret: Option<String>,
     pub webhook_url: Option<String>,

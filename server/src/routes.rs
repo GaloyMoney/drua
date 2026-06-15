@@ -82,6 +82,10 @@ pub fn router() -> Router<AppState> {
             post(project_workflow_trigger),
         )
         .route(
+            "/projects/{id}/workflows/{wf_id}/pause",
+            post(project_workflow_set_paused),
+        )
+        .route(
             "/projects/{id}/workflows/{wf_id}/runs/{run_id}",
             get(project_workflow_run_detail),
         )
@@ -1726,6 +1730,7 @@ fn workflow_definition_to_view_for_list(
         description: d.description.clone(),
         trigger_type,
         trigger_provider,
+        paused: d.paused,
         webhook_secret: None,
         webhook_url: None,
         steps: d.steps.iter().map(workflow_step_to_view).collect(),
@@ -1770,6 +1775,7 @@ fn workflow_definition_to_view_for_detail(
         description: d.description.clone(),
         trigger_type,
         trigger_provider,
+        paused: d.paused,
         webhook_secret: secret,
         webhook_url,
         steps: d.steps.iter().map(workflow_step_to_view).collect(),
@@ -2082,6 +2088,42 @@ async fn project_workflow_trigger(
             .into_response()
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowSetPausedForm {
+    paused: bool,
+}
+
+#[instrument(name = "web.project_workflow_set_paused", skip_all)]
+async fn project_workflow_set_paused(
+    State(state): State<AppState>,
+    session: Session,
+    Path((id, wf_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+    Form(form): Form<WorkflowSetPausedForm>,
+) -> Response {
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
+    let workflow_id = WorkflowDefinitionId::from(wf_id);
+
+    let msg = match state
+        .app
+        .workflows()
+        .set_paused(&sub, workflow_id, form.paused)
+        .await
+    {
+        Ok(_) if form.paused => "workflow paused; no runs will fire until resumed".to_string(),
+        Ok(_) => "workflow resumed".to_string(),
+        Err(e) => format!("failed to update workflow: {e}"),
+    };
+    Redirect::to(&format!(
+        "/projects/{id}/workflows/{wf_id}?flash={}",
+        encode_query_value(&msg)
+    ))
+    .into_response()
 }
 
 #[instrument(name = "web.project_workflow_run_detail", skip_all)]
