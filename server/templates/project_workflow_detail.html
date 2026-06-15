@@ -107,10 +107,7 @@
     <tr>
       <th>Type</th>
       <td>
-        {% if workflow.trigger_type == "manual" %}manual
-        {% else %}
-          webhook{% match workflow.trigger_provider %}{% when Some(p) %} ({{ p }}){% when None %}{% endmatch %}
-        {% endif %}
+        {{ workflow.trigger_type }}{% match workflow.trigger_provider %}{% when Some(p) %} ({{ p }}){% when None %}{% endmatch %}
       </td>
     </tr>
     {% match workflow.webhook_url %}

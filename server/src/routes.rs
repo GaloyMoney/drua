@@ -1708,7 +1708,7 @@ fn encode_query_value(s: &str) -> String {
 fn workflow_definition_to_view_for_list(
     d: &domain::workflow::WorkflowDefinition,
 ) -> WorkflowDefinitionView {
-    let (mut trigger_type, trigger_provider, secret) = match &d.trigger {
+    let (trigger_type, trigger_provider, secret) = match &d.trigger {
         WorkflowTrigger::Manual { .. } => ("manual".to_string(), None, None),
         WorkflowTrigger::Webhook {
             provider, secret, ..
@@ -1719,9 +1719,6 @@ fn workflow_definition_to_view_for_list(
         ),
         WorkflowTrigger::Cron { schedule, .. } => (format!("cron ({schedule})"), None, None),
     };
-    if d.paused {
-        trigger_type.push_str(" (paused)");
-    }
     // The list view never surfaces the secret — only the detail page does.
     let _ = secret;
     WorkflowDefinitionView {
@@ -1743,7 +1740,7 @@ fn workflow_definition_to_view_for_detail(
     d: &domain::workflow::WorkflowDefinition,
     public_host: Option<&str>,
 ) -> WorkflowDefinitionView {
-    let (mut trigger_type, trigger_provider, secret) = match &d.trigger {
+    let (trigger_type, trigger_provider, secret) = match &d.trigger {
         WorkflowTrigger::Manual { .. } => ("manual".to_string(), None, None),
         WorkflowTrigger::Webhook {
             provider, secret, ..
@@ -1762,9 +1759,6 @@ fn workflow_definition_to_view_for_detail(
             (label, None, None)
         }
     };
-    if d.paused {
-        trigger_type.push_str(" (paused)");
-    }
     let webhook_url = secret.as_ref().map(|_| match public_host {
         Some(host) => format!("{host}/webhooks/{}", d.id),
         None => format!("/webhooks/{}", d.id),
@@ -2109,20 +2103,24 @@ async fn project_workflow_set_paused(
     let sub = AuthSubject::User(user_id);
     let workflow_id = WorkflowDefinitionId::from(wf_id);
 
-    let msg = match state
+    let base = format!("/projects/{id}/workflows/{wf_id}");
+    match state
         .app
         .workflows()
         .set_paused(&sub, workflow_id, form.paused)
         .await
     {
-        Ok(_) if form.paused => "workflow paused; no runs will fire until resumed".to_string(),
-        Ok(_) => "workflow resumed".to_string(),
-        Err(e) => format!("failed to update workflow: {e}"),
-    };
-    Redirect::to(&format!(
-        "/projects/{id}/workflows/{wf_id}?flash={}",
-        encode_query_value(&msg)
-    ))
+        // Resume needs no banner — the page already shows the active state.
+        Ok(_) if !form.paused => Redirect::to(&base),
+        Ok(_) => Redirect::to(&format!(
+            "{base}?flash={}",
+            encode_query_value("workflow paused; no runs will fire until resumed")
+        )),
+        Err(e) => Redirect::to(&format!(
+            "{base}?flash={}",
+            encode_query_value(&format!("failed to update workflow: {e}"))
+        )),
+    }
     .into_response()
 }
 
