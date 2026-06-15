@@ -43,6 +43,9 @@ pub struct AppState {
     pub tunnel_public_keys: TunnelPublicKeys,
     pub library_repo_url: Option<String>,
     pub dev_mode_agent_tokens: bool,
+    /// Model ids from `providers[].models`, in config order; populates the
+    /// agent model-chain dropdowns.
+    pub model_options: Vec<String>,
 }
 
 impl AppState {
@@ -71,6 +74,7 @@ impl AppState {
             tunnel_public_keys,
             library_repo_url: None,
             dev_mode_agent_tokens: false,
+            model_options: Vec::new(),
         }
     }
 
@@ -226,6 +230,11 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
     );
     app_state.library_repo_url = config.library.repo_url.clone();
     app_state.dev_mode_agent_tokens = auth_config.dev_mode_agent_tokens;
+    app_state.model_options = config
+        .providers
+        .iter()
+        .flat_map(|p| p.models.iter().map(|m| m.name.clone()))
+        .collect();
     if app_state.dev_mode_agent_tokens {
         tracing::warn!(
             "dev_mode_agent_tokens enabled — accepting `dev-agent:<uuid>` bearer tokens. \

@@ -143,32 +143,59 @@
 <p><small>
   Set this agent's session chain. Empty primary ⇒ revert to the
   role's chain / <code>agents.default_chain</code>. Fallbacks are
-  comma-separated model ids tried in order on transient errors.
+  tried in priority order on transient errors.
 </small></p>
 <form data-gql-mutation="mutation($input: AgentUpdateSessionChainInput!) { agentUpdateSessionChain(input: $input) { session { chain { primary { name } fallbacks { name } } } } }"
       data-gql-build="buildAgentChain"
       data-gql-reload="true">
   <label>
     Primary model
-    <input name="primary_name" type="text" placeholder="anthropic/claude-sonnet-4-6">
+    <select name="primary_name">
+      <option value="">— use role / default chain —</option>
+      {% for m in model_options %}
+      <option value="{{ m }}">{{ m }}</option>
+      {% endfor %}
+    </select>
   </label>
-  <label>
-    Fallbacks <small>(comma-separated, in priority order)</small>
-    <input name="fallbacks" type="text" placeholder="openai/gpt-4o, anthropic/claude-haiku-4-5">
-  </label>
+  <label>Fallbacks <small>(in priority order)</small></label>
+  <div id="fallback-rows"></div>
+  <button type="button" id="add-fallback" class="secondary outline" style="margin-bottom: 1rem;">+ Add fallback</button>
   <div style="display: flex; gap: 0.5rem;">
     <button type="submit">Save chain</button>
     <button type="button" id="agent-chain-clear" class="secondary outline">Reset to default</button>
   </div>
 </form>
+<template id="fallback-row-template">
+  <div class="fallback-row" style="display: flex; gap: 0.5rem; margin-bottom: 0.5rem;">
+    <select name="fallback" style="flex: 1;">
+      <option value="">— select model —</option>
+      {% for m in model_options %}
+      <option value="{{ m }}">{{ m }}</option>
+      {% endfor %}
+    </select>
+    <button type="button" class="secondary outline remove-fallback" style="width: auto; margin: 0;">&times;</button>
+  </div>
+</template>
 <script>
+  const fallbackRows = document.getElementById('fallback-rows');
+  const fallbackTpl = document.getElementById('fallback-row-template');
+  function addFallbackRow(value) {
+    const row = fallbackTpl.content.cloneNode(true).querySelector('.fallback-row');
+    if (value) row.querySelector('select').value = value;
+    row.querySelector('.remove-fallback').addEventListener('click', () => row.remove());
+    fallbackRows.appendChild(row);
+  }
+  document.getElementById('add-fallback').addEventListener('click', () => addFallbackRow());
+
   function buildAgentChain(fd) {
-    const primary = fd.get('primary_name').trim();
+    const primary = (fd.get('primary_name') || '').trim();
     if (!primary) {
       return { agentId: "{{ agent.id }}", chain: null };
     }
-    const fbRaw = fd.get('fallbacks') || '';
-    const fallbacks = fbRaw.split(',').map(s => s.trim()).filter(Boolean).map(name => ({ name }));
+    const fallbacks = fd.getAll('fallback')
+      .map(s => s.trim())
+      .filter(Boolean)
+      .map(name => ({ name }));
     return {
       agentId: "{{ agent.id }}",
       chain: { primary: { name: primary }, fallbacks }
