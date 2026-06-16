@@ -433,6 +433,8 @@ pub struct ProjectAgentDetailTemplate {
     pub agent: AgentDetailView,
     /// Empty when `agent.attached_sandbox` is `Some`.
     pub sandbox_options: Vec<SandboxOptionView>,
+    /// Configured model ids for the model-chain dropdowns.
+    pub model_options: Vec<String>,
     /// Flash message after a failed attach/detach (`?error=...` on redirect).
     pub error: Option<String>,
 }

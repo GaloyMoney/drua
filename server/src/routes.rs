@@ -1377,6 +1377,7 @@ async fn project_agent_detail(
             attached_sandbox: attached_view,
         },
         sandbox_options,
+        model_options: state.model_options.clone(),
         error: query.error,
     }
     .into_response()
