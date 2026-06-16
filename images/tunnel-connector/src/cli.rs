@@ -1,8 +1,9 @@
 use clap::Parser;
 
 use crate::postgres_mcp::{
-    DEFAULT_POSTGRES_MCP_CONFIG_SECRET, DEFAULT_POSTGRES_MCP_CONNECT_TIMEOUT_SECS,
-    DEFAULT_POSTGRES_MCP_IMAGE, DEFAULT_POSTGRES_MCP_LIMIT_CPU, DEFAULT_POSTGRES_MCP_LIMIT_MEMORY,
+    DEFAULT_POSTGRES_MCP_CLOUD_SQL_PROXY_IMAGE, DEFAULT_POSTGRES_MCP_CONFIG_SECRET,
+    DEFAULT_POSTGRES_MCP_CONNECT_TIMEOUT_SECS, DEFAULT_POSTGRES_MCP_IMAGE,
+    DEFAULT_POSTGRES_MCP_LIMIT_CPU, DEFAULT_POSTGRES_MCP_LIMIT_MEMORY,
     DEFAULT_POSTGRES_MCP_MAX_ROWS, DEFAULT_POSTGRES_MCP_QUERY_TIMEOUT,
     DEFAULT_POSTGRES_MCP_REQUEST_CPU, DEFAULT_POSTGRES_MCP_REQUEST_MEMORY,
     DEFAULT_POSTGRES_MCP_RESOURCE_NAME, DEFAULT_POSTGRES_MCP_SERVICE_PORT,
@@ -57,6 +58,11 @@ pub(crate) struct Cli {
     #[arg(long, env = "TUNNEL_POSTGRES_MCP_DATAWAREHOUSE_DSN")]
     pub(crate) postgres_mcp_datawarehouse_dsn: Option<String>,
 
+    /// Optional service account name for the generated aggregate DBHub pods.
+    /// Required when DBHub needs Workload Identity for Cloud SQL proxy sidecars.
+    #[arg(long, env = "TUNNEL_POSTGRES_MCP_SERVICE_ACCOUNT_NAME")]
+    pub(crate) postgres_mcp_service_account_name: Option<String>,
+
     /// Fixed name for the generated aggregate DBHub Deployment and Service.
     #[arg(
         long,
@@ -96,6 +102,32 @@ pub(crate) struct Cli {
         default_value = "IfNotPresent"
     )]
     pub(crate) postgres_mcp_image_pull_policy: String,
+
+    /// Cloud SQL Auth Proxy image used by generated DBHub pods when proxy args are configured.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_CLOUD_SQL_PROXY_IMAGE",
+        default_value = DEFAULT_POSTGRES_MCP_CLOUD_SQL_PROXY_IMAGE
+    )]
+    pub(crate) postgres_mcp_cloud_sql_proxy_image: String,
+
+    /// Image pull policy for generated DBHub Cloud SQL proxy sidecars.
+    #[arg(
+        long,
+        env = "TUNNEL_POSTGRES_MCP_CLOUD_SQL_PROXY_IMAGE_PULL_POLICY",
+        default_value = "IfNotPresent"
+    )]
+    pub(crate) postgres_mcp_cloud_sql_proxy_image_pull_policy: String,
+
+    /// Optional Cloud SQL Auth Proxy instance arg for the Lana runtime instance,
+    /// for example `project:region:instance?port=5432&private-ip=true`.
+    #[arg(long, env = "TUNNEL_POSTGRES_MCP_RUNTIME_CLOUD_SQL_PROXY_ARG")]
+    pub(crate) postgres_mcp_runtime_cloud_sql_proxy_arg: Option<String>,
+
+    /// Optional Cloud SQL Auth Proxy instance arg for the Lana datawarehouse instance,
+    /// for example `project:region:instance?port=5433&private-ip=true`.
+    #[arg(long, env = "TUNNEL_POSTGRES_MCP_DATAWAREHOUSE_CLOUD_SQL_PROXY_ARG")]
+    pub(crate) postgres_mcp_datawarehouse_cloud_sql_proxy_arg: Option<String>,
 
     /// DBHub HTTP port.
     #[arg(
