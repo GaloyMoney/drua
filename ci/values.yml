@@ -28,7 +28,9 @@ deploy_concourse_password: ((galoybot-concourse-creds.password))
 #! Provisioned by galoy-org-infra at
 #! concourse/galoy-agents/galoy-agents-bin/lana-bank-cachix-token.
 deploy_lana_bank_cachix_auth_token: ((lana-bank-cachix-token.token))
-deploy_lana_bank_cachix_public_key: ""
+#! Public signing key for the private cache above. This is not secret; keep it
+#! explicit so prepare-deployment does not need Cachix API access.
+deploy_lana_bank_cachix_public_key: "lana-bank-github-actions.cachix.org-1:31jDEkkTk7VarJjX1rsUEYkEoqhKtOGJeK6ZEsXvMsg="
 honeycomb_api_key: ((mcp-upstream.honeycomb_api_key))
 github_pat: ((mcp-upstream.github_pat))
 zenduty_api_token: ((zenduty.api_key))
