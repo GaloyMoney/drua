@@ -99,6 +99,7 @@ Sandbox NIX_CONFIG contents for configured remote substituters.
 {{- end -}}
 
 {{- define "galoyAgents.sandbox.nixConfig" -}}
+fallback = true
 substituters ={{- with (include "galoyAgents.sandbox.nixSubstituterUrls" .) }} {{ . }}{{- end }} https://cache.nixos.org/
 trusted-public-keys ={{- with (include "galoyAgents.sandbox.nixPublicKeys" .) }} {{ . }}{{- end }} cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
 {{- if .Values.sandbox.nixNetrc.enabled }}
