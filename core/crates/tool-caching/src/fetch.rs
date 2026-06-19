@@ -482,25 +482,60 @@ impl StoredInvocation {
 
     fn navigate(&self, path: &str) -> Result<&Value, ToolCachingError> {
         let segments = parse_path(path)?;
-        let mut cur = &self.query_structure.root;
-        for seg in &segments {
-            cur = match seg {
-                PathSegment::Key(k) => cur.get(k).ok_or_else(|| {
-                    ToolCachingError::InvalidPath(format!(
-                        "path {path}: no `{k}` — {hint}",
-                        hint = describe_available(cur)
-                    ))
-                })?,
-                PathSegment::Index(i) => cur.get(*i).ok_or_else(|| {
-                    ToolCachingError::InvalidPath(format!(
-                        "path {path}: no [{i}] — {hint}",
-                        hint = describe_available(cur)
-                    ))
-                })?,
-            };
+        let root = &self.query_structure.root;
+        match walk_segments(root, &segments, path) {
+            Ok(v) => Ok(v),
+            // Tolerate the MCP wire-wrapper assumption: models routinely send
+            // `$.result.<...>` because normal tool responses are wrapped in
+            // `{result: ...}` on the wire, but the persisted fetch root is the
+            // unwrapped upstream value. When the root has no `result` key and
+            // the `$.result`-stripped path resolves, honour that rather than
+            // failing — but only when stripping actually resolves, so genuine
+            // misses still surface the original key-listing error.
+            Err(original) => match segments.as_slice() {
+                [PathSegment::Key(first), rest @ ..]
+                    if first == "result" && !rest.is_empty() && root.get("result").is_none() =>
+                {
+                    match walk_segments(root, rest, path) {
+                        Ok(v) => {
+                            tracing::debug!(
+                                path = %path,
+                                "drua_core.tool_caching.fetch_stripped_result_wrapper"
+                            );
+                            Ok(v)
+                        }
+                        Err(_) => Err(original),
+                    }
+                }
+                _ => Err(original),
+            },
         }
-        Ok(cur)
     }
+}
+
+fn walk_segments<'a>(
+    root: &'a Value,
+    segments: &[PathSegment],
+    path: &str,
+) -> Result<&'a Value, ToolCachingError> {
+    let mut cur = root;
+    for seg in segments {
+        cur = match seg {
+            PathSegment::Key(k) => cur.get(k).ok_or_else(|| {
+                ToolCachingError::InvalidPath(format!(
+                    "path {path}: no `{k}` — {hint}",
+                    hint = describe_available(cur)
+                ))
+            })?,
+            PathSegment::Index(i) => cur.get(*i).ok_or_else(|| {
+                ToolCachingError::InvalidPath(format!(
+                    "path {path}: no [{i}] — {hint}",
+                    hint = describe_available(cur)
+                ))
+            })?,
+        };
+    }
+    Ok(cur)
 }
 
 #[derive(Debug, PartialEq)]
@@ -950,6 +985,48 @@ mod tests {
         assert!(msg.contains("no `result`"), "got: {msg}");
         assert!(msg.contains("logs"), "got: {msg}");
         assert!(msg.contains("extra"), "got: {msg}");
+    }
+
+    #[test]
+    fn navigate_tolerates_result_wrapper_prefix() {
+        // Models send `$.result.<...>` assuming the MCP wire wrapper; the
+        // persisted root is unwrapped. Strip the bogus `result` segment when
+        // it lets the rest of the path resolve.
+        let inv = stored(serde_json::json!({"issues": [{"body": "boom"}]}));
+        assert_eq!(
+            inv.navigate("$.result.issues[0].body").unwrap(),
+            &Value::String("boom".into())
+        );
+    }
+
+    #[test]
+    fn navigate_tolerates_result_wrapper_for_content_shape() {
+        let inv = stored(serde_json::json!({"content": [{"text": "hi"}]}));
+        assert_eq!(
+            inv.navigate("$.result.content[0].text").unwrap(),
+            &Value::String("hi".into())
+        );
+    }
+
+    #[test]
+    fn navigate_keeps_real_result_key() {
+        // A genuine `result` key must still resolve normally, not be stripped.
+        let inv = stored(serde_json::json!({"result": {"body": "real"}}));
+        assert_eq!(
+            inv.navigate("$.result.body").unwrap(),
+            &Value::String("real".into())
+        );
+    }
+
+    #[test]
+    fn navigate_result_strip_does_not_mask_real_miss() {
+        // Stripping `result` doesn't resolve either → surface the original
+        // error against the path the caller actually sent.
+        let inv = stored(serde_json::json!({"logs": "x"}));
+        let err = inv.navigate("$.result.missing").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no `result`"), "got: {msg}");
+        assert!(msg.contains("logs"), "got: {msg}");
     }
 
     #[test]
