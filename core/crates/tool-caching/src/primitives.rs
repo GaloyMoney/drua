@@ -122,10 +122,7 @@ impl ToolCallSummary {
     /// which has no outer `{ result: ... }` wrapper. If `wire_result` is
     /// not an object (e.g. a tool returns an array or scalar root), fall
     /// back to [`build_wire`] so recovery metadata is never lost.
-    pub fn build_wire_envelope(
-        &self,
-        invocation_id: ToolInvocationId,
-    ) -> (CallToolResult, Value) {
+    pub fn build_wire_envelope(&self, invocation_id: ToolInvocationId) -> (CallToolResult, Value) {
         let envelope = self.build_envelope_text();
         let recovery = self.recovery_manifest(invocation_id);
         let mut root = self.wire_result.clone();
