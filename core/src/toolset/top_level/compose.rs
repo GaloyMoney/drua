@@ -196,11 +196,17 @@ impl TopLevelTool for ComposeTool {
 
         let ctr = match self.tool_caching.as_ref() {
             Some(tc) => {
-                // Plain `cache()` — same path every other top-level tool
-                // takes. We hand off an empty text channel; cache() fills
-                // it from the structured payload (or replaces it with the
-                // `<summary>+<recovery>` envelope when walking elides).
-                tc.cache(subject, "compose", &recorded_args, ctr)
+                // `cache_envelope()` — compose advertises `ComposeOutput`
+                // (a flat schema with no outer `{ result: ... }` wrapper)
+                // as its outputSchema, so it must NOT go through `cache()`'s
+                // DruaToolResult wrap: strict MCP clients validate
+                // `structuredContent` against the advertised schema and
+                // reject the wrapped shape (which nests ComposeOutput under
+                // a `result` key, dropping its declared top-level fields).
+                // `cache_envelope` walks/persists identically but emits `T`
+                // verbatim, merging `_recovery`/`_elided` into the
+                // ComposeOutput root when the walker elides `result`.
+                tc.cache_envelope(subject, "compose", &recorded_args, ctr)
                     .await?
                     .result
             }

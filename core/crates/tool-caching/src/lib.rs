@@ -120,6 +120,65 @@ impl ToolCaching {
         })
     }
 
+    /// Variant of [`cache`] for tools that own their envelope shape and opt
+    /// out of the `DruaToolResult` wrapper (`default_tool_caching() == false`,
+    /// e.g. `compose`). Walks and persists identically to `cache()`, but on
+    /// the structured channel emits the upstream `T` verbatim — merging
+    /// elision recovery (`_recovery` / `_elided`) into `T`'s top-level
+    /// object when the walker elides, rather than nesting under a
+    /// synthetic `result` key.
+    ///
+    /// This is what makes the returned `structuredContent` validate against
+    /// such a tool's advertised `outputSchema` (e.g. `ComposeOutput`): the
+    /// schema has no outer `{ result: ... }` wrapper, so `cache()`'s wrap
+    /// would make every persisted compose call fail strict MCP-client
+    /// output-schema validation (`@modelcontextprotocol/sdk` `callTool`
+    /// validates unconditionally when a tool declares an `outputSchema`).
+    pub async fn cache_envelope(
+        &self,
+        owner: impl Into<Option<ToolCallOwnerId>>,
+        tool_name: &str,
+        args: &serde_json::Value,
+        result: CallToolResult,
+    ) -> Result<ToolCacheResponse, ToolCachingError> {
+        let result = ensure_text_channel(result);
+        let Some(owner_id) = owner.into() else {
+            return Ok(passthrough_no_owner(result));
+        };
+        if result.is_error == Some(true) {
+            return Ok(passthrough_no_owner(result));
+        }
+
+        let processed = self.process(owner_id, tool_name, args, &result).await?;
+
+        if !processed.persisted {
+            // Sub-threshold passthrough — emit T verbatim, no `{result: T}`
+            // wrap. Matches what envelope-owning tools advertise as their
+            // outputSchema.
+            let mut passthrough = result;
+            passthrough.structured_content = Some(processed.upstream_t);
+            return Ok(ToolCacheResponse {
+                result: passthrough,
+                elided_paths: Vec::new(),
+                invocation_id: None,
+                summary_fetch_info: None,
+                root_path: None,
+            });
+        }
+
+        let elided_paths = processed.summary.elided_paths.clone();
+        let summary_fetch_info = self.summary_fetch_info(&processed.summary);
+        let root_path = processed.summary.root_path.clone();
+        let wrapped = build_elide_ctr_envelope(processed.summary, processed.invocation_id);
+        Ok(ToolCacheResponse {
+            result: wrapped,
+            elided_paths,
+            invocation_id: Some(processed.invocation_id),
+            summary_fetch_info: Some(summary_fetch_info),
+            root_path: Some(root_path),
+        })
+    }
+
     /// Compose sub-dispatch call path. The JS engine has its own size
     /// cap and scripts use the sub-tool's return directly as upstream `T`
     /// — pre-elided data would force every script to recover through
@@ -287,6 +346,16 @@ fn build_elide_ctr(summary: ToolCallSummary, invocation_id: ToolInvocationId) ->
     summary.build_wire(invocation_id).0
 }
 
+/// Envelope-owning variant (see [`ToolCallSummary::build_wire_envelope`]).
+/// Used by [`ToolCaching::cache_envelope`] for tools like `compose` whose
+/// advertised outputSchema has no outer `{ result: ... }` wrapper.
+fn build_elide_ctr_envelope(
+    summary: ToolCallSummary,
+    invocation_id: ToolInvocationId,
+) -> CallToolResult {
+    summary.build_wire_envelope(invocation_id).0
+}
+
 pub fn extract_text(result: &CallToolResult) -> String {
     result
         .content
@@ -446,5 +515,116 @@ mod tests {
             value["content"][1]["resource"]["blob"],
             "<base64 resource blob elided; 10 bytes>"
         );
+    }
+
+    /// `build_wire_envelope` keeps the walked object's own top-level shape
+    /// (no synthetic `result` wrapper) while still attaching `_recovery` /
+    /// `_elided`. This is what lets envelope-owning tools like `compose`
+    /// validate their `structuredContent` against a flat `outputSchema`
+    /// (e.g. `ComposeOutput`). Mirrored against `build_wire` to lock the
+    /// wrap-vs-merge contract.
+    #[test]
+    fn build_wire_envelope_merges_recovery_into_object_root() {
+        use crate::primitives::{ElidedPath, ToolCallSummary};
+        // `wire_result` mirrors a ComposeOutput-style envelope: a handful
+        // of always-present fields plus a big `result` the walker elided.
+        let wire_result = serde_json::json!({
+            "sub_invocations": [],
+            "tool_calls": 1,
+            "execution_time_ms": 12,
+            "console": [],
+            "result": "<elided body>"
+        });
+        let elided = ElidedPath {
+            path: "$.result".to_string(),
+            total_bytes: 9999,
+            shown_bytes: 16,
+            total_lines: None,
+            shown_lines: None,
+            total_items: None,
+            shown_items: None,
+            recover: serde_json::json!({
+                "tool": "tool_output_fetch",
+                "args_template": { "invocation_id": "<id>", "path": "$.result" }
+            }),
+        };
+        let summary = ToolCallSummary {
+            summary: serde_json::json!("<elided body>"),
+            wire_result: wire_result.clone(),
+            elided_paths: vec![elided],
+            root_path: "$".to_string(),
+            total_bytes: 9999,
+            shown_bytes: 16,
+            total_items: None,
+            shown_items: None,
+            total_lines: None,
+            shown_lines: None,
+        };
+        let id = ToolInvocationId::new();
+
+        let (wrapped_ctr, wrapped) = summary.clone().build_wire(id);
+        let (env_ctr, env) = summary.build_wire_envelope(id);
+
+        // `build_wire` nests everything under `result` (DruaToolResult).
+        assert_eq!(wrapped["result"]["tool_calls"], 1);
+        assert!(wrapped.get("_recovery").is_some());
+        assert!(wrapped.get("_elided").is_some());
+        // The envelope's own fields are NOT at the wrapped root.
+        assert!(wrapped.get("tool_calls").is_none());
+
+        // `build_wire_envelope` keeps ComposeOutput's fields at the root.
+        assert_eq!(env["tool_calls"], 1);
+        assert_eq!(env["execution_time_ms"], 12);
+        assert_eq!(env["sub_invocations"], serde_json::json!([]));
+        assert_eq!(env["result"], "<elided body>");
+        // Recovery metadata merged in alongside them, not under `result`.
+        assert_eq!(
+            env["_recovery"]["invocation_id"],
+            wrapped["_recovery"]["invocation_id"]
+        );
+        assert_eq!(env["_elided"]["paths"][0]["path"], "$.result");
+        // No synthetic `result` wrapper around the whole envelope.
+        assert!(env.get("result").is_some()); // ComposeOutput.result, present
+        assert!(env.get("_recovery").is_some());
+        assert!(env.get("_elided").is_some());
+
+        // Same text-channel envelope on both (recovery rendering is shared).
+        assert_eq!(extract_text(&wrapped_ctr), extract_text(&env_ctr));
+    }
+
+    /// When `wire_result` is not an object (array/scalar root),
+    /// `build_wire_envelope` must fall back to `build_wire` so recovery
+    /// metadata is never silently dropped.
+    #[test]
+    fn build_wire_envelope_falls_back_to_wrap_for_non_object_root() {
+        use crate::primitives::{ElidedPath, ToolCallSummary};
+        let summary = ToolCallSummary {
+            summary: serde_json::json!("x"),
+            wire_result: serde_json::json!([1, 2, 3]), // array root
+            elided_paths: vec![ElidedPath {
+                path: "$[0]".to_string(),
+                total_bytes: 10,
+                shown_bytes: 1,
+                total_lines: None,
+                shown_lines: None,
+                total_items: None,
+                shown_items: None,
+                recover: serde_json::json!({"tool": "tool_output_fetch"}),
+            }],
+            root_path: "$".to_string(),
+            total_bytes: 10,
+            shown_bytes: 1,
+            total_items: None,
+            shown_items: None,
+            total_lines: None,
+            shown_lines: None,
+        };
+        let id = ToolInvocationId::new();
+        let (_, env) = summary.clone().build_wire_envelope(id);
+        let (_, wrapped) = summary.build_wire(id);
+        // Non-object root → identical wrapped shape (recovery preserved).
+        assert_eq!(env, wrapped);
+        assert_eq!(env["result"], serde_json::json!([1, 2, 3]));
+        assert!(env.get("_recovery").is_some());
     }
 }
