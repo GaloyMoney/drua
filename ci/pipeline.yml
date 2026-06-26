@@ -191,7 +191,10 @@ jobs:
             # here using the deploy GITHUB_PAT and rewrite the module sources
             # to local paths so init needs no GitHub auth. The vendored tree is
             # the same `main` the git sources previously pointed at.
-            command -v git >/dev/null 2>&1 || nix profile install nixpkgs#git
+            # The nix flake image is minimal and ships neither git nor sed by
+            # default; both are needed to vendor the modules and rewrite their
+            # sources. Install them together if either is missing.
+            { command -v git >/dev/null 2>&1 && command -v sed >/dev/null 2>&1; } || nix profile install nixpkgs#git nixpkgs#gnused
             GALOY_INFRA_URL="https://x-access-token:${GITHUB_PAT}@github.com/GaloyMoney/galoy-infra.git"
             if ! git clone --depth 1 --quiet "$GALOY_INFRA_URL" deployment/tf/galoy-infra-modules 2>/tmp/gi-clone.err; then
               echo "failed to vendor galoy-infra modules:" >&2
