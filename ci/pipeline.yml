@@ -202,7 +202,7 @@ jobs:
               exit 1
             fi
             rm -rf deployment/tf/galoy-infra-modules/.git
-            sed -i 's#git::https://github.com/GaloyMoney/galoy-infra\.git//\([^?]*\)?ref=main#galoy-infra-modules/\1#g' deployment/tf/main.tf
+            sed -i 's#git::https://github.com/GaloyMoney/galoy-infra\.git//\([^?]*\)?ref=main#./galoy-infra-modules/\1#g' deployment/tf/main.tf
 
             set +x
             cat <<EOF > deployment/tf/terraform.tfvars
