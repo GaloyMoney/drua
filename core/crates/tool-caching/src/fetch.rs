@@ -370,8 +370,19 @@ impl StoredInvocation {
     /// Replay the curated `<summary>+<recovery>` envelope from the
     /// persisted `ToolCallSummary`. Summary mode is the recovery escape
     /// hatch, so it bypasses the normal fetch-size cap.
+    ///
+    /// Envelope-mode invocations (e.g. `compose`, which advertises
+    /// `ComposeOutput` as its outputSchema and has no outer `{result: …}`
+    /// wrapper) replay through `build_wire_envelope` so the replayed
+    /// shape matches what the live call emitted — agents using
+    /// `query:{mode:"summary"}` recovery see the same structured shape
+    /// they would have seen calling the tool directly.
     fn summary_view(&self, _max_bytes: usize) -> Result<FetchResult, ToolCachingError> {
-        let (result, structured) = self.summary.build_wire(self.id);
+        let (result, structured) = if self.summary.envelope_mode {
+            self.summary.build_wire_envelope(self.id)
+        } else {
+            self.summary.build_wire(self.id)
+        };
         Ok(FetchResult { result, structured })
     }
 
@@ -754,6 +765,7 @@ mod tests {
                 shown_items: None,
                 total_lines: None,
                 shown_lines: None,
+                envelope_mode: false,
             },
             original_structured: None,
         }
@@ -1055,6 +1067,58 @@ mod tests {
         assert!(hint.contains("normal_fetch_limit_bytes: 64"), "got: {hint}");
     }
 
+    /// Envelope-mode persisted summaries (e.g. `compose`) must replay
+    /// through `build_wire_envelope` on `query:{mode:"summary"}` so the
+    /// re-fetched structured shape matches the live elided call. If it
+    /// fell back to `build_wire`, agents would see `{result: <T>, ...}`
+    /// from the replay but a flat ComposeOutput from the live call.
+    #[test]
+    fn summary_query_replays_envelope_mode_through_build_wire_envelope() {
+        use crate::primitives::ElidedPath;
+        let mut inv = stored(serde_json::json!({}));
+        inv.summary = ToolCallSummary {
+            summary: Value::String("<elided body>".into()),
+            wire_result: serde_json::json!({
+                "sub_invocations": [],
+                "tool_calls": 1,
+                "execution_time_ms": 12,
+                "console": [],
+                "result": "<elided body>",
+            }),
+            elided_paths: vec![ElidedPath {
+                path: "$.result".to_string(),
+                total_bytes: 9999,
+                shown_bytes: 16,
+                total_lines: None,
+                shown_lines: None,
+                total_items: None,
+                shown_items: None,
+                recover: serde_json::json!({
+                    "tool": "tool_output_fetch",
+                    "args_template": { "invocation_id": "<id>", "path": "$.result" },
+                }),
+            }],
+            root_path: "$".to_string(),
+            total_bytes: 9999,
+            shown_bytes: 16,
+            total_items: None,
+            shown_items: None,
+            total_lines: None,
+            shown_lines: None,
+            envelope_mode: true,
+        };
+
+        let fetched = inv
+            .query("$", Some(&FetchQuery::Summary), 64)
+            .expect("summary mode bypasses the normal fetch cap");
+        // ComposeOutput fields at the root, not under a synthetic `result` key.
+        assert_eq!(fetched.structured["tool_calls"], 1);
+        assert_eq!(fetched.structured["execution_time_ms"], 12);
+        assert_eq!(fetched.structured["result"], "<elided body>");
+        assert!(fetched.structured.get("_recovery").is_some());
+        assert!(fetched.structured.get("_elided").is_some());
+    }
+
     #[test]
     fn summary_query_bypasses_fetch_cap_without_late_annotation() {
         let mut inv = stored(serde_json::json!("full"));
@@ -1069,6 +1133,7 @@ mod tests {
             shown_items: None,
             total_lines: None,
             shown_lines: None,
+            envelope_mode: false,
         };
 
         let fetched = inv
@@ -1138,6 +1203,7 @@ mod tests {
                 shown_items: None,
                 total_lines: None,
                 shown_lines: None,
+                envelope_mode: false,
             },
             original_structured: None,
         }

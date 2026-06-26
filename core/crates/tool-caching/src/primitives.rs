@@ -76,6 +76,13 @@ pub struct ToolCallSummary {
     pub total_lines: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shown_lines: Option<u32>,
+    /// True when this summary was produced by a tool that owns its
+    /// envelope shape (`default_tool_caching() == false`, e.g. `compose`)
+    /// — the live wire emits `T` verbatim via [`build_wire_envelope`],
+    /// so summary replay must do the same to keep parity. `#[serde(default)]`
+    /// keeps pre-existing persisted rows readable as wrap-mode.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub envelope_mode: bool,
 }
 
 impl ToolCallSummary {

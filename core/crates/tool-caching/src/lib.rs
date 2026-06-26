@@ -41,6 +41,19 @@ struct Processed {
     persisted: bool,
 }
 
+/// Which wire shape the persisted summary should replay as on a later
+/// `tool_output_fetch(query:{mode:"summary"})`. Stamped onto the summary
+/// inside `process()` so the replay path can't diverge from the live
+/// caller's choice.
+#[derive(Debug, Clone, Copy)]
+enum ProcessMode {
+    /// `{result: T, _recovery, _elided}` — the default `DruaToolResult` shape.
+    Wrap,
+    /// T verbatim with `_recovery` / `_elided` merged into its root.
+    /// Used by tools that own their envelope shape (e.g. `compose`).
+    Envelope,
+}
+
 impl ToolCaching {
     pub fn new(pool: &sqlx::PgPool, config: ToolCachingConfig) -> Self {
         let walker = Walker::new(
@@ -88,7 +101,9 @@ impl ToolCaching {
             return Ok(passthrough_no_owner(result));
         }
 
-        let processed = self.process(owner_id, tool_name, args, &result).await?;
+        let processed = self
+            .process(owner_id, tool_name, args, &result, ProcessMode::Wrap)
+            .await?;
 
         if !processed.persisted {
             // Sub-threshold passthrough — keep the text channel raw,
@@ -149,7 +164,9 @@ impl ToolCaching {
             return Ok(passthrough_no_owner(result));
         }
 
-        let processed = self.process(owner_id, tool_name, args, &result).await?;
+        let processed = self
+            .process(owner_id, tool_name, args, &result, ProcessMode::Envelope)
+            .await?;
 
         if !processed.persisted {
             // Sub-threshold passthrough — emit T verbatim, no `{result: T}`
@@ -205,7 +222,14 @@ impl ToolCaching {
             return Ok(passthrough_no_owner(result));
         }
 
-        let processed = self.process(owner_id, tool_name, args, &result).await?;
+        // Sub-invocations inside compose are persisted under their own
+        // tool's wire shape (catalog tools use the `DruaToolResult` wrap;
+        // top-level envelope-owning tools are out of scope here since they
+        // can't run from compose), so the summary replay mode mirrors
+        // `cache()`'s `{result: T}` envelope.
+        let processed = self
+            .process(owner_id, tool_name, args, &result, ProcessMode::Wrap)
+            .await?;
 
         // For compose JS engine: always emit T verbatim, regardless of
         // whether the walker found anything elision-worthy.
@@ -268,12 +292,18 @@ impl ToolCaching {
     /// shape; `persist_for_compose()` discards the summary on the wire
     /// (emits T verbatim) but persists it so the agent can re-fetch
     /// with `{mode: "summary"}` later.
+    ///
+    /// `mode` controls how a later `tool_output_fetch(query:{mode:"summary"})`
+    /// replays this invocation — wrap (`{result: T, _recovery, _elided}`)
+    /// or envelope (T verbatim with recovery merged in). It is persisted
+    /// on the summary so the replay path can't drift from the live call.
     async fn process(
         &self,
         owner_id: ToolCallOwnerId,
         tool_name: &str,
         args: &serde_json::Value,
         result: &CallToolResult,
+        mode: ProcessMode,
     ) -> Result<Processed, ToolCachingError> {
         let original_structured = result.structured_content.clone();
         let upstream_t = tool_result_value(result);
@@ -292,9 +322,10 @@ impl ToolCaching {
             root: upstream_t.clone(),
         };
         let invocation_id = ToolInvocationId::new();
-        let summary = self
+        let mut summary = self
             .walker
             .summarize(&query_structure, invocation_id, tool_name);
+        summary.envelope_mode = matches!(mode, ProcessMode::Envelope);
 
         if summary.elided_paths.is_empty() {
             return Ok(Processed {
@@ -559,6 +590,7 @@ mod tests {
             shown_items: None,
             total_lines: None,
             shown_lines: None,
+            envelope_mode: true,
         };
         let id = ToolInvocationId::new();
 
@@ -618,6 +650,7 @@ mod tests {
             shown_items: None,
             total_lines: None,
             shown_lines: None,
+            envelope_mode: true,
         };
         let id = ToolInvocationId::new();
         let (_, env) = summary.clone().build_wire_envelope(id);

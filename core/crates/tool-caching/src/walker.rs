@@ -146,6 +146,7 @@ impl Walker {
             shown_items,
             total_lines,
             shown_lines,
+            envelope_mode: false,
         }
     }
 
