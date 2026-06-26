@@ -75,8 +75,16 @@ struct ComposeOutput {
     result: serde_json::Value,
 }
 
-static COMPOSE_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<ComposeOutput>);
+/// `ComposeOutput` is generated with `additionalProperties: false` by
+/// `schema_for`, but `cache_envelope` merges `_recovery` / `_elided` into
+/// the ComposeOutput root when the walker elides. Without declaring them
+/// as optional properties here, strict MCP clients reject every elided
+/// compose response. Mirrors the recovery property shape in `wrap.rs`.
+static COMPOSE_OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
+    let mut schema = schema_for::<ComposeOutput>();
+    crate::toolset::wrap::merge_envelope_recovery_props(&mut schema);
+    schema
+});
 
 #[async_trait::async_trait]
 impl TopLevelTool for ComposeTool {
@@ -196,11 +204,17 @@ impl TopLevelTool for ComposeTool {
 
         let ctr = match self.tool_caching.as_ref() {
             Some(tc) => {
-                // Plain `cache()` — same path every other top-level tool
-                // takes. We hand off an empty text channel; cache() fills
-                // it from the structured payload (or replaces it with the
-                // `<summary>+<recovery>` envelope when walking elides).
-                tc.cache(subject, "compose", &recorded_args, ctr)
+                // `cache_envelope()` — compose advertises `ComposeOutput`
+                // (a flat schema with no outer `{ result: ... }` wrapper)
+                // as its outputSchema, so it must NOT go through `cache()`'s
+                // DruaToolResult wrap: strict MCP clients validate
+                // `structuredContent` against the advertised schema and
+                // reject the wrapped shape (which nests ComposeOutput under
+                // a `result` key, dropping its declared top-level fields).
+                // `cache_envelope` walks/persists identically but emits `T`
+                // verbatim, merging `_recovery`/`_elided` into the
+                // ComposeOutput root when the walker elides `result`.
+                tc.cache_envelope(subject, "compose", &recorded_args, ctr)
                     .await?
                     .result
             }
@@ -917,6 +931,37 @@ mod tests {
             !dts.contains("function compose("),
             "non-composable tool leaked into dts:\n{dts}"
         );
+    }
+
+    /// `cache_envelope` merges `_recovery` and `_elided` into the
+    /// ComposeOutput root when the walker elides. The schema is generated
+    /// with `additionalProperties: false`, so those keys must be declared
+    /// up front or strict MCP clients reject every elided compose call.
+    #[test]
+    fn compose_output_schema_declares_recovery_properties() {
+        let props = COMPOSE_OUTPUT_SCHEMA
+            .get("properties")
+            .and_then(|v| v.as_object())
+            .expect("compose outputSchema has properties");
+        assert!(
+            props.contains_key("_recovery"),
+            "_recovery missing — strict validators reject elided compose"
+        );
+        assert!(
+            props.contains_key("_elided"),
+            "_elided missing — strict validators reject elided compose"
+        );
+        // They MUST stay optional — non-elided compose responses don't carry them.
+        let required: Vec<&str> = COMPOSE_OUTPUT_SCHEMA
+            .get("required")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+            .unwrap_or_default();
+        assert!(
+            !required.contains(&"_recovery"),
+            "_recovery must be optional"
+        );
+        assert!(!required.contains(&"_elided"), "_elided must be optional");
     }
 
     /// Strict MCP clients (e.g. Claude Code) reject boolean schemas inside

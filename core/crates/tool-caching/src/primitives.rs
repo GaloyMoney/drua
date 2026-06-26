@@ -76,6 +76,13 @@ pub struct ToolCallSummary {
     pub total_lines: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shown_lines: Option<u32>,
+    /// True when this summary was produced by a tool that owns its
+    /// envelope shape (`default_tool_caching() == false`, e.g. `compose`)
+    /// — the live wire emits `T` verbatim via [`build_wire_envelope`],
+    /// so summary replay must do the same to keep parity. `#[serde(default)]`
+    /// keeps pre-existing persisted rows readable as wrap-mode.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub envelope_mode: bool,
 }
 
 impl ToolCallSummary {
@@ -106,6 +113,51 @@ impl ToolCallSummary {
         let mut result = CallToolResult::success(vec![Content::text(envelope)]);
         result.structured_content = Some(structured.clone());
         (result, structured)
+    }
+
+    /// Variant of [`build_wire`] for tools that own their envelope shape
+    /// and opt out of the `DruaToolResult` wrapper (i.e.
+    /// `default_tool_caching() == false`, such as `compose`). The walker
+    /// still operates on the full structured `T` and persists it for
+    /// `tool_output_fetch` recovery, but the agent-facing structured
+    /// channel keeps `T`'s own top-level shape — merging `_recovery` /
+    /// `_elided` into `T`'s root object rather than nesting everything
+    /// under a synthetic `result` key.
+    ///
+    /// This is what makes the returned `structuredContent` validate against
+    /// such a tool's advertised `outputSchema` (e.g. `ComposeOutput`),
+    /// which has no outer `{ result: ... }` wrapper. If `wire_result` is
+    /// not an object (e.g. a tool returns an array or scalar root), fall
+    /// back to [`build_wire`] so recovery metadata is never lost.
+    pub fn build_wire_envelope(&self, invocation_id: ToolInvocationId) -> (CallToolResult, Value) {
+        let envelope = self.build_envelope_text();
+        let recovery = self.recovery_manifest(invocation_id);
+        let mut root = self.wire_result.clone();
+        match &mut root {
+            Value::Object(map) => {
+                map.insert(
+                    "_recovery".to_string(),
+                    serde_json::to_value(&recovery).unwrap(),
+                );
+                if !self.elided_paths.is_empty() {
+                    map.insert(
+                        "_elided".to_string(),
+                        serde_json::json!({
+                            "invocation_id": invocation_id.to_string(),
+                            "paths": self.elided_paths.clone(),
+                        }),
+                    );
+                }
+            }
+            _ => {
+                // Non-object root — wrapping is the only way to attach
+                // recovery metadata without losing the root value.
+                return self.build_wire(invocation_id);
+            }
+        }
+        let mut result = CallToolResult::success(vec![Content::text(envelope)]);
+        result.structured_content = Some(root.clone());
+        (result, root)
     }
 
     fn recovery_manifest(&self, invocation_id: ToolInvocationId) -> RecoveryManifest {

@@ -422,20 +422,20 @@ assert_compose_snapshot() {
   local r1_struct
   r1_struct="$(echo "$output" | jq -r '.result.structuredContent')"
 
-  # Compose is a top-level cached tool — its structured channel is the
-  # `DruaToolResult<ComposeOutput>` wrapper. ComposeOutput fields live
-  # under `.result.` (outer wrap key).
+  # Compose owns its envelope shape (outputSchema is ComposeOutput,
+  # a flat schema — no DruaToolResult wrapper). ComposeOutput fields
+  # are at the structuredContent root.
   #
   # Structural: 2 sub_invocations expected (small obj is passthrough →
   # no recovery; large str + large arr are persisted).
   local n_subs
-  n_subs="$(echo "$r1_struct" | jq -r '.result.sub_invocations | length')"
+  n_subs="$(echo "$r1_struct" | jq -r '.sub_invocations | length')"
   [ "$n_subs" = "2" ]
 
   # Each persisted sub_invocation carries a uuid + a kind discriminator.
   local subs_summary
   subs_summary="$(echo "$r1_struct" | jq -r \
-    '.result.sub_invocations | map({tool_name, kind})')"
+    '.sub_invocations | map({tool_name, kind})')"
   echo "$subs_summary"
   [[ "$subs_summary" == *"str-large-table"* ]]
   [[ "$subs_summary" == *"arr-large-passthrough-items"* ]]
@@ -448,9 +448,9 @@ assert_compose_snapshot() {
   # recoverability of sub-call data persisted by persist_for_compose.
   local str_id arr_id
   str_id="$(echo "$r1_struct" | jq -r \
-    '.result.sub_invocations[] | select(.tool_name | endswith("str-large-table")) | .invocation_id')"
+    '.sub_invocations[] | select(.tool_name | endswith("str-large-table")) | .invocation_id')"
   arr_id="$(echo "$r1_struct" | jq -r \
-    '.result.sub_invocations[] | select(.tool_name | endswith("arr-large-passthrough-items")) | .invocation_id')"
+    '.sub_invocations[] | select(.tool_name | endswith("arr-large-passthrough-items")) | .invocation_id')"
   [[ "$str_id" =~ ^[0-9a-f-]{36}$ ]]
   [[ "$arr_id" =~ ^[0-9a-f-]{36}$ ]]
 
@@ -466,11 +466,11 @@ assert_compose_snapshot() {
   [ "$status" -eq 0 ]
 
   # The recovered slices must match the elided middle of each fixture.
-  # Outer compose wrap puts ComposeOutput at `.result`; ComposeOutput.result
-  # is the JS return — `{ str_slice: <fetched_string>, arr_slice: <fetched_array> }`.
+  # ComposeOutput.result is the JS return —
+  # `{ str_slice: <fetched_string>, arr_slice: <fetched_array> }`.
   local r2_struct r2_inner
   r2_struct="$(echo "$output" | jq -r '.result.structuredContent')"
-  r2_inner="$(echo "$r2_struct" | jq -r '.result.result')"
+  r2_inner="$(echo "$r2_struct" | jq -r '.result')"
 
   # str_slice is a JSON string; arr_slice is a JSON array.
   local str_slice arr_slice_len
