@@ -165,7 +165,17 @@ struct DescribeToolOutput {
     description: String,
     #[schemars(schema_with = "crate::toolset::any_json_schema")]
     input_schema: serde_json::Value,
+    // `#[schemars(default)]` is required, not redundant with `Option`: when
+    // `schema_with` overrides a field's type schema, schemars 0.8 loses track
+    // of the `Option` and marks the field `required`. Strict MCP clients
+    // (pi ships @modelcontextprotocol/sdk 1.29.0) validate `structuredContent`
+    // against this schema and reject responses missing a `required` field —
+    // which is why `describe_tool` failed for every tool that has no upstream
+    // `output_schema`. `schemars(default)` restores the not-required semantics
+    // while `schema_with` keeps the field an any-schema object (not a boolean
+    // schema, which strict clients also reject).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(default)]
     #[schemars(schema_with = "crate::toolset::any_json_schema")]
     output_schema: Option<serde_json::Value>,
 }
@@ -1175,6 +1185,39 @@ mod tests {
             assert!(
                 !matches!(schema, serde_json::Value::Bool(_)),
                 "property `{name}` is a boolean schema, MCP validators reject it"
+            );
+        }
+    }
+
+    /// `output_schema` is `Option<_>` and omitted when a tool has no upstream
+    /// output schema (the common case). It MUST NOT appear in the schema's
+    /// `required`, or strict MCP clients reject the `structuredContent` of
+    /// every such describe_tool call with "data must have required property
+    /// 'output_schema'". `schema_with` on an `Option` field defeats schemars
+    /// 0.8's Option-detection, so `#[schemars(default)]` restores it.
+    #[test]
+    fn describe_output_schema_does_not_require_output_schema_field() {
+        let required = DESCRIBE_OUTPUT_SCHEMA
+            .get("required")
+            .and_then(|v| v.as_array())
+            .expect("describe outputSchema has a required array");
+        let required_names: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            !required_names.contains(&"output_schema"),
+            "`output_schema` must not be required (it is Option and omitted for \
+             most tools), but schema requires: {required_names:?}"
+        );
+        // Sanity: the always-present fields are still required.
+        for always in [
+            "name",
+            "upstream",
+            "category",
+            "description",
+            "input_schema",
+        ] {
+            assert!(
+                required_names.contains(&always),
+                "`{always}` should be required, got: {required_names:?}"
             );
         }
     }
