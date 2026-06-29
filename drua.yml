@@ -136,7 +136,7 @@ toolsets:
         - list_issues
         - search_issues
     - name: github_actions
-      url: https://api.githubcopilot.com/mcp/x/actions/readonly
+      url: https://api.githubcopilot.com/mcp/x/actions
       tool_prefix: github_actions
       category: ci
       category_description: "GitHub Actions workflows, runs, jobs, and logs"
@@ -144,6 +144,7 @@ toolsets:
         - actions_list
         - actions_get
         - get_job_logs
+        - actions_run_trigger
     # PR-mutation upstream — local-dev test of separating writes from reads.
     # Auth: GITHUB_PULL_REQUESTS_AUTH_HEADER ("Bearer <PAT>"). Same PAT as
     # the github upstream is fine for now; PAT needs `repo` (or fine-grained
