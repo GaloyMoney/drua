@@ -112,7 +112,7 @@ fn installation_token_request_body() -> serde_json::Value {
             "metadata": "read",
             "checks": "read",
             "statuses": "read",
-            "actions": "write"
+            "actions": "read"
         }
     })
 }
@@ -122,7 +122,7 @@ mod tests {
     use super::installation_token_request_body;
 
     #[test]
-    fn installation_token_requests_ci_permissions() {
+    fn installation_token_requests_ci_read_permissions() {
         let body = installation_token_request_body();
         let permissions = body
             .get("permissions")
@@ -139,7 +139,7 @@ mod tests {
         );
         assert_eq!(
             permissions.get("actions").and_then(|v| v.as_str()),
-            Some("write")
+            Some("read")
         );
     }
 
