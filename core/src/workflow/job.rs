@@ -102,6 +102,20 @@ impl JobRunner for ExecuteRunRunner {
         match result {
             Ok(()) => Ok(JobCompletion::Complete),
             Err(WorkflowError::Cancelled) => Ok(JobCompletion::RescheduleNow),
+            Err(WorkflowError::RunFind(ref e)) if e.was_not_found() => {
+                tracing::warn!(
+                    run_id = %self.config.run_id,
+                    "run deleted; completing job without retry"
+                );
+                Ok(JobCompletion::Complete)
+            }
+            Err(WorkflowError::DefinitionFind(ref e)) if e.was_not_found() => {
+                tracing::warn!(
+                    run_id = %self.config.run_id,
+                    "definition deleted; completing job without retry"
+                );
+                Ok(JobCompletion::Complete)
+            }
             Err(e) => Err(Box::new(e)),
         }
     }
