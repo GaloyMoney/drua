@@ -264,7 +264,7 @@ galoyAgents:
     tunnelInternalSecret: ""
     annotations:
   codeAssistant:
-    indexHash: "5180fcb263a522614370217334dee12b5880a4defedd97a6de666748c7c3aaa6"
+    indexHash: "a457c0ffc3277eed81fd5651954fe4dd680d9ec7c911ac7fcea8555177f69d8b"
     embedderHash: "569359897109da21014e728cd4d618843766f7f5a52f95c0c35e57250c117d06"
     gcsBucket: galoy-agents-models
     gcsCreds: ""
