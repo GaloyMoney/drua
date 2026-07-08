@@ -71,6 +71,9 @@ galoyAgents:
           - name: z-ai/glm-4.6
             maxTokensPerResponse: 8192
             contextWindowTokens: 200000
+          - name: z-ai/glm-5.2
+            maxTokensPerResponse: 8192
+            contextWindowTokens: 1048576
     ## Per-role defaults applied when an agent with that role is created.
     ## All three of `projectLead`, `agent`, and `workflowStepAgent` are
     ## REQUIRED — the binary refuses to start if any of
