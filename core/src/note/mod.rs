@@ -330,13 +330,23 @@ impl Notes {
             AuthResource::Note(project_id, Some(note_id)),
         )?;
         let note = self.repo.find_by_id(note_id).await?;
-        if note.project_id != Some(project_id) {
-            return Err(NoteError::Authorization(AuthorizationError::Forbidden {
-                verb: AuthVerb::Read,
-                resource: AuthResource::Project(Some(project_id)),
-            }));
+        if note.project_id == Some(project_id) {
+            return Ok(note);
         }
-        Ok(note)
+        // A note surfaced by `search` (which spans the project's mounted
+        // spaces) must also be fetchable by `get`. Space-scoped notes are
+        // readable when the note lives in a space mounted onto the
+        // caller's project — mirrors the scope filter in `search`.
+        if let Some(space_id) = note.space_id {
+            let mounted = self.space_mounts.space_ids_for_project(project_id).await?;
+            if mounted.contains(&space_id) {
+                return Ok(note);
+            }
+        }
+        Err(NoteError::Authorization(AuthorizationError::Forbidden {
+            verb: AuthVerb::Read,
+            resource: AuthResource::Project(Some(project_id)),
+        }))
     }
 
     #[instrument(name = "note.search", skip(self))]
