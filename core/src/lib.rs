@@ -1,6 +1,7 @@
 #![recursion_limit = "256"]
 
 pub mod agent;
+mod arguments_envelope;
 pub mod audit;
 pub mod auth;
 pub mod code_assistant;

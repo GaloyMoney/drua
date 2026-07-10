@@ -642,12 +642,16 @@ impl AgentSession {
         // The validated payload is the assistant's `tool_use.input` —
         // already validated provider-side (`strict: true`) and by the
         // tool itself in `SubmitOutputTool::call`.
+        // `unwrap_recorded_input` mirrors the dispatch-layer `arguments`-
+        // envelope recovery: when a model wrapped its output as
+        // `{"arguments": {…}}`, the tool succeeded on the unwrapped retry, so
+        // the persisted payload must be unwrapped to match.
         let submit_output = results
             .iter()
             .find(|r| !r.is_error)
             .and_then(|result| self.find_tool_use_input(thread_id, &result.tool_use_id))
             .filter(|(name, _)| name == SUBMIT_OUTPUT_TOOL_NAME)
-            .map(|(_, input)| input);
+            .map(|(_, input)| crate::arguments_envelope::unwrap_recorded_input(input));
 
         self.events
             .push(AgentSessionEvent::ToolResultsAdded { thread_id, results });
@@ -1810,6 +1814,54 @@ mod tests {
             result,
             Ok(AgentSessionResponse::AwaitingAssistantResponse)
         ));
+    }
+
+    #[test]
+    fn submit_output_records_unwrapped_arguments_envelope() {
+        let mut session = new_session();
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Do the step".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+        let thread_id = session.current_main_thread.unwrap();
+        hydrate_threads(&mut session);
+
+        // Model wrapped its output one level too deep. The dispatch layer
+        // recovered by unwrapping and retrying, so the tool result is a
+        // success — the persisted payload must be the inner object.
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::ToolUse {
+                    id: "s1".into(),
+                    name: SUBMIT_OUTPUT_TOOL_NAME.into(),
+                    input: serde_json::json!({
+                        "arguments": { "success": true, "verdict": "fix-pr" }
+                    }),
+                }],
+                StopReason::ToolUse,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+
+        let result = session
+            .add_tool_results(
+                thread_id,
+                vec![ToolResultInput {
+                    tool_use_id: "s1".into(),
+                    content: "output recorded".into(),
+                    is_error: false,
+                }],
+            )
+            .unwrap();
+
+        assert!(matches!(result, AgentSessionResponse::Done));
+        assert_eq!(
+            session.submitted_output(),
+            Some(&serde_json::json!({ "success": true, "verdict": "fix-pr" })),
+            "persisted output is the unwrapped inner object, not the `arguments` wrapper"
+        );
     }
 
     fn new_session_with_compaction(keep_recent: usize) -> AgentSession {

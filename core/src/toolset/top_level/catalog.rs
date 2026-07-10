@@ -578,7 +578,7 @@ impl TopLevelTool for CallCatalogTool {
         // the outer call_tool envelope only declares `arguments: object`, so
         // stringified JSON inside individual upstream-arg fields wouldn't
         // otherwise be parsed.
-        let inner_args = inner_args.map(|mut a| {
+        let mut inner_args = inner_args.map(|mut a| {
             if let Some(entry) = set.tools().iter().find(|t| t.name == name) {
                 let schema =
                     serde_json::Value::Object(entry.description.input_schema.as_ref().clone());
@@ -589,7 +589,36 @@ impl TopLevelTool for CallCatalogTool {
 
         Audit::record_action(format!("catalog: {}", tool_name));
 
-        let result = set.call(subject, &name, inner_args.clone()).await;
+        let mut result = set.call(subject, &name, inner_args.clone()).await;
+
+        // Recover a double-wrapped `{arguments: {…}}` payload — some models
+        // nest the upstream args again inside call_tool's own `arguments`.
+        // If the call failed and the inner args are exactly that wrapper (and
+        // the upstream tool doesn't declare its own `arguments` field), retry
+        // once with the unwrapped object.
+        if crate::toolset::call_failed(&result) {
+            let upstream_schema = set
+                .tools()
+                .iter()
+                .find(|t| t.name == name)
+                .map(|t| serde_json::Value::Object(t.description.input_schema.as_ref().clone()))
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let Some(unwrapped) = inner_args
+                .as_ref()
+                .and_then(|a| crate::arguments_envelope::strip_for_dispatch(a, &upstream_schema))
+            {
+                let retry = set.call(subject, &name, Some(unwrapped.clone())).await;
+                if !crate::toolset::call_failed(&retry) {
+                    tracing::warn!(
+                        tool = %tool_name,
+                        "recovered from `arguments` envelope; retried upstream with unwrapped args",
+                    );
+                    result = retry;
+                    inner_args = Some(unwrapped);
+                }
+            }
+        }
+
         let result = annotate_envelope_mistake(result, &tool_name, &extra_keys)?;
 
         let result = match self.tool_caching.as_ref() {

@@ -603,8 +603,30 @@ impl ToolSets {
             }));
 
             let default_cache = tool.default_tool_caching();
+            // Cheap to compute upfront (fast `None` unless the args are
+            // exactly a lone `{arguments: {…}}` wrapper), so `arguments` can
+            // move into the first call without a clone.
+            let recovery_inner = arguments.as_ref().and_then(|a| {
+                crate::arguments_envelope::strip_for_dispatch(a, tool.input_schema())
+            });
             let start = std::time::Instant::now();
-            let raw_result = tool.call(subject, arguments).await;
+            let mut raw_result = tool.call(subject, arguments).await;
+
+            // Recover the `{arguments: {…}}` envelope some models emit: if the
+            // call failed and the args were that wrapper, retry once with the
+            // inner object — the shape the model meant.
+            if call_failed(&raw_result) {
+                if let Some(inner) = recovery_inner {
+                    let retry = tool.call(subject, Some(inner)).await;
+                    if !call_failed(&retry) {
+                        tracing::warn!(
+                            tool = name,
+                            "recovered from `arguments` envelope; retried with unwrapped args",
+                        );
+                        raw_result = retry;
+                    }
+                }
+            }
             Audit::record_duration(start);
 
             let final_result = match raw_result {
@@ -636,6 +658,16 @@ impl ToolSets {
         }
         .with_event_context(seed)
         .await
+    }
+}
+
+/// A dispatch is "failed" for envelope-recovery purposes when it errored
+/// outright or returned an error result (`is_error: true`). Used to decide
+/// whether to retry with an unwrapped `arguments` envelope.
+pub(crate) fn call_failed(result: &Result<CallToolResult, ToolSetsError>) -> bool {
+    match result {
+        Err(_) => true,
+        Ok(r) => r.is_error.unwrap_or(false),
     }
 }
 
@@ -1163,6 +1195,80 @@ mod tests {
         toolsets.register_top_level(StubTopLevelTool::new("ok", true, true));
         let resolved = toolsets.find_for_workflow("ok").expect("accepted");
         assert_eq!(resolved.name(), "ok");
+    }
+
+    /// Fails unless its args carry a top-level `success` key — models the
+    /// class of tool (including `submit_output`) whose real schema requires
+    /// a field the model buried inside an `{"arguments": {…}}` envelope.
+    struct RequiresSuccessTool;
+
+    #[async_trait::async_trait]
+    impl TopLevelTool for RequiresSuccessTool {
+        fn name(&self) -> &str {
+            "requires_success"
+        }
+        fn description(&self) -> &str {
+            "stub"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static S: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            S.get_or_init(|| serde_json::json!({ "type": "object" }))
+        }
+        async fn call(
+            &self,
+            _subject: &AuthSubject,
+            arguments: Option<JsonObject>,
+        ) -> Result<CallToolResult, ToolSetsError> {
+            if arguments
+                .as_ref()
+                .is_some_and(|a| a.contains_key("success"))
+            {
+                Ok(CallToolResult::success(vec![rmcp::model::Content::text(
+                    "ok",
+                )]))
+            } else {
+                Ok(CallToolResult::error(vec![rmcp::model::Content::text(
+                    "missing required field `success`",
+                )]))
+            }
+        }
+    }
+
+    fn obj(v: serde_json::Value) -> JsonObject {
+        v.as_object().expect("object").clone()
+    }
+
+    #[tokio::test]
+    async fn call_top_level_tool_recovers_from_arguments_envelope() {
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_top_level(RequiresSuccessTool);
+        let wrapped = obj(serde_json::json!({ "arguments": { "success": true } }));
+        let result = toolsets
+            .call_top_level_tool(&AuthSubject::Anonymous, "requires_success", Some(wrapped))
+            .await
+            .expect("dispatch ok");
+        assert_ne!(
+            result.is_error,
+            Some(true),
+            "wrapped args are unwrapped and the retry succeeds"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_top_level_tool_surfaces_genuine_failure_unchanged() {
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_top_level(RequiresSuccessTool);
+        // Not an `arguments` wrapper — a real bad payload must still fail.
+        let bad = obj(serde_json::json!({ "verdict": "x" }));
+        let result = toolsets
+            .call_top_level_tool(&AuthSubject::Anonymous, "requires_success", Some(bad))
+            .await
+            .expect("dispatch ok");
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "a non-wrapped failure is not masked by the recovery"
+        );
     }
 
     #[test]
