@@ -1323,12 +1323,22 @@ impl Agents {
         Ok(rx)
     }
 
-    /// Re-drive an in-flight LLM call for a workflow agent on retry. Uses
-    /// [`Sessions::pending_prompt`] which, when the last `PromptSent` has no
-    /// matching `AssistantResponseReceived`, rebuilds the original prompt
-    /// from the persisted definition. Returns `Ok(None)` when the prior turn
-    /// closed cleanly (success or recorded error) — caller should fall back
-    /// to [`Self::send_message`] to start a fresh turn.
+    /// Re-drive a workflow agent's turn on job retry so execution continues
+    /// with the *same* agent after the prior worker died. Two interruption
+    /// points are recovered:
+    ///
+    /// 1. Killed between `PromptSent` and `AssistantResponseReceived` (mid
+    ///    LLM call): [`Sessions::pending_prompt`] rebuilds the original prompt
+    ///    from the persisted definition.
+    /// 2. Killed between `AssistantResponseReceived` (tool request) and
+    ///    `ToolResultsAdded` (mid tool call — e.g. a pod restart):
+    ///    [`Sessions::resume_interrupted_tool_use`] closes the unanswered
+    ///    tool_use and returns the continuation prompt, so the agent picks up
+    ///    regardless of which tool was in flight.
+    ///
+    /// Returns `Ok(None)` only when the prior turn closed cleanly (success or
+    /// recorded error) — caller should fall back to [`Self::send_message`] to
+    /// start a fresh turn.
     #[instrument(name = "domain.agent.resume_message", skip(self))]
     pub async fn resume_message(
         &self,
@@ -1355,8 +1365,15 @@ impl Agents {
             Audit::record_workflow_run_id(run);
         }
 
-        let Some(prompt_state) = self.sessions.pending_prompt(id).await? else {
-            return Ok(None);
+        let prompt_state = match self.sessions.pending_prompt(id).await? {
+            Some(prompt) => prompt,
+            // No half-sent prompt to replay. The prior worker may instead have
+            // died mid-tool-call: recover by closing the stuck tool_use and
+            // continuing. `None` here means nothing to resume — start fresh.
+            None => match self.sessions.resume_interrupted_tool_use(id).await? {
+                Some(prompt) => prompt,
+                None => return Ok(None),
+            },
         };
 
         let agent_subject = match subject.originating_user_id() {

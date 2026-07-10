@@ -27,6 +27,17 @@ pub use thread::SessionThreadId;
 
 es_entity::entity_id! { AgentSessionId }
 
+/// Synthetic tool-result content injected when a workflow step is retried at
+/// the job level (e.g. a pod restart) while a tool call was still in flight.
+/// The previous execution died before recording the result, so the reused
+/// agent picks the conversation back up with this note in place of the lost
+/// result.
+const TOOL_INTERRUPTED_ON_RETRY: &str =
+    "tool_execution_interrupted: the previous execution of this \
+    step was interrupted before this tool call returned (e.g. the worker restarted). Its result is \
+    lost and any side effects are unconfirmed. Re-verify the relevant state before relying on it, \
+    then continue.";
+
 #[derive(Clone)]
 pub struct Sessions {
     repo: AgentSessionRepo,
@@ -157,6 +168,33 @@ impl Sessions {
     ) -> Result<Option<llm::Prompt>, AgentSessionError> {
         let session = self.repo.find_by_agent_id(agent_id).await?;
         Ok(session.pending_prompt()?.map(Into::into))
+    }
+
+    /// Resume-after-restart primitive for the workflow runner. When the prior
+    /// execution died *after* the assistant requested tools but *before* their
+    /// results were recorded (a pod restart mid-tool-call), the turn is stuck
+    /// in a ToolUse state that [`Self::pending_prompt`] cannot rebuild. Close
+    /// the unanswered tool_use with a synthetic interrupted-result and return
+    /// the continuation prompt so the same agent picks up where it left off,
+    /// regardless of which tool was in flight. `Ok(None)` when the session is
+    /// not stuck in a ToolUse turn (caller falls back to a fresh turn).
+    #[instrument(name = "domain.agent_session.resume_interrupted_tool_use", skip(self))]
+    pub async fn resume_interrupted_tool_use(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Option<llm::Prompt>, AgentSessionError> {
+        let mut op = self.repo.begin_op().await?;
+        let mut session = self.repo.find_by_agent_id_in_op(&mut op, agent_id).await?;
+        if !session
+            .abort_pending_tool_use(TOOL_INTERRUPTED_ON_RETRY)?
+            .did_execute()
+        {
+            return Ok(None);
+        }
+        let prompt = session.next_prompt(TargetThread::Main)?;
+        self.repo.update_in_op(&mut op, &mut session).await?;
+        op.commit().await?;
+        Ok(Some(prompt.into()))
     }
 
     #[instrument(
