@@ -801,27 +801,64 @@ impl AgentSession {
         &mut self,
         thread_id: SessionThreadId,
     ) -> Result<(), AgentSessionError> {
+        if !self.is_tool_use_stale(thread_id) {
+            return Ok(());
+        }
+        let _ = self.abort_tool_use_on_thread(
+            thread_id,
+            "tool_execution_interrupted: dispatcher restarted",
+        )?;
+        Ok(())
+    }
+
+    /// Closes any unanswered tool_use on the current main thread with a
+    /// synthetic error result, flipping the thread back to a user turn so the
+    /// conversation can continue. Unlike [`Self::recover_stale_tool_use`] there
+    /// is no staleness gate: the caller (a workflow job retry after the prior
+    /// worker died mid-tool-call) knows the in-flight result will never arrive,
+    /// so the turn must close now rather than after the stale window.
+    /// Idempotent: no-op when the thread isn't in a ToolUse turn (e.g. the real
+    /// result landed first).
+    pub fn abort_pending_tool_use(
+        &mut self,
+        reason: &str,
+    ) -> Result<Idempotent<()>, AgentSessionError> {
+        match self.current_main_thread {
+            Some(thread_id) => self.abort_tool_use_on_thread(thread_id, reason),
+            None => Ok(Idempotent::AlreadyApplied),
+        }
+    }
+
+    /// Shared body for [`Self::recover_stale_tool_use`] and
+    /// [`Self::abort_pending_tool_use`]: if `thread_id` is in a ToolUse turn
+    /// with unanswered tool_use ids, append an `is_error` tool result for each
+    /// carrying `reason`, flipping the thread back to a user turn.
+    fn abort_tool_use_on_thread(
+        &mut self,
+        thread_id: SessionThreadId,
+        reason: &str,
+    ) -> Result<Idempotent<()>, AgentSessionError> {
         let is_tool_use = self
             .threads
             .get_persisted(&thread_id)
             .is_some_and(|t| t.is_tool_use_turn());
-        if !is_tool_use || !self.is_tool_use_stale(thread_id) {
-            return Ok(());
+        if !is_tool_use {
+            return Ok(Idempotent::AlreadyApplied);
         }
         let tool_use_ids = self.pending_tool_use_ids(thread_id);
         if tool_use_ids.is_empty() {
-            return Ok(());
+            return Ok(Idempotent::AlreadyApplied);
         }
         let results = tool_use_ids
             .into_iter()
             .map(|id| ToolResultInput {
                 tool_use_id: id,
-                content: "tool_execution_interrupted: dispatcher restarted".into(),
+                content: reason.to_string(),
                 is_error: true,
             })
             .collect();
         let _ = self.add_tool_results(thread_id, results)?;
-        Ok(())
+        Ok(Idempotent::Executed(()))
     }
 
     pub fn assistant_response_received(
@@ -1594,6 +1631,117 @@ mod tests {
             }
             _ => panic!("expected User message with tool results and queued text"),
         }
+    }
+
+    /// Drives a session into a ToolUse turn (assistant issued `tool_1`, no
+    /// result yet) — the exact state a mid-tool-call worker restart strands.
+    fn session_awaiting_tool_result() -> (AgentSession, SessionThreadId) {
+        let mut session = new_session();
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Use the tool".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+        let thread_id = session.current_main_thread.unwrap();
+        hydrate_threads(&mut session);
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![
+                    AssistantBlock::Text {
+                        text: "Let me check.".into(),
+                    },
+                    AssistantBlock::ToolUse {
+                        id: "tool_1".into(),
+                        name: "get_weather".into(),
+                        input: serde_json::json!({"city": "NYC"}),
+                    },
+                ],
+                StopReason::ToolUse,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+        (session, thread_id)
+    }
+
+    #[test]
+    fn abort_pending_tool_use_closes_dangling_tool_use() {
+        let (mut session, thread_id) = session_awaiting_tool_result();
+
+        // Job retry after a mid-tool-call restart: close the unanswered
+        // tool_use so execution can continue with the same agent.
+        assert!(session
+            .abort_pending_tool_use("interrupted on retry")
+            .unwrap()
+            .did_execute());
+
+        // Second call is a no-op — the turn already flipped back to the user.
+        assert!(!session
+            .abort_pending_tool_use("interrupted on retry")
+            .unwrap()
+            .did_execute());
+
+        // The turn is no longer ToolUse: a late real result (from a stale
+        // worker whose tool call finally returned) is rejected rather than
+        // double-appended.
+        let late = session.add_tool_results(
+            thread_id,
+            vec![ToolResultInput {
+                tool_use_id: "tool_1".into(),
+                content: "72F".into(),
+                is_error: false,
+            }],
+        );
+        assert!(matches!(late, Err(AgentSessionError::NotToolUseTurn)));
+
+        // The continuation prompt is valid: the assistant tool_use is answered
+        // by a synthetic is_error tool_result, so the model can resume.
+        let prompt = session.next_prompt(TargetThread::Main).unwrap();
+        assert_eq!(prompt.messages.len(), 3);
+        match &prompt.messages[2] {
+            Message::User { content } => match &content[0] {
+                UserBlock::ToolResult {
+                    tool_use_id,
+                    content: blocks,
+                    is_error,
+                } => {
+                    assert_eq!(tool_use_id, "tool_1");
+                    assert!(is_error);
+                    assert!(
+                        matches!(&blocks[0], ToolResultBlock::Text { text } if text == "interrupted on retry")
+                    );
+                }
+                other => panic!("expected ToolResult block, got {other:?}"),
+            },
+            other => panic!("expected User message, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn abort_pending_tool_use_noops_outside_tool_use_turn() {
+        // No thread yet.
+        let mut session = new_session();
+        assert!(!session.abort_pending_tool_use("x").unwrap().did_execute());
+
+        // After a plain text turn the thread is a user turn — nothing pending.
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Hi".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+        let thread_id = session.current_main_thread.unwrap();
+        hydrate_threads(&mut session);
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::Text {
+                    text: "hello".into(),
+                }],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+        assert!(!session.abort_pending_tool_use("x").unwrap().did_execute());
     }
 
     #[test]

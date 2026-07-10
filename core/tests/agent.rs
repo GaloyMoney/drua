@@ -461,6 +461,217 @@ async fn send_message_dispatches_registered_tool_call() {
     }
 }
 
+/// A registered top-level tool whose call never returns — it signals entry
+/// then parks forever. Lets a test freeze an agent in a persisted ToolUse
+/// turn (assistant requested the tool, no result recorded), the exact state a
+/// worker killed mid-tool-call leaves behind.
+struct HangingTool {
+    schema: serde_json::Value,
+    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+impl HangingTool {
+    fn new(entered: tokio::sync::oneshot::Sender<()>) -> Self {
+        Self {
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false,
+            }),
+            entered: std::sync::Mutex::new(Some(entered)),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TopLevelTool for HangingTool {
+    fn name(&self) -> &str {
+        "hang"
+    }
+    fn description(&self) -> &str {
+        "Never returns. Test-only tool."
+    }
+    fn input_schema(&self) -> &serde_json::Value {
+        &self.schema
+    }
+    async fn call(
+        &self,
+        _subject: &AuthSubject,
+        _arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        if let Some(tx) = self.entered.lock().unwrap().take() {
+            let _ = tx.send(());
+        }
+        std::future::pending::<()>().await;
+        unreachable!("hang tool never resolves")
+    }
+}
+
+/// A worker that dies mid-tool-call leaves the session in a ToolUse turn with
+/// no result. On job retry the executor re-drives the *same* agent via
+/// `resume_message`, which must close the interrupted tool_use and continue —
+/// regardless of which tool was in flight — rather than dead-end.
+#[tokio::test]
+async fn resume_message_continues_past_interrupted_tool_call() {
+    use std::time::Duration;
+
+    let pool = pool().await;
+    let (prompt_tx, mut prompt_rx) = mpsc::channel::<PromptRequest>(64);
+
+    let model_name = "claude-haiku-4-5-20251001".to_string();
+    let mut builtin_roles = HashMap::new();
+    builtin_roles.insert(
+        AgentRole::ProjectLead,
+        RoleConfig {
+            chain: Some(llm::ModelChain::new(model_name.clone())),
+            compaction: Default::default(),
+        },
+    );
+    let mut models = HashMap::new();
+    models.insert(
+        model_name.clone(),
+        ModelDefaults {
+            model: model_name,
+            max_tokens_per_response: 1024,
+            context_window_tokens: 200_000,
+            effort: ReasoningEffort::Low,
+        },
+    );
+    let config = AgentsConfig {
+        builtin_roles,
+        models,
+        ..Default::default()
+    };
+
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let toolsets = ToolSets::init(ToolSetsConfig::default(), None, None, None)
+        .await
+        .expect("init toolsets");
+    toolsets.register_top_level(HangingTool::new(entered_tx));
+    let toolsets = Arc::new(toolsets);
+
+    let sandboxes = Arc::new(
+        Sandboxes::init(
+            &pool,
+            SandboxConfig::default(),
+            std::sync::Arc::new(drua_git_proxy::Allowlist::default()),
+        )
+        .await
+        .expect("init sandboxes"),
+    );
+    let skills = Arc::new(drua_core::skill::Skills::new_without_library(
+        &pool,
+        Arc::clone(&sandboxes),
+    ));
+    let agents = Agents::new(
+        &pool,
+        config,
+        toolsets,
+        prompt_tx,
+        Arc::clone(&sandboxes),
+        Arc::clone(&skills),
+        None,
+        ContextGeneration::new(),
+        Arc::new(drua_core::library::SpaceMounts::empty()),
+    );
+
+    let sub = AuthSubject::User(UserId::new());
+    let agent = agents
+        .create_project_lead(&sub, ProjectId::new(), "lead", "test-project")
+        .await
+        .expect("create agent");
+
+    // First turn: the model asks to call `hang`.
+    let _events_rx = agents
+        .send_message(sub, agent.id, "Call hang".to_string())
+        .await
+        .expect("send_message");
+    let request = tokio::time::timeout(Duration::from_secs(5), prompt_rx.recv())
+        .await
+        .expect("first prompt timed out")
+        .expect("first prompt request");
+    request
+        .response_channel
+        .send(Ok(PromptResult::Complete(PromptResponse {
+            content: vec![AssistantBlock::ToolUse {
+                id: "tu_1".to_string(),
+                name: "hang".to_string(),
+                input: serde_json::json!({}),
+            }],
+            usage: Usage {
+                input_tokens: 7,
+                output_tokens: 4,
+                ..Default::default()
+            },
+            stop_reason: Some(StopReason::ToolUse),
+            model_used: None,
+        })))
+        .expect("send first response");
+
+    // Dispatch is now parked inside `hang`: the assistant response is
+    // committed but no tool result will ever land — the session is frozen in a
+    // ToolUse turn, exactly like a worker killed mid-tool-call.
+    tokio::time::timeout(Duration::from_secs(5), entered_rx)
+        .await
+        .expect("hang tool not entered")
+        .expect("entered signal");
+
+    // Simulate the job-level retry re-driving the same agent.
+    let resumed = agents
+        .resume_message(AuthSubject::User(UserId::new()), agent.id)
+        .await
+        .expect("resume_message");
+    let mut resumed_rx =
+        resumed.expect("resume must continue past the interrupted tool call, not return None");
+
+    // The continuation prompt answers the interrupted `tu_1` with an error
+    // result, so the model resumes from where it left off.
+    let request = tokio::time::timeout(Duration::from_secs(5), prompt_rx.recv())
+        .await
+        .expect("continuation prompt timed out")
+        .expect("continuation prompt request");
+    let has_interrupted_result = request.prompt.messages.iter().any(|m| match m {
+        llm::prompt::Message::User { content } => content.iter().any(|b| {
+            matches!(
+                b,
+                llm::prompt::UserBlock::ToolResult { tool_use_id, is_error, .. }
+                    if tool_use_id.as_str() == "tu_1" && *is_error
+            )
+        }),
+        _ => false,
+    });
+    assert!(
+        has_interrupted_result,
+        "continuation prompt should answer interrupted tool_use tu_1 with an error result",
+    );
+    request
+        .response_channel
+        .send(Ok(PromptResult::Complete(PromptResponse {
+            content: vec![AssistantBlock::Text {
+                text: "resumed and done".to_string(),
+            }],
+            usage: Usage {
+                input_tokens: 3,
+                output_tokens: 2,
+                ..Default::default()
+            },
+            stop_reason: None,
+            model_used: None,
+        })))
+        .expect("send continuation response");
+
+    // Draining the resumed loop reaches AssistantDone: execution continued.
+    let mut saw_done = false;
+    while let Ok(Some(event)) =
+        tokio::time::timeout(Duration::from_secs(5), resumed_rx.recv()).await
+    {
+        if matches!(event, ChatOutputEvent::AssistantDone { .. }) {
+            saw_done = true;
+        }
+    }
+    assert!(saw_done, "resumed loop should reach AssistantDone");
+}
+
 #[tokio::test]
 async fn delete_removes_agent_from_listing() {
     let pool = pool().await;
