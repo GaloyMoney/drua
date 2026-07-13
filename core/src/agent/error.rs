@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 use crate::auth::error::AuthorizationError;
-use crate::primitives::{ProjectId, SandboxId};
+use crate::primitives::{AgentId, ProjectId, SandboxId, WorkflowRunId};
 use crate::sandbox::error::SandboxError;
 use crate::skill::SkillError;
 
@@ -46,4 +46,13 @@ pub enum AgentError {
     NoLeadAgent(ProjectId),
     #[error("AgentError - workflow agents inherit their chain from the workflow definition")]
     WorkflowAgentChainImmutable,
+    #[error(
+        "AgentError - agent {agent_id} is a workflow agent (run {run_id}); \
+         use `workflow cancel run_id={run_id}` instead — deleting it directly \
+         would leave the run in a zombie `running` state"
+    )]
+    WorkflowAgentDeleteForbidden {
+        agent_id: AgentId,
+        run_id: WorkflowRunId,
+    },
 }

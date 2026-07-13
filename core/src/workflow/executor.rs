@@ -16,7 +16,7 @@ use crate::toolset::ToolSets;
 use super::definition::{WorkflowSandboxDecl, WorkflowStepDef};
 use super::error::WorkflowError;
 use super::repo::WorkflowDefinitionRepo;
-use super::run::{StepResult, WorkflowRunRepo, WorkflowRunState};
+use super::run::{StepResult, WorkflowRunRepo};
 use super::template::{
     format_template_diagnostics, template_diagnostics, ConditionOutcome, TemplateContext,
 };
@@ -121,10 +121,10 @@ impl Executor {
     ) -> Result<(), WorkflowError> {
         let mut run = self.runs.find_by_id(run_id).await?;
 
-        if matches!(
-            run.state,
-            WorkflowRunState::Succeeded | WorkflowRunState::Failed | WorkflowRunState::Errored
-        ) {
+        // Terminal on load (including an externally-issued `Cancelled`):
+        // nothing left to do. A run cancelled mid-flight lands here on the
+        // job's next attempt and completes cleanly, freeing the queue slot.
+        if run.state.is_terminal() {
             return Ok(());
         }
 
