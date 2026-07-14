@@ -42,6 +42,8 @@ pub enum WorkflowError {
     InvalidTemplateRef(String),
     #[error("WorkflowError - InvalidCondition: {0}")]
     InvalidCondition(String),
+    #[error("WorkflowError - InvalidLoop: loop step '{step}': {reason}")]
+    InvalidLoop { step: String, reason: String },
     #[error("WorkflowError - ConditionNotBoolean: step '{step}' condition `{body}` evaluated to {value} (expected bool)")]
     ConditionNotBoolean {
         step: String,

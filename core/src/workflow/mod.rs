@@ -184,6 +184,74 @@ fn reject_forward_step_refs(
     Ok(())
 }
 
+/// Resolve a `StepResult.name` back to its `WorkflowStepDef`.
+/// Top-level names match directly; loop-scoped names of the form
+/// `{loop_name}.iter[{N}].{inner_name}` recurse into the matching
+/// Loop's inner `steps` and return the inner def. `None` if no
+/// match found (e.g. the snapshot was edited after the run started
+/// — should not happen since snapshots are immutable per run).
+fn lookup_wait_step_def<'a>(
+    steps: &'a [WorkflowStepDef],
+    name: &str,
+) -> Option<&'a WorkflowStepDef> {
+    // Fast path: top-level match.
+    if let Some(s) = steps.iter().find(|s| s.name() == name) {
+        return Some(s);
+    }
+    // Dotted-name path: `{loop}.iter[{N}].{inner}`.
+    let dot_iter = ".iter[";
+    let dot_iter_idx = name.find(dot_iter)?;
+    let outer_name = &name[..dot_iter_idx];
+    let after = &name[dot_iter_idx + dot_iter.len()..];
+    let bracket_end = after.find("].")?;
+    let inner_name = &after[bracket_end + "].".len()..];
+    let outer = steps.iter().find(|s| s.name() == outer_name)?;
+    if let WorkflowStepDef::Loop {
+        steps: inner_steps, ..
+    } = outer
+    {
+        return inner_steps.iter().find(|s| s.name() == inner_name);
+    }
+    None
+}
+
+/// Forward-ref checks for a parsed iteration-scope expression
+/// (`break_condition` or any inner step's body/condition). Splits
+/// the two distinct namespaces: `steps.<X>` must be a pre-loop outer
+/// step (in `outer_seen`), `iter.<X>` must be an inner loop step (in
+/// `inner_seen`). Caller is responsible for running the
+/// root-validate step first (the parse_iteration_* helpers do that).
+fn validate_loop_iteration_ref(
+    loop_name: &str,
+    r: &TemplateRef,
+    outer_seen: &std::collections::HashSet<String>,
+    inner_seen: &std::collections::HashSet<String>,
+) -> Result<(), WorkflowError> {
+    for target in template::referenced_step_names(r) {
+        if !outer_seen.contains(&target) {
+            return Err(WorkflowError::InvalidLoop {
+                step: loop_name.to_string(),
+                reason: format!(
+                    "{} references step '{target}' which is not declared earlier in the workflow",
+                    r.raw
+                ),
+            });
+        }
+    }
+    for target in template::referenced_iter_names(r) {
+        if !inner_seen.contains(&target) {
+            return Err(WorkflowError::InvalidLoop {
+                step: loop_name.to_string(),
+                reason: format!(
+                    "{} references iter.{target} which is not a declared inner step of this loop",
+                    r.raw
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn validate_ref_against_prior_steps(
     step_name: &str,
     r: &TemplateRef,
@@ -568,6 +636,76 @@ impl Workflows {
                         validate_ref_against_prior_steps(name, r, &seen_step_names)?;
                     }
                 }
+                WorkflowStepDef::Loop {
+                    name,
+                    break_condition,
+                    max_iterations,
+                    steps: inner_steps,
+                    ..
+                } => {
+                    if *max_iterations == 0 {
+                        return Err(WorkflowError::InvalidLoop {
+                            step: name.clone(),
+                            reason: "max_iterations must be >= 1".into(),
+                        });
+                    }
+                    if inner_steps.is_empty() {
+                        return Err(WorkflowError::InvalidLoop {
+                            step: name.clone(),
+                            reason: "steps must contain at least one inner step".into(),
+                        });
+                    }
+                    // Eagerly reject nested loops here so the per-inner
+                    // arm doesn't have to special-case the variant.
+                    for inner in inner_steps {
+                        if matches!(inner, WorkflowStepDef::Loop { .. }) {
+                            return Err(WorkflowError::InvalidLoop {
+                                step: name.clone(),
+                                reason: format!(
+                                    "nested loops are not supported (inner step '{}')",
+                                    inner.name()
+                                ),
+                            });
+                        }
+                    }
+                    // Inner step name set — needed to forward-ref-check
+                    // `iter.<X>` references and to enforce
+                    // CEL-identifier shape per inner step name.
+                    let mut inner_names: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
+                    for inner in inner_steps {
+                        if !is_cel_identifier(inner.name()) {
+                            return Err(WorkflowError::InvalidStep(format!(
+                                "loop '{name}' inner step '{}': name must be a CEL identifier",
+                                inner.name()
+                            )));
+                        }
+                        inner_names.insert(inner.name().to_string());
+                    }
+                    // `break_condition` runs after every iteration's
+                    // last inner step, so all inner names are in scope.
+                    let r = template::parse_iteration_condition(break_condition).map_err(|e| {
+                        WorkflowError::InvalidLoop {
+                            step: name.clone(),
+                            reason: format!("break_condition: {e}"),
+                        }
+                    })?;
+                    validate_loop_iteration_ref(name, &r, &seen_step_names, &inner_names)?;
+                    self.validate_loop_inner_steps(
+                        sub,
+                        project_id,
+                        name,
+                        inner_steps,
+                        sandboxes,
+                        &decl_names,
+                        &preexisting_ids,
+                        &seen_step_names,
+                        &inner_names,
+                        &mut missing_skills,
+                        &mut undeclared_sandboxes,
+                    )
+                    .await?;
+                }
             }
             seen_step_names.insert(step.name().to_string());
         }
@@ -592,6 +730,134 @@ impl Workflows {
                 "{listed}. Add each name to the workflow's top-level `sandboxes` declarations"
             )));
         }
+        Ok(())
+    }
+
+    /// Inner-step validator for a `Loop`. Mirrors the per-variant
+    /// validation in `validate_steps`, but with iteration-scope
+    /// expression parsers (`iter` / `iteration` accepted) and dual
+    /// forward-ref scoping (`steps.X` against `outer_seen`, `iter.X`
+    /// against the running `inner_seen_so_far` — same "must be
+    /// earlier in this loop body" rule, scoped to the loop).
+    #[allow(clippy::too_many_arguments)]
+    async fn validate_loop_inner_steps(
+        &self,
+        _sub: &AuthSubject,
+        project_id: ProjectId,
+        loop_name: &str,
+        inner_steps: &[WorkflowStepDef],
+        _sandboxes: &[WorkflowSandboxDecl],
+        decl_names: &std::collections::HashSet<&str>,
+        preexisting_ids: &std::collections::HashMap<String, SandboxId>,
+        outer_seen: &std::collections::HashSet<String>,
+        inner_names: &std::collections::HashSet<String>,
+        missing_skills: &mut Vec<(String, String)>,
+        undeclared_sandboxes: &mut Vec<(String, String)>,
+    ) -> Result<(), WorkflowError> {
+        let mut inner_seen_so_far: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for inner in inner_steps {
+            if let Some(body) = inner.condition() {
+                let r = template::parse_iteration_condition(body).map_err(|e| {
+                    WorkflowError::InvalidLoop {
+                        step: loop_name.to_string(),
+                        reason: format!("inner step '{}': condition: {e}", inner.name()),
+                    }
+                })?;
+                validate_loop_iteration_ref(loop_name, &r, outer_seen, &inner_seen_so_far)?;
+            }
+            match inner {
+                WorkflowStepDef::AgentStep {
+                    name,
+                    skill,
+                    sandbox,
+                    ..
+                } => {
+                    let preexisting_sandbox_id = sandbox
+                        .as_deref()
+                        .and_then(|n| preexisting_ids.get(n).copied());
+                    let found = self
+                        .skills
+                        .find_by_name(skill, Some(project_id), preexisting_sandbox_id)
+                        .await
+                        .map_err(|e| WorkflowError::Skill(e.to_string()))?;
+                    if found.is_none() {
+                        missing_skills.push((format!("{loop_name}.{}", name), skill.clone()));
+                    }
+                    if let Some(sandbox_name) = sandbox {
+                        if !decl_names.contains(sandbox_name.as_str()) {
+                            undeclared_sandboxes
+                                .push((format!("{loop_name}.{}", name), sandbox_name.clone()));
+                        }
+                    }
+                }
+                WorkflowStepDef::Wait {
+                    name,
+                    provider,
+                    resume_condition,
+                    outputs,
+                    ..
+                } => {
+                    if provider.is_empty() {
+                        return Err(WorkflowError::InvalidStep(format!(
+                            "loop '{loop_name}' wait step '{name}': `provider` must be a non-empty string"
+                        )));
+                    }
+                    let r = template::parse_resume_iteration_condition(resume_condition.trim())
+                        .map_err(|e| WorkflowError::InvalidLoop {
+                            step: loop_name.to_string(),
+                            reason: format!("wait step '{name}': resume_condition: {e}"),
+                        })?;
+                    validate_loop_iteration_ref(loop_name, &r, outer_seen, &inner_seen_so_far)?;
+                    for (key, expr) in outputs {
+                        let r = template::parse_resume_iteration_condition(expr.trim()).map_err(
+                            |e| WorkflowError::InvalidLoop {
+                                step: loop_name.to_string(),
+                                reason: format!("wait step '{name}': outputs.{key}: {e}"),
+                            },
+                        )?;
+                        validate_loop_iteration_ref(loop_name, &r, outer_seen, &inner_seen_so_far)?;
+                    }
+                }
+                WorkflowStepDef::ToolStep {
+                    name, tool, params, ..
+                } => {
+                    self.toolsets.find_for_workflow(tool).map_err(|e| {
+                        WorkflowError::InvalidStep(format!(
+                            "loop '{loop_name}' tool_step '{name}': {e}"
+                        ))
+                    })?;
+                    let refs = template::extract_refs_in_value(params).map_err(|e| {
+                        WorkflowError::InvalidTemplateRef(format!(
+                            "loop '{loop_name}' tool_step '{name}': {e}"
+                        ))
+                    })?;
+                    for r in &refs {
+                        template::validate_iteration_root(r).map_err(|e| {
+                            WorkflowError::InvalidLoop {
+                                step: loop_name.to_string(),
+                                reason: format!("tool_step '{name}': {e}"),
+                            }
+                        })?;
+                        validate_loop_iteration_ref(loop_name, r, outer_seen, &inner_seen_so_far)?;
+                    }
+                }
+                WorkflowStepDef::Loop { .. } => {
+                    // Pre-screened in the outer arm. Defensive
+                    // guard so a future refactor can't silently
+                    // permit nested loops.
+                    return Err(WorkflowError::InvalidLoop {
+                        step: loop_name.to_string(),
+                        reason: format!(
+                            "nested loops are not supported (inner step '{}')",
+                            inner.name()
+                        ),
+                    });
+                }
+            }
+            inner_seen_so_far.insert(inner.name().to_string());
+        }
+        let _ = inner_names; // reserved for richer error messages
         Ok(())
     }
 
@@ -991,10 +1257,7 @@ impl Workflows {
                     None => continue,
                 };
 
-                let wait_def = run
-                    .steps_snapshot
-                    .iter()
-                    .find(|s| s.name() == wait_step_name);
+                let wait_def = lookup_wait_step_def(&run.steps_snapshot, &wait_step_name);
 
                 let (step_provider, resume_condition, outputs) = match wait_def {
                     Some(WorkflowStepDef::Wait {
@@ -1421,5 +1684,50 @@ mod tests {
         assert!(!is_cel_identifier("1step"));
         assert!(!is_cel_identifier("has space"));
         assert!(!is_cel_identifier("dot.in.middle"));
+    }
+
+    // ── Loop-step dotted-name lookup ──
+
+    fn wait_step(name: &str) -> WorkflowStepDef {
+        WorkflowStepDef::Wait {
+            name: name.into(),
+            provider: "github_app".into(),
+            resume_condition: "true".into(),
+            outputs: Default::default(),
+            condition: None,
+        }
+    }
+
+    fn loop_with(name: &str, inner: Vec<WorkflowStepDef>) -> WorkflowStepDef {
+        WorkflowStepDef::Loop {
+            name: name.into(),
+            break_condition: "true".into(),
+            max_iterations: 5,
+            steps: inner,
+            condition: None,
+        }
+    }
+
+    #[test]
+    fn lookup_wait_step_def_finds_top_level_wait() {
+        let snapshot = vec![wait_step("approval")];
+        let found = lookup_wait_step_def(&snapshot, "approval").unwrap();
+        assert_eq!(found.name(), "approval");
+    }
+
+    #[test]
+    fn lookup_wait_step_def_finds_dotted_inner_wait() {
+        let snapshot = vec![loop_with("review_cycle", vec![wait_step("await_review")])];
+        let found = lookup_wait_step_def(&snapshot, "review_cycle.iter[3].await_review").unwrap();
+        assert!(matches!(found, WorkflowStepDef::Wait { .. }));
+        assert_eq!(found.name(), "await_review");
+    }
+
+    #[test]
+    fn lookup_wait_step_def_returns_none_for_unknown() {
+        let snapshot = vec![loop_with("review_cycle", vec![wait_step("await_review")])];
+        assert!(lookup_wait_step_def(&snapshot, "review_cycle.iter[1].nope").is_none());
+        assert!(lookup_wait_step_def(&snapshot, "missing.iter[1].x").is_none());
+        assert!(lookup_wait_step_def(&snapshot, "not_dotted").is_none());
     }
 }

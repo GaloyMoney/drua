@@ -1836,6 +1836,14 @@ fn workflow_step_to_view(s: &domain::workflow::WorkflowStepDef) -> WorkflowStepV
             sandbox: None,
             timeout_seconds: None,
         },
+        domain::workflow::WorkflowStepDef::Loop { name, .. } => WorkflowStepView {
+            name: name.clone(),
+            step_type: "loop".to_string(),
+            skill: String::new(),
+            tool: None,
+            sandbox: None,
+            timeout_seconds: None,
+        },
     }
 }
 

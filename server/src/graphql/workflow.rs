@@ -237,6 +237,20 @@ impl From<&DomainWorkflowStepDef> for WorkflowStep {
                 provider: Some(provider.clone()),
                 resume_condition: Some(resume_condition.clone()),
             },
+            DomainWorkflowStepDef::Loop {
+                name, condition, ..
+            } => Self {
+                name: name.clone(),
+                step_type: WorkflowStepType::Loop,
+                skill: None,
+                tool: None,
+                sandbox: None,
+                sandbox_mode: None,
+                timeout_seconds: None,
+                condition: condition.clone(),
+                output_schema: None,
+                outputs: None,
+            },
         }
     }
 }
@@ -246,6 +260,7 @@ pub enum WorkflowStepType {
     AgentStep,
     ToolStep,
     Wait,
+    Loop,
 }
 
 #[derive(SimpleObject, Clone)]

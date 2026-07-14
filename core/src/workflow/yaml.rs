@@ -264,6 +264,19 @@ enum WorkflowStepYaml {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         condition: Option<String>,
     },
+    Loop {
+        name: String,
+        break_condition: String,
+        #[serde(default = "default_loop_max_iterations_yaml")]
+        max_iterations: u32,
+        steps: Vec<WorkflowStepYaml>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        condition: Option<String>,
+    },
+}
+
+fn default_loop_max_iterations_yaml() -> u32 {
+    25
 }
 
 impl WorkflowStepYaml {
@@ -314,6 +327,19 @@ impl WorkflowStepYaml {
                 outputs: outputs.clone(),
                 condition: condition.clone(),
             },
+            WorkflowStepDef::Loop {
+                name,
+                break_condition,
+                max_iterations,
+                steps,
+                condition,
+            } => WorkflowStepYaml::Loop {
+                name: name.clone(),
+                break_condition: break_condition.clone(),
+                max_iterations: *max_iterations,
+                steps: steps.iter().map(WorkflowStepYaml::from_runtime).collect(),
+                condition: condition.clone(),
+            },
         }
     }
 
@@ -362,6 +388,22 @@ impl WorkflowStepYaml {
                 provider,
                 resume_condition,
                 outputs,
+                condition,
+            },
+            WorkflowStepYaml::Loop {
+                name,
+                break_condition,
+                max_iterations,
+                steps,
+                condition,
+            } => WorkflowStepDef::Loop {
+                name,
+                break_condition,
+                max_iterations,
+                steps: steps
+                    .into_iter()
+                    .map(WorkflowStepYaml::into_runtime)
+                    .collect(),
                 condition,
             },
         }

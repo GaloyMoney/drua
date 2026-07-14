@@ -138,6 +138,28 @@ pub enum WorkflowRunEvent {
         source: String,
         resumed_at: DateTime<Utc>,
     },
+    /// Emitted at the start of each iteration of a `Loop` step.
+    /// `iteration` is 1-based. Inner steps in this iteration record
+    /// themselves under dotted names like
+    /// `{step_name}.iter[{iteration}].{inner_name}`.
+    LoopIterationStarted {
+        step_name: String,
+        iteration: u32,
+        started_at: DateTime<Utc>,
+    },
+    /// Emitted when an iteration's last inner step finishes, before
+    /// the next iteration starts (or before the outer loop's
+    /// `StepCompleted` if `broke` is true / `max_iterations` exhausted).
+    LoopIterationCompleted {
+        step_name: String,
+        iteration: u32,
+        /// `true` → this iteration's `break_condition` evaluated to
+        /// true; the loop terminates here. `false` → the loop will
+        /// move to iteration+1 (or terminate via max-iterations
+        /// exhaustion, recorded on the outer step's `StepCompleted`).
+        broke: bool,
+        completed_at: DateTime<Utc>,
+    },
     RunCompleted {
         state: WorkflowRunState,
         completed_at: DateTime<Utc>,
@@ -387,6 +409,153 @@ impl WorkflowRun {
         Idempotent::Executed(())
     }
 
+    /// Records the start of a `Loop` step's iteration. Driven by the
+    /// executor before it begins running that iteration's inner
+    /// steps. Idempotent: replaying the same `(step_name, iteration)`
+    /// pair is a no-op so at-least-once job retries are safe.
+    pub fn loop_iteration_started(&mut self, step_name: String, iteration: u32) -> Idempotent<()> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied:
+                WorkflowRunEvent::LoopIterationStarted { step_name: n, iteration: i, .. }
+                    if n == &step_name && *i == iteration,
+        );
+        let now = Utc::now();
+        if self.state == WorkflowRunState::Pending {
+            self.state = WorkflowRunState::Running;
+        }
+        self.events.push(WorkflowRunEvent::LoopIterationStarted {
+            step_name,
+            iteration,
+            started_at: now,
+        });
+        Idempotent::Executed(())
+    }
+
+    /// Records the end of a `Loop` step's iteration after its
+    /// `break_condition` has been evaluated. `broke == true` →
+    /// the executor exits the loop here. Idempotent on
+    /// `(step_name, iteration)`.
+    pub fn loop_iteration_completed(
+        &mut self,
+        step_name: String,
+        iteration: u32,
+        broke: bool,
+    ) -> Idempotent<()> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied:
+                WorkflowRunEvent::LoopIterationCompleted { step_name: n, iteration: i, .. }
+                    if n == &step_name && *i == iteration,
+        );
+        let now = Utc::now();
+        self.events.push(WorkflowRunEvent::LoopIterationCompleted {
+            step_name,
+            iteration,
+            broke,
+            completed_at: now,
+        });
+        Idempotent::Executed(())
+    }
+
+    /// Highest iteration of a Loop step for which `LoopIterationStarted`
+    /// has been emitted. `0` → no iteration has begun yet. Used by the
+    /// executor on resume to pick up where the previous attempt left off.
+    pub fn loop_current_iteration(&self, step_name: &str) -> u32 {
+        let mut max = 0u32;
+        for ev in self.events.iter_all() {
+            if let WorkflowRunEvent::LoopIterationStarted {
+                step_name: n,
+                iteration,
+                ..
+            } = ev
+            {
+                if n == step_name && *iteration > max {
+                    max = *iteration;
+                }
+            }
+        }
+        max
+    }
+
+    /// True once `LoopIterationCompleted { broke: true }` has been
+    /// emitted for this loop step OR the outer step itself has
+    /// reached a terminal state. The executor uses this to short-
+    /// circuit the inner iteration loop on resume.
+    pub fn loop_broke(&self, step_name: &str) -> bool {
+        for ev in self.events.iter_all() {
+            if let WorkflowRunEvent::LoopIterationCompleted {
+                step_name: n,
+                broke,
+                ..
+            } = ev
+            {
+                if n == step_name && *broke {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// All `LoopIterationCompleted` outputs collected from the
+    /// recorded inner step results. Used to populate the `iterations`
+    /// CEL binding and to compute the outer loop's `StepResult.output`.
+    pub fn loop_iterations_so_far(&self, step_name: &str) -> Vec<serde_json::Value> {
+        let mut by_iter: std::collections::BTreeMap<
+            u32,
+            serde_json::Map<String, serde_json::Value>,
+        > = std::collections::BTreeMap::new();
+        let prefix = format!("{step_name}.iter[");
+        for r in &self.step_results {
+            if !r.name.starts_with(&prefix) {
+                continue;
+            }
+            // `{step}.iter[{N}].{inner}` — extract N and inner
+            let after = &r.name[prefix.len()..];
+            let Some(close_idx) = after.find(']') else {
+                continue;
+            };
+            let Ok(iteration) = after[..close_idx].parse::<u32>() else {
+                continue;
+            };
+            // Skip the leading "]." then take the remainder
+            let inner = match after.get(close_idx + 2..) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let inner_output = r.output.clone().unwrap_or(serde_json::Value::Null);
+            by_iter
+                .entry(iteration)
+                .or_default()
+                .insert(inner, inner_output);
+        }
+        let broke_map: std::collections::HashMap<u32, bool> = self
+            .events
+            .iter_all()
+            .filter_map(|ev| match ev {
+                WorkflowRunEvent::LoopIterationCompleted {
+                    step_name: n,
+                    iteration,
+                    broke,
+                    ..
+                } if n == step_name => Some((*iteration, *broke)),
+                _ => None,
+            })
+            .collect();
+        by_iter
+            .into_iter()
+            .map(|(iteration, steps)| {
+                let broke = broke_map.get(&iteration).copied().unwrap_or(false);
+                serde_json::json!({
+                    "iteration": iteration,
+                    "steps": serde_json::Value::Object(steps),
+                    "broke": broke,
+                })
+            })
+            .collect()
+    }
+
     /// Transitions Running → WaitingForEvent when the executor
     /// reaches a Wait step.
     pub fn step_waiting(&mut self, step_name: String, provider: String) -> Idempotent<()> {
@@ -588,6 +757,12 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
                             waiting_provider: None,
                         });
                     }
+                }
+                WorkflowRunEvent::LoopIterationStarted { .. } => {
+                    state = WorkflowRunState::Running;
+                }
+                WorkflowRunEvent::LoopIterationCompleted { .. } => {
+                    state = WorkflowRunState::Running;
                 }
                 WorkflowRunEvent::StepWaiting {
                     step_name,
@@ -1252,5 +1427,173 @@ mod tests {
             waiting_provider: Some("github_app".into()),
         };
         assert_eq!(sr.step_state(), WorkflowStepState::WaitingForEvent);
+    }
+
+    // ── Loop step tests ──
+
+    #[test]
+    fn loop_iteration_started_event_wire_format() {
+        let ev = WorkflowRunEvent::LoopIterationStarted {
+            step_name: "review_cycle".into(),
+            iteration: 1,
+            started_at: Utc::now(),
+        };
+        let v = serde_json::to_value(&ev).unwrap();
+        assert_eq!(
+            v.get("type").and_then(|t| t.as_str()),
+            Some("loop_iteration_started")
+        );
+        assert_eq!(v.get("iteration").and_then(|i| i.as_u64()), Some(1));
+    }
+
+    #[test]
+    fn loop_iteration_completed_event_wire_format() {
+        let ev = WorkflowRunEvent::LoopIterationCompleted {
+            step_name: "review_cycle".into(),
+            iteration: 2,
+            broke: true,
+            completed_at: Utc::now(),
+        };
+        let v = serde_json::to_value(&ev).unwrap();
+        assert_eq!(
+            v.get("type").and_then(|t| t.as_str()),
+            Some("loop_iteration_completed")
+        );
+        assert_eq!(v.get("broke").and_then(|b| b.as_bool()), Some(true));
+        assert_eq!(v.get("iteration").and_then(|i| i.as_u64()), Some(2));
+    }
+
+    #[test]
+    fn loop_iteration_started_is_idempotent_per_iteration() {
+        let mut run = fresh_run(&["loop_step"]);
+        run.loop_iteration_started("loop_step".into(), 1)
+            .did_execute();
+        let outcome = run.loop_iteration_started("loop_step".into(), 1);
+        assert!(matches!(outcome, Idempotent::AlreadyApplied));
+        // Next iteration is not blocked.
+        run.loop_iteration_started("loop_step".into(), 2)
+            .did_execute();
+        assert_eq!(run.loop_current_iteration("loop_step"), 2);
+    }
+
+    #[test]
+    fn loop_iteration_completed_is_idempotent_per_iteration() {
+        let mut run = fresh_run(&["loop_step"]);
+        run.loop_iteration_started("loop_step".into(), 1)
+            .did_execute();
+        run.loop_iteration_completed("loop_step".into(), 1, false)
+            .did_execute();
+        let outcome = run.loop_iteration_completed("loop_step".into(), 1, false);
+        assert!(matches!(outcome, Idempotent::AlreadyApplied));
+    }
+
+    #[test]
+    fn loop_current_iteration_returns_highest_started() {
+        let mut run = fresh_run(&["loop_step"]);
+        assert_eq!(run.loop_current_iteration("loop_step"), 0);
+        run.loop_iteration_started("loop_step".into(), 1)
+            .did_execute();
+        assert_eq!(run.loop_current_iteration("loop_step"), 1);
+        run.loop_iteration_started("loop_step".into(), 2)
+            .did_execute();
+        assert_eq!(run.loop_current_iteration("loop_step"), 2);
+    }
+
+    #[test]
+    fn loop_broke_is_false_until_broke_event_recorded() {
+        let mut run = fresh_run(&["loop_step"]);
+        assert!(!run.loop_broke("loop_step"));
+        run.loop_iteration_started("loop_step".into(), 1)
+            .did_execute();
+        run.loop_iteration_completed("loop_step".into(), 1, false)
+            .did_execute();
+        assert!(!run.loop_broke("loop_step"));
+        run.loop_iteration_started("loop_step".into(), 2)
+            .did_execute();
+        run.loop_iteration_completed("loop_step".into(), 2, true)
+            .did_execute();
+        assert!(run.loop_broke("loop_step"));
+    }
+
+    #[test]
+    fn loop_events_hydrate_with_running_state() {
+        let mut run = fresh_run(&["loop_step"]);
+        run.loop_iteration_started("loop_step".into(), 1)
+            .did_execute();
+        run.loop_iteration_completed("loop_step".into(), 1, true)
+            .did_execute();
+        let events = run.events;
+        let rehydrated = WorkflowRun::try_from_events(events).unwrap();
+        assert_eq!(rehydrated.state, WorkflowRunState::Running);
+        assert_eq!(rehydrated.loop_current_iteration("loop_step"), 1);
+        assert!(rehydrated.loop_broke("loop_step"));
+    }
+
+    /// End-to-end: a Loop step over two iterations. Inner step
+    /// records use the dotted-name shape produced by the executor
+    /// (`{loop}.iter[{N}].{inner}`). After completion,
+    /// `loop_iterations_so_far` returns one row per iteration with
+    /// each inner step's output keyed by its inner name and the
+    /// `broke` flag from the corresponding `LoopIterationCompleted`
+    /// event. Mirrors what the executor builds at break_condition
+    /// time and what the outer `StepResult.output` would surface.
+    #[test]
+    fn loop_iterations_so_far_aggregates_two_iterations() {
+        let mut run = fresh_run(&["review"]);
+        // Outer step starts
+        run.step_started("review".into()).did_execute();
+        // Iteration 1
+        run.loop_iteration_started("review".into(), 1).did_execute();
+        run.step_started("review.iter[1].check".into())
+            .did_execute();
+        run.step_completed("review.iter[1].check".into(), json!({ "merged": false }))
+            .did_execute();
+        run.loop_iteration_completed("review".into(), 1, false)
+            .did_execute();
+        // Iteration 2 — break
+        run.loop_iteration_started("review".into(), 2).did_execute();
+        run.step_started("review.iter[2].check".into())
+            .did_execute();
+        run.step_completed("review.iter[2].check".into(), json!({ "merged": true }))
+            .did_execute();
+        run.loop_iteration_completed("review".into(), 2, true)
+            .did_execute();
+
+        let iters = run.loop_iterations_so_far("review");
+        assert_eq!(iters.len(), 2);
+        assert_eq!(iters[0]["iteration"], json!(1));
+        assert_eq!(iters[0]["broke"], json!(false));
+        assert_eq!(iters[0]["steps"]["check"], json!({ "merged": false }));
+        assert_eq!(iters[1]["iteration"], json!(2));
+        assert_eq!(iters[1]["broke"], json!(true));
+        assert_eq!(iters[1]["steps"]["check"], json!({ "merged": true }));
+        assert!(run.loop_broke("review"));
+    }
+
+    /// Inner Wait inside Loop parks the run. The waiting step's
+    /// name is the dotted form, so a resume that targets it must
+    /// resolve back through the Loop's `steps` to find the def
+    /// (covered by `lookup_wait_step_def` in mod.rs tests).
+    /// Confirms the run state machine here: park flips to
+    /// `WaitingForEvent`, resume flips back to `Running`.
+    #[test]
+    fn loop_inner_wait_parks_and_resumes_via_dotted_name() {
+        let mut run = fresh_run(&["review"]);
+        run.step_started("review".into()).did_execute();
+        run.loop_iteration_started("review".into(), 1).did_execute();
+        run.step_waiting("review.iter[1].await_review".into(), "github_app".into())
+            .did_execute();
+        assert_eq!(run.state, WorkflowRunState::WaitingForEvent);
+        let ws = run.current_wait_step().expect("waiting step");
+        assert_eq!(ws.name, "review.iter[1].await_review");
+        assert_eq!(ws.waiting_provider.as_deref(), Some("github_app"));
+
+        run.step_resumed(
+            "review.iter[1].await_review".into(),
+            json!({ "action": "approved" }),
+            "provider:github_app".into(),
+        )
+        .did_execute();
+        assert_eq!(run.state, WorkflowRunState::Running);
     }
 }

@@ -234,6 +234,62 @@ impl BuiltResumeContext {
     }
 }
 
+/// Evaluation context for `break_condition` and for inner-step
+/// `condition:` / `params` substitution inside a `Loop` step. Binds
+/// `iter` (this iteration's already-completed inner step outputs)
+/// and `iteration` (1-based count) alongside the usual `trigger` and
+/// `steps` (pre-loop outer outputs only — inner siblings live under
+/// `iter`).
+pub struct IterationContext<'a> {
+    pub trigger: &'a Value,
+    pub steps: &'a std::collections::HashMap<String, Value>,
+    /// Per-iteration outputs keyed by inner step name. Wrapped under
+    /// `outputs` exactly like `steps.<name>.outputs.X` so authors who
+    /// already know the `steps` shape pick up `iter` for free.
+    pub iter: &'a std::collections::HashMap<String, Value>,
+    pub iteration: u32,
+}
+
+impl IterationContext<'_> {
+    fn build_cel_context(&self) -> Result<BuiltContext, TemplateError> {
+        let mut cel = build_base_cel_context(self.trigger, self.steps)?;
+        let iter_value = Value::Object(
+            self.iter
+                .iter()
+                .map(|(k, v)| {
+                    let mut wrapper = serde_json::Map::with_capacity(1);
+                    wrapper.insert("outputs".to_string(), v.clone());
+                    (k.clone(), Value::Object(wrapper))
+                })
+                .collect(),
+        );
+        cel.add_variable("iter", iter_value)
+            .map_err(|e| TemplateError::Resolve("<context>".to_string(), format!("iter: {e}")))?;
+        // CEL evaluates ints as i64; `iteration` is u32 in the runtime
+        // but fits trivially.
+        cel.add_variable("iteration", Value::from(self.iteration as i64))
+            .map_err(|e| {
+                TemplateError::Resolve("<context>".to_string(), format!("iteration: {e}"))
+            })?;
+        Ok(BuiltContext { cel })
+    }
+
+    pub fn evaluate_condition(&self, body: &str) -> Result<ConditionOutcome, TemplateError> {
+        let built = self.build_cel_context()?;
+        evaluate_condition_with_built(&built, body)
+    }
+
+    pub fn substitute(&self, value: &Value) -> Result<Value, TemplateError> {
+        let built = self.build_cel_context()?;
+        substitute_value_with_built(value, &built)
+    }
+
+    pub fn substitute_in_string(&self, s: &str) -> Result<String, TemplateError> {
+        let built = self.build_cel_context()?;
+        substitute_in_string_with_built(s, &built)
+    }
+}
+
 fn evaluate_extract_with_built(built: &BuiltContext, expr: &str) -> Result<Value, TemplateError> {
     let trimmed = expr.trim();
     let raw = format!("{OPEN} {trimmed} {CLOSE}");
@@ -358,6 +414,26 @@ pub fn validate_resume_root(r: &TemplateRef) -> Result<(), TemplateError> {
     validate_root_inner(r, &["trigger", "steps", "resume_payload"])
 }
 
+pub fn validate_iteration_root(r: &TemplateRef) -> Result<(), TemplateError> {
+    validate_root_inner(r, &["trigger", "steps", "iter", "iteration"])
+}
+
+pub fn validate_resume_iteration_root(r: &TemplateRef) -> Result<(), TemplateError> {
+    validate_root_inner(
+        r,
+        &["trigger", "steps", "resume_payload", "iter", "iteration"],
+    )
+}
+
+/// Wait step inside a Loop: `resume_condition` / `outputs` may
+/// reference both `resume_payload` (inbound webhook) and
+/// `iter.<sibling>.outputs.…` (same iteration's prior inner steps).
+pub fn parse_resume_iteration_condition(body: &str) -> Result<TemplateRef, TemplateError> {
+    let r = parse_path(body)?;
+    validate_resume_iteration_root(&r)?;
+    Ok(r)
+}
+
 /// Compile-time parse + root validation for a wait step
 /// `resume_condition`. Like [`parse_condition`] but additionally
 /// allows `resume_payload` as a root.
@@ -365,6 +441,36 @@ pub fn parse_resume_condition(body: &str) -> Result<TemplateRef, TemplateError> 
     let r = parse_path(body)?;
     validate_resume_root(&r)?;
     Ok(r)
+}
+
+/// Compile-time parse + root validation for a `break_condition:` or
+/// an inner-step `condition:` inside a `Loop`. Accepts `iter` and
+/// `iteration` in addition to the usual roots.
+pub fn parse_iteration_condition(body: &str) -> Result<TemplateRef, TemplateError> {
+    let r = parse_path(body)?;
+    validate_iteration_root(&r)?;
+    Ok(r)
+}
+
+/// Names of every inner step referenced via `iter.<name>` in the
+/// expression body. Mirror of [`referenced_step_names`] for the
+/// per-iteration namespace; same identifier shape, same hyphen
+/// caveat.
+pub fn referenced_iter_names(r: &TemplateRef) -> Vec<String> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"\biter\.([A-Za-z_][A-Za-z0-9_]*)").unwrap());
+    let mut out: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
+    for cap in re.captures_iter(&r.body) {
+        let name = cap
+            .get(1)
+            .map(|m| m.as_str().to_string())
+            .unwrap_or_default();
+        if seen.insert(name.clone()) {
+            out.push(name);
+        }
+    }
+    out
 }
 
 /// Names of every step referenced via `steps.<name>` in the
@@ -1204,6 +1310,93 @@ mod tests {
     /// at create time, so this case is unreachable in practice —
     /// the test pins the narrow extraction behaviour as a
     /// belt-and-braces match against that validation contract.
+    #[test]
+    fn iteration_context_resolves_iter_outputs() {
+        let trigger = json!({});
+        let steps = std::collections::HashMap::new();
+        let mut iter_map = std::collections::HashMap::new();
+        iter_map.insert(
+            "check_pr".to_string(),
+            json!({ "merged": true, "title": "fix bug" }),
+        );
+        let ctx = IterationContext {
+            trigger: &trigger,
+            steps: &steps,
+            iter: &iter_map,
+            iteration: 2,
+        };
+        match ctx.evaluate_condition("iter.check_pr.outputs.merged == true") {
+            Ok(ConditionOutcome::True) => {}
+            other => panic!("expected True, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn iteration_context_iteration_count_visible() {
+        let trigger = json!({});
+        let steps = std::collections::HashMap::new();
+        let iter_map = std::collections::HashMap::new();
+        let ctx = IterationContext {
+            trigger: &trigger,
+            steps: &steps,
+            iter: &iter_map,
+            iteration: 5,
+        };
+        match ctx.evaluate_condition("iteration >= 5") {
+            Ok(ConditionOutcome::True) => {}
+            other => panic!("expected True, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn iteration_context_skipped_sibling_null_coalesces_to_false() {
+        // Inner sibling `foo` was skipped this iteration → executor
+        // collects it as `null`. CEL's `null.outputs.bar` quirk
+        // (same as `steps.<skipped>.outputs.X`) flattens the access
+        // to `false`, so a strict equality check evaluates to False
+        // without raising. The point: gated-out inner siblings
+        // don't blow up downstream conditions, they cascade as the
+        // path's natural falsy collapse.
+        let trigger = json!({});
+        let steps = std::collections::HashMap::new();
+        let mut iter_map = std::collections::HashMap::new();
+        iter_map.insert("foo".to_string(), Value::Null);
+        let ctx = IterationContext {
+            trigger: &trigger,
+            steps: &steps,
+            iter: &iter_map,
+            iteration: 1,
+        };
+        assert_eq!(
+            ctx.evaluate_condition("iter.foo.outputs.kind == 'autofix'")
+                .unwrap(),
+            ConditionOutcome::False
+        );
+    }
+
+    #[test]
+    fn parse_iteration_condition_accepts_iter_and_iteration() {
+        parse_iteration_condition("iter.check.outputs.merged == true").unwrap();
+        parse_iteration_condition("iteration > 3").unwrap();
+        parse_iteration_condition("trigger.payload.x == 'y'").unwrap();
+        parse_iteration_condition("steps.prior.outputs.kind == 'autofix'").unwrap();
+    }
+
+    #[test]
+    fn parse_iteration_condition_rejects_unknown_root() {
+        let err = parse_iteration_condition("resume_payload.x == 'y'").unwrap_err();
+        assert!(matches!(err, TemplateError::UnknownRoot(_, _)));
+    }
+
+    #[test]
+    fn referenced_iter_names_extracts_unique_ordered() {
+        let r = parse_path("iter.a.outputs.x && iter.b.outputs.y && iter.a.outputs.z").unwrap();
+        assert_eq!(
+            referenced_iter_names(&r),
+            vec!["a".to_string(), "b".to_string()]
+        );
+    }
+
     #[test]
     fn referenced_step_names_stops_at_hyphen() {
         // We can't `parse_path("steps.store-note.outputs.x")`

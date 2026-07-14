@@ -889,6 +889,7 @@ enum WorkflowStepState {
 
 enum WorkflowStepType {
 	AGENT_STEP
+	LOOP
 	TOOL_STEP
 	WAIT
 }

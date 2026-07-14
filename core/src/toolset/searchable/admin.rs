@@ -372,6 +372,28 @@ enum WorkflowStepParams {
         #[serde(default)]
         condition: Option<String>,
     },
+    /// Repeat the inner `steps` until `break_condition` evaluates to
+    /// true (or `max_iterations` is exhausted). Inner steps have
+    /// access to `iter.<step>.outputs.X` for prior siblings within
+    /// the same iteration.
+    Loop {
+        name: String,
+        /// Bare CEL boolean, evaluated against `trigger`, `steps`
+        /// (pre-loop), `iter` (this iteration's outputs), and
+        /// `iteration` (1-based count). `true` breaks out.
+        break_condition: String,
+        /// Hard cap (default 25). Loop records `success: false` on
+        /// exhaustion.
+        #[serde(default = "default_loop_max_iterations")]
+        max_iterations: u32,
+        steps: Vec<WorkflowStepParams>,
+        #[serde(default)]
+        condition: Option<String>,
+    },
+}
+
+fn default_loop_max_iterations() -> u32 {
+    25
 }
 
 impl WorkflowStepParams {
@@ -432,6 +454,25 @@ impl WorkflowStepParams {
                 outputs,
                 condition,
             }),
+            WorkflowStepParams::Loop {
+                name,
+                break_condition,
+                max_iterations,
+                steps,
+                condition,
+            } => {
+                let inner = steps
+                    .into_iter()
+                    .map(|s| s.into_step())
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(WorkflowStepDef::Loop {
+                    name,
+                    break_condition,
+                    max_iterations,
+                    steps: inner,
+                    condition,
+                })
+            }
         }
     }
 }
