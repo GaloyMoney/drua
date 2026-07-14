@@ -30,7 +30,7 @@ pub fn draw_workflows(frame: &mut Frame, state: &mut ScreenState, area: Rect) {
 pub fn status_keys(state: &ScreenState) -> &'static str {
     match state.workflows.focus {
         MillerFocus::Definitions => {
-            " │ ↑/↓:nav  Enter:yaml  →:runs  ^R:trigger  r:refresh  Esc:chat "
+            " │ ↑/↓:nav  Enter:yaml  →:runs  ^R:trigger  p:pause/resume  r:refresh  Esc:chat "
         }
         MillerFocus::YamlDetail => " │ ↑/↓:scroll  →:runs  ←/Esc:back ",
         MillerFocus::Runs => {
@@ -85,7 +85,7 @@ fn draw_col_definitions(frame: &mut Frame, state: &ScreenState, area: Rect) {
                 .first()
                 .map(|r| (state_label(&r.state), state_color(&r.state)))
                 .unwrap_or(("—", Color::DarkGray));
-            let line = Line::from(vec![
+            let mut spans = vec![
                 Span::styled(marker, Style::default().fg(Color::Yellow)),
                 Span::raw(" "),
                 Span::styled(
@@ -98,8 +98,11 @@ fn draw_col_definitions(frame: &mut Frame, state: &ScreenState, area: Rect) {
                 ),
                 Span::raw(" "),
                 Span::styled(run_indicator.0, Style::default().fg(run_indicator.1)),
-            ]);
-            items.push(ListItem::new(line));
+            ];
+            if definition.paused {
+                spans.push(Span::styled(" ⏸", Style::default().fg(Color::Yellow)));
+            }
+            items.push(ListItem::new(Line::from(spans)));
         }
     }
 
@@ -156,7 +159,13 @@ fn draw_definition_detail(frame: &mut Frame, state: &ScreenState, area: Rect) {
         .workflows
         .selected_definition
         .as_ref()
-        .map(|d| format!(" {} ", d.name))
+        .map(|d| {
+            if d.paused {
+                format!(" {} (paused) ", d.name)
+            } else {
+                format!(" {} ", d.name)
+            }
+        })
         .unwrap_or_else(|| " Definition ".to_string());
     let focused = state.workflows.focus == MillerFocus::YamlDetail;
     let border_color = if focused {

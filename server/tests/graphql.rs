@@ -580,7 +580,7 @@ async fn workflow_definitions_query_exposes_yaml_and_structured_fields() {
 }
 
 #[tokio::test]
-async fn workflow_trigger_mutation_returns_run_or_filtered() {
+async fn workflow_trigger_mutation_reports_disposition() {
     let pool = pool().await;
     let app = test_app(&pool).await;
     let schema = drua_server::graphql::schema(Some(app.clone()));
@@ -656,7 +656,7 @@ async fn workflow_trigger_mutation_returns_run_or_filtered() {
         &sub,
         r#"mutation($input: WorkflowTriggerInput!) {
             workflowTrigger(input: $input) {
-                filtered
+                disposition
                 run { id definitionId projectId state triggerContext }
             }
         }"#,
@@ -669,7 +669,7 @@ async fn workflow_trigger_mutation_returns_run_or_filtered() {
     )
     .await;
     let data = assert_no_errors(&result);
-    assert_eq!(data["workflowTrigger"]["filtered"], false);
+    assert_eq!(data["workflowTrigger"]["disposition"], "SPAWNED");
     assert_eq!(
         data["workflowTrigger"]["run"]["definitionId"],
         runnable.id.to_string()
@@ -684,13 +684,31 @@ async fn workflow_trigger_mutation_returns_run_or_filtered() {
         &app,
         &sub,
         r#"mutation($input: WorkflowTriggerInput!) {
-            workflowTrigger(input: $input) { filtered run { id } }
+            workflowTrigger(input: $input) { disposition run { id } }
         }"#,
         serde_json::json!({ "input": { "definitionId": filtered.id.to_string() } }),
     )
     .await;
     let data = assert_no_errors(&result);
-    assert_eq!(data["workflowTrigger"]["filtered"], true);
+    assert_eq!(data["workflowTrigger"]["disposition"], "FILTERED");
+    assert!(data["workflowTrigger"]["run"].is_null());
+
+    app.workflows()
+        .set_paused(&sub, runnable.id, true)
+        .await
+        .expect("pause workflow");
+    let result = execute_graphql(
+        &schema,
+        &app,
+        &sub,
+        r#"mutation($input: WorkflowTriggerInput!) {
+            workflowTrigger(input: $input) { disposition run { id } }
+        }"#,
+        serde_json::json!({ "input": { "definitionId": runnable.id.to_string() } }),
+    )
+    .await;
+    let data = assert_no_errors(&result);
+    assert_eq!(data["workflowTrigger"]["disposition"], "PAUSED");
     assert!(data["workflowTrigger"]["run"].is_null());
 }
 

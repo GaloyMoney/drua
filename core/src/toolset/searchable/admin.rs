@@ -26,8 +26,8 @@ use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandb
 use crate::skill::{ScopedSkill, Skill, SkillSource, Skills};
 use crate::space_fs::SpaceFs;
 use crate::workflow::{
-    WorkflowDefinition, WorkflowRun, WorkflowRunState, WorkflowSandboxDecl, WorkflowStepDef,
-    WorkflowTrigger, Workflows,
+    TriggerOutcome, WorkflowDefinition, WorkflowRun, WorkflowRunState, WorkflowSandboxDecl,
+    WorkflowStepDef, WorkflowTrigger, Workflows,
 };
 
 use super::super::error::ToolSetsError;
@@ -1461,14 +1461,19 @@ impl AdminToolSet {
                 let payload = params
                     .payload
                     .unwrap_or_else(|| serde_json::Value::Object(Default::default()));
-                let maybe_run = self
+                let outcome = self
                     .workflows
                     .trigger_run(subject, definition_id, payload)
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
-                let body = match maybe_run {
-                    Some(run) => format_run(&run),
-                    None => "Trigger condition evaluated to false; no run created.".to_string(),
+                let body = match outcome {
+                    TriggerOutcome::Spawned(run) => format_run(&run),
+                    TriggerOutcome::Filtered => {
+                        "Trigger condition evaluated to false; no run created.".to_string()
+                    }
+                    TriggerOutcome::Paused => {
+                        "Workflow is paused; no run created. Resume it to trigger runs.".to_string()
+                    }
                 };
                 Ok(CallToolResult::success(vec![Content::text(body)]))
             }

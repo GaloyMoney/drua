@@ -42,14 +42,11 @@ impl Mutation {
             .payload
             .map(JsonValue::into_inner)
             .unwrap_or_else(|| serde_json::json!({}));
-        let run = app
+        let outcome = app
             .workflows()
             .trigger_run(sub, input.definition_id, payload)
             .await?;
-        Ok(WorkflowTriggerPayload {
-            filtered: run.is_none(),
-            run: run.map(WorkflowRun::from),
-        })
+        Ok(WorkflowTriggerPayload::from(outcome))
     }
 
     async fn project_update(
@@ -278,6 +275,24 @@ impl Mutation {
         app.workflows().delete(sub, input.id).await?;
         Ok(WorkflowDeletePayload {
             deleted_id: input.id,
+        })
+    }
+
+    /// Pause or resume a workflow without deleting it. While paused no
+    /// runs fire: cron fires, webhook deliveries, and manual triggers
+    /// are all suppressed with a paused disposition (no run).
+    async fn workflow_set_paused(
+        &self,
+        ctx: &Context<'_>,
+        input: WorkflowSetPausedInput,
+    ) -> async_graphql::Result<WorkflowSetPausedPayload> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        let definition = app
+            .workflows()
+            .set_paused(sub, input.definition_id, input.paused)
+            .await?;
+        Ok(WorkflowSetPausedPayload {
+            workflow: WorkflowDefinition::from(definition),
         })
     }
 

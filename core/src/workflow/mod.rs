@@ -41,8 +41,20 @@ pub use run::{StepResult, WorkflowRun, WorkflowRunRepo, WorkflowRunState, Workfl
 pub struct ProviderFanOutResult {
     pub triggered: usize,
     pub filtered: usize,
+    pub paused: usize,
     pub errored: usize,
     pub resumed: usize,
+}
+
+/// Disposition of a single trigger attempt. The non-`Spawned` variants
+/// are deliberate suppressions (each writes an audit row), not errors —
+/// callers decide per surface how loudly to report them.
+pub enum TriggerOutcome {
+    Spawned(Box<WorkflowRun>),
+    /// The trigger's `condition:` evaluated to false.
+    Filtered,
+    /// The definition is paused.
+    Paused,
 }
 
 use cron_job::{cron_queue_id, TriggerCronConfig, TriggerCronJobInitializer};
@@ -57,6 +69,9 @@ const AUDIT_ACTION_TRIGGER_FILTERED: &str = "workflow.trigger_filtered";
 /// Audit action recorded when a `trigger.condition:` errors at
 /// runtime (compile, runtime, non-boolean result).
 const AUDIT_ACTION_TRIGGER_CONDITION_ERRORED: &str = "workflow.trigger_condition_errored";
+/// Audit action recorded when a run is suppressed because the
+/// workflow is paused.
+const AUDIT_ACTION_TRIGGER_PAUSED: &str = "workflow.trigger_paused";
 
 /// Evaluate each output's CEL expression against the resume context.
 /// Builds the CEL context once and reuses it across all expressions.
@@ -124,6 +139,25 @@ fn record_trigger_filtered_audit(
         definition_id = %definition.id,
         condition_body,
         "workflow run suppressed by trigger condition"
+    );
+}
+
+fn record_trigger_paused_audit(
+    definition: &WorkflowDefinition,
+    trigger_context: &serde_json::Value,
+) {
+    // See `record_trigger_filtered_audit` — same overwrite rationale.
+    Audit::record_action(AUDIT_ACTION_TRIGGER_PAUSED);
+    Audit::record_workflow_id(definition.id);
+    Audit::record_metadata(serde_json::json!({
+        "definition_id": definition.id.to_string(),
+        "trigger_kind": definition.trigger.kind_label(),
+        "payload_digest": payload_digest(trigger_context),
+    }));
+    Audit::record_outcome_if_unset(InteractionOutcome::Success);
+    tracing::info!(
+        definition_id = %definition.id,
+        "workflow run suppressed: workflow is paused"
     );
 }
 
@@ -279,6 +313,7 @@ impl Workflows {
             name,
             description,
             trigger,
+            paused,
             steps,
             sandboxes,
             model_chain,
@@ -342,6 +377,7 @@ impl Workflows {
                     Some(steps),
                     Some(sandboxes),
                     Some(model_chain.clone()),
+                    Some(paused),
                     file_hash,
                 )
                 .did_execute()
@@ -374,6 +410,7 @@ impl Workflows {
             .project_id(project_id)
             .name(name)
             .trigger(trigger)
+            .paused(paused)
             .steps(steps)
             .sandboxes(sandboxes)
             .model_chain(model_chain);
@@ -751,6 +788,36 @@ impl Workflows {
         Ok(definition)
     }
 
+    /// Pause or resume a workflow without deleting it. While paused no
+    /// runs fire: cron fires are skipped (the in-flight cron job keeps
+    /// ticking, so resume needs no re-registration and missed fires are
+    /// not backfilled), and webhook deliveries and manual triggers are
+    /// suppressed with a paused disposition (each writes an audit row).
+    /// Pause gates run *creation* only — in-flight runs, including runs
+    /// parked on a `Wait` step, continue. Returns the definition
+    /// unchanged (no event, no commit) when already in the target state.
+    #[instrument(name = "core.workflow.set_paused", skip_all)]
+    pub async fn set_paused(
+        &self,
+        sub: &AuthSubject,
+        id: WorkflowDefinitionId,
+        paused: bool,
+    ) -> Result<WorkflowDefinition, WorkflowError> {
+        let mut op = self.repo.begin_op().await?;
+        let mut definition = self.repo.find_by_id_in_op(&mut op, id).await?;
+        sub.can(
+            AuthVerb::Update,
+            AuthResource::Workflow(definition.project_id, Some(definition.id)),
+        )?;
+
+        if definition.set_paused(paused).did_execute() {
+            self.populate_attribution().await;
+            self.repo.update_in_op(&mut op, &mut definition).await?;
+            op.commit().await?;
+        }
+        Ok(definition)
+    }
+
     async fn populate_attribution(&self) -> CommitAttribution {
         self.users.commit_attribution().await
     }
@@ -871,17 +938,18 @@ impl Workflows {
         Ok(result.entities)
     }
 
-    /// Spawns the executor as a job and returns the run synchronously.
-    /// `Ok(None)` means the trigger's `condition:` evaluated to false
-    /// and the run was deliberately suppressed (an audit row was
-    /// written).
+    /// Authenticated explicit-trigger path. Returns the full
+    /// [`TriggerOutcome`] — `Spawned` with the run, or a deliberate
+    /// `Filtered`/`Paused` suppression (each writes an audit row).
+    /// `Paused` is an expected disposition, not an error; each caller
+    /// maps the outcome to its own surface.
     #[instrument(name = "core.workflow.trigger_run", skip_all)]
     pub async fn trigger_run(
         &self,
         sub: &AuthSubject,
         definition_id: WorkflowDefinitionId,
         trigger_context: serde_json::Value,
-    ) -> Result<Option<WorkflowRun>, WorkflowError> {
+    ) -> Result<TriggerOutcome, WorkflowError> {
         let definition = self.repo.find_by_id(definition_id).await?;
         sub.can(
             AuthVerb::Use,
@@ -892,14 +960,12 @@ impl Workflows {
 
     /// No auth check — pairs with [`Self::find_by_id_unchecked`] so
     /// the webhook handler doesn't double-load the definition.
-    /// `Ok(None)` carries the same "filtered by trigger condition"
-    /// meaning as [`Self::trigger_run`].
     #[instrument(name = "core.workflow.trigger_run_for_definition", skip_all)]
     pub async fn trigger_run_for_definition(
         &self,
         definition: WorkflowDefinition,
         trigger_context: serde_json::Value,
-    ) -> Result<Option<WorkflowRun>, WorkflowError> {
+    ) -> Result<TriggerOutcome, WorkflowError> {
         self.spawn_run(definition, trigger_context).await
     }
 
@@ -911,6 +977,7 @@ impl Workflows {
     ) -> Result<ProviderFanOutResult, WorkflowError> {
         let mut triggered = 0usize;
         let mut filtered = 0usize;
+        let mut paused = 0usize;
         let mut errored = 0usize;
 
         let mut query = es_entity::PaginatedQueryArgs {
@@ -933,13 +1000,17 @@ impl Workflows {
                     .trigger_run_for_definition(defn, trigger_context.clone())
                     .await
                 {
-                    Ok(Some(run)) => {
+                    Ok(TriggerOutcome::Spawned(run)) => {
                         tracing::info!(%def_id, run_id = %run.id, "provider fan-out: run triggered");
                         triggered += 1;
                     }
-                    Ok(None) => {
+                    Ok(TriggerOutcome::Filtered) => {
                         tracing::debug!(%def_id, "provider fan-out: filtered by condition");
                         filtered += 1;
+                    }
+                    Ok(TriggerOutcome::Paused) => {
+                        tracing::debug!(%def_id, "provider fan-out: workflow paused");
+                        paused += 1;
                     }
                     Err(e) => {
                         tracing::warn!(%def_id, error = %e, "provider fan-out: trigger errored");
@@ -957,6 +1028,7 @@ impl Workflows {
         Ok(ProviderFanOutResult {
             triggered,
             filtered,
+            paused,
             errored,
             resumed: 0,
         })
@@ -1091,7 +1163,7 @@ impl Workflows {
         &self,
         definition: WorkflowDefinition,
         trigger_context: serde_json::Value,
-    ) -> Result<Option<WorkflowRun>, WorkflowError> {
+    ) -> Result<TriggerOutcome, WorkflowError> {
         Self::spawn_run_static(
             &self.run_repo,
             &self.execute_run_spawner,
@@ -1101,18 +1173,25 @@ impl Workflows {
         .await
     }
 
+    /// The single gate every run-creation path goes through — pause and
+    /// trigger-condition suppression are enforced here, never in callers.
     pub(crate) async fn spawn_run_static(
         run_repo: &WorkflowRunRepo,
         execute_run_spawner: &::job::JobSpawner<ExecuteRunConfig>,
         definition: WorkflowDefinition,
         trigger_context: serde_json::Value,
-    ) -> Result<Option<WorkflowRun>, WorkflowError> {
+    ) -> Result<TriggerOutcome, WorkflowError> {
+        if definition.paused {
+            record_trigger_paused_audit(&definition, &trigger_context);
+            return Ok(TriggerOutcome::Paused);
+        }
+
         if let Some(body) = definition.trigger.condition() {
             match template::evaluate_trigger_condition(body, &trigger_context) {
                 Ok(template::ConditionOutcome::True) => {}
                 Ok(template::ConditionOutcome::False) => {
                     record_trigger_filtered_audit(&definition, body, &trigger_context);
-                    return Ok(None);
+                    return Ok(TriggerOutcome::Filtered);
                 }
                 Ok(template::ConditionOutcome::NotBoolean(rendered)) => {
                     let reason = format!("condition evaluated to non-boolean: {rendered}");
@@ -1159,7 +1238,7 @@ impl Workflows {
             .await
             .map_err(|e| WorkflowError::Job(e.to_string()))?;
 
-        Ok(Some(run))
+        Ok(TriggerOutcome::Spawned(Box::new(run)))
     }
 
     #[instrument(name = "core.workflow.list_runs", skip_all)]

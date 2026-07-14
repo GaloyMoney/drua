@@ -5,9 +5,11 @@
 //!   1. Loads the definition (no auth — system path).
 //!   2. If the definition was deleted or its trigger is no longer
 //!      `Cron`, exits without rescheduling.
-//!   3. Otherwise spawns a run via [`Workflows::trigger_run_for_definition`]
-//!      with a `triggered_by: cron` context, then schedules the next
-//!      job at the cron expression's next fire time.
+//!   3. Otherwise attempts a run via the central spawn gate with a
+//!      `triggered_by: cron` context (a paused definition reports
+//!      `TriggerOutcome::Paused` and no run is created), then schedules
+//!      the next job at the cron expression's next fire time. A paused
+//!      schedule keeps ticking so resume needs no re-registration.
 //!
 //! Concurrency: every cron-fired run shares the existing
 //! `workflow:{definition_id}` queue used by `ExecuteRunConfig`, and the
@@ -22,6 +24,7 @@ use crate::primitives::WorkflowDefinitionId;
 use super::definition::WorkflowTrigger;
 use super::repo::WorkflowDefinitionRepo;
 use super::run::WorkflowRunRepo;
+use super::TriggerOutcome;
 
 pub(crate) const TRIGGER_CRON_JOB: &str = "workflow.trigger-cron";
 
@@ -136,13 +139,16 @@ impl JobRunner for TriggerCronRunner {
         )
         .await
         {
-            Ok(Some(run)) => {
+            Ok(TriggerOutcome::Spawned(run)) => {
                 tracing::info!(run_id = %run.id, "cron-triggered workflow run spawned");
             }
-            Ok(None) => {
+            Ok(TriggerOutcome::Filtered) => {
                 tracing::info!(
                     "cron-triggered run suppressed by trigger condition; schedule continues"
                 );
+            }
+            Ok(TriggerOutcome::Paused) => {
+                tracing::info!("definition paused; skipping fire, schedule continues");
             }
             Err(e) => {
                 tracing::warn!(error = %e, "cron-triggered run spawn failed; continuing schedule");

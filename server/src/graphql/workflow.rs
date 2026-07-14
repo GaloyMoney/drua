@@ -7,10 +7,11 @@ use super::primitives::*;
 
 use drua_core::sandbox::{SandboxMode, SandboxSpecs};
 use drua_core::workflow::{
-    StepResult as DomainStepResult, WorkflowDefinition as DomainWorkflowDefinition,
-    WorkflowRun as DomainWorkflowRun, WorkflowRunState as DomainWorkflowRunState,
-    WorkflowSandboxDecl as DomainWorkflowSandboxDecl, WorkflowStepDef as DomainWorkflowStepDef,
-    WorkflowStepState as DomainWorkflowStepState, WorkflowTrigger as DomainWorkflowTrigger,
+    StepResult as DomainStepResult, TriggerOutcome as DomainTriggerOutcome,
+    WorkflowDefinition as DomainWorkflowDefinition, WorkflowRun as DomainWorkflowRun,
+    WorkflowRunState as DomainWorkflowRunState, WorkflowSandboxDecl as DomainWorkflowSandboxDecl,
+    WorkflowStepDef as DomainWorkflowStepDef, WorkflowStepState as DomainWorkflowStepState,
+    WorkflowTrigger as DomainWorkflowTrigger,
 };
 
 #[derive(InputObject)]
@@ -34,6 +35,10 @@ pub struct WorkflowDefinition {
     steps: Vec<WorkflowStep>,
     sandboxes: Vec<WorkflowSandbox>,
     model_chain: Option<ModelChain>,
+    /// `true` when the workflow is paused — no runs fire (cron fires,
+    /// webhook deliveries, and manual triggers are all suppressed with
+    /// a paused disposition) until resumed.
+    paused: bool,
     created_at: Timestamp,
     updated_at: Timestamp,
     yaml: String,
@@ -66,6 +71,7 @@ impl From<DomainWorkflowDefinition> for WorkflowDefinition {
         if matches!(entity.trigger, DomainWorkflowTrigger::Webhook { .. }) {
             trigger.webhook_url = Some(format!("/webhooks/{}", entity.id));
         }
+        trigger.next_run_at = entity.next_run_at(chrono::Utc::now()).map(Into::into);
         let yaml = entity.canonical_yaml();
         Self {
             id: entity.id,
@@ -76,6 +82,7 @@ impl From<DomainWorkflowDefinition> for WorkflowDefinition {
             steps: entity.steps.iter().map(WorkflowStep::from).collect(),
             sandboxes: entity.sandboxes.iter().map(WorkflowSandbox::from).collect(),
             model_chain: entity.model_chain.clone().map(Into::into),
+            paused: entity.paused,
             created_at: created_at.into(),
             updated_at: updated_at.into(),
             yaml,
@@ -129,11 +136,9 @@ impl From<&DomainWorkflowTrigger> for WorkflowTrigger {
                 provider: None,
                 cron_schedule: Some(schedule.clone()),
                 cron_timezone: timezone.clone(),
-                next_run_at: trigger
-                    .next_fire_at(chrono::Utc::now())
-                    .ok()
-                    .flatten()
-                    .map(Into::into),
+                // Filled by the definition conversion, which knows the
+                // pause state (`WorkflowDefinition::next_run_at`).
+                next_run_at: None,
                 condition: condition.clone(),
                 webhook_url: None,
             },
@@ -442,10 +447,51 @@ pub struct WorkflowTriggerInput {
     pub payload: Option<JsonValue>,
 }
 
+/// How an explicit `workflowTrigger` resolved: a run was `SPAWNED`, or
+/// it was deliberately suppressed because the trigger `condition` was
+/// `FILTERED` out or the workflow is `PAUSED`. Suppression is an
+/// expected outcome, not an error.
+#[derive(Enum, Copy, Clone, Eq, PartialEq)]
+pub enum WorkflowTriggerDisposition {
+    Spawned,
+    Filtered,
+    Paused,
+}
+
 #[derive(SimpleObject)]
 pub struct WorkflowTriggerPayload {
     pub run: Option<WorkflowRun>,
-    pub filtered: bool,
+    pub disposition: WorkflowTriggerDisposition,
+}
+
+impl From<DomainTriggerOutcome> for WorkflowTriggerPayload {
+    fn from(outcome: DomainTriggerOutcome) -> Self {
+        match outcome {
+            DomainTriggerOutcome::Spawned(run) => Self {
+                run: Some(WorkflowRun::from(*run)),
+                disposition: WorkflowTriggerDisposition::Spawned,
+            },
+            DomainTriggerOutcome::Filtered => Self {
+                run: None,
+                disposition: WorkflowTriggerDisposition::Filtered,
+            },
+            DomainTriggerOutcome::Paused => Self {
+                run: None,
+                disposition: WorkflowTriggerDisposition::Paused,
+            },
+        }
+    }
+}
+
+#[derive(InputObject)]
+pub struct WorkflowSetPausedInput {
+    pub definition_id: WorkflowDefinitionId,
+    pub paused: bool,
+}
+
+#[derive(SimpleObject)]
+pub struct WorkflowSetPausedPayload {
+    pub workflow: WorkflowDefinition,
 }
 
 pub fn limit<T>(items: Vec<T>, first: i32) -> Vec<T> {

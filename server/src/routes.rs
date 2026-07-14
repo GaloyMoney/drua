@@ -17,7 +17,7 @@ use domain::primitives::{
     AgentId, SandboxId, SkillId, SpaceId, UserId, WorkflowDefinitionId, WorkflowRunId,
 };
 use domain::sandbox::{SandboxAgentMode, SandboxMode};
-use domain::workflow::WorkflowTrigger;
+use domain::workflow::{TriggerOutcome, WorkflowTrigger};
 
 use crate::templates::*;
 use crate::AppState;
@@ -80,6 +80,10 @@ pub fn router() -> Router<AppState> {
         .route(
             "/projects/{id}/workflows/{wf_id}/trigger",
             post(project_workflow_trigger),
+        )
+        .route(
+            "/projects/{id}/workflows/{wf_id}/pause",
+            post(project_workflow_set_paused),
         )
         .route(
             "/projects/{id}/workflows/{wf_id}/runs/{run_id}",
@@ -1724,6 +1728,7 @@ fn workflow_definition_to_view_for_list(
         description: d.description.clone(),
         trigger_type,
         trigger_provider,
+        paused: d.paused,
         webhook_secret: None,
         webhook_url: None,
         steps: d.steps.iter().map(workflow_step_to_view).collect(),
@@ -1765,6 +1770,7 @@ fn workflow_definition_to_view_for_detail(
         description: d.description.clone(),
         trigger_type,
         trigger_provider,
+        paused: d.paused,
         webhook_secret: secret,
         webhook_url,
         steps: d.steps.iter().map(workflow_step_to_view).collect(),
@@ -2048,10 +2054,20 @@ async fn project_workflow_trigger(
         .trigger_run(&sub, workflow_id, payload)
         .await
     {
-        Ok(Some(run)) => Redirect::to(&format!("/projects/{id}/workflows/{wf_id}/runs/{}", run.id))
-            .into_response(),
-        Ok(None) => {
+        Ok(TriggerOutcome::Spawned(run)) => {
+            Redirect::to(&format!("/projects/{id}/workflows/{wf_id}/runs/{}", run.id))
+                .into_response()
+        }
+        Ok(TriggerOutcome::Filtered) => {
             let msg = "trigger condition evaluated to false; no run created".to_string();
+            Redirect::to(&format!(
+                "/projects/{id}/workflows/{wf_id}?flash={}",
+                encode_query_value(&msg)
+            ))
+            .into_response()
+        }
+        Ok(TriggerOutcome::Paused) => {
+            let msg = "workflow is paused; no run created — resume it to trigger runs".to_string();
             Redirect::to(&format!(
                 "/projects/{id}/workflows/{wf_id}?flash={}",
                 encode_query_value(&msg)
@@ -2067,6 +2083,46 @@ async fn project_workflow_trigger(
             .into_response()
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowSetPausedForm {
+    paused: bool,
+}
+
+#[instrument(name = "web.project_workflow_set_paused", skip_all)]
+async fn project_workflow_set_paused(
+    State(state): State<AppState>,
+    session: Session,
+    Path((id, wf_id)): Path<(uuid::Uuid, uuid::Uuid)>,
+    Form(form): Form<WorkflowSetPausedForm>,
+) -> Response {
+    let user_id = match extract_user_id(&session).await {
+        Some(id) => id,
+        None => return Redirect::to("/").into_response(),
+    };
+    let sub = AuthSubject::User(user_id);
+    let workflow_id = WorkflowDefinitionId::from(wf_id);
+
+    let base = format!("/projects/{id}/workflows/{wf_id}");
+    match state
+        .app
+        .workflows()
+        .set_paused(&sub, workflow_id, form.paused)
+        .await
+    {
+        // Resume needs no banner — the page already shows the active state.
+        Ok(_) if !form.paused => Redirect::to(&base),
+        Ok(_) => Redirect::to(&format!(
+            "{base}?flash={}",
+            encode_query_value("workflow paused; no runs will fire until resumed")
+        )),
+        Err(e) => Redirect::to(&format!(
+            "{base}?flash={}",
+            encode_query_value(&format!("failed to update workflow: {e}"))
+        )),
+    }
+    .into_response()
 }
 
 #[instrument(name = "web.project_workflow_run_detail", skip_all)]

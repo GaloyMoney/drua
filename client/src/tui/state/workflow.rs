@@ -43,6 +43,7 @@ pub struct WorkflowDefinitionItem {
     pub name: String,
     pub description: Option<String>,
     pub trigger: WorkflowTriggerInfo,
+    pub paused: bool,
     pub steps: Vec<WorkflowStepItem>,
     pub recent_runs: Vec<WorkflowRunItem>,
 }
@@ -54,6 +55,7 @@ pub struct WorkflowDefinitionDetail {
     pub description: Option<String>,
     pub yaml: String,
     pub trigger: WorkflowTriggerInfo,
+    pub paused: bool,
     pub steps: Vec<WorkflowStepItem>,
     pub sandboxes: Vec<WorkflowSandboxItem>,
     pub recent_runs: Vec<WorkflowRunItem>,

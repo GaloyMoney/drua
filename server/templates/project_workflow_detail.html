@@ -107,10 +107,7 @@
     <tr>
       <th>Type</th>
       <td>
-        {% if workflow.trigger_type == "manual" %}manual
-        {% else %}
-          webhook{% match workflow.trigger_provider %}{% when Some(p) %} ({{ p }}){% when None %}{% endmatch %}
-        {% endif %}
+        {{ workflow.trigger_type }}{% match workflow.trigger_provider %}{% when Some(p) %} ({{ p }}){% when None %}{% endmatch %}
       </td>
     </tr>
     {% match workflow.webhook_url %}
@@ -130,6 +127,23 @@
       {% when None %}
     {% endmatch %}
   </table>
+</section>
+
+<section>
+  <h4>Status</h4>
+  {% if workflow.paused %}
+  <p><strong>Paused.</strong> No runs fire — cron fires are skipped, webhook deliveries and manual triggers are suppressed — until resumed.</p>
+  <form method="post" action="/projects/{{ project.id }}/workflows/{{ workflow.id }}/pause">
+    <input type="hidden" name="paused" value="false">
+    <button type="submit">Resume workflow</button>
+  </form>
+  {% else %}
+  <p><strong>Active.</strong></p>
+  <form method="post" action="/projects/{{ project.id }}/workflows/{{ workflow.id }}/pause">
+    <input type="hidden" name="paused" value="true">
+    <button type="submit" class="secondary">Pause workflow</button>
+  </form>
+  {% endif %}
 </section>
 
 <section>

@@ -89,14 +89,7 @@
       <tr style="cursor: pointer;" onclick="window.location='/projects/{{ project.id }}/workflows/{{ wf.id }}'">
         <td><strong>{{ wf.name }}</strong>{% match wf.description %}{% when Some(d) %}<br><small style="color: var(--pico-muted-color);">{{ d }}</small>{% when None %}{% endmatch %}</td>
         <td>
-          {% if wf.trigger_type == "manual" %}
-            <small>manual</small>
-          {% else %}
-            {% match wf.trigger_provider %}
-              {% when Some(p) %}<small>webhook ({{ p }})</small>
-              {% when None %}<small>webhook</small>
-            {% endmatch %}
-          {% endif %}
+          <small>{{ wf.trigger_type }}{% match wf.trigger_provider %}{% when Some(p) %} ({{ p }}){% when None %}{% endmatch %}{% if wf.paused %} (paused){% endif %}</small>
         </td>
         <td>{{ wf.steps.len() }}</td>
         <td><small>{{ wf.created_at }}</small></td>

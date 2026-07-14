@@ -326,6 +326,12 @@ type Mutation {
 	sandboxSuspend(input: SandboxSuspendInput!): SandboxSuspendPayload!
 	skillDelete(input: SkillDeleteInput!): SkillDeletePayload!
 	workflowDelete(input: WorkflowDeleteInput!): WorkflowDeletePayload!
+	"""
+	Pause or resume a workflow without deleting it. While paused no
+	runs fire: cron fires, webhook deliveries, and manual triggers
+	are all suppressed with a paused disposition (no run).
+	"""
+	workflowSetPaused(input: WorkflowSetPausedInput!): WorkflowSetPausedPayload!
 	workflowTrigger(input: WorkflowTriggerInput!): WorkflowTriggerPayload!
 }
 
@@ -785,6 +791,12 @@ type WorkflowDefinition {
 	id: WorkflowDefinitionId!
 	modelChain: ModelChain
 	name: String!
+	"""
+	`true` when the workflow is paused — no runs fire (cron fires,
+	webhook deliveries, and manual triggers are all suppressed with
+	a paused disposition) until resumed.
+	"""
+	paused: Boolean!
 	projectId: ProjectId!
 	recentRuns(first: Int! = 10): [WorkflowRun!]!
 	sandboxes: [WorkflowSandbox!]!
@@ -842,6 +854,15 @@ enum WorkflowSandboxKind {
 	PREEXISTING
 	REPO
 	SCRATCH
+}
+
+input WorkflowSetPausedInput {
+	definitionId: WorkflowDefinitionId!
+	paused: Boolean!
+}
+
+type WorkflowSetPausedPayload {
+	workflow: WorkflowDefinition!
 }
 
 type WorkflowStep {
@@ -903,6 +924,18 @@ type WorkflowTrigger {
 	webhookUrl: String
 }
 
+"""
+How an explicit `workflowTrigger` resolved: a run was `SPAWNED`, or
+it was deliberately suppressed because the trigger `condition` was
+`FILTERED` out or the workflow is `PAUSED`. Suppression is an
+expected outcome, not an error.
+"""
+enum WorkflowTriggerDisposition {
+	FILTERED
+	PAUSED
+	SPAWNED
+}
+
 input WorkflowTriggerInput {
 	definitionId: WorkflowDefinitionId!
 	payload: Json
@@ -915,7 +948,7 @@ enum WorkflowTriggerKind {
 }
 
 type WorkflowTriggerPayload {
-	filtered: Boolean!
+	disposition: WorkflowTriggerDisposition!
 	run: WorkflowRun
 }
 

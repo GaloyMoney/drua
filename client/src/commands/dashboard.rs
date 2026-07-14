@@ -91,6 +91,7 @@ const WORKFLOW_DEFINITIONS_QUERY: &str = r#"
             id
             name
             description
+            paused
             trigger { kind provider cronSchedule cronTimezone nextRunAt condition webhookUrl }
             steps { name stepType skill tool sandbox sandboxMode condition provider resumeCondition }
             recentRuns(first: 1) {
@@ -111,6 +112,7 @@ const WORKFLOW_DEFINITION_QUERY: &str = r#"
             name
             description
             yaml
+            paused
             trigger { kind provider cronSchedule cronTimezone nextRunAt condition webhookUrl }
             steps { name stepType skill tool sandbox sandboxMode condition provider resumeCondition }
             sandboxes { name kind branch repoUrl }
@@ -148,10 +150,18 @@ const WORKFLOW_RUN_QUERY: &str = r#"
     }
 "#;
 
+const WORKFLOW_SET_PAUSED_MUTATION: &str = r#"
+    mutation WorkflowSetPaused($input: WorkflowSetPausedInput!) {
+        workflowSetPaused(input: $input) {
+            workflow { id paused yaml }
+        }
+    }
+"#;
+
 const WORKFLOW_TRIGGER_MUTATION: &str = r#"
     mutation WorkflowTrigger($input: WorkflowTriggerInput!) {
         workflowTrigger(input: $input) {
-            filtered
+            disposition
             run {
                 id
                 definitionId
@@ -195,10 +205,36 @@ struct WorkflowTriggerResponse {
     workflow_trigger: WorkflowTriggerPayloadNode,
 }
 
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum WorkflowTriggerDisposition {
+    Spawned,
+    Filtered,
+    Paused,
+}
+
 #[derive(Debug, Deserialize)]
 struct WorkflowTriggerPayloadNode {
-    filtered: bool,
+    disposition: WorkflowTriggerDisposition,
     run: Option<WorkflowRunNode>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowSetPausedResponse {
+    workflow_set_paused: WorkflowSetPausedPayloadNode,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowSetPausedPayloadNode {
+    workflow: WorkflowSetPausedWorkflowNode,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkflowSetPausedWorkflowNode {
+    paused: bool,
+    #[serde(default)]
+    yaml: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -209,6 +245,8 @@ struct WorkflowDefinitionNode {
     description: Option<String>,
     #[serde(default)]
     yaml: String,
+    #[serde(default)]
+    paused: bool,
     trigger: WorkflowTriggerNode,
     #[serde(default)]
     steps: Vec<WorkflowStepNode>,
@@ -629,6 +667,12 @@ enum WorkflowEvent {
         is_poll: bool,
     },
     TriggerComplete(Box<WorkflowTriggerOutcome>),
+    SetPausedComplete {
+        definition_id: String,
+        paused: bool,
+        yaml: Option<String>,
+        error: Option<String>,
+    },
     ConversationLoaded {
         agent_id: String,
         agent_name: String,
@@ -641,7 +685,7 @@ enum WorkflowEvent {
 }
 
 struct WorkflowTriggerOutcome {
-    filtered: bool,
+    disposition: Option<WorkflowTriggerDisposition>,
     run_id: Option<String>,
     run_detail: Option<WorkflowRunDetail>,
     updated_runs: Option<Vec<WorkflowRunItem>>,
@@ -849,6 +893,7 @@ fn workflow_definition_node_to_item(d: WorkflowDefinitionNode) -> WorkflowDefini
         name: d.name,
         description: d.description,
         trigger: workflow_trigger_node_to_info(d.trigger),
+        paused: d.paused,
         steps: d
             .steps
             .into_iter()
@@ -869,6 +914,7 @@ fn workflow_definition_node_to_detail(d: WorkflowDefinitionNode) -> WorkflowDefi
         description: d.description,
         yaml: d.yaml,
         trigger: workflow_trigger_node_to_info(d.trigger),
+        paused: d.paused,
         steps: d
             .steps
             .into_iter()
@@ -989,6 +1035,25 @@ async fn trigger_workflow(
         )
         .await?;
     Ok(resp.workflow_trigger)
+}
+
+async fn set_workflow_paused(
+    client: &GraphqlClient,
+    definition_id: &str,
+    paused: bool,
+) -> Result<WorkflowSetPausedWorkflowNode> {
+    let resp: WorkflowSetPausedResponse = client
+        .query(
+            WORKFLOW_SET_PAUSED_MUTATION,
+            serde_json::json!({
+                "input": {
+                    "definitionId": definition_id,
+                    "paused": paused,
+                }
+            }),
+        )
+        .await?;
+    Ok(resp.workflow_set_paused.workflow)
 }
 
 async fn fetch_user_name(client: &GraphqlClient) -> Result<String> {
@@ -1550,50 +1615,32 @@ fn spawn_workflow_trigger(
     tokio::spawn(async move {
         let client = GraphqlClient::new(&base_url, &token);
         match trigger_workflow(&client, &definition_id, payload).await {
-            Ok(result) if result.filtered => {
-                let _ = tx.send(WorkflowEvent::TriggerComplete(Box::new(
-                    WorkflowTriggerOutcome {
-                        filtered: true,
-                        run_id: None,
-                        run_detail: None,
-                        updated_runs: None,
-                        error: None,
-                    },
-                )));
-            }
             Ok(result) => {
-                if let Some(run) = result.run {
+                let (run_id, run_detail, updated_runs) = if let Some(run) = result.run {
                     let run_id = run.id.clone();
                     let run_detail = match fetch_workflow_run(&client, &run_id).await {
                         Ok(detail) => detail,
                         Err(_) => workflow_run_node_to_detail(run),
                     };
                     let updated_runs = fetch_workflow_runs(&client, &definition_id).await.ok();
-                    let _ = tx.send(WorkflowEvent::TriggerComplete(Box::new(
-                        WorkflowTriggerOutcome {
-                            filtered: false,
-                            run_id: Some(run_id),
-                            run_detail: Some(run_detail),
-                            updated_runs,
-                            error: None,
-                        },
-                    )));
+                    (Some(run_id), Some(run_detail), updated_runs)
                 } else {
-                    let _ = tx.send(WorkflowEvent::TriggerComplete(Box::new(
-                        WorkflowTriggerOutcome {
-                            filtered: false,
-                            run_id: None,
-                            run_detail: None,
-                            updated_runs: None,
-                            error: None,
-                        },
-                    )));
-                }
+                    (None, None, None)
+                };
+                let _ = tx.send(WorkflowEvent::TriggerComplete(Box::new(
+                    WorkflowTriggerOutcome {
+                        disposition: Some(result.disposition),
+                        run_id,
+                        run_detail,
+                        updated_runs,
+                        error: None,
+                    },
+                )));
             }
             Err(e) => {
                 let _ = tx.send(WorkflowEvent::TriggerComplete(Box::new(
                     WorkflowTriggerOutcome {
-                        filtered: false,
+                        disposition: None,
                         run_id: None,
                         run_detail: None,
                         updated_runs: None,
@@ -1602,6 +1649,33 @@ fn spawn_workflow_trigger(
                 )));
             }
         }
+    });
+}
+
+fn spawn_workflow_set_paused(
+    base_url: String,
+    token: String,
+    definition_id: String,
+    paused: bool,
+    tx: mpsc::UnboundedSender<WorkflowEvent>,
+) {
+    tokio::spawn(async move {
+        let client = GraphqlClient::new(&base_url, &token);
+        let (resulting_paused, yaml, error) =
+            match set_workflow_paused(&client, &definition_id, paused).await {
+                Ok(w) => (w.paused, Some(w.yaml), None),
+                Err(e) => (
+                    paused,
+                    None,
+                    Some(format!("Failed to update workflow: {e}")),
+                ),
+            };
+        let _ = tx.send(WorkflowEvent::SetPausedComplete {
+            definition_id,
+            paused: resulting_paused,
+            yaml,
+            error,
+        });
     });
 }
 
@@ -1689,10 +1763,18 @@ fn handle_workflow_event(
                 state.set_workflow_error(error);
                 return;
             }
-            if outcome.filtered {
-                state.status_message =
-                    Some("Trigger condition filtered; no run created".to_string());
-                return;
+            match outcome.disposition {
+                Some(WorkflowTriggerDisposition::Filtered) => {
+                    state.status_message =
+                        Some("Trigger condition filtered; no run created".to_string());
+                    return;
+                }
+                Some(WorkflowTriggerDisposition::Paused) => {
+                    state.status_message =
+                        Some("Workflow is paused; resume it to trigger runs".to_string());
+                    return;
+                }
+                _ => {}
             }
             if let Some(ref run_id) = outcome.run_id {
                 state.status_message = Some(format!("Workflow run {run_id} created"));
@@ -1708,6 +1790,26 @@ fn handle_workflow_event(
             } else {
                 state.status_message = Some("Workflow trigger returned no run".to_string());
             }
+        }
+        WorkflowEvent::SetPausedComplete {
+            definition_id,
+            paused,
+            yaml,
+            error,
+        } => {
+            if let Some(error) = error {
+                state.set_workflow_error(error);
+                return;
+            }
+            state.set_workflow_definition_paused(&definition_id, paused, yaml);
+            state.status_message = Some(
+                if paused {
+                    "Workflow paused"
+                } else {
+                    "Workflow resumed"
+                }
+                .to_string(),
+            );
         }
         WorkflowEvent::ConversationLoaded {
             agent_id,
@@ -1998,6 +2100,19 @@ async fn run_event_loop(
                                     config.auth_token.clone(),
                                     definition_id,
                                     payload,
+                                    workflow_tx.clone(),
+                                );
+                            }
+                            handlers::Action::SetWorkflowPaused { definition_id, paused } => {
+                                state.status_message = Some(
+                                    if paused { "Pausing workflow…" } else { "Resuming workflow…" }
+                                        .to_string(),
+                                );
+                                spawn_workflow_set_paused(
+                                    config.server_url.clone(),
+                                    config.auth_token.clone(),
+                                    definition_id,
+                                    paused,
                                     workflow_tx.clone(),
                                 );
                             }
