@@ -14,6 +14,10 @@ use crate::workflow::definition::WorkflowStepDef;
 /// - `Errored`: at least one step hit an infrastructure-level error
 ///   (sandbox not ready, idle timeout, executor / agent error, etc.).
 ///   Errored takes precedence over Failed.
+/// - `Cancelled`: an operator (or a self-cancelling workflow) aborted
+///   the run via `Workflows::cancel_run` before it reached one of the
+///   above. Distinct so observability + skills can tell a deliberate
+///   abort apart from an infrastructure error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "VARCHAR", rename_all = "snake_case")]
@@ -24,6 +28,22 @@ pub enum WorkflowRunState {
     Succeeded,
     Failed,
     Errored,
+    Cancelled,
+}
+
+impl WorkflowRunState {
+    /// True once the run has reached a state the executor will never
+    /// leave. `WaitingForEvent` is deliberately excluded — a parked
+    /// run resumes on a matching inbound event.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            WorkflowRunState::Succeeded
+                | WorkflowRunState::Failed
+                | WorkflowRunState::Errored
+                | WorkflowRunState::Cancelled
+        )
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +161,16 @@ pub enum WorkflowRunEvent {
     RunCompleted {
         state: WorkflowRunState,
         completed_at: DateTime<Utc>,
+    },
+    /// Operator- (or self-) initiated abort. Terminal, and takes
+    /// precedence over whatever step state the run was in. `cancelled_by`
+    /// is the auth-subject label of the caller; `reason` is an optional
+    /// free-text audit note.
+    RunCancelled {
+        cancelled_by: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+        cancelled_at: DateTime<Utc>,
     },
 }
 
@@ -366,6 +396,7 @@ impl WorkflowRun {
         idempotency_guard!(
             self.events.iter_all().rev(),
             already_applied: WorkflowRunEvent::RunCompleted { .. },
+            already_applied: WorkflowRunEvent::RunCancelled { .. },
         );
         if self.state == WorkflowRunState::WaitingForEvent {
             return Idempotent::AlreadyApplied;
@@ -383,6 +414,31 @@ impl WorkflowRun {
         self.events.push(WorkflowRunEvent::RunCompleted {
             state,
             completed_at: now,
+        });
+        Idempotent::Executed(())
+    }
+
+    /// Aborts the run: records a terminal `Cancelled` state regardless
+    /// of which step was in flight. No-op if the run already reached any
+    /// terminal state (idempotent against retries and races with
+    /// `run_completed` — whichever terminal event lands first wins).
+    ///
+    /// The executor observes the persisted terminal state on its next
+    /// job attempt and exits without further work; the queue slot frees
+    /// once that attempt completes.
+    pub fn cancel(&mut self, cancelled_by: String, reason: Option<String>) -> Idempotent<()> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied: WorkflowRunEvent::RunCompleted { .. },
+            already_applied: WorkflowRunEvent::RunCancelled { .. },
+        );
+        let now = Utc::now();
+        self.state = WorkflowRunState::Cancelled;
+        self.completed_at = Some(now);
+        self.events.push(WorkflowRunEvent::RunCancelled {
+            cancelled_by,
+            reason,
+            cancelled_at: now,
         });
         Idempotent::Executed(())
     }
@@ -636,6 +692,10 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
                 } => {
                     state = *s;
                     completed_at = Some(*ts);
+                }
+                WorkflowRunEvent::RunCancelled { cancelled_at, .. } => {
+                    state = WorkflowRunState::Cancelled;
+                    completed_at = Some(*cancelled_at);
                 }
             }
         }
@@ -1252,5 +1312,94 @@ mod tests {
             waiting_provider: Some("github_app".into()),
         };
         assert_eq!(sr.step_state(), WorkflowStepState::WaitingForEvent);
+    }
+
+    // ── Cancel tests ──
+
+    #[test]
+    fn cancel_transitions_running_to_cancelled() {
+        let mut run = fresh_run(&["a"]);
+        start(&mut run, "a");
+        assert_eq!(run.state, WorkflowRunState::Running);
+
+        assert!(run
+            .cancel("user:abc".into(), Some("stuck".into()))
+            .did_execute());
+        assert_eq!(run.state, WorkflowRunState::Cancelled);
+        assert!(run.completed_at.is_some());
+        assert!(run.state.is_terminal());
+    }
+
+    #[test]
+    fn cancel_from_waiting_for_event() {
+        let mut run = fresh_run(&["wait_step"]);
+        run.step_waiting("wait_step".into(), "github_app".into())
+            .did_execute();
+        assert_eq!(run.state, WorkflowRunState::WaitingForEvent);
+
+        assert!(run.cancel("user:abc".into(), None).did_execute());
+        assert_eq!(run.state, WorkflowRunState::Cancelled);
+    }
+
+    #[test]
+    fn cancel_is_idempotent_against_retry() {
+        let mut run = fresh_run(&["a"]);
+        run.cancel("user:abc".into(), None).did_execute();
+        let outcome = run.cancel("user:xyz".into(), Some("again".into()));
+        assert!(matches!(outcome, Idempotent::AlreadyApplied));
+        assert_eq!(run.state, WorkflowRunState::Cancelled);
+    }
+
+    #[test]
+    fn cancel_is_noop_on_already_completed_run() {
+        let mut run = fresh_run(&["a"]);
+        start(&mut run, "a");
+        complete(&mut run, "a", json!({ "success": true }));
+        finalize(&mut run);
+        assert_eq!(run.state, WorkflowRunState::Succeeded);
+
+        let outcome = run.cancel("user:abc".into(), None);
+        assert!(matches!(outcome, Idempotent::AlreadyApplied));
+        // The earlier terminal state wins — cancel does not overwrite it.
+        assert_eq!(run.state, WorkflowRunState::Succeeded);
+    }
+
+    #[test]
+    fn run_completed_is_noop_after_cancel() {
+        let mut run = fresh_run(&["a"]);
+        run.cancel("user:abc".into(), None).did_execute();
+        let outcome = run.run_completed();
+        assert!(matches!(outcome, Idempotent::AlreadyApplied));
+        assert_eq!(run.state, WorkflowRunState::Cancelled);
+    }
+
+    #[test]
+    fn cancel_hydrates_from_events() {
+        let mut run = fresh_run(&["a"]);
+        start(&mut run, "a");
+        run.cancel("user:abc".into(), Some("git-proxy down".into()))
+            .did_execute();
+        let events = run.events;
+        let rehydrated = WorkflowRun::try_from_events(events).unwrap();
+        assert_eq!(rehydrated.state, WorkflowRunState::Cancelled);
+        assert!(rehydrated.completed_at.is_some());
+    }
+
+    #[test]
+    fn cancel_event_wire_format() {
+        let ev = WorkflowRunEvent::RunCancelled {
+            cancelled_by: "user:abc".into(),
+            reason: Some("stuck".into()),
+            cancelled_at: Utc::now(),
+        };
+        let v = serde_json::to_value(&ev).unwrap();
+        assert_eq!(
+            v.get("type").and_then(|t| t.as_str()),
+            Some("run_cancelled")
+        );
+        assert_eq!(
+            v.get("cancelled_by").and_then(|c| c.as_str()),
+            Some("user:abc")
+        );
     }
 }

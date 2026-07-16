@@ -375,6 +375,7 @@ pub enum WorkflowRunState {
     Succeeded,
     Failed,
     Errored,
+    Cancelled,
 }
 
 impl From<DomainWorkflowRunState> for WorkflowRunState {
@@ -386,6 +387,7 @@ impl From<DomainWorkflowRunState> for WorkflowRunState {
             DomainWorkflowRunState::Succeeded => Self::Succeeded,
             DomainWorkflowRunState::Failed => Self::Failed,
             DomainWorkflowRunState::Errored => Self::Errored,
+            DomainWorkflowRunState::Cancelled => Self::Cancelled,
         }
     }
 }

@@ -820,6 +820,7 @@ type WorkflowRun {
 scalar WorkflowRunId
 
 enum WorkflowRunState {
+	CANCELLED
 	ERRORED
 	FAILED
 	PENDING

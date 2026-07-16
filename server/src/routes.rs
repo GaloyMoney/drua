@@ -1847,6 +1847,7 @@ fn workflow_run_state_str(state: domain::workflow::WorkflowRunState) -> &'static
         domain::workflow::WorkflowRunState::Succeeded => "succeeded",
         domain::workflow::WorkflowRunState::Failed => "failed",
         domain::workflow::WorkflowRunState::Errored => "errored",
+        domain::workflow::WorkflowRunState::Cancelled => "cancelled",
     }
 }
 

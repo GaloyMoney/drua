@@ -1163,3 +1163,38 @@ async fn update_session_chain_rejects_workflow_agents() {
         Err(drua_core::agent::AgentError::WorkflowAgentChainImmutable)
     ));
 }
+
+#[tokio::test]
+async fn delete_rejects_workflow_agents() {
+    let pool = pool().await;
+    let (agents, _sandboxes, _sandbox_id, project_id) =
+        fixture_for_detach_test(&pool, "sb-delete-wf").await;
+    let (workflow_id, run_id) = seed_workflow_run(&pool, project_id).await;
+
+    let mut op = agents.begin_op().await.expect("begin op");
+    let agent = agents
+        .create_for_workflow_run_in_op(
+            &mut op,
+            project_id,
+            workflow_id,
+            run_id,
+            "wf-step",
+            None,
+            None,
+            drua_core::workflow::default_output_schema(),
+        )
+        .await
+        .expect("create workflow agent");
+    op.commit().await.expect("commit");
+
+    let sub = AuthSubject::User(UserId::new());
+    let result = agents.delete(&sub, agent.id).await;
+    assert!(matches!(
+        result,
+        Err(drua_core::agent::AgentError::WorkflowAgentDeleteForbidden { .. })
+    ));
+
+    // The agent must survive the rejected delete.
+    let still_there = agents.find_by_id(&sub, agent.id).await;
+    assert!(still_there.is_ok(), "workflow agent should not be deleted");
+}

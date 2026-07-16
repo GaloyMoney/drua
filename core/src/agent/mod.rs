@@ -749,6 +749,17 @@ impl Agents {
             AuthVerb::Delete,
             AuthResource::Agent(agent.project_id, Some(agent.id)),
         )?;
+        // A workflow agent's lifecycle is owned by its run. Deleting it
+        // directly stops the model burn but leaves `workflow_runs` +
+        // `job_executions` zombied at `running` with the queue locked.
+        // Route operators to `workflow cancel`, which transitions the run
+        // to a terminal state atomically alongside the agent soft-delete.
+        if let Some(run_id) = agent.workflow_run_id {
+            return Err(AgentError::WorkflowAgentDeleteForbidden {
+                agent_id: id,
+                run_id,
+            });
+        }
         Audit::record_action_if_unset("agent.delete");
         Audit::record_project_id(agent.project_id);
         Audit::record_agent_id(id);
@@ -822,6 +833,46 @@ impl Agents {
             }
         }
         Ok(())
+    }
+
+    /// Soft-delete every agent spawned by a single workflow run (as
+    /// opposed to [`Self::cascade_delete_for_workflow_id_in_op`], which
+    /// spans all runs of a definition). Returns the deleted agent ids so
+    /// the caller can invalidate their in-memory session caches after the
+    /// op commits. Used by `Workflows::cancel_run`.
+    #[instrument(
+        name = "domain.agent.cascade_delete_for_workflow_run_id_in_op",
+        skip(self, op)
+    )]
+    pub async fn cascade_delete_for_workflow_run_id_in_op(
+        &self,
+        op: &mut es_entity::DbOp<'_>,
+        run_id: WorkflowRunId,
+    ) -> Result<Vec<AgentId>, AgentError> {
+        const PAGE_SIZE: usize = 100;
+        let mut deleted = Vec::new();
+        loop {
+            let result = self
+                .repo
+                .list_for_workflow_run_id_by_created_at_in_op(
+                    &mut *op,
+                    Some(run_id),
+                    es_entity::PaginatedQueryArgs {
+                        first: PAGE_SIZE,
+                        after: None,
+                    },
+                    es_entity::ListDirection::Ascending,
+                )
+                .await?;
+            if result.entities.is_empty() {
+                break;
+            }
+            for agent in result.entities {
+                self.delete_in_op(op, agent.id).await?;
+                deleted.push(agent.id);
+            }
+        }
+        Ok(deleted)
     }
 
     /// Re-attach with a different mode: downgrade unconditional; upgrade to

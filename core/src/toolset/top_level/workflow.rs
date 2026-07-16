@@ -115,6 +115,13 @@ enum WorkflowParams {
     Delete {
         definition_id: WorkflowDefinitionId,
     },
+    /// Abort an in-flight run. Terminal `cancelled` state; the run's
+    /// agents are soft-deleted and the queue slot frees.
+    Cancel {
+        run_id: WorkflowRunId,
+        #[serde(default)]
+        reason: Option<String>,
+    },
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -309,6 +316,7 @@ impl WorkflowParams {
             Self::Run { .. } => "workflow.run",
             Self::Update { .. } => "workflow.update",
             Self::Delete { .. } => "workflow.delete",
+            Self::Cancel { .. } => "workflow.cancel",
         }
     }
 }
@@ -471,8 +479,8 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
         "properties": {
             "command": {
                 "type": "string",
-                "enum": ["create", "list", "get", "trigger", "runs", "run", "update", "delete"],
-                "description": "Which workflow operation to perform. `trigger` returns immediately with the freshly-spawned run. `runs` lists runs (truncated outputs); `run` returns a single run with full per-step output."
+                "enum": ["create", "list", "get", "trigger", "runs", "run", "update", "delete", "cancel"],
+                "description": "Which workflow operation to perform. `trigger` returns immediately with the freshly-spawned run. `runs` lists runs (truncated outputs); `run` returns a single run with full per-step output. `cancel` aborts an in-flight run (requires `run_id`, optional `reason`)."
             },
             "name": {
                 "type": "string",
@@ -524,7 +532,11 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             "run_id": {
                 "type": "string",
                 "format": "uuid",
-                "description": "Workflow run ID (run)."
+                "description": "Workflow run ID (run, cancel)."
+            },
+            "reason": {
+                "type": "string",
+                "description": "Optional free-text audit note recorded on the run_cancelled event (cancel)."
             },
             "payload": {
                 "description": "Trigger context payload (trigger). Defaults to {}."
@@ -622,7 +634,9 @@ impl TopLevelTool for WorkflowTool {
          `provider`/`manual`/`trigger_condition`+`update_trigger`, \
          `model_chain`+`clear_model_chain`), \
          `delete` (requires `definition_id`; cascades to runs and queues \
-         a `DeleteFile` on the canonical YAML)."
+         a `DeleteFile` on the canonical YAML), \
+         `cancel` (requires `run_id`, optional `reason`; aborts an \
+         in-flight run to a terminal `cancelled` state and frees the queue)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -925,6 +939,26 @@ impl TopLevelTool for WorkflowTool {
                 };
                 (text, out)
             }
+
+            WorkflowParams::Cancel { run_id, reason } => {
+                let run = self
+                    .workflows
+                    .cancel_run(subject, run_id, reason.filter(|s| !s.is_empty()))
+                    .await
+                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                let text = format!(
+                    "Run {} state: {}.\n\n{}",
+                    run.id,
+                    run_state_str(run.state),
+                    format_run_text(&run),
+                );
+                let out = WorkflowOutput {
+                    command: "cancel".to_string(),
+                    run: Some(run_to_output(&run)),
+                    ..Default::default()
+                };
+                (text, out)
+            }
         };
 
         let structured = serde_json::to_value(&out).expect("WorkflowOutput serialization");
@@ -1079,6 +1113,7 @@ fn run_state_str(state: WorkflowRunState) -> &'static str {
         WorkflowRunState::Succeeded => "succeeded",
         WorkflowRunState::Failed => "failed",
         WorkflowRunState::Errored => "errored",
+        WorkflowRunState::Cancelled => "cancelled",
     }
 }
 

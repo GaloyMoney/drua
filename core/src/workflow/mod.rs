@@ -102,6 +102,26 @@ fn payload_digest(trigger_context: &serde_json::Value) -> String {
     hex::encode(digest)
 }
 
+/// Stable, human-readable identity for the `cancelled_by` field on a
+/// `RunCancelled` event. Mirrors the actor dimensions the audit log
+/// records, collapsed into one string so it lives on the event body.
+fn subject_label(sub: &AuthSubject) -> String {
+    match sub {
+        AuthSubject::User(id) => format!("user:{id}"),
+        AuthSubject::ExportedAgent(user_id, creds_id, _) => {
+            format!("exported_agent:{creds_id} (user:{user_id})")
+        }
+        AuthSubject::Agent(_, agent_id, _) => format!("agent:{agent_id}"),
+        AuthSubject::AgentOnBehalfOfUser(user_id, _, agent_id, _) => {
+            format!("agent:{agent_id} (on behalf of user:{user_id})")
+        }
+        AuthSubject::WorkflowExecutor(_, def_id, run_id, _) => {
+            format!("workflow_executor:run={run_id} (definition:{def_id})")
+        }
+        AuthSubject::Anonymous => "anonymous".to_string(),
+    }
+}
+
 fn record_trigger_filtered_audit(
     definition: &WorkflowDefinition,
     condition_body: &str,
@@ -1199,6 +1219,61 @@ impl Workflows {
             AuthVerb::Read,
             AuthResource::Workflow(run.project_id, Some(run.definition_id)),
         )?;
+        Ok(run)
+    }
+
+    /// Abort an in-flight run: write a terminal `Cancelled` state + a
+    /// `RunCancelled` event, then soft-delete the run's agent(s) so the
+    /// model burn stops. Idempotent — cancelling an already-terminal run
+    /// returns its current state unchanged.
+    ///
+    /// Returns as soon as the transition is committed. The executor loop
+    /// shuts down asynchronously: it observes the terminal state on its
+    /// next job attempt and exits, freeing the queue slot. Deleting the
+    /// run's agents also unblocks an executor parked on a hung agent turn
+    /// (the next `send_message` finds no agent and errors the step).
+    #[instrument(name = "core.workflow.cancel_run", skip_all)]
+    pub async fn cancel_run(
+        &self,
+        sub: &AuthSubject,
+        run_id: WorkflowRunId,
+        reason: Option<String>,
+    ) -> Result<WorkflowRun, WorkflowError> {
+        let mut run = self.run_repo.find_by_id(run_id).await?;
+        sub.can(
+            AuthVerb::Update,
+            AuthResource::Workflow(run.project_id, Some(run.definition_id)),
+        )?;
+        Audit::record_action_if_unset("workflow.cancel");
+        Audit::record_project_id(run.project_id);
+        Audit::record_workflow_id(run.definition_id);
+        Audit::record_workflow_run_id(run.id);
+
+        // Already terminal (finished on its own, or a prior cancel): no-op.
+        if run.state.is_terminal() {
+            return Ok(run);
+        }
+
+        let cancelled_by = subject_label(sub);
+        Audit::record_metadata(serde_json::json!({
+            "cancelled_by": cancelled_by,
+            "reason": reason,
+        }));
+
+        let mut op = self.run_repo.begin_op().await?;
+        let deleted_agents = if run.cancel(cancelled_by, reason).did_execute() {
+            self.run_repo.update_in_op(&mut op, &mut run).await?;
+            self.agents
+                .cascade_delete_for_workflow_run_id_in_op(&mut op, run_id)
+                .await?
+        } else {
+            Vec::new()
+        };
+        op.commit().await?;
+
+        for agent_id in deleted_agents {
+            self.agents.invalidate_agent_cache(agent_id);
+        }
         Ok(run)
     }
 

@@ -313,6 +313,9 @@ enum WorkflowCommand {
     Trigger,
     /// Read a single run with full per-step outputs.
     Run,
+    /// Abort an in-flight run: terminal `cancelled` state, agents
+    /// soft-deleted, queue freed. Requires `run_id`; optional `reason`.
+    Cancel,
 }
 
 /// Tagged step input. `type: agent_step` (the historical default,
@@ -526,9 +529,14 @@ struct WorkflowParams {
     #[schemars(with = "Option<uuid::Uuid>")]
     definition_id: Option<WorkflowDefinitionId>,
 
-    /// Required for `run`.
+    /// Required for `run`, `cancel`.
     #[schemars(with = "Option<uuid::Uuid>")]
     run_id: Option<WorkflowRunId>,
+
+    /// `cancel`: optional free-text audit note recorded on the
+    /// `run_cancelled` event.
+    #[serde(default)]
+    reason: Option<String>,
 
     /// `trigger`: webhook-equivalent payload bound to the run's
     /// `trigger.*` template namespace. Defaults to `{}`.
@@ -1487,6 +1495,25 @@ impl AdminToolSet {
                     &run,
                 ))]))
             }
+
+            WorkflowCommand::Cancel => {
+                let run_id = params.run_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("run_id is required for cancel".to_string())
+                })?;
+                Audit::record_action("workflow.cancel");
+                let reason = params.reason.filter(|s| !s.is_empty());
+                let run = self
+                    .workflows
+                    .cancel_run(subject, run_id, reason)
+                    .await
+                    .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "Run {} state: {}.\n{}",
+                    run.id,
+                    run_state(run.state),
+                    format_run(&run),
+                ))]))
+            }
         }
     }
 
@@ -2072,18 +2099,25 @@ fn format_workflow(d: &WorkflowDefinition, created: bool) -> String {
 /// compact JSON (one per line) so callers can read the structured
 /// payload directly without a second round-trip through the inspect
 /// MCP. Used by `trigger`, `await_run`, and `run`.
-fn format_run(r: &WorkflowRun) -> String {
-    let state = match r.state {
+fn run_state(state: WorkflowRunState) -> &'static str {
+    match state {
         WorkflowRunState::Pending => "pending",
         WorkflowRunState::Running => "running",
         WorkflowRunState::WaitingForEvent => "waiting_for_event",
         WorkflowRunState::Succeeded => "succeeded",
         WorkflowRunState::Failed => "failed",
         WorkflowRunState::Errored => "errored",
-    };
+        WorkflowRunState::Cancelled => "cancelled",
+    }
+}
+
+fn format_run(r: &WorkflowRun) -> String {
     let mut out = format!(
         "Run:\n  id: {}\n  definition_id: {}\n  project_id: {}\n  state: {}\n",
-        r.id, r.definition_id, r.project_id, state,
+        r.id,
+        r.definition_id,
+        r.project_id,
+        run_state(r.state),
     );
     if !r.step_results.is_empty() {
         out.push_str("  steps:\n");
@@ -2736,6 +2770,32 @@ mod tests {
         .expect("parse");
         assert!(matches!(p.command, WorkflowCommand::Delete));
         assert_eq!(p.definition_id.map(uuid::Uuid::from), Some(definition_id));
+    }
+
+    #[test]
+    fn workflow_cancel_takes_run_id_and_reason() {
+        let run_id = uuid::Uuid::new_v4();
+        let p: WorkflowParams = parse_params(args(serde_json::json!({
+            "command": "cancel",
+            "run_id": run_id,
+            "reason": "git-proxy connectivity broken",
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, WorkflowCommand::Cancel));
+        assert_eq!(p.run_id.map(uuid::Uuid::from), Some(run_id));
+        assert_eq!(p.reason.as_deref(), Some("git-proxy connectivity broken"));
+    }
+
+    #[test]
+    fn workflow_cancel_parses_without_reason() {
+        let run_id = uuid::Uuid::new_v4();
+        let p: WorkflowParams = parse_params(args(serde_json::json!({
+            "command": "cancel",
+            "run_id": run_id,
+        })))
+        .expect("parse");
+        assert!(matches!(p.command, WorkflowCommand::Cancel));
+        assert!(p.reason.is_none());
     }
 
     #[test]
