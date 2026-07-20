@@ -3,6 +3,7 @@ mod entity;
 pub mod error;
 pub(crate) mod repo;
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -59,6 +60,7 @@ impl Sandboxes {
                 storage_class,
                 mount_path,
                 nix_store,
+                ..
             } => {
                 let mut client = K8sAdminClient::try_from_env(namespace, template_name).await?;
                 // PVC-backed mount; without it pods use ephemeral storage.
@@ -1049,5 +1051,56 @@ impl Sandboxes {
             self.repo.update_in_op(op, &mut sandbox).await?;
         }
         Ok(sandbox)
+    }
+
+    /// One PVC-janitor sweep: reclaim every `managed-by=drua` PVC whose
+    /// owning sandbox row is gone. Safe under HA — concurrent sweeps and
+    /// in-flight cascades race on idempotent `delete_pvcs` (404s ignored).
+    /// Returns the count of orphan owners swept.
+    #[instrument(name = "domain.sandbox.reap_orphaned_pvcs", skip(self))]
+    pub async fn reap_orphaned_pvcs(&self) -> Result<usize, SandboxError> {
+        let owners = self.admin.list_pvc_owners().await?;
+        if owners.is_empty() {
+            return Ok(0);
+        }
+        let live: HashSet<String> = self.repo.live_resource_names().await?.into_iter().collect();
+        let mut reaped = 0;
+        for owner in owners {
+            if live.contains(&owner) {
+                continue;
+            }
+            tracing::warn!(sandbox = %owner, "reaping orphaned PVC(s)");
+            if let Err(e) = self.admin.delete_pvcs(&owner).await {
+                tracing::warn!(
+                    sandbox = %owner,
+                    error = %e,
+                    "reap delete_pvcs failed; will retry next sweep"
+                );
+                continue;
+            }
+            reaped += 1;
+        }
+        Ok(reaped)
+    }
+
+    /// Runs `reap_orphaned_pvcs` on a fixed interval for the lifetime of
+    /// `App`. Skipped ticks don't pile up; each sweep is best-effort and
+    /// logs failures without aborting the loop.
+    pub fn spawn_pvc_janitor(self: &Arc<Self>, interval: Duration) {
+        let sandboxes = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                match sandboxes.reap_orphaned_pvcs().await {
+                    Ok(reaped) if reaped > 0 => {
+                        tracing::info!(reaped, "pvc janitor: reclaimed orphaned PVCs");
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "pvc janitor: sweep failed"),
+                }
+            }
+        });
     }
 }

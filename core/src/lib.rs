@@ -42,7 +42,7 @@ use primitives::ContextGeneration;
 use project::Projects;
 use project_secret::ProjectSecrets;
 use prompt_executor::PromptExecutor;
-use sandbox::Sandboxes;
+use sandbox::{Sandboxes, SandboxBackendConfig};
 use skill::Skills;
 use toolset::{
     AdminToolSet, Bash, CodeAssistantToolSet, Delete, GlobTool, Grep, LibraryToolSet, Ls, MoveFile,
@@ -201,7 +201,17 @@ impl App {
             "git-proxy allow-list loaded"
         );
 
+        let pvc_janitor_interval = match &config.sandbox.backend {
+            SandboxBackendConfig::K8s {
+                pvc_janitor_interval_secs,
+                ..
+            } => Some(std::time::Duration::from_secs(*pvc_janitor_interval_secs)),
+            _ => None,
+        };
         let sandboxes = Arc::new(Sandboxes::init(pool, config.sandbox, allowlist.clone()).await?);
+        if let Some(interval) = pvc_janitor_interval {
+            sandboxes.spawn_pvc_janitor(interval);
+        }
 
         let mirror_root = config
             .git_proxy

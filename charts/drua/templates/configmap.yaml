@@ -335,4 +335,7 @@ data:
           size: {{ .nixStore.size | quote }}
         {{- end }}
         {{- end }}
+        {{- with .Values.sandbox.pvcJanitorIntervalSeconds }}
+        pvc_janitor_interval_secs: {{ . }}
+        {{- end }}
     {{- end }}
