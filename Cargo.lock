@@ -1491,7 +1491,7 @@ dependencies = [
  "drua-library",
  "drua-tool-caching",
  "drua-tunnel",
- "es-entity",
+ "es-entity 0.10.40",
  "futures",
  "git2",
  "github-app",
@@ -1554,7 +1554,7 @@ dependencies = [
  "code-assistant-core",
  "derive_builder",
  "dirs",
- "es-entity",
+ "es-entity 0.10.40",
  "git2",
  "github-app",
  "job",
@@ -1574,7 +1574,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "drua-core",
- "es-entity",
+ "es-entity 0.10.40",
  "http",
  "rmcp",
  "schemars 0.8.22",
@@ -1604,7 +1604,7 @@ dependencies = [
  "drua-tracing-utils",
  "drua-tunnel",
  "ed25519-dalek",
- "es-entity",
+ "es-entity 0.10.40",
  "hex",
  "hmac",
  "http-body-util",
@@ -1640,7 +1640,7 @@ dependencies = [
 name = "drua-tool-caching"
 version = "0.1.0"
 dependencies = [
- "es-entity",
+ "es-entity 0.10.40",
  "regex",
  "rmcp",
  "schemars 0.8.22",
@@ -1812,7 +1812,30 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "derive_builder",
- "es-entity-macros",
+ "es-entity-macros 0.10.40",
+ "im",
+ "parking_lot",
+ "pin-project",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "es-entity"
+version = "0.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e9202fb16f15dd697e20a31b1b7a38772f6e7926014cacd847cdefe2f2ce214"
+dependencies = [
+ "async-stream",
+ "chrono",
+ "derive_builder",
+ "es-entity-macros 0.11.2",
+ "futures-core",
+ "futures-util",
  "im",
  "opentelemetry 0.32.0",
  "opentelemetry_sdk 0.32.1",
@@ -1833,6 +1856,21 @@ name = "es-entity-macros"
 version = "0.10.40"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4b4d2f9d7f0926ec76535e65a764ab2528657731811fa2b35f3563573dd1fc60"
+dependencies = [
+ "convert_case",
+ "darling 0.23.0",
+ "pluralizer",
+ "proc-macro2",
+ "quote",
+ "regex",
+ "syn",
+]
+
+[[package]]
+name = "es-entity-macros"
+version = "0.11.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0c32fdc62f4087581040d26a88e6708c0c754761b7509709ab13b7f4cff112d"
 dependencies = [
  "convert_case",
  "darling 0.23.0",
@@ -2911,14 +2949,14 @@ dependencies = [
 
 [[package]]
 name = "job"
-version = "0.6.28"
+version = "0.6.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "518512c0122e327140301d066e994339ce74cbbff0d33be40d0292d0c1b57d94"
+checksum = "87168d8fdabbc2b5a57d63470040134da6ae9135140af92e03ee494e277475e2"
 dependencies = [
  "async-trait",
  "chrono",
  "derive_builder",
- "es-entity",
+ "es-entity 0.11.2",
  "futures",
  "rand 0.10.1",
  "serde",
@@ -3614,7 +3652,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "derive_builder",
- "es-entity",
+ "es-entity 0.10.40",
  "futures",
  "im",
  "job",
