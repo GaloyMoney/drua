@@ -132,7 +132,7 @@ tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 url = "2"
 
 # Event sourcing
-es-entity = "0.10.40"
+es-entity = "0.11.6"
 derive_builder = "0.20"
 
 # Job processing

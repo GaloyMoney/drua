@@ -1804,15 +1804,18 @@ dependencies = [
 
 [[package]]
 name = "es-entity"
-version = "0.10.40"
+version = "0.11.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4eef4c84ca2adcf9627af48c440d558c856a915c0b85e2fd884a3852ee8ce3d9"
+checksum = "e3ee4087e4fa197a04214b70f0d7552923d87728d9a35be2b2f3d887def30f3b"
 dependencies = [
  "async-graphql",
+ "async-stream",
  "base64 0.22.1",
  "chrono",
  "derive_builder",
  "es-entity-macros",
+ "futures-core",
+ "futures-util",
  "im",
  "opentelemetry 0.32.0",
  "opentelemetry_sdk 0.32.1",
@@ -1830,9 +1833,9 @@ dependencies = [
 
 [[package]]
 name = "es-entity-macros"
-version = "0.10.40"
+version = "0.11.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b4d2f9d7f0926ec76535e65a764ab2528657731811fa2b35f3563573dd1fc60"
+checksum = "bfead6a9b91b8c4d9c97b5b0eeb378399bc7c963b2024d92961120d954318ae3"
 dependencies = [
  "convert_case",
  "darling 0.23.0",
@@ -2911,9 +2914,9 @@ dependencies = [
 
 [[package]]
 name = "job"
-version = "0.6.28"
+version = "0.6.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "518512c0122e327140301d066e994339ce74cbbff0d33be40d0292d0c1b57d94"
+checksum = "9551994aff279dd8c3cd296391ed559cfd3a06f23652ea72d79b73c8b36fa771"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3607,9 +3610,9 @@ dependencies = [
 
 [[package]]
 name = "obix"
-version = "0.2.26"
+version = "0.2.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e962274bd197f8cab9f1efa045fec54a70010b00720ebd13274150d19362fb2a"
+checksum = "c0bafdd5b56ebcc3ff630b35c6a9ce1db25ccf5c08eec48a0d4374194d7602cd"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3630,9 +3633,9 @@ dependencies = [
 
 [[package]]
 name = "obix-macros"
-version = "0.2.26"
+version = "0.2.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3847e27014116cd3c22b33693571fb4ebe6c4ee46e6687a98b5ffdf4b8867e0"
+checksum = "1bd2f97f84ea2563a6a103a16b31ca4605f81b4c19426a0a5d680003215e2409"
 dependencies = [
  "darling 0.23.0",
  "proc-macro2",
