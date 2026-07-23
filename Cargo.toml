@@ -137,7 +137,7 @@ derive_builder = "0.20"
 
 # Job processing
 job = { version = "0.6.28", features = ["es-entity"] }
-obix = "0.2"
+obix = "0.3.3"
 
 # Database
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
