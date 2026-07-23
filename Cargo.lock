@@ -1826,14 +1826,14 @@ dependencies = [
 
 [[package]]
 name = "es-entity"
-version = "0.11.2"
+version = "0.11.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e9202fb16f15dd697e20a31b1b7a38772f6e7926014cacd847cdefe2f2ce214"
+checksum = "b4218c80d3db58bc7fe48fba253e49620df846697ad3bf9007b247c11aaa68b4"
 dependencies = [
  "async-stream",
  "chrono",
  "derive_builder",
- "es-entity-macros 0.11.2",
+ "es-entity-macros 0.11.5",
  "futures-core",
  "futures-util",
  "im",
@@ -1868,9 +1868,9 @@ dependencies = [
 
 [[package]]
 name = "es-entity-macros"
-version = "0.11.2"
+version = "0.11.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c0c32fdc62f4087581040d26a88e6708c0c754761b7509709ab13b7f4cff112d"
+checksum = "3eda195609616c97a424a5178e1e2d175fe2abcf801d02e0db996345aee78a33"
 dependencies = [
  "convert_case",
  "darling 0.23.0",
@@ -2949,14 +2949,14 @@ dependencies = [
 
 [[package]]
 name = "job"
-version = "0.6.30"
+version = "0.6.31"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "87168d8fdabbc2b5a57d63470040134da6ae9135140af92e03ee494e277475e2"
+checksum = "9551994aff279dd8c3cd296391ed559cfd3a06f23652ea72d79b73c8b36fa771"
 dependencies = [
  "async-trait",
  "chrono",
  "derive_builder",
- "es-entity 0.11.2",
+ "es-entity 0.11.5",
  "futures",
  "rand 0.10.1",
  "serde",
