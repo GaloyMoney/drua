@@ -24,3 +24,4 @@ chrono = { version = "0.4", features = ["clock", "serde"], default-features = fa
 [dev-dependencies]
 tokio = { workspace = true }
 serde_json = { workspace = true }
+tracing-subscriber = { workspace = true }
