@@ -99,7 +99,7 @@ impl Library {
             Arc::clone(&git),
             tick_tx,
             Duration::from_millis(config.fetch_interval_ms),
-            git.local_commit_notify(),
+            git.commit_notify(),
         );
 
         let spawner = jobs.add_initializer(LibrarySyncJobInitializer::new(
@@ -148,7 +148,7 @@ impl Library {
         git: Arc<GitEngine>,
         tick_tx: mpsc::Sender<CommitTick>,
         interval: Duration,
-        local_commit_notify: Arc<tokio::sync::Notify>,
+        commit_notify: Arc<tokio::sync::Notify>,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
@@ -157,7 +157,7 @@ impl Library {
             loop {
                 tokio::select! {
                     _ = ticker.tick() => {}
-                    _ = local_commit_notify.notified() => {}
+                    _ = commit_notify.notified() => {}
                 }
                 match git.fetch_and_head().await {
                     Ok(Some(head)) => {

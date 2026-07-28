@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use tokio::task::JoinHandle;
 
@@ -21,6 +21,13 @@ const QUEUE_CAPACITY: usize = 256;
 /// Cluster-wide Postgres advisory-lock key for serializing pushes to the
 /// library repo's `main`. Fixed (one library repo per deployment); `0x647275616c6962` = "drualib".
 const LIBRARY_PUSH_LOCK_KEY: i64 = 0x647275616c6962;
+
+/// PG NOTIFY channel fired after a successful push. Every replica's
+/// fetcher LISTENs on it, so a write on one replica is visible
+/// cluster-wide in milliseconds instead of after each replica's fetch
+/// ticker (`fetch_interval_ms`). Payload is empty; the wake-up is
+/// purely a hint, the ticker remains the backstop.
+const LIBRARY_HEAD_NOTIFY_CHANNEL: &str = "library_head_changed";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeltaKind {
@@ -125,9 +132,12 @@ pub struct GitEngine {
     /// in-flight commits before `push_main` lands.
     repo_mutex: Arc<Mutex<()>>,
     write_tx: mpsc::Sender<QueuedOp>,
-    local_commit_notify: Arc<Notify>,
+    /// Wakes the fetcher. Fired by the local writer after a successful
+    /// batch and by the head listener on any peer replica's push.
+    commit_notify: Arc<Notify>,
     github_app: Option<Arc<GitHubAppTokenProvider>>,
     _writer: OwnedTaskHandle,
+    _listener: OwnedTaskHandle,
 }
 
 impl GitEngine {
@@ -137,8 +147,8 @@ impl GitEngine {
         &self.repo_path
     }
 
-    pub fn local_commit_notify(&self) -> Arc<Notify> {
-        Arc::clone(&self.local_commit_notify)
+    pub fn commit_notify(&self) -> Arc<Notify> {
+        Arc::clone(&self.commit_notify)
     }
 
     #[tracing::instrument(name = "library.git.init", skip_all)]
@@ -163,24 +173,57 @@ impl GitEngine {
 
         let repo_mutex = Arc::new(Mutex::new(()));
         let (write_tx, write_rx) = mpsc::channel(QUEUE_CAPACITY);
-        let local_commit_notify = Arc::new(Notify::new());
+        let commit_notify = Arc::new(Notify::new());
         let writer = tokio::spawn(Self::run_writer(
             repo_path.clone(),
             github_app.clone(),
             Arc::clone(&repo_mutex),
-            Arc::clone(&local_commit_notify),
+            Arc::clone(&commit_notify),
             write_rx,
-            pool,
+            pool.clone(),
         ));
+        let listener = tokio::spawn(Self::run_head_listener(pool, Arc::clone(&commit_notify)));
 
         Ok(Self {
             repo_path,
             repo_mutex,
             write_tx,
-            local_commit_notify,
+            commit_notify,
             github_app,
             _writer: OwnedTaskHandle::new(writer),
+            _listener: OwnedTaskHandle::new(listener),
         })
+    }
+
+    /// Cluster-wide counterpart of the writer's local wake-up: any
+    /// replica's successful push `pg_notify`s [`LIBRARY_HEAD_NOTIFY_CHANNEL`],
+    /// waking this replica's fetcher immediately. While PG is
+    /// unreachable, sync degrades to ticker cadence.
+    async fn run_head_listener(pool: PgPool, commit_notify: Arc<Notify>) {
+        loop {
+            let mut listener = match sqlx::postgres::PgListener::connect_with(&pool).await {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!(error = %e, "library head listener: connect failed; retrying");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
+            if let Err(e) = listener.listen(LIBRARY_HEAD_NOTIFY_CHANNEL).await {
+                tracing::warn!(error = %e, "library head listener: LISTEN failed; retrying");
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                continue;
+            }
+            loop {
+                match listener.recv().await {
+                    Ok(_) => commit_notify.notify_one(),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "library head listener: recv failed; reconnecting");
+                        break;
+                    }
+                }
+            }
+        }
     }
 
     /// Diff between two commits (None `from` = walk all of `to`'s tree as Added)
@@ -692,7 +735,7 @@ impl GitEngine {
         repo_path: PathBuf,
         github_app: Option<Arc<GitHubAppTokenProvider>>,
         repo_mutex: Arc<Mutex<()>>,
-        local_commit_notify: Arc<Notify>,
+        commit_notify: Arc<Notify>,
         mut rx: mpsc::Receiver<QueuedOp>,
         pool: PgPool,
     ) {
@@ -715,7 +758,7 @@ impl GitEngine {
                 Self::process_batch(&repo_path, github_app.as_ref(), &repo_mutex, &pool, batch)
                     .await;
             if any_ok {
-                local_commit_notify.notify_waiters();
+                commit_notify.notify_one();
             }
         }
     }
@@ -774,6 +817,11 @@ impl GitEngine {
                 .collect()
         });
 
+        let any_ok = results.iter().any(|r| r.is_ok());
+        if any_ok {
+            Self::notify_cluster_push(pool, lock_conn.as_deref_mut()).await;
+        }
+
         if let Some(mut conn) = lock_conn.take() {
             if let Err(e) = sqlx::query("SELECT pg_advisory_unlock($1)")
                 .bind(LIBRARY_PUSH_LOCK_KEY)
@@ -783,12 +831,33 @@ impl GitEngine {
                 tracing::warn!(error = %e, "library push lock: release failed");
             }
         }
-
-        let any_ok = results.iter().any(|r| r.is_ok());
         for (resp, res) in responders.into_iter().zip(results) {
             let _ = resp.send(res);
         }
         any_ok
+    }
+
+    /// Wake peer replicas' fetchers after a successful push so
+    /// cross-replica reads converge in milliseconds instead of after
+    /// each replica's fetch ticker. Best effort: failure degrades to
+    /// ticker-cadence convergence. Prefers the advisory-lock connection
+    /// (already held) over a fresh pool checkout.
+    async fn notify_cluster_push(pool: &PgPool, lock_conn: Option<&mut PgConnection>) {
+        let res = match lock_conn {
+            Some(conn) => sqlx::query("SELECT pg_notify($1, '')")
+                .bind(LIBRARY_HEAD_NOTIFY_CHANNEL)
+                .execute(conn)
+                .await
+                .map(|_| ()),
+            None => sqlx::query("SELECT pg_notify($1, '')")
+                .bind(LIBRARY_HEAD_NOTIFY_CHANNEL)
+                .execute(pool)
+                .await
+                .map(|_| ()),
+        };
+        if let Err(e) = res {
+            tracing::warn!(error = %e, "library head notify failed; peers converge on ticker");
+        }
     }
 
     /// Apply N ops as N commits, then push once. On non-FF push, fetch
