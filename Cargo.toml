@@ -132,12 +132,12 @@ tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 url = "2"
 
 # Event sourcing
-es-entity = "0.10.41"
+es-entity = "0.11.10"
 derive_builder = "0.20"
 
 # Job processing
-job = { version = "0.6.28", features = ["es-entity"] }
-obix = "0.2"
+job = { version = "0.6.35", features = ["es-entity"] }
+obix = "0.4.3"
 
 # Database
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
