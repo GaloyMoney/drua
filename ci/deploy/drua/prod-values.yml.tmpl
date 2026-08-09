@@ -152,12 +152,13 @@ galoyAgents:
         toolPrefix: github_pr
         authMode: github_app
         category: source-control-write
-        categoryDescription: "GitHub PR mutations — create"
+        categoryDescription: "GitHub PR mutations — create, review, and inline comment replies"
         internalOnly: true
         allowedTools:
           - create_pull_request
           - update_pull_request
           - pull_request_review_write
+          - add_reply_to_pull_request_comment
       - name: github_issues
         url: https://api.githubcopilot.com/mcp/
         toolPrefix: github_issues
