@@ -1647,6 +1647,7 @@ dependencies = [
  "schemars 0.8.22",
  "serde",
  "serde_json",
+ "serde_yaml",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
