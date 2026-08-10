@@ -353,6 +353,10 @@ sandbox:
   ## Whether the Helm chart should create the sandbox namespace.
   ## Set to false when the namespace is managed externally (e.g. Terraform).
   createNamespace: true
+  ## PVC-janitor sweep interval (seconds). Reclaims `managed-by=drua`
+  ## PVCs whose sandbox row is gone — the gap left when cascade teardown
+  ## swallows a transient k8s error. Empty uses the in-binary default (900s).
+  pvcJanitorIntervalSeconds: ""
   ## Install the Agent Sandbox CRDs + controller from vendored upstream manifests.
   ## Set to false if the controller is already installed (e.g. via Terraform).
   installController: true

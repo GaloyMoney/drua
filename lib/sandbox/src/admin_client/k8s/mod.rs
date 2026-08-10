@@ -457,6 +457,27 @@ impl K8sAdminClient {
         Ok(())
     }
 
+    /// Distinct `sandbox-name` values across PVCs labeled `managed-by=drua`.
+    /// Drives the PVC janitor's orphan detection — every owner returned
+    /// here that has no live sandbox row is a leaked PVC.
+    #[instrument(name = "sandbox.admin.k8s.list_pvc_owners", skip_all)]
+    pub async fn list_pvc_owners(&self) -> Result<Vec<String>, AdminError> {
+        let pvcs: Api<PersistentVolumeClaim> =
+            Api::namespaced(self.client.clone(), &self.namespace);
+        let lp = ListParams::default().labels(&format!("{MANAGED_BY_LABEL}={MANAGED_BY_VALUE}"));
+        let list = pvcs.list(&lp).await?;
+        let mut owners: Vec<String> = list
+            .items
+            .iter()
+            .filter_map(|p| p.metadata.labels.as_ref())
+            .filter_map(|labels| labels.get("sandbox-name").cloned())
+            .filter(|s| !s.is_empty())
+            .collect();
+        owners.sort();
+        owners.dedup();
+        Ok(owners)
+    }
+
     /// Filtered by the managed-by label.
     #[instrument(name = "sandbox.admin.k8s.list_sandboxes", skip_all)]
     pub async fn list_sandboxes(&self) -> Result<Vec<SandboxView>, AdminError> {
@@ -708,6 +729,10 @@ impl AdminClient for K8sAdminClient {
 
     async fn delete_pvcs(&self, name: &str) -> Result<(), AdminError> {
         K8sAdminClient::delete_pvcs(self, name).await
+    }
+
+    async fn list_pvc_owners(&self) -> Result<Vec<String>, AdminError> {
+        K8sAdminClient::list_pvc_owners(self).await
     }
 
     async fn get_sandbox(&self, name: &str) -> Result<SandboxView, AdminError> {
