@@ -22,7 +22,9 @@ use crate::primitives::{
     AgentId, NoteId, ProjectId, SandboxId, SkillId, UserId, WorkflowDefinitionId, WorkflowRunId,
 };
 use crate::project::{Project, Projects};
-use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandboxes};
+use crate::sandbox::{
+    DeleteOutcome, ResizeRequest, Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandboxes,
+};
 use crate::skill::{ScopedSkill, Skill, SkillSource, Skills};
 use crate::space_fs::SpaceFs;
 use crate::workflow::{
@@ -141,6 +143,8 @@ enum SandboxCommand {
     List,
     Get,
     Inspect,
+    Resize,
+    Delete,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -690,7 +694,11 @@ static TOOLS: &[ToolDef] = &[
                        `mode`, optional `repo_url`, `branch`, `cpu`, `memory`, `disk_size`), \
                        `list` (requires `project_id`), \
                        `get` (requires `sandbox_id`), \
-                       `inspect` (requires `sandbox_id`, `tool` (grep/glob/read/ls), `tool_args`).",
+                       `inspect` (requires `sandbox_id`, `tool` (grep/glob/read/ls), `tool_args`), \
+                       `resize` (requires `sandbox_id` and at least one of `cpu`, \
+                       `memory`, `disk_size`; disk can only grow), \
+                       `delete` (requires `sandbox_id`; tears down pod + PVCs and \
+                       soft-deletes the row).",
         schema: &SANDBOX_SCHEMA,
     },
     ToolDef {
@@ -1088,6 +1096,42 @@ impl AdminToolSet {
 
                 Audit::record_sandbox_id(sandbox_id);
                 execute_inspect(subject, &self.sandboxes, sandbox_id, op, op_args).await
+            }
+
+            SandboxCommand::Resize => {
+                let sandbox_id = params.sandbox_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("sandbox_id is required for resize".to_string())
+                })?;
+                let request = ResizeRequest {
+                    cpu: params.cpu,
+                    memory: params.memory,
+                    disk_size: params.disk_size,
+                };
+                if request.is_empty() {
+                    return Err(ToolSetsError::MissingArgument(
+                        "resize: at least one of cpu, memory, disk_size is required".to_string(),
+                    ));
+                }
+                let outcome = self.sandboxes.resize(subject, sandbox_id, request).await?;
+                let pvc_note = match &outcome.pvc_warning {
+                    None => String::new(),
+                    Some(w) => format!("\n\nNote: workspace-PVC patch failed: {w}"),
+                };
+                Ok(CallToolResult::success(vec![Content::text(format!(
+                    "{}{}",
+                    format_sandbox(&outcome.sandbox),
+                    pvc_note,
+                ))]))
+            }
+
+            SandboxCommand::Delete => {
+                let sandbox_id = params.sandbox_id.ok_or_else(|| {
+                    ToolSetsError::MissingArgument("sandbox_id is required for delete".to_string())
+                })?;
+                let outcome = self.sandboxes.delete(subject, sandbox_id).await?;
+                Ok(CallToolResult::success(vec![Content::text(
+                    format_admin_delete_outcome(sandbox_id, &outcome),
+                )]))
             }
         }
     }
@@ -1980,6 +2024,25 @@ fn format_sandbox(s: &Sandbox) -> String {
         s.specs.cpu, s.specs.memory, s.specs.disk_size,
         error_str, agents_str,
     )
+}
+
+/// Admin-flavoured delete report: same honesty as the project tool's
+/// version, slightly terser since this surface is operator-facing.
+fn format_admin_delete_outcome(sandbox_id: SandboxId, outcome: &DeleteOutcome) -> String {
+    let header = format!("Sandbox {sandbox_id}: row soft-deleted.");
+    if outcome.admin_teardown_clean() {
+        return format!("{header} Pod + PVC teardown ok.");
+    }
+    let mut lines = vec![header];
+    match &outcome.pod_warning {
+        None => lines.push("Pod teardown: ok.".to_string()),
+        Some(w) => lines.push(format!("Pod teardown FAILED: {w}")),
+    }
+    match &outcome.pvcs_warning {
+        None => lines.push("PVC teardown: ok.".to_string()),
+        Some(w) => lines.push(format!("PVC teardown FAILED: {w}")),
+    }
+    lines.join("\n")
 }
 
 fn format_sandboxes(sandboxes: &[Sandbox]) -> String {

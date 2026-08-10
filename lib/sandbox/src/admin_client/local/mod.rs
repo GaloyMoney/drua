@@ -245,6 +245,12 @@ impl AdminClient for LocalAdminClient {
         LocalAdminClient::delete_pvcs(self, name).await
     }
 
+    /// Local backend doesn't enforce disk size — recording the new
+    /// allocation in the sandbox entity is sufficient.
+    async fn resize_pvc(&self, _name: &str, _new_size: &str) -> Result<(), AdminError> {
+        Ok(())
+    }
+
     async fn get_sandbox(&self, name: &str) -> Result<SandboxView, AdminError> {
         LocalAdminClient::get_sandbox(self, name).await
     }

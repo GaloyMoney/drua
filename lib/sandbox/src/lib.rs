@@ -18,4 +18,4 @@ pub use tool_protocol::{
     GrepOutputMode, MoveInput, TextEditorAction, TextEditorCommand, TextEditorInput,
     TextEditorInputError,
 };
-pub use types::{Sandbox, SandboxMode, SandboxSpecs};
+pub use types::{parse_k8s_quantity, Sandbox, SandboxMode, SandboxSpecs};

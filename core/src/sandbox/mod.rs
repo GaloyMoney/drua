@@ -13,7 +13,7 @@ use sandbox::admin_client::{AdminClient, K8sAdminClient, LocalAdminClient, Local
 use sandbox::instance_client::{
     AttachRequest, InitializeRequest, InitializeResponse, InstanceClient,
 };
-pub use sandbox::{SandboxMode, SandboxSpecs};
+pub use sandbox::{parse_k8s_quantity, SandboxMode, SandboxSpecs};
 
 use crate::audit::Audit;
 
@@ -1004,6 +1004,195 @@ impl Sandboxes {
         Ok(all)
     }
 
+    /// Re-allocate CPU / memory / disk for a single sandbox. Pod-level
+    /// fields (cpu, memory) only take effect on the next `restart`;
+    /// disk growth is applied immediately to the backing PVC. Disk
+    /// shrinks are rejected — k8s storage providers don't support it
+    /// and the local backend doesn't enforce sizes anyway. Callers
+    /// pass only the fields they want changed; unset fields are
+    /// preserved as-of the in-transaction load so a concurrent resize
+    /// can't make a CPU-only request look like a disk shrink.
+    ///
+    /// The PVC patch runs *after* the DB commit on purpose: a grown
+    /// PVC can't be shrunk back, so applying it before commit would
+    /// leave the cluster ahead of the entity row on commit failure.
+    /// `resize_in_op` therefore only writes the DB; this wrapper is
+    /// the layer responsible for the admin-side side-effect. A failed
+    /// PVC patch surfaces as [`ResizeOutcome::pvc_warning`] rather than
+    /// an error so the caller can render the actual outcome — the DB
+    /// row is already committed regardless.
+    #[instrument(name = "domain.sandbox.resize", skip(self, sub))]
+    pub async fn resize(
+        &self,
+        sub: &AuthSubject,
+        id: impl Into<SandboxId> + std::fmt::Debug,
+        request: ResizeRequest,
+    ) -> Result<ResizeOutcome, SandboxError> {
+        let id = id.into();
+        let sandbox = self.repo.find_by_id(id).await?;
+        sub.can(
+            AuthVerb::Update,
+            AuthResource::Sandbox(sandbox.project_id, Some(sandbox.id)),
+        )?;
+        Audit::record_action_if_unset("sandbox.resize");
+        Audit::record_project_id(sandbox.project_id);
+        let mut op = self.repo.begin_op().await?;
+        let sandbox = self.resize_in_op(&mut op, id, request).await?;
+        op.commit().await?;
+
+        let resource_name = sandbox.resource_name();
+        let pvc_warning = match self
+            .admin
+            .resize_pvc(&resource_name, &sandbox.specs.disk_size)
+            .await
+        {
+            Ok(()) => None,
+            Err(e) => {
+                tracing::warn!(
+                    sandbox = %resource_name,
+                    error = %e,
+                    "Admin client resize_pvc failed; entity specs already committed — \
+                     restart will recreate the pod with new CPU/memory and a retry \
+                     can reconcile the PVC"
+                );
+                Some(e.to_string())
+            }
+        };
+        Ok(ResizeOutcome {
+            sandbox,
+            pvc_warning,
+        })
+    }
+
+    /// Reads the sandbox in-transaction, merges `request` with the
+    /// current specs (so unset fields are filled from the in-tx row,
+    /// never a pre-tx read that a concurrent resize could have
+    /// invalidated), then validates and writes the new specs. The PVC
+    /// patch lives in [`Self::resize`] so it runs *after* the commit —
+    /// PVC growth isn't reversible, so applying it before commit would
+    /// strand the cluster ahead of the entity row on commit failure.
+    /// External callers composing this `_in_op` must call
+    /// `admin.resize_pvc` themselves after their `commit`.
+    #[instrument(name = "domain.sandbox.resize_in_op", skip(self, op))]
+    pub async fn resize_in_op(
+        &self,
+        op: &mut DbOp<'_>,
+        id: impl Into<SandboxId> + std::fmt::Debug,
+        request: ResizeRequest,
+    ) -> Result<Sandbox, SandboxError> {
+        let id = id.into();
+        Audit::record_sandbox_id(id);
+        let mut sandbox = self.repo.find_by_id_in_op(&mut *op, id).await?;
+        reject_if_provisioning("resize", sandbox.state)?;
+        let specs = request.merge_with(&sandbox.specs);
+
+        if !disk_size_grows(&sandbox.specs.disk_size, &specs.disk_size) {
+            return Err(SandboxError::DiskShrinkNotSupported {
+                current: sandbox.specs.disk_size.clone(),
+                requested: specs.disk_size.clone(),
+            });
+        }
+
+        if !sandbox.resize(specs).did_execute() {
+            return Ok(sandbox);
+        }
+        self.repo.update_in_op(op, &mut sandbox).await?;
+        Ok(sandbox)
+    }
+
+    /// Per-sandbox delete: soft-deletes the row, then best-effort tears
+    /// down the pod + PVCs via the admin client. Symmetric with
+    /// [`Self::cascade_delete_for_project_in_op`] — neither path
+    /// records an entity-level `Deleted` tombstone, so callers must
+    /// rely on the repo-level soft-delete + audit log for history.
+    /// Rejects with [`SandboxError::SandboxStillAttached`] when any
+    /// agent is currently attached; the caller is expected to detach
+    /// via `agent.detach_sandbox` first so each agent's own
+    /// `attached_sandbox_id` doesn't end up pointing at a deleted row.
+    ///
+    /// Admin teardown runs *after* the DB commit so a partial cluster
+    /// teardown can't leave the row in a half-deleted state. Failures
+    /// surface as warnings on [`DeleteOutcome`] rather than errors —
+    /// the row is already gone, the orphaned pod/PVC can be reconciled
+    /// out-of-band.
+    #[instrument(name = "domain.sandbox.delete", skip(self, sub))]
+    pub async fn delete(
+        &self,
+        sub: &AuthSubject,
+        id: impl Into<SandboxId> + std::fmt::Debug,
+    ) -> Result<DeleteOutcome, SandboxError> {
+        let id = id.into();
+        let sandbox = self.repo.find_by_id(id).await?;
+        sub.can(
+            AuthVerb::Delete,
+            AuthResource::Sandbox(sandbox.project_id, Some(sandbox.id)),
+        )?;
+        Audit::record_action_if_unset("sandbox.delete");
+        Audit::record_project_id(sandbox.project_id);
+        let mut op = self.repo.begin_op().await?;
+        let resource_name = self.delete_in_op(&mut op, id).await?;
+        op.commit().await?;
+
+        // `delete_sandbox` runs unconditionally because a prior
+        // `suspend` may have marked the entity `Suspended` even when
+        // its admin call failed — skipping it here would leak a live
+        // pod.
+        let pod_warning = match self.admin.delete_sandbox(&resource_name).await {
+            Ok(()) => None,
+            Err(sandbox::AdminError::NotFound(_)) => None,
+            Err(other) => {
+                tracing::warn!(
+                    sandbox = %resource_name,
+                    error = %other,
+                    "admin delete_sandbox failed during single-sandbox delete"
+                );
+                Some(other.to_string())
+            }
+        };
+        let pvcs_warning = match self.admin.delete_pvcs(&resource_name).await {
+            Ok(()) => None,
+            Err(e) => {
+                tracing::warn!(
+                    sandbox = %resource_name,
+                    error = %e,
+                    "admin delete_pvcs failed during single-sandbox delete"
+                );
+                Some(e.to_string())
+            }
+        };
+        Ok(DeleteOutcome {
+            pod_warning,
+            pvcs_warning,
+        })
+    }
+
+    /// DB-only piece of [`Self::delete`]: validates the sandbox is in a
+    /// deletable state and soft-deletes the row. The admin-side pod /
+    /// PVC teardown happens *after* the commit in `delete` so a stuck
+    /// k8s call can't strand a half-deleted entity. Returns the
+    /// resource name so the caller can drive the post-commit teardown
+    /// without re-loading the row.
+    #[instrument(name = "domain.sandbox.delete_in_op", skip(self, op))]
+    pub async fn delete_in_op(
+        &self,
+        op: &mut DbOp<'_>,
+        id: impl Into<SandboxId> + std::fmt::Debug,
+    ) -> Result<String, SandboxError> {
+        let id = id.into();
+        Audit::record_sandbox_id(id);
+        let sandbox = self.repo.find_by_id_in_op(&mut *op, id).await?;
+        reject_if_provisioning("delete", sandbox.state)?;
+        if !sandbox.attached_agents.is_empty() {
+            return Err(SandboxError::SandboxStillAttached {
+                sandbox_id: sandbox.id,
+                agent_ids: sandbox.attached_agents.iter().map(|(id, _)| *id).collect(),
+            });
+        }
+        let resource_name = sandbox.resource_name();
+        self.repo.delete_in_op(op, sandbox).await?;
+        Ok(resource_name)
+    }
+
     #[instrument(name = "domain.sandbox.suspend", skip(self, sub))]
     pub async fn suspend(
         &self,
@@ -1049,5 +1238,186 @@ impl Sandboxes {
             self.repo.update_in_op(op, &mut sandbox).await?;
         }
         Ok(sandbox)
+    }
+}
+
+/// `true` when `new` is larger than or equal to `current`. When the
+/// stored `current` is unparseable but `new` is well-formed we accept
+/// the change — otherwise a single bad row in the DB would block every
+/// future grow until an operator patched it by hand. Falls back to
+/// string equality when both sides are unparseable so a typo still
+/// short-circuits the identical case. Uses the same parser as the k8s
+/// admin client's PVC patch idempotency check so both layers agree on
+/// what counts as a shrink.
+fn disk_size_grows(current: &str, new: &str) -> bool {
+    match (parse_k8s_quantity(current), parse_k8s_quantity(new)) {
+        (Some(c), Some(n)) => n >= c,
+        (None, Some(_)) => true,
+        _ => current == new,
+    }
+}
+
+/// `resize`/`delete` race the create lifecycle when the sandbox is
+/// still being provisioned — the spawned task reads specs once and
+/// then keeps calling the admin client, so a spec change mid-flight
+/// would land on stale state and a `delete` would orphan whatever the
+/// task is about to create. Reject until the sandbox lands in a
+/// terminal state.
+fn reject_if_provisioning(
+    operation: &'static str,
+    state: SandboxState,
+) -> Result<(), SandboxError> {
+    match state {
+        SandboxState::Provisioning | SandboxState::Initializing => {
+            Err(SandboxError::OperationNotAllowedWhileProvisioning {
+                operation,
+                state: state.to_string(),
+            })
+        }
+        SandboxState::Ready | SandboxState::Suspended | SandboxState::Errored => Ok(()),
+    }
+}
+
+/// Result of [`Sandboxes::resize`]. The DB row is always committed
+/// before this is returned; `pvc_warning` carries the best-effort PVC
+/// patch outcome so callers can surface honest cluster-side state
+/// instead of always claiming a successful resize.
+pub struct ResizeOutcome {
+    pub sandbox: Sandbox,
+    /// `Some` only when the post-commit PVC patch failed. The entity's
+    /// `specs.disk_size` already reflects the new size; the cluster
+    /// PVC will need a follow-up retry (or, in practice, a `restart`
+    /// that recreates the pod with the new mount spec).
+    pub pvc_warning: Option<String>,
+}
+
+/// Result of [`Sandboxes::delete`]. The row is always committed before
+/// this is returned; the warnings carry best-effort admin teardown
+/// outcomes so callers don't claim a pod/PVC was removed when only the
+/// row went away.
+#[derive(Debug, Clone, Default)]
+pub struct DeleteOutcome {
+    /// `Some` when `delete_sandbox` failed with anything other than
+    /// `NotFound` (which is treated as "already gone").
+    pub pod_warning: Option<String>,
+    /// `Some` when `delete_pvcs` failed; the workspace PVC (and any
+    /// `volumeClaimTemplate`-owned siblings) may still exist.
+    pub pvcs_warning: Option<String>,
+}
+
+impl DeleteOutcome {
+    /// `true` when both pod and PVC teardown reported clean exits
+    /// (or `NotFound`). Lets callers branch their user-facing copy.
+    pub fn admin_teardown_clean(&self) -> bool {
+        self.pod_warning.is_none() && self.pvcs_warning.is_none()
+    }
+}
+
+/// Partial spec for [`Sandboxes::resize`]. Each field is `Some` only
+/// when the caller wants it changed; unset fields are filled from
+/// the in-transaction sandbox row inside `resize_in_op`, so a
+/// concurrent resize between the tool handler's pre-read and the
+/// service's in-tx read can't make a CPU-only request look like a
+/// disk shrink (Cursor bugbot review, PR #399).
+#[derive(Debug, Clone, Default)]
+pub struct ResizeRequest {
+    pub cpu: Option<String>,
+    pub memory: Option<String>,
+    pub disk_size: Option<String>,
+}
+
+impl ResizeRequest {
+    pub fn is_empty(&self) -> bool {
+        self.cpu.is_none() && self.memory.is_none() && self.disk_size.is_none()
+    }
+
+    fn merge_with(self, current: &SandboxSpecs) -> SandboxSpecs {
+        SandboxSpecs {
+            cpu: self.cpu.unwrap_or_else(|| current.cpu.clone()),
+            memory: self.memory.unwrap_or_else(|| current.memory.clone()),
+            disk_size: self.disk_size.unwrap_or_else(|| current.disk_size.clone()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disk_size_grows_accepts_growth() {
+        assert!(disk_size_grows("10Gi", "20Gi"));
+        assert!(disk_size_grows("1Gi", "1024Mi"));
+        assert!(disk_size_grows("10Gi", "10Gi"));
+    }
+
+    #[test]
+    fn disk_size_grows_rejects_shrink() {
+        assert!(!disk_size_grows("20Gi", "10Gi"));
+        assert!(!disk_size_grows("1Gi", "500Mi"));
+    }
+
+    #[test]
+    fn disk_size_grows_unparseable_falls_back_to_string_eq() {
+        assert!(disk_size_grows("weird", "weird"));
+        assert!(!disk_size_grows("weird", "other"));
+    }
+
+    #[test]
+    fn disk_size_grows_accepts_parseable_new_when_current_unparseable() {
+        // A bad value in the stored row would otherwise block every
+        // future grow forever; treat any well-formed `new` as a grow
+        // so an operator can reconcile by passing a real quantity.
+        assert!(disk_size_grows("weird", "20Gi"));
+    }
+
+    #[test]
+    fn reject_if_provisioning_rejects_in_flight_states() {
+        assert!(matches!(
+            reject_if_provisioning("resize", SandboxState::Provisioning),
+            Err(SandboxError::OperationNotAllowedWhileProvisioning { .. })
+        ));
+        assert!(matches!(
+            reject_if_provisioning("delete", SandboxState::Initializing),
+            Err(SandboxError::OperationNotAllowedWhileProvisioning { .. })
+        ));
+    }
+
+    #[test]
+    fn reject_if_provisioning_accepts_terminal_states() {
+        assert!(reject_if_provisioning("resize", SandboxState::Ready).is_ok());
+        assert!(reject_if_provisioning("resize", SandboxState::Suspended).is_ok());
+        assert!(reject_if_provisioning("delete", SandboxState::Errored).is_ok());
+    }
+
+    #[test]
+    fn resize_request_merge_preserves_unset_fields() {
+        let current = SandboxSpecs {
+            cpu: "1".into(),
+            memory: "2Gi".into(),
+            disk_size: "10Gi".into(),
+        };
+        // CPU-only request — disk_size must come from `current`, not
+        // from a (potentially stale) caller-side default. This is the
+        // race the bugbot review (PR #399) flagged.
+        let req = ResizeRequest {
+            cpu: Some("2".into()),
+            memory: None,
+            disk_size: None,
+        };
+        let merged = req.merge_with(&current);
+        assert_eq!(merged.cpu, "2");
+        assert_eq!(merged.memory, "2Gi");
+        assert_eq!(merged.disk_size, "10Gi");
+    }
+
+    #[test]
+    fn resize_request_is_empty_only_when_all_none() {
+        assert!(ResizeRequest::default().is_empty());
+        let just_cpu = ResizeRequest {
+            cpu: Some("2".into()),
+            ..Default::default()
+        };
+        assert!(!just_cpu.is_empty());
     }
 }
