@@ -1090,11 +1090,8 @@ impl Workflows {
         let queue_id = format!("workflow:{}", run.definition_id);
         // Re-spawn under a fresh JobId: the run's original ExecuteRun job (id =
         // run.id) still occupies the `jobs` row, so reusing it would hit the
-        // primary-key constraint and roll the whole resume back. Parenting on
-        // run.id keeps the lineage queryable via list_by_parent_job_id.
+        // primary-key constraint and roll the whole resume back.
         self.execute_run_spawner
-            .clone()
-            .with_parent(run.id.into())
             .spawn_with_queue_id_in_op(
                 &mut op,
                 ::job::JobId::new(),
