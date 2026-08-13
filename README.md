@@ -40,11 +40,21 @@ On first run it opens your browser to authenticate and generate an API token.
 Credentials are stored in `~/.drua/config.json`. See [`client/README.md`](client/README.md)
 for all commands and key bindings.
 
+## Workflows
+
+Multi-step agent workflows are defined in YAML as an ordered list of steps,
+each an agent prompt with its own model and toolset. A workflow can be
+triggered on demand or on a cron schedule. Run state is persisted and resumes
+the same agent across retries, and in-flight runs can be cancelled.
+Definitions and runs are exposed through the GraphQL API (`workflowDefinitions`,
+`workflowRuns`, `workflowTrigger`) and surfaced in the `drua` dashboard.
+
 ## Environment Variables
 
 All secrets are loaded from environment variables (or CLI flags). Non-secret
 configuration lives in a YAML config file (`drua.yml` by default).
-A complete `.env.example` is provided at the repo root.
+A minimal `.env.example` (the core keys) ships at the repo root; the table
+below is the full reference.
 
 ### Main Server (`drua-server`)
 
@@ -184,14 +194,20 @@ requires no authentication.
 
 ```
 cli/            Unified binary entrypoint (dispatches to server or client)
-client/         TUI client library (login, tui, project management)
+client/         TUI client library (login, tui, project management, dashboard)
 server/         Axum web server library (routes, auth, GraphQL, templates, config)
-core/           Domain logic (agents, sessions, toolsets, sandbox, encryption)
+core/           Domain logic (agents, sessions, toolsets, sandbox, workflows, library)
 mcp-gateway/    MCP protocol gateway (rmcp-based)
-lib/            Shared libraries (anthropic-client, sandbox admin client, LLM)
-images/sandbox/ Sandbox tool server (runs inside sandbox pods)
+lib/            Shared libraries (LLM clients, sandbox admin, upstream clients, git-proxy, github-app, js-engine)
+images/         Container images (sandbox tool server, tunnel-connector, concourse-drua-resource)
 code-assistant/ Semantic code search toolset
 charts/         Helm chart for Kubernetes deployment
+infra/          Terraform + values template for cluster deployment
+ci/             Concourse CI pipeline definitions
+dev/            Generated default config + OTEL agent config
+bats/           Bash end-to-end test suites
+benchmarks/     Benchmark and eval scenarios
+nix/            Nix helper modules
 ```
 
 ## Make Targets
@@ -206,4 +222,10 @@ charts/         Helm chart for Kubernetes deployment
 | `make nix-run-server` | Run server via `nix run .` |
 | `make build-sandbox` | Build only the sandbox tool server |
 | `make sqlx-prepare` | Regenerate SQLx offline query data |
+| `make sdl-rust` | Regenerate the GraphQL SDL into `server/src/graphql/schema.graphql` |
+| `make generate-default-config` | Dump the default config to `dev/drua.default.yml` |
+| `make integration-tests` | `reset-deps` then run `cargo nextest` |
+| `make update-fixtures` | Regenerate bats gateway snapshots from the live gateway |
+| `make reset-test-library` | Reset the `drua-test-library` repo to an empty scaffold |
+| `make add-test-skill` | Push a sample `ci-check` skill to the test library |
 | `make start` | Full reset: `reset-deps` then server with dev login |
