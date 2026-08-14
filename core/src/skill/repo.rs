@@ -10,21 +10,9 @@ use super::entity::*;
 #[es_repo(
     entity = "Skill",
     columns(
-        project_id(
-            ty = "Option<ProjectId>",
-            list_for(by(created_at)),
-            constraint = "idx_skills_project_name",
-        ),
-        space_id(
-            ty = "Option<SpaceId>",
-            list_for(by(created_at)),
-            constraint = "idx_skills_space_name",
-        ),
-        name(
-            ty = "String",
-            list_for(by(created_at)),
-            constraint = "idx_skills_global_name",
-        ),
+        project_id(ty = "Option<ProjectId>", list_for(by(created_at))),
+        space_id(ty = "Option<SpaceId>", list_for(by(created_at))),
+        name(ty = "String", list_for(by(created_at))),
         path(ty = "String"),
     ),
     delete = "soft",

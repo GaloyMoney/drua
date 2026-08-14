@@ -109,9 +109,7 @@ impl Library {
             Arc::clone(&importers),
             embed_spawner.clone(),
         ));
-        spawner
-            .spawn_unique(::job::JobId::new(), LibrarySyncConfig::default())
-            .await?;
+        spawner.spawn_unique(LibrarySyncConfig::default()).await?;
 
         Ok(Self {
             config: LibraryConfig {
