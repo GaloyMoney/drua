@@ -701,11 +701,19 @@ impl Agents {
                     es_entity::ListDirection::Descending,
                 )
                 .await?;
+            // `into_next_query` needs `entities.len()` intact, so read
+            // pagination fields before draining `entities` below.
+            let has_next_page = result.has_next_page;
+            let next_first = result.entities.len();
+            let next_after = result.end_cursor.take();
             all.append(&mut result.entities);
-            match result.into_next_query() {
-                Some(next) => query = next,
-                None => break,
+            if !has_next_page {
+                break;
             }
+            query = es_entity::PaginatedQueryArgs {
+                first: next_first,
+                after: next_after,
+            };
         }
         Ok(all)
     }

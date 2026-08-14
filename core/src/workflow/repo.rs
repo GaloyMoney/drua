@@ -99,18 +99,25 @@ impl WorkflowDefinitionRepo {
                     es_entity::ListDirection::Ascending,
                 )
                 .await?;
+            // `into_next_query` needs `entities.len()` intact, so read
+            // pagination fields before taking `entities` below.
+            let has_next_page = result.has_next_page;
+            let next_first = result.entities.len();
+            let next_after = result.end_cursor.take();
             let entities = std::mem::take(&mut result.entities);
-            let next = result.into_next_query();
             if let Some(found) = entities
                 .into_iter()
                 .find(|w| canonical_workflow_path(&w.name, w.project_name.as_deref()) == path)
             {
                 return Ok(Some(found));
             }
-            match next {
-                Some(q) => query = q,
-                None => return Ok(None),
+            if !has_next_page {
+                return Ok(None);
             }
+            query = es_entity::PaginatedQueryArgs {
+                first: next_first,
+                after: next_after,
+            };
         }
     }
 

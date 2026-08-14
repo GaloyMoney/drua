@@ -671,11 +671,19 @@ impl Sandboxes {
                 .repo
                 .list_for_project_id_by_created_at(project_id, query, ListDirection::Descending)
                 .await?;
+            // See `list_all_for_project_in_op`: `into_next_query` needs
+            // `entities.len()` intact, so read pagination fields first.
+            let has_next_page = result.has_next_page;
+            let next_first = result.entities.len();
+            let next_after = result.end_cursor.take();
             all.append(&mut result.entities);
-            match result.into_next_query() {
-                Some(next) => query = next,
-                None => break,
+            if !has_next_page {
+                break;
             }
+            query = PaginatedQueryArgs {
+                first: next_first,
+                after: next_after,
+            };
         }
         Ok(all)
     }
@@ -963,11 +971,19 @@ impl Sandboxes {
                     ListDirection::Descending,
                 )
                 .await?;
+            // See `list_all_for_project_in_op`: `into_next_query` needs
+            // `entities.len()` intact, so read pagination fields first.
+            let has_next_page = result.has_next_page;
+            let next_first = result.entities.len();
+            let next_after = result.end_cursor.take();
             all.append(&mut result.entities);
-            match result.into_next_query() {
-                Some(next) => query = next,
-                None => break,
+            if !has_next_page {
+                break;
             }
+            query = PaginatedQueryArgs {
+                first: next_first,
+                after: next_after,
+            };
         }
         Ok(all)
     }
@@ -995,11 +1011,20 @@ impl Sandboxes {
                     ListDirection::Descending,
                 )
                 .await?;
+            // `into_next_query` reads `entities.len()` to size the next
+            // page, so it must run before anything drains `entities` —
+            // read the pagination fields first, then take the entities.
+            let has_next_page = result.has_next_page;
+            let next_first = result.entities.len();
+            let next_after = result.end_cursor.take();
             all.append(&mut result.entities);
-            match result.into_next_query() {
-                Some(next) => query = next,
-                None => break,
+            if !has_next_page {
+                break;
             }
+            query = PaginatedQueryArgs {
+                first: next_first,
+                after: next_after,
+            };
         }
         Ok(all)
     }
