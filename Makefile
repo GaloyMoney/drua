@@ -13,9 +13,25 @@ clean-deps:
 start-deps:
 	$(COMPOSE_CMD) up -d
 
+# Native PostgreSQL + pgvector from nix — no container VM (no Rosetta
+# on apple silicon). Serves the same PG_CON default as the compose stack.
+start-deps-native:
+	nix run .#pg-start
+
+stop-deps-native:
+	@pg_ctl -D .nix-deps/pg stop -m fast 2>/dev/null \
+		|| echo "native postgres not running"
+
+clean-deps-native: stop-deps-native
+	@rm -rf .nix-deps/pg .nix-deps/pg.log
+
+reset-deps-native: clean-deps-native start-deps-native setup-db
+
+# Engine-agnostic: works against both the compose stack and the native
+# nix instance (pg_isready from the devShell hits TCP either way).
 setup-db:
 	@echo "Waiting for PostgreSQL..."
-	@until $(COMPOSE_CMD) exec postgres pg_isready -U user -d drua > /dev/null 2>&1; do sleep 1; done
+	@until pg_isready -h localhost -p 5432 -U user -d drua > /dev/null 2>&1; do sleep 1; done
 	@echo "PostgreSQL ready"
 	DATABASE_URL=$(PG_CON) cargo sqlx migrate run --source core/migrations
 

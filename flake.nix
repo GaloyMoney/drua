@@ -465,6 +465,66 @@
           inherit pkgs;
         };
 
+        # Native PostgreSQL + pgvector for local dev/tests — no container
+        # VM (and on apple silicon, none of the podman machine's Rosetta
+        # overhead). Matches the compose stack's pgvector/pgvector:pg16
+        # image: user `user`, db `drua`, trust auth, port 5432 — i.e. the
+        # Makefile's PG_CON default.
+        packages.pg-start = let
+          pg = pkgs.postgresql_17.withPackages (p: [p.pgvector]);
+        in
+          pkgs.writeShellApplication {
+            name = "pg-start";
+            runtimeInputs = [pkgs.coreutils];
+            text = ''
+              set -euo pipefail
+              NAME=pg
+              PORT=5432
+              PGUSER=user
+              DB=drua
+              PGDATA="$PWD/.nix-deps/$NAME"
+              LOG="$PWD/.nix-deps/$NAME.log"
+
+              mkdir -p "$PWD/.nix-deps"
+
+              if [ ! -f "$PGDATA/PG_VERSION" ]; then
+                echo "[$NAME] Initializing data directory at $PGDATA..."
+                ${pg}/bin/initdb -D "$PGDATA" --username="$PGUSER" --auth=trust --no-locale -E UTF8
+                {
+                  echo "port = $PORT"
+                  echo "max_connections = 200"
+                  echo "unix_socket_directories = '/tmp'"
+                  echo "listen_addresses = '127.0.0.1'"
+                } >> "$PGDATA/postgresql.conf"
+              fi
+
+              if ${pg}/bin/pg_ctl -D "$PGDATA" status >/dev/null 2>&1; then
+                echo "[$NAME] Already running on port $PORT"
+              else
+                # Stale pid file from an unclean shutdown blocks start.
+                if [ -f "$PGDATA/postmaster.pid" ]; then
+                  rm -f "$PGDATA/postmaster.pid"
+                fi
+                # Every binary must be invoked via its absolute store
+                # path: the withPlugins `postgres` wrapper resolves
+                # $libdir from argv0, so a relative invocation breaks all
+                # extension loads ("could not access file $libdir/vector").
+                ${pg}/bin/pg_ctl -D "$PGDATA" -l "$LOG" -w start
+              fi
+
+              ${pg}/bin/pg_isready -h 127.0.0.1 -p "$PORT" -U "$PGUSER" -q
+
+              ${pg}/bin/createdb -h 127.0.0.1 -p "$PORT" -U "$PGUSER" "$DB" 2>/dev/null \
+                || echo "[$NAME] Database '$DB' already exists"
+
+              ${pg}/bin/psql -h 127.0.0.1 -p "$PORT" -U "$PGUSER" -d "$DB" \
+                -c 'CREATE EXTENSION IF NOT EXISTS vector;'
+
+              echo "[$NAME] Ready: postgres://$PGUSER@127.0.0.1:$PORT/$DB"
+              echo "[$NAME] Migrations: make setup-db   Stop: make stop-deps-native"
+            '';
+          };
+
         devShells.training = pkgs.mkShell {
           buildInputs = [ pythonEnv ];
           shellHook = ''
