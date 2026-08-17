@@ -10,7 +10,6 @@ use super::primitives::*;
 use super::project::Project;
 use super::sandbox::Sandbox;
 use super::workflow::{limit, WorkflowDefinition, WorkflowRun};
-use super::AppConfigYaml;
 
 use drua_core::project::ProjectByCreatedAtCursor;
 
@@ -30,8 +29,9 @@ impl Query {
         "pong"
     }
 
-    async fn app_config(&self, ctx: &Context<'_>) -> Yaml {
-        ctx.data_unchecked::<AppConfigYaml>().0.clone()
+    async fn app_config(&self, ctx: &Context<'_>) -> async_graphql::Result<Yaml> {
+        let (app, sub) = app_and_sub_from_ctx!(ctx);
+        Ok(app.app_config(sub)?.into())
     }
 
     async fn me(&self, ctx: &Context<'_>) -> async_graphql::Result<Option<Me>> {

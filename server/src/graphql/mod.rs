@@ -35,11 +35,8 @@ use tokio_stream::{self as stream, StreamExt};
 use crate::AppState;
 
 pub use mutation::Mutation;
-pub use primitives::Yaml;
 pub use query::Query;
 pub use subscription::Subscription;
-
-pub struct AppConfigYaml(pub Yaml);
 
 pub type AgentsSchema = Schema<Query, Mutation, Subscription>;
 
@@ -77,8 +74,6 @@ async fn graphql_handler(
         .map(|Extension(sub)| sub)
         .unwrap_or(domain::auth::AuthSubject::Anonymous);
     request = request.data(auth_subject);
-
-    request = request.data(AppConfigYaml(state.app_config_yaml.clone()));
 
     // Replace the REST middleware's generic "api: POST /graphql" entrypoint
     // with the concrete operation name for useful audit entries.

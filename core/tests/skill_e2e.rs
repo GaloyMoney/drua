@@ -177,7 +177,9 @@ async fn skill_create_propagates_to_search_and_upstream() {
         },
         ..Default::default()
     };
-    let app = App::init(&pool, config).await.expect("App::init");
+    let app = App::init(&pool, config, String::new())
+        .await
+        .expect("App::init");
 
     let sub = AuthSubject::User(UserId::new());
 

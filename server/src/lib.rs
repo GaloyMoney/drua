@@ -35,8 +35,6 @@ pub struct AppState {
     pub mcp_endpoint: String,
     pub github_allowed_teams: Vec<String>,
     pub code_assistant: Option<CodeAssistant>,
-    /// Exposed via the `appConfig` GraphQL query.
-    pub app_config_yaml: graphql::Yaml,
     /// Present when running in-cluster.
     pub sa_token_validator: Option<SaTokenValidator>,
     pub session_store: PgSessionStore,
@@ -57,7 +55,6 @@ impl AppState {
         login: LoginMethod,
         mcp_endpoint: String,
         github_allowed_teams: Vec<String>,
-        app_config_yaml: graphql::Yaml,
         tunnel_public_keys: TunnelPublicKeys,
     ) -> Self {
         let code_assistant = app.code_assistant().cloned();
@@ -68,7 +65,6 @@ impl AppState {
             mcp_endpoint,
             github_allowed_teams,
             code_assistant,
-            app_config_yaml,
             sa_token_validator: None,
             session_store: PgSessionStore::new(pool),
             tunnel_public_keys,
@@ -196,7 +192,7 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
         tunnel_runtime,
     };
 
-    let app = domain::App::init(&pool, app_config).await?;
+    let app = domain::App::init(&pool, app_config, serde_yaml::to_string(&config)?).await?;
     let app_for_shutdown = app.clone();
     let auth_config = config.auth_config();
     let oauth_client = auth_config.oauth_client();
@@ -207,8 +203,6 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
     };
 
     let mcp_service = drua_mcp_gateway::McpGateway::service(app.clone());
-
-    let app_config_yaml: graphql::Yaml = serde_yaml::to_string(&config)?.into();
 
     let tunnel_public_keys = tunnel::parse_configured_keys(&config.server.tunnel)?;
     if !tunnel_public_keys.is_empty() {
@@ -225,7 +219,6 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
         auth_config.login,
         config.server.mcp_endpoint.clone(),
         auth_config.github_allowed_teams,
-        app_config_yaml,
         std::sync::Arc::new(tunnel_public_keys),
     );
     app_state.library_repo_url = config.library.repo_url.clone();
