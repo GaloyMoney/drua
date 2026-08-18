@@ -521,7 +521,39 @@
                 -c 'CREATE EXTENSION IF NOT EXISTS vector;'
 
               echo "[$NAME] Ready: postgres://$PGUSER@127.0.0.1:$PORT/$DB"
-              echo "[$NAME] Migrations: make setup-db   Stop: make stop-deps-native"
+              echo "[$NAME] Migrations: make setup-db   Stop: make stop-deps"
+            '';
+          };
+
+        # Companion to pg-start. Self-contained (uses the same nix-built
+        # pg_ctl via absolute store path) and refuses to mask failures:
+        # a server that is running but cannot be stopped is an error, so
+        # callers like clean-deps never rm -rf a live data directory.
+        packages.pg-stop = let
+          pg = pkgs.postgresql_17.withPackages (p: [p.pgvector]);
+        in
+          pkgs.writeShellApplication {
+            name = "pg-stop";
+            runtimeInputs = [pkgs.coreutils];
+            text = ''
+              set -euo pipefail
+              NAME=pg
+              PGDATA="$PWD/.nix-deps/$NAME"
+
+              if [ ! -f "$PGDATA/postmaster.pid" ]; then
+                echo "[$NAME] Not running"
+                exit 0
+              fi
+
+              if ! ${pg}/bin/pg_ctl -D "$PGDATA" status >/dev/null 2>&1; then
+                # Stale pid file — no live postmaster.
+                echo "[$NAME] Not running (stale pid file)"
+                rm -f "$PGDATA/postmaster.pid"
+                exit 0
+              fi
+
+              ${pg}/bin/pg_ctl -D "$PGDATA" stop -m fast -w
+              echo "[$NAME] Stopped"
             '';
           };
 

@@ -19,8 +19,7 @@ start-deps-native:
 	nix run .#pg-start
 
 stop-deps-native:
-	@pg_ctl -D .nix-deps/pg stop -m fast 2>/dev/null \
-		|| echo "native postgres not running"
+	nix run .#pg-stop
 
 clean-deps-native: stop-deps-native
 	@rm -rf .nix-deps/pg .nix-deps/pg.log
