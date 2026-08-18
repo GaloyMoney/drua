@@ -3,18 +3,17 @@ DRUA_BIN="${DRUA_BIN:-cargo run --bin drua --}"
 SERVER_PID_FILE="$BATS_FILE_TMPDIR/server.pid"
 PG_CON="${PG_CON:-postgres://user:password@localhost:5432/drua}"
 
-COMPOSE_CMD="${COMPOSE_CMD:-docker compose}"
-
 start_server() {
-  # Skip the compose dance when the caller is bringing its own
-  # already-running PG (developer iteration, CI sidecar). Set
-  # `SKIP_COMPOSE=1` to opt in.
-  if [ "${SKIP_COMPOSE:-0}" != "1" ]; then
-    # Clean up any leftover containers
-    $COMPOSE_CMD -f "$REPO_ROOT/docker-compose.yml" down -v 2>/dev/null || true
-
-    # Start postgres
-    $COMPOSE_CMD -f "$REPO_ROOT/docker-compose.yml" up -d
+  # Skip the PG bring-up dance when the caller is bringing its own
+  # already-running instance (developer iteration, CI sidecar). Set
+  # `SKIP_DEPS=1` to opt in.
+  if [ "${SKIP_DEPS:-0}" != "1" ]; then
+    # Fresh cluster per file — same semantics the compose stack's
+    # `down -v` + `up -d` gave. pg-start is idempotent, so tear down
+    # first to guarantee the fresh volume.
+    (cd "$REPO_ROOT" && pg-stop) 2>/dev/null || true
+    rm -rf "$REPO_ROOT/.nix-deps/pg"
+    (cd "$REPO_ROOT" && pg-start)
   fi
 
   # Wait for postgres.
@@ -70,8 +69,9 @@ stop_server() {
     kill "$(cat "$SERVER_PID_FILE")" 2>/dev/null || true
     rm -f "$SERVER_PID_FILE"
   fi
-  if [ "${SKIP_COMPOSE:-0}" != "1" ]; then
-    $COMPOSE_CMD -f "$REPO_ROOT/docker-compose.yml" down -v 2>/dev/null || true
+  if [ "${SKIP_DEPS:-0}" != "1" ]; then
+    (cd "$REPO_ROOT" && pg-stop) || true
+    rm -rf "$REPO_ROOT/.nix-deps/pg"
   fi
 }
 

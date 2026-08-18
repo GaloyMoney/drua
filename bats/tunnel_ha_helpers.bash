@@ -31,8 +31,9 @@ teardown_tunnel_ha_file() {
   stop_runtime "a"
   stop_runtime "b"
 
-  if [ -f "$BATS_FILE_TMPDIR/started-compose" ]; then
-    $COMPOSE_CMD -f "$REPO_ROOT/docker-compose.yml" down -v 2>/dev/null || true
+  if [ -f "$BATS_FILE_TMPDIR/started-pg" ]; then
+    (cd "$REPO_ROOT" && pg-stop) || true
+    rm -rf "$REPO_ROOT/.nix-deps/pg"
   fi
 }
 
@@ -57,10 +58,11 @@ start_postgres() {
     return 0
   fi
 
-  if [ "${SKIP_COMPOSE:-0}" != "1" ]; then
-    $COMPOSE_CMD -f "$REPO_ROOT/docker-compose.yml" down -v 2>/dev/null || true
-    $COMPOSE_CMD -f "$REPO_ROOT/docker-compose.yml" up -d postgres
-    touch "$BATS_FILE_TMPDIR/started-compose"
+  if [ "${SKIP_DEPS:-0}" != "1" ]; then
+    (cd "$REPO_ROOT" && pg-stop) 2>/dev/null || true
+    rm -rf "$REPO_ROOT/.nix-deps/pg"
+    (cd "$REPO_ROOT" && pg-start)
+    touch "$BATS_FILE_TMPDIR/started-pg"
   fi
 
   for _i in $(seq 1 60); do

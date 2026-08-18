@@ -127,11 +127,6 @@
             onnxscript
           ]);
 
-        podmanPkgs = import ./nix/podman-runner.nix {
-          inherit pkgs;
-          inherit (pkgs) lib stdenv;
-        };
-
         sandboxToolServerBin = pkgs.writeShellScriptBin "sandbox-tool-server" ''
           exec ${self.packages.${system}.sandbox-tool-server}/bin/sandbox-tool-server "$@"
         '';
@@ -159,27 +154,16 @@
           export PG_CON="postgres://user:password@localhost:5432/drua"
           export DATABASE_URL="$PG_CON"
           export ORT_DYLIB_PATH="${pkgs.onnxruntime}/lib/libonnxruntime${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}"
-          export COMPOSE_CMD="''${COMPOSE_CMD:-podman-compose-runner}"
 
           cleanup() {
-            $COMPOSE_CMD -f "$REPO_ROOT/docker-compose.yml" down -v 2>/dev/null || true
+            (cd "$REPO_ROOT" && pg-stop) || true
           }
           trap cleanup EXIT
 
-          $COMPOSE_CMD -f "$REPO_ROOT/docker-compose.yml" up -d postgres
-
-          echo "Waiting for PostgreSQL..."
-          for i in $(seq 1 30); do
-            if pg_isready -h localhost -p 5432 -U user -d drua >/dev/null 2>&1; then
-              echo "PostgreSQL ready"
-              break
-            fi
-            if [ "$i" = "30" ]; then
-              echo "ERROR: PostgreSQL failed to start within 30s"
-              exit 1
-            fi
-            sleep 1
-          done
+          # Fresh cluster per run — same semantics the compose stack's
+          # `down -v` gave CI.
+          (cd "$REPO_ROOT" && rm -rf .nix-deps/pg .nix-deps/pg.log)
+          (cd "$REPO_ROOT" && pg-start)
 
           sqlx migrate run --source "$REPO_ROOT/core/migrations"
 
@@ -207,12 +191,6 @@
           export SANDBOX_TOOL_SERVER_BIN="${sandboxToolServerBin}/bin/sandbox-tool-server"
           export TUNNEL_FIXTURE_BIN="${self.packages.${system}.tunnel-fixture}/bin/tunnel-fixture"
           export PG_CON="postgres://user:password@localhost:5432/drua"
-          export COMPOSE_CMD="''${COMPOSE_CMD:-podman-compose-runner}"
-
-          cleanup() {
-            $COMPOSE_CMD -f "$REPO_ROOT/docker-compose.yml" down -v 2>/dev/null || true
-          }
-          trap cleanup EXIT
 
           exec bats bats/*.bats
         '';
@@ -306,7 +284,8 @@
               export PATH="${pkgs.lib.makeBinPath [
                 bats-runner
                 drua
-                podmanPkgs.podman-compose-runner
+                self.packages.${system}.pg-start
+                self.packages.${system}.pg-stop
                 pkgs.bats
                 pkgs.diffutils
                 pkgs.jq
@@ -361,7 +340,8 @@
             wrapped = pkgs.writeShellScriptBin "run-integration-tests" ''
               export PATH="${pkgs.lib.makeBinPath [
                 integration-test-runner
-                podmanPkgs.podman-compose-runner
+                self.packages.${system}.pg-start
+                self.packages.${system}.pg-stop
                 pkgs.cargo-nextest
                 pkgs.sqlx-cli
                 pkgs.postgresql
@@ -557,6 +537,21 @@
             '';
           };
 
+        # Native OTLP collector replacing the compose `otel-agent` service.
+        # Forwards traces to Honeycomb when INGEST_HONEYCOMB_API_KEY is set;
+        # otherwise the exporter header is empty and the debug exporter
+        # still prints locally. Run from the repo root (config path is
+        # relative): make start-otel. Ctrl-C stops it.
+        packages.otel-agent = pkgs.writeShellApplication {
+          name = "otel-agent";
+          text = ''
+            set -euo pipefail
+            export HONEYCOMB_API_KEY="''${INGEST_HONEYCOMB_API_KEY:-''${HONEYCOMB_API_KEY:-}}"
+            exec ${pkgs.opentelemetry-collector-contrib}/bin/otelcol-contrib \
+              --config "$PWD/dev/otel-agent-config.yaml"
+          '';
+        };
+
         devShells.training = pkgs.mkShell {
           buildInputs = [ pythonEnv ];
           shellHook = ''
@@ -580,9 +575,6 @@
             # https:// clones fail at runtime with "unsupported URL
             # protocol" (libgit2 error class=Net 12).
             pkgs.perl
-            pkgs.docker-compose
-            pkgs.podman
-            pkgs.podman-compose
             pkgs.opentofu
             pkgs.ytt
             pkgs.kubernetes-helm
@@ -599,16 +591,6 @@
           ];
 
           shellHook = ''
-            # Container engine auto-detection
-            unset DOCKER_HOST
-            if [[ -n "''${ENGINE_DEFAULT:-}" ]]; then
-              :
-            elif command -v podman &>/dev/null && ! command -v docker &>/dev/null; then
-              export ENGINE_DEFAULT=podman
-            else
-              export ENGINE_DEFAULT=docker
-            fi
-
             export ORT_DYLIB_PATH="${pkgs.onnxruntime}/lib/libonnxruntime${pkgs.stdenv.hostPlatform.extensions.sharedLibrary}"
 
             # Local-dev: route the in-cluster sandbox image's git ops at
@@ -628,7 +610,7 @@
             : "''${DRUA_DEV_AGENT_TOKEN:=dev-agent}"
             export DRUA_GIT_PROXY_URL DRUA_DEV_AGENT_TOKEN
 
-            echo "drua dev shell loaded (engine: $ENGINE_DEFAULT)"
+            echo "drua dev shell loaded (dev deps: make start-deps — no container engine required)"
           '';
         };
       }
