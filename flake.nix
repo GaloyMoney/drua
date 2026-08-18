@@ -161,7 +161,10 @@
           trap cleanup EXIT
 
           # Fresh cluster per run — same semantics the compose stack's
-          # `down -v` gave CI.
+          # `down -v` gave CI. pg-stop first (fails loudly on a running-
+          # but-unstoppable server, so the rm -rf never hits a live
+          # postmaster); it exits 0 when nothing is running.
+          (cd "$REPO_ROOT" && pg-stop)
           (cd "$REPO_ROOT" && rm -rf .nix-deps/pg .nix-deps/pg.log)
           (cd "$REPO_ROOT" && pg-start)
 
@@ -567,6 +570,10 @@
             pkgs.cargo-nextest
             pkgs.sqlx-cli
             pkgs.postgresql
+            # Bare-command lifecycle for bats/helpers.bash (start_server
+            # invokes `pg-start`/`pg-stop` directly when SKIP_DEPS is unset).
+            self.packages.${system}.pg-start
+            self.packages.${system}.pg-stop
             pkgs.pkg-config
             # `git2`'s `vendored-openssl` (drua-library) builds OpenSSL
             # via `openssl-src`, which shells out to perl during

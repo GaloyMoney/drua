@@ -32,7 +32,7 @@ teardown_tunnel_ha_file() {
   stop_runtime "b"
 
   if [ -f "$BATS_FILE_TMPDIR/started-pg" ]; then
-    (cd "$REPO_ROOT" && pg-stop) || true
+    (cd "$REPO_ROOT" && pg-stop)
     rm -rf "$REPO_ROOT/.nix-deps/pg"
   fi
 }
@@ -59,7 +59,8 @@ start_postgres() {
   fi
 
   if [ "${SKIP_DEPS:-0}" != "1" ]; then
-    (cd "$REPO_ROOT" && pg-stop) 2>/dev/null || true
+    require_pg_tools
+    (cd "$REPO_ROOT" && pg-stop)
     rm -rf "$REPO_ROOT/.nix-deps/pg"
     (cd "$REPO_ROOT" && pg-start)
     touch "$BATS_FILE_TMPDIR/started-pg"
