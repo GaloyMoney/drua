@@ -12,10 +12,21 @@ runs:
   using: "composite"
   steps:
     - uses: DeterminateSystems/nix-installer-action@v16
-    # continue-on-error: a missing/revoked cache must not fail the build
-    - uses: cachix/cachix-action@v17
-      continue-on-error: true
+    # Cache may be deleted or the token revoked; skip cachix instead of failing
+    - name: Probe cachix cache
+      id: cachix
+      shell: bash
       if: inputs.cachix_auth_token != ''
+      env:
+        CACHIX_AUTH_TOKEN: ${{ inputs.cachix_auth_token }}
+      run: |
+        if curl -sf -H "Authorization: Bearer $CACHIX_AUTH_TOKEN" https://drua-github-actions.cachix.org/nix-cache-info > /dev/null; then
+          echo "available=true" >> "$GITHUB_OUTPUT"
+        else
+          echo "available=false" >> "$GITHUB_OUTPUT"
+        fi
+    - uses: cachix/cachix-action@v17
+      if: steps.cachix.outputs.available == 'true'
       with:
         name: drua-github-actions
         authToken: ${{ inputs.cachix_auth_token }}
