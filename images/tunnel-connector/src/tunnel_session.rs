@@ -3,6 +3,7 @@ use tokio_tungstenite::tungstenite;
 
 use crate::{
     cli::Cli,
+    lana_admin_mcp::{LanaAdminMcpController, LanaAdminMcpInstanceDiscoverer},
     mcp_upstream::{
         call_tool, discover_upstream, registration_fingerprint, tool_catalog_changed, McpClients,
         UpstreamConfig,
@@ -12,17 +13,19 @@ use crate::{
     tunnel_protocol::TunnelMessage,
 };
 
-pub(crate) async fn run_tunnel<H, D>(
+pub(crate) async fn run_tunnel<H, D, L>(
     cli: &Cli,
     static_upstreams: &[UpstreamConfig],
     postgres_mcp: &PostgresMcpController<H, D>,
+    lana_admin_mcp: Option<&LanaAdminMcpController<L>>,
     backoff: &mut std::time::Duration,
 ) -> anyhow::Result<()>
 where
     H: PostgresMcpHandler,
     D: PostgresSourceDiscoverer,
+    L: LanaAdminMcpInstanceDiscoverer,
 {
-    let upstreams = build_upstreams(static_upstreams, postgres_mcp).await?;
+    let upstreams = build_upstreams(static_upstreams, postgres_mcp, lana_admin_mcp).await?;
     if upstreams.is_empty() {
         anyhow::bail!("all configured MCP upstreams are unavailable or disabled");
     }
@@ -106,7 +109,7 @@ where
         tokio::select! {
             biased;
             _ = refresh_tick.tick(), if refresh_enabled => {
-                match build_upstreams(static_upstreams, postgres_mcp).await {
+                match build_upstreams(static_upstreams, postgres_mcp, lana_admin_mcp).await {
                     Ok(refreshed_upstreams) if refreshed_upstreams != upstreams => {
                         tracing::info!("configured upstream set changed; reconnecting to refresh drua registration");
                         return Ok(());
@@ -151,7 +154,7 @@ where
                                 arguments,
                             } => {
                                 let response =
-                                    handle_call(&mcp_clients, id, &upstream, &tool_name, arguments).await;
+                                    handle_call(&mut mcp_clients, id, &upstream, &tool_name, arguments).await;
                                 let json = serde_json::to_string(&response)?;
                                 ws_tx.send(tungstenite::Message::Text(json.into())).await?;
                             }
@@ -176,13 +179,15 @@ where
     Ok(())
 }
 
-async fn build_upstreams<H, D>(
+async fn build_upstreams<H, D, L>(
     static_upstreams: &[UpstreamConfig],
     postgres_mcp: &PostgresMcpController<H, D>,
+    lana_admin_mcp: Option<&LanaAdminMcpController<L>>,
 ) -> anyhow::Result<Vec<UpstreamConfig>>
 where
     H: PostgresMcpHandler,
     D: PostgresSourceDiscoverer,
+    L: LanaAdminMcpInstanceDiscoverer,
 {
     let mut upstreams = static_upstreams.to_vec();
 
@@ -190,11 +195,15 @@ where
         upstreams.push(upstream);
     }
 
+    if let Some(lana_admin_mcp) = lana_admin_mcp {
+        upstreams.extend(lana_admin_mcp.reconcile().await?);
+    }
+
     Ok(upstreams)
 }
 
 async fn handle_call(
-    clients: &McpClients,
+    clients: &mut McpClients,
     id: String,
     upstream: &str,
     tool_name: &str,
