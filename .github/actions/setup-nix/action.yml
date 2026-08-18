@@ -12,7 +12,9 @@ runs:
   using: "composite"
   steps:
     - uses: DeterminateSystems/nix-installer-action@v16
+    # continue-on-error: a missing/revoked cache must not fail the build
     - uses: cachix/cachix-action@v17
+      continue-on-error: true
       if: inputs.cachix_auth_token != ''
       with:
         name: drua-github-actions
