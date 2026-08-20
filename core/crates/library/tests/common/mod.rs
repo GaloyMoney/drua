@@ -34,10 +34,20 @@ pub fn library_data_dir(test_name: &str) -> PathBuf {
     tests_dir().join(".library").join(test_name)
 }
 
-/// `spawn_unique` is a no-op while a row exists, so a stuck "running" job
-/// from a crashed previous run would prevent the poller from ever invoking
-/// our runner. Tests should call this before constructing `Library`.
+/// Spawning the resident job resolves to the existing one while a row
+/// exists, so a stuck "running" job from a crashed previous run would
+/// prevent the poller from ever invoking our runner. Tests should call this
+/// before constructing `Library`.
 pub async fn reset_library_db_state(pool: &sqlx::PgPool) {
+    // `job_execution_states` has no FK back to `jobs`, so it has to be
+    // cleared explicitly or the execution rows below orphan their state.
+    sqlx::query(
+        "DELETE FROM job_execution_states WHERE id IN \
+         (SELECT id FROM jobs WHERE job_type = 'library.sync')",
+    )
+    .execute(pool)
+    .await
+    .expect("delete job_execution_states");
     sqlx::query("DELETE FROM job_executions WHERE job_type = 'library.sync'")
         .execute(pool)
         .await
