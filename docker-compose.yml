@@ -1,0 +1,25 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: drua
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  otel-agent:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.133.0
+    command: --config=/etc/otel-agent-config.yaml
+    environment:
+      - HONEYCOMB_API_KEY=${INGEST_HONEYCOMB_API_KEY}
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+    volumes:
+      - ./dev/otel-agent-config.yaml:/etc/otel-agent-config.yaml
+
+volumes:
+  pgdata:

@@ -11,7 +11,7 @@ configuration lives in `drua.yml`; secrets come from environment variables
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `PG_CON` | No | `postgres://user:password@localhost:5432/drua` | PostgreSQL connection URL. The Makefile provides this default, which matches the native nix Postgres (`make start-deps`). |
+| `PG_CON` | No | `postgres://user:password@localhost:5432/drua` | PostgreSQL connection URL. The Makefile provides this default, which matches the bundled compose stack. |
 | `GITHUB_CLIENT_SECRET` | No | `dev-secret` | GitHub OAuth App client secret (only needed when `oauth.login: github`). |
 | `ANTHROPIC_API_KEY` | No | `""` | Anthropic API key for the agent LLM runtime. Server starts without it but agent prompts will fail. |
 | `OPENAI_API_KEY` | No | `""` | OpenAI Platform API key used by `openai` (Chat Completions API) and `openai-responses` (Responses API). |

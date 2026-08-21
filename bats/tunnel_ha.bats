@@ -12,6 +12,7 @@ DEPLOYMENT_SPLIT=3
 if [ -z "${TUNNEL_FIXTURE_BIN:-}" ]; then
   TUNNEL_FIXTURE_BIN="cargo run --manifest-path $REPO_ROOT/Cargo.toml -p tunnel-connector --bin tunnel-fixture --"
 fi
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-drua-tunnel-ha-bats}"
 
 setup_file() {
   setup_tunnel_ha_file

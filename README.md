@@ -69,9 +69,7 @@ The day-to-day ones:
 |---|---|
 | `make start` | `reset-deps` + server with dev login |
 | `make run-server` | Build sandbox binary and start the server (prod login) |
-| `make reset-deps` | `clean-deps` + `start-deps` + `setup-db` (native Postgres via nix — no container engine) |
-| `make stop-deps` | Stop the native Postgres instance |
-| `make start-otel` | Run the OTLP collector (foreground; Honeycomb if `INGEST_HONEYCOMB_API_KEY` set) |
+| `make reset-deps` | `clean-deps` + `start-deps` + `setup-db` (Postgres) |
 | `make sqlx-prepare` | Regenerate SQLx offline query data |
 | `make sdl-rust` | Regenerate the GraphQL SDL (`server/src/graphql/schema.graphql`) |
 | `make integration-tests` | `reset-deps` then `cargo nextest` |

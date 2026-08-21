@@ -9,7 +9,7 @@
 #   admin token call `create_test_agent` themselves (per-test or
 #   in `setup_file` after this call).
 # - `reset_library_tables`: wipes the rows that linger between
-#   test runs when `SKIP_DEPS=1` is set (developer iteration
+#   test runs when `SKIP_COMPOSE=1` is set (developer iteration
 #   against a persisted PG). Always wipes `jobs` + `library_documents`;
 #   callers pass entity-specific table names as extra args.
 # - `admin_call`: dispatches a `drua_admin_<tool>` searchable tool
@@ -90,7 +90,7 @@ EOF
   start_server
 }
 
-# Reset the rows that linger between bats runs when `SKIP_DEPS=1`
+# Reset the rows that linger between bats runs when `SKIP_COMPOSE=1`
 # is set (developer iteration). Wipes `jobs` + `library_documents`
 # unconditionally — every library-using test needs them clean — plus
 # every additional table name passed as an extra arg.
@@ -99,7 +99,7 @@ EOF
 # the entity table and its events table (e.g.
 # `reset_library_tables skill_events skills`).
 reset_library_tables() {
-  if [ "${SKIP_DEPS:-0}" != "1" ]; then return 0; fi
+  if [ "${SKIP_COMPOSE:-0}" != "1" ]; then return 0; fi
   local pg="${PG_CON:-postgres://user:password@localhost:5432/drua}"
   local -a cmd=(
     -q

@@ -24,4 +24,3 @@ test-sandbox.sh
 .bacon-locations
 style-agent/
 tmp
-.nix-deps/

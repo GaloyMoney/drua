@@ -88,7 +88,7 @@ _poll_run() {
 
 @test "workflow: tool_step dispatches whoami and surfaces workflow_executor identity" {
   # Unique-per-run names so re-runs against a persisted PG (developer
-  # iteration with SKIP_DEPS=1) don't collide.
+  # iteration with SKIP_COMPOSE=1) don't collide.
   local suffix
   suffix="$(uuidgen | tr '[:upper:]' '[:lower:]' | cut -c1-8)"
   local proj_name="proj-toolstep-$suffix"
