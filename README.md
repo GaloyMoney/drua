@@ -32,6 +32,61 @@ cargo run -p drua-cli -- tui --server https://…       # remote
 First run opens a browser to authenticate and stores a token in
 `~/.drua/config.json`. Commands and key bindings: [`client/README.md`](client/README.md).
 
+## Local library + MCP quickstart
+
+The server needs a library git repo at boot (`library.repo_url`); the checked-in
+`drua.yml` points at a Galoy-internal one. To run fully locally — no GitHub access,
+no LLM provider key:
+
+```bash
+./dev/local-library-setup.sh                    # local bare upstream + tmp/drua.local.yml
+make reset-deps                                 # Postgres + migrations
+DRUA_CONFIG=tmp/drua.local.yml make run-server  # server on :4200
+```
+
+Mint an admin-scoped MCP token (seeded directly in Postgres):
+
+```bash
+TOKEN=$(./dev/mint-mcp-token.sh)
+```
+
+The MCP endpoint is `http://localhost:4200/mcp` (streamable HTTP, stateless — no
+`initialize` handshake needed). Space files live under `spaces/<slug>/…` in the
+library repo and are managed through the `drua_admin_spaces` tool via the `call_tool`
+envelope:
+
+```bash
+mcp() {
+  curl -s -X POST http://localhost:4200/mcp \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json, text/event-stream" \
+    -H "Authorization: Bearer $TOKEN" \
+    -d "$1"
+}
+
+# create a space
+mcp '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"call_tool",
+  "arguments":{"tool_name":"drua_admin_spaces",
+    "arguments":{"command":"create","slug":"demo","description":"demo space"}}}}'
+
+# write a file (edit_op: write | str_replace | insert | delete | move)
+mcp '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"call_tool",
+  "arguments":{"tool_name":"drua_admin_spaces",
+    "arguments":{"command":"edit","slug":"demo","edit_op":"write",
+      "op_args":{"path":"notes/hello.md","content":"# hello\n"}}}}}'
+
+# read it back (view_op: read | ls | grep | glob)
+mcp '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"call_tool",
+  "arguments":{"tool_name":"drua_admin_spaces",
+    "arguments":{"command":"view","slug":"demo","view_op":"read",
+      "op_args":{"path":"notes/hello.md"}}}}}'
+```
+
+Every write is a commit pushed to the upstream (`git -C tmp/library-upstream.git log`
+to inspect). Point `library.repo_url` at any GitHub repo instead via SSH
+(`git@github.com:you/repo.git`; ssh-agent or `~/.ssh/id_*` keys are picked up
+automatically).
+
 ## Configuration
 
 - **Secrets** → environment variables. Copy `.env.example`; at minimum set an
