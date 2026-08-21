@@ -5,20 +5,20 @@
 # upstream to an empty scaffold.
 #
 # By default the upstream is a local bare repo under tmp/. Set
-# REPO_URL to use a remote you own instead (SSH form, e.g.
-# REPO_URL=git@github.com:you/some-empty-repo.git) — the server picks
+# DRUA_LIBRARY_REPO_URL to use a remote you own instead (SSH form, e.g.
+# DRUA_LIBRARY_REPO_URL=git@github.com:you/some-empty-repo.git) — the server picks
 # up ssh-agent or ~/.ssh/id_* keys automatically. Everything on that
 # repo's main branch is overwritten.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-UPSTREAM="${REPO_URL:-$ROOT/tmp/library-upstream.git}"
+UPSTREAM="${DRUA_LIBRARY_REPO_URL:-$ROOT/tmp/library-upstream.git}"
 WORKING="$ROOT/tmp/library-upstream-working"
 DATA_DIR="$ROOT/tmp/library-data"
 CONFIG="$ROOT/tmp/drua.local.yml"
 
 rm -rf "$WORKING" "$DATA_DIR"
-if [ -z "${REPO_URL:-}" ]; then
+if [ -z "${DRUA_LIBRARY_REPO_URL:-}" ]; then
   rm -rf "$UPSTREAM"
   git init --bare --initial-branch=main "$UPSTREAM" >/dev/null
 fi
@@ -67,7 +67,7 @@ providers:
         context_window_tokens: 4096
 library:
   data_dir: "$ROOT/tmp/library-data"
-  repo_url: "${REPO_URL:-file://$UPSTREAM}"
+  repo_url: "${DRUA_LIBRARY_REPO_URL:-file://$UPSTREAM}"
   skill_sync_interval_secs: 1
 sandbox:
   backend:

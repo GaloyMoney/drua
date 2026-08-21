@@ -83,9 +83,15 @@ mcp '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"call_tool",
 ```
 
 Every write is a commit pushed to the upstream (`git -C tmp/library-upstream.git log`
-to inspect). Point `library.repo_url` at any GitHub repo instead via SSH
-(`git@github.com:you/repo.git`; ssh-agent or `~/.ssh/id_*` keys are picked up
-automatically).
+to inspect). To use a GitHub repo you own as the upstream instead of the local bare
+one, pass it to the setup script — its `main` branch is force-overwritten with an empty
+scaffold:
+
+```bash
+DRUA_LIBRARY_REPO_URL=git@github.com:you/repo.git ./dev/local-library-setup.sh
+```
+
+Auth is SSH: ssh-agent or `~/.ssh/id_*` keys are picked up automatically.
 
 ## Configuration
 

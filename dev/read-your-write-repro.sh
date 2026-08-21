@@ -32,8 +32,9 @@
 # local `file://` upstream a fetch completes in single-digit
 # milliseconds and the window is too narrow to observe reliably over
 # real HTTP calls, which is exactly why the bug escaped local testing.
-# So this script requires REPO_URL to point at a remote repo you own
-# (SSH form). Everything on its `main` branch is overwritten.
+# So this script requires DRUA_LIBRARY_REPO_URL to point at a remote
+# repo you own (SSH form). Everything on its `main` branch is
+# overwritten.
 #
 # ## Other knobs
 #
@@ -57,7 +58,7 @@
 # Postgres up and migrated (`make reset-deps`). Ports 4200/4300 free.
 # An empty repo you own, reachable over SSH:
 #
-#   REPO_URL=git@github.com:you/drua-library-repro.git ./dev/read-your-write-repro.sh
+#   DRUA_LIBRARY_REPO_URL=git@github.com:you/drua-library-repro.git ./dev/read-your-write-repro.sh
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -71,11 +72,11 @@ B=4300
 # upstream reset performed below, so a reused slug would fail `create`.
 SLUG="ryw-repro-$RANDOM"
 
-if [ -z "${REPO_URL:-}" ]; then
+if [ -z "${DRUA_LIBRARY_REPO_URL:-}" ]; then
   cat >&2 <<'EOF'
-REPO_URL is required — point it at an empty repo you own, SSH form:
+DRUA_LIBRARY_REPO_URL is required — point it at an empty repo you own, SSH form:
 
-  REPO_URL=git@github.com:you/drua-library-repro.git ./dev/read-your-write-repro.sh
+  DRUA_LIBRARY_REPO_URL=git@github.com:you/drua-library-repro.git ./dev/read-your-write-repro.sh
 
 Its main branch will be overwritten. A remote upstream matters: the
 staleness window this script demonstrates is the peer's push-to-fetch
@@ -99,11 +100,16 @@ done
 
 # Force-reset the upstream to an empty scaffold and render the minimal
 # config both replicas boot from (see dev/local-library-setup.sh).
-echo "==> Resetting library upstream ($REPO_URL) + rendering config"
-REPO_URL="$REPO_URL" ./dev/local-library-setup.sh >/dev/null
+echo "==> Resetting library upstream ($DRUA_LIBRARY_REPO_URL) + rendering config"
+DRUA_LIBRARY_REPO_URL="$DRUA_LIBRARY_REPO_URL" ./dev/local-library-setup.sh >/dev/null
 
-echo "==> Building server binary"
-cargo build -q -p drua-cli -p sandbox-tool-server
+# Not -q: the first run compiles the whole workspace, and a silent
+# multi-minute pause is indistinguishable from a hang.
+echo "==> Building server binary (first run compiles the workspace — this takes a while)"
+cargo build -p drua-cli -p sandbox-tool-server || {
+  echo "build failed" >&2
+  exit 2
+}
 
 pids=()
 cleanup() {
