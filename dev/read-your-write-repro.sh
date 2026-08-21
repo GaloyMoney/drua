@@ -130,23 +130,41 @@ start_replica() {
     --set "library.data_dir=$data_dir" \
     --set "library.skill_sync_interval_secs=3600" \
     > "$ROOT/tmp/ryw-$name.log" 2>&1 &
-  pids+=($!)
+  LAST_PID=$!
+  pids+=("$LAST_PID")
 }
 
-echo "==> Starting replica A (:$A) and replica B (:$B)"
-start_replica a $A "$ROOT/tmp/library-data"
-start_replica b $B "$ROOT/tmp/library-data-b"
-
-for port in $A $B; do
-  for _ in $(seq 1 60); do
-    curl -s -o /dev/null -m 1 "http://localhost:$port/" 2>/dev/null && break
+# Waits for one replica's HTTP listener, failing fast if the process
+# exits first and surfacing its log either way — a replica that dies at
+# startup is the difference between a clear error and a mute timeout.
+wait_ready() {
+  local name="$1" port="$2" pid="$3" i=0
+  while [ $i -lt 300 ]; do
+    curl -s -o /dev/null -m 1 "http://localhost:$port/" 2>/dev/null && return 0
+    if ! kill -0 "$pid" 2>/dev/null; then
+      echo "Replica $name (:$port) exited during startup. Last lines of tmp/ryw-$name.log:" >&2
+      tail -15 "$ROOT/tmp/ryw-$name.log" >&2
+      exit 2
+    fi
     sleep 1
+    i=$((i + 1))
   done
-  curl -s -o /dev/null -m 1 "http://localhost:$port/" 2>/dev/null || {
-    echo "Replica on :$port did not become ready — see tmp/ryw-*.log" >&2
-    exit 2
-  }
-done
+  echo "Replica $name (:$port) did not become ready. Last lines of tmp/ryw-$name.log:" >&2
+  tail -15 "$ROOT/tmp/ryw-$name.log" >&2
+  exit 2
+}
+
+# Sequentially, not in parallel: the first server to boot downloads the
+# embedding model (~150MB) into a cache both processes share, and two
+# concurrent downloads race and clobber each other. Starting A first
+# means B finds the cache warm.
+echo "==> Starting replica A (:$A) — first boot downloads the embedding model, be patient"
+start_replica a $A "$ROOT/tmp/library-data"
+wait_ready a $A "$LAST_PID"
+
+echo "==> Starting replica B (:$B)"
+start_replica b $B "$ROOT/tmp/library-data-b"
+wait_ready b $B "$LAST_PID"
 
 # Admin-scoped MCP bearer token, seeded directly in Postgres. Both
 # replicas resolve it against the same table, so one token works for
