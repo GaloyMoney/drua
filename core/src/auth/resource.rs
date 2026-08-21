@@ -19,6 +19,10 @@ pub enum AuthResource {
     ProjectSecret(ProjectId, Option<ProjectSecretId>),
     /// User-scoped. Only `User` subjects and `Admin`-scoped agents can access.
     McpCreds(Option<McpCredsId>),
+    /// Serialized server configuration (the `appConfig` query). Instance-wide
+    /// and not project-scoped, so — like `McpCreds` — only `User` subjects
+    /// and `Admin`-scoped agents can read it.
+    AppConfig,
     Note(ProjectId, Option<NoteId>),
     Skill(ProjectId, Option<SkillId>),
     Workflow(ProjectId, Option<WorkflowDefinitionId>),
@@ -40,7 +44,10 @@ impl AuthResource {
             | AuthResource::Skill(project, _)
             | AuthResource::Workflow(project, _)
             | AuthResource::AuditLog(project) => Some(*project),
-            AuthResource::McpCreds(_) | AuthResource::Space(_) | AuthResource::External(_) => None,
+            AuthResource::McpCreds(_)
+            | AuthResource::AppConfig
+            | AuthResource::Space(_)
+            | AuthResource::External(_) => None,
         }
     }
 }

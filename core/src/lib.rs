@@ -32,6 +32,7 @@ use std::sync::Arc;
 
 use agent::Agents;
 use audit::Audit;
+use auth::{AuthResource, AuthSubject, AuthVerb};
 use code_assistant::CodeAssistant;
 use git_proxy::GitProxies;
 use github_app::GitHubAppTokenProvider;
@@ -49,11 +50,13 @@ use toolset::{
     NotesTool, ProjectAgent, ProjectLog, ProjectSandbox, Read, SkillTool, SpacesTool,
     SubmitOutputTool, TextEditor, ToolSets, ToolSetsError, UseSkillTool, WorkflowTool,
 };
+use tracing::instrument;
 use user::Users;
 use workflow::Workflows;
 
 #[derive(Clone)]
 pub struct App {
+    app_config_yaml: String,
     users: Arc<Users>,
     mcp_creds: Arc<McpCredentials>,
     agents: Arc<Agents>,
@@ -78,7 +81,11 @@ pub struct App {
 }
 
 impl App {
-    pub async fn init(pool: &sqlx::PgPool, config: AppConfig) -> Result<Self, AppError> {
+    pub async fn init(
+        pool: &sqlx::PgPool,
+        config: AppConfig,
+        app_config_yaml: String,
+    ) -> Result<Self, AppError> {
         // Fail loudly at startup rather than on first project-create.
         config.agents.validate()?;
         config
@@ -387,6 +394,7 @@ impl App {
         )?);
 
         Ok(Self {
+            app_config_yaml,
             users,
             mcp_creds: Arc::new(mcp_creds),
             agents: Arc::clone(&agents),
@@ -494,6 +502,15 @@ impl App {
         &self.notes
     }
 
+    /// Serialized application configuration (YAML). Reveals infra topology
+    /// and integration endpoints, so reads are restricted to `User` subjects
+    /// and `Admin`-scoped tokens.
+    #[instrument(name = "domain.app.app_config", skip(self))]
+    pub fn app_config(&self, sub: &AuthSubject) -> Result<String, AppError> {
+        sub.can(AuthVerb::Read, AuthResource::AppConfig)?;
+        Ok(self.app_config_yaml.clone())
+    }
+
     /// Gracefully shut down background jobs. Call on SIGTERM / ctrl-c.
     pub async fn shutdown(&self) {
         self.tunnel.shutdown().await;
@@ -540,6 +557,8 @@ fn spawn_context_generation_listener(pool: sqlx::PgPool, generation: ContextGene
 pub enum AppError {
     #[error("AppError - Agent: {0}")]
     Agent(#[from] agent::AgentError),
+    #[error("AppError - Authorization: {0}")]
+    Authorization(#[from] auth::error::AuthorizationError),
     #[error("AppError - ToolSets: {0}")]
     ToolSets(#[from] ToolSetsError),
     #[error("AppError - Embedder: {0}")]

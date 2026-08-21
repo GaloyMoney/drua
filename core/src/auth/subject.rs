@@ -285,6 +285,33 @@ mod tests {
         assert!(matches!(err, AuthorizationError::AuthenticationRequired));
     }
 
+    /// The serialized server config exposes infra topology and integration
+    /// endpoints — instance-wide, so only `User` subjects and `Admin`-scoped
+    /// tokens may read it; project scopes never cover it.
+    #[test]
+    fn app_config_read_is_user_and_admin_scope_only() {
+        let user = AuthSubject::User(UserId::new());
+        assert!(user.can(AuthVerb::Read, AuthResource::AppConfig).is_ok());
+
+        let admin =
+            AuthSubject::ExportedAgent(UserId::new(), McpCredsId::new(), vec![AuthScope::Admin]);
+        assert!(admin.can(AuthVerb::Read, AuthResource::AppConfig).is_ok());
+
+        let project = project();
+        for scopes in [
+            vec![AuthScope::ProjectAdmin(project)],
+            vec![AuthScope::ProjectMember(project)],
+        ] {
+            let s = AuthSubject::Agent(project, AgentId::new(), scopes);
+            assert!(s.can(AuthVerb::Read, AuthResource::AppConfig).is_err());
+        }
+
+        let err = AuthSubject::Anonymous
+            .can(AuthVerb::Read, AuthResource::AppConfig)
+            .unwrap_err();
+        assert!(matches!(err, AuthorizationError::AuthenticationRequired));
+    }
+
     #[test]
     fn project_admin_permits_management_resources() {
         let s = admin(project());

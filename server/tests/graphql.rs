@@ -20,6 +20,8 @@ fn test_sub() -> drua_core::auth::AuthSubject {
     drua_core::auth::AuthSubject::User(drua_core::primitives::UserId::new())
 }
 
+const TEST_APP_CONFIG_YAML: &str = "mcp_endpoint: https://drua.test/mcp\n";
+
 /// Initialise a throwaway bare git repo under the test scratch dir and
 /// return its path. `Library::init` requires a non-empty `repo_url`
 /// and reachable upstream — this gives both without standing up a
@@ -123,7 +125,7 @@ async fn test_app(pool: &sqlx::PgPool) -> drua_core::App {
         ..Default::default()
     };
 
-    drua_core::App::init(pool, config)
+    drua_core::App::init(pool, config, TEST_APP_CONFIG_YAML.to_string())
         .await
         .expect("init test app")
 }
@@ -186,6 +188,82 @@ async fn ping_mutation_works() {
         .await;
     let json = serde_json::to_value(&response).unwrap();
     assert_eq!(json["data"]["ping"], "pong");
+}
+
+// ─── appConfig authorization tests ─────────────────────────────────────────
+
+#[tokio::test]
+async fn app_config_rejects_anonymous_and_non_admin_scopes() {
+    let pool = pool().await;
+    let app = test_app(&pool).await;
+    let schema = drua_server::graphql::schema(Some(app.clone()));
+
+    let anon = execute_graphql(
+        &schema,
+        &app,
+        &drua_core::auth::AuthSubject::Anonymous,
+        "{ appConfig }",
+        serde_json::Value::Null,
+    )
+    .await;
+    assert!(anon["data"]["appConfig"].is_null());
+    assert!(anon["errors"]
+        .as_array()
+        .is_some_and(|errs| !errs.is_empty()));
+
+    let project_id = drua_core::primitives::ProjectId::from(uuid::Uuid::new_v4());
+    let project_admin = drua_core::auth::AuthSubject::Agent(
+        project_id,
+        drua_core::primitives::AgentId::new(),
+        vec![drua_core::auth::AuthScope::ProjectAdmin(project_id)],
+    );
+    let denied = execute_graphql(
+        &schema,
+        &app,
+        &project_admin,
+        "{ appConfig }",
+        serde_json::Value::Null,
+    )
+    .await;
+    assert!(denied["data"]["appConfig"].is_null());
+    assert!(denied["errors"]
+        .as_array()
+        .is_some_and(|errs| !errs.is_empty()));
+}
+
+#[tokio::test]
+async fn app_config_allows_user_and_admin_scope() {
+    let pool = pool().await;
+    let app = test_app(&pool).await;
+    let schema = drua_server::graphql::schema(Some(app.clone()));
+
+    let user = test_sub();
+    let res = execute_graphql(
+        &schema,
+        &app,
+        &user,
+        "{ appConfig }",
+        serde_json::Value::Null,
+    )
+    .await;
+    let data = assert_no_errors(&res);
+    assert_eq!(data["appConfig"], TEST_APP_CONFIG_YAML);
+
+    let admin = drua_core::auth::AuthSubject::ExportedAgent(
+        drua_core::primitives::UserId::new(),
+        drua_core::primitives::McpCredsId::new(),
+        vec![drua_core::auth::AuthScope::Admin],
+    );
+    let res = execute_graphql(
+        &schema,
+        &app,
+        &admin,
+        "{ appConfig }",
+        serde_json::Value::Null,
+    )
+    .await;
+    let data = assert_no_errors(&res);
+    assert_eq!(data["appConfig"], TEST_APP_CONFIG_YAML);
 }
 
 // ─── Project mutation tests ───────────────────────────────────────────────
