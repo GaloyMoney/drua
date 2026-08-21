@@ -2,20 +2,27 @@ PG_CON ?= postgres://user:password@localhost:5432/drua
 GITHUB_CLIENT_SECRET ?= $(shell echo $$GITHUB_CLIENT_SECRET)
 ANTHROPIC_API_KEY ?= $(shell echo $$ANTHROPIC_API_KEY)
 
-# ── Container engine ─────────────────────────────────────────────────────────────
-# Set by the nix devShell shellHook. Override with: make start ENGINE_DEFAULT=docker
-ENGINE_DEFAULT ?= $(shell command -v podman >/dev/null 2>&1 && echo podman || echo docker)
-COMPOSE_CMD = $(ENGINE_DEFAULT) compose
-
-clean-deps:
-	$(COMPOSE_CMD) down -v
-
+# ── Dev dependencies — native via nix, no container engine ──────────────────────
+# Postgres+pgvector run as local processes (see packages.pg-start in
+# flake.nix). No docker/podman, no VM, no Rosetta on apple silicon.
 start-deps:
-	$(COMPOSE_CMD) up -d
+	nix run .#pg-start
+
+stop-deps:
+	nix run .#pg-stop
+
+clean-deps: stop-deps
+	@rm -rf .nix-deps/pg .nix-deps/pg.log
+
+# OTLP collector (dev/otel-agent-config.yaml): OTLP on :4317/:4318,
+# forwards to Honeycomb when INGEST_HONEYCOMB_API_KEY is set. Runs in
+# the foreground; Ctrl-C stops it.
+start-otel:
+	nix run .#otel-agent
 
 setup-db:
 	@echo "Waiting for PostgreSQL..."
-	@until $(COMPOSE_CMD) exec postgres pg_isready -U user -d drua > /dev/null 2>&1; do sleep 1; done
+	@until pg_isready -h localhost -p 5432 -U user -d drua > /dev/null 2>&1; do sleep 1; done
 	@echo "PostgreSQL ready"
 	DATABASE_URL=$(PG_CON) cargo sqlx migrate run --source core/migrations
 
@@ -49,7 +56,7 @@ integration-tests: reset-deps
 update-fixtures:
 	DATABASE_URL=$(PG_CON) cargo build --release -p drua-cli -p fake-mcp-upstream
 	$(MAKE) reset-deps
-	SKIP_COMPOSE=1 UPDATE_FIXTURES=1 \
+	SKIP_DEPS=1 UPDATE_FIXTURES=1 \
 		DRUA_BIN=$(PWD)/target/release/drua \
 		FAKE_UPSTREAM_BIN=$(PWD)/target/release/fake-mcp-upstream \
 		PG_CON=$(PG_CON) \
