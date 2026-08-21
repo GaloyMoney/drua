@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use job::{CurrentJob, Job, JobCompletion, JobId, JobInitializer, JobRunner, JobSpawner, JobType};
+use job::{
+    CurrentJob, Job, JobId, JobSpawner, JobType, ResidentJobCompletion, ResidentJobInitializer,
+    ResidentJobRunner,
+};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc, Mutex, RwLock};
 
@@ -52,18 +55,14 @@ impl LibrarySyncJobInitializer {
     }
 }
 
-impl JobInitializer for LibrarySyncJobInitializer {
+impl ResidentJobInitializer for LibrarySyncJobInitializer {
     type Config = LibrarySyncConfig;
 
     fn job_type(&self) -> JobType {
         JobType::new(LIBRARY_SYNC_JOB)
     }
 
-    fn init(
-        &self,
-        _job: &Job,
-        _spawner: JobSpawner<Self::Config>,
-    ) -> Result<Box<dyn JobRunner>, Box<dyn std::error::Error>> {
+    fn init(&self, _job: &Job) -> Result<Box<dyn ResidentJobRunner>, Box<dyn std::error::Error>> {
         Ok(Box::new(LibrarySyncRunner {
             rx: Arc::clone(&self.rx),
             git: Arc::clone(&self.git),
@@ -83,19 +82,19 @@ struct LibrarySyncRunner {
 }
 
 #[async_trait::async_trait]
-impl JobRunner for LibrarySyncRunner {
+impl ResidentJobRunner for LibrarySyncRunner {
     #[tracing::instrument(name = "library.sync.run", skip_all)]
     async fn run(
         &self,
         mut current_job: CurrentJob,
-    ) -> Result<JobCompletion, Box<dyn std::error::Error>> {
+    ) -> Result<ResidentJobCompletion, Box<dyn std::error::Error>> {
         let mut rx = self.rx.lock().await;
         let mut state: LibrarySyncState = current_job.execution_state()?.unwrap_or_default();
         loop {
             tokio::select! {
                 _ = current_job.shutdown_requested() => {
                     tracing::debug!("library.sync: shutdown requested");
-                    return Ok(JobCompletion::RescheduleNow);
+                    return Ok(ResidentJobCompletion::RescheduleNow);
                 }
                 msg = rx.recv() => {
                     match msg {
@@ -135,7 +134,7 @@ impl JobRunner for LibrarySyncRunner {
                         }
                         None => {
                             tracing::debug!("library.sync: tick channel closed, rescheduling");
-                            return Ok(JobCompletion::RescheduleNow);
+                            return Ok(ResidentJobCompletion::RescheduleNow);
                         }
                     }
                 }

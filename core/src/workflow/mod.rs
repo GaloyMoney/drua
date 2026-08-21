@@ -947,6 +947,12 @@ impl Workflows {
                 )
                 .await?;
 
+            // `into_next_query` needs `entities.len()` intact, so read
+            // pagination fields before draining `entities` below.
+            let has_next_page = result.has_next_page;
+            let next_first = result.entities.len();
+            let next_after = result.end_cursor.take();
+
             for defn in result.entities.drain(..) {
                 let def_id = defn.id;
                 match self
@@ -968,10 +974,13 @@ impl Workflows {
                 }
             }
 
-            match result.into_next_query() {
-                Some(next) => query = next,
-                None => break,
+            if !has_next_page {
+                break;
             }
+            query = es_entity::PaginatedQueryArgs {
+                first: next_first,
+                after: next_after,
+            };
         }
 
         Ok(ProviderFanOutResult {
@@ -1004,6 +1013,12 @@ impl Workflows {
                     es_entity::ListDirection::Descending,
                 )
                 .await?;
+
+            // `into_next_query` needs `entities.len()` intact, so read
+            // pagination fields before draining `entities` below.
+            let has_next_page = result.has_next_page;
+            let next_first = result.entities.len();
+            let next_after = result.end_cursor.take();
 
             for mut run in result.entities.drain(..) {
                 let wait_step_name = match run.current_wait_step() {
@@ -1076,10 +1091,13 @@ impl Workflows {
                 }
             }
 
-            match result.into_next_query() {
-                Some(next) => query = next,
-                None => break,
+            if !has_next_page {
+                break;
             }
+            query = es_entity::PaginatedQueryArgs {
+                first: next_first,
+                after: next_after,
+            };
         }
         Ok(resumed)
     }

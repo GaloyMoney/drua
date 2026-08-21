@@ -34,16 +34,24 @@ impl ProjectRepo {
             let mut result = self
                 .list_by_created_at(query, ListDirection::Descending)
                 .await?;
+            // `into_next_query` needs `entities.len()` intact, so read
+            // pagination fields before draining `entities` below.
+            let has_next_page = result.has_next_page;
+            let next_first = result.entities.len();
+            let next_after = result.end_cursor.take();
             all.extend(
                 result
                     .entities
                     .drain(..)
                     .filter(|project| !project.is_archived()),
             );
-            match result.into_next_query() {
-                Some(next) => query = next,
-                None => break,
+            if !has_next_page {
+                break;
             }
+            query = PaginatedQueryArgs {
+                first: next_first,
+                after: next_after,
+            };
         }
 
         Ok(all)

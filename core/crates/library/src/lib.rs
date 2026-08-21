@@ -102,16 +102,14 @@ impl Library {
             git.commit_notify(),
         );
 
-        let spawner = jobs.add_initializer(LibrarySyncJobInitializer::new(
+        let spawner = jobs.add_resident_initializer(LibrarySyncJobInitializer::new(
             tick_rx,
             Arc::clone(&git),
             search.clone(),
             Arc::clone(&importers),
             embed_spawner.clone(),
         ));
-        spawner
-            .spawn_unique(::job::JobId::new(), LibrarySyncConfig::default())
-            .await?;
+        spawner.spawn(LibrarySyncConfig::default()).await?;
 
         Ok(Self {
             config: LibraryConfig {
