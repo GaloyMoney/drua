@@ -8,6 +8,7 @@ pub mod primitives;
 mod search;
 pub mod space;
 mod synced;
+mod watermark;
 
 use std::path::PathBuf;
 use std::sync::Arc;

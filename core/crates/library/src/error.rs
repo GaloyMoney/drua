@@ -12,4 +12,8 @@ pub enum LibraryError {
     Job(#[from] job::error::JobError),
     #[error("sqlx: {0}")]
     Sqlx(#[from] sqlx::Error),
+    #[error("head publish: {0}")]
+    HeadPublish(String),
+    #[error("local library at version {applied}, needs {required}: catch-up timed out")]
+    CatchUpTimeout { required: u64, applied: u64 },
 }

@@ -2,12 +2,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use sqlx::{PgConnection, PgPool};
+use sqlx::PgPool;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use tokio::task::JoinHandle;
 
 use crate::attribution::CommitAttribution;
 use crate::importer::GitFileHash;
+use crate::watermark::HeadWatermark;
 use crate::{GitHubAppTokenProvider, LibraryError};
 
 /// How long the writer waits for additional ops after the first one
@@ -21,13 +22,6 @@ const QUEUE_CAPACITY: usize = 256;
 /// Cluster-wide Postgres advisory-lock key for serializing pushes to the
 /// library repo's `main`. Fixed (one library repo per deployment); `0x647275616c6962` = "drualib".
 const LIBRARY_PUSH_LOCK_KEY: i64 = 0x647275616c6962;
-
-/// PG NOTIFY channel fired after a successful push. Every replica's
-/// fetcher LISTENs on it, so a write on one replica is visible
-/// cluster-wide in milliseconds instead of after each replica's fetch
-/// ticker (`fetch_interval_ms`). Payload is empty; the wake-up is
-/// purely a hint, the ticker remains the backstop.
-const LIBRARY_HEAD_NOTIFY_CHANNEL: &str = "library_head_changed";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeltaKind {
@@ -133,8 +127,10 @@ pub struct GitEngine {
     repo_mutex: Arc<Mutex<()>>,
     write_tx: mpsc::Sender<QueuedOp>,
     /// Wakes the fetcher. Fired by the local writer after a successful
-    /// batch and by the head listener on any peer replica's push.
+    /// batch, by any peer replica's publish, and by a read that finds
+    /// this clone behind.
     commit_notify: Arc<Notify>,
+    head: Arc<HeadWatermark>,
     github_app: Option<Arc<GitHubAppTokenProvider>>,
     _writer: OwnedTaskHandle,
     _listener: OwnedTaskHandle,
@@ -174,56 +170,28 @@ impl GitEngine {
         let repo_mutex = Arc::new(Mutex::new(()));
         let (write_tx, write_rx) = mpsc::channel(QUEUE_CAPACITY);
         let commit_notify = Arc::new(Notify::new());
+        let head = Arc::new(HeadWatermark::init(&pool).await?);
         let writer = tokio::spawn(Self::run_writer(
             repo_path.clone(),
             github_app.clone(),
             Arc::clone(&repo_mutex),
             Arc::clone(&commit_notify),
             write_rx,
-            pool.clone(),
+            pool,
+            Arc::clone(&head),
         ));
-        let listener = tokio::spawn(Self::run_head_listener(pool, Arc::clone(&commit_notify)));
+        let listener = head.spawn_peer_listener(Arc::clone(&commit_notify));
 
         Ok(Self {
             repo_path,
             repo_mutex,
             write_tx,
             commit_notify,
+            head,
             github_app,
             _writer: OwnedTaskHandle::new(writer),
             _listener: OwnedTaskHandle::new(listener),
         })
-    }
-
-    /// Cluster-wide counterpart of the writer's local wake-up: any
-    /// replica's successful push `pg_notify`s [`LIBRARY_HEAD_NOTIFY_CHANNEL`],
-    /// waking this replica's fetcher immediately. While PG is
-    /// unreachable, sync degrades to ticker cadence.
-    async fn run_head_listener(pool: PgPool, commit_notify: Arc<Notify>) {
-        loop {
-            let mut listener = match sqlx::postgres::PgListener::connect_with(&pool).await {
-                Ok(l) => l,
-                Err(e) => {
-                    tracing::warn!(error = %e, "library head listener: connect failed; retrying");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    continue;
-                }
-            };
-            if let Err(e) = listener.listen(LIBRARY_HEAD_NOTIFY_CHANNEL).await {
-                tracing::warn!(error = %e, "library head listener: LISTEN failed; retrying");
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            }
-            loop {
-                match listener.recv().await {
-                    Ok(_) => commit_notify.notify_one(),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "library head listener: recv failed; reconnecting");
-                        break;
-                    }
-                }
-            }
-        }
     }
 
     /// Diff between two commits (None `from` = walk all of `to`'s tree as Added)
@@ -436,10 +404,24 @@ impl GitEngine {
         Ok(deltas)
     }
 
+    /// Blocks until this replica has fetched everything published
+    /// cluster-wide as of now. Every read at HEAD goes through here:
+    /// without it a replica that has not yet fetched a peer's push serves
+    /// content the caller was already told had been overwritten.
+    async fn wait_until_current(&self) -> Result<(), LibraryError> {
+        let required = self.head.published().await?;
+        if self.head.applied() >= required {
+            return Ok(());
+        }
+        self.commit_notify.notify_one();
+        self.head.wait_until_applied(required).await
+    }
+
     /// Read the blob at `path` from HEAD's tree. `Ok(None)` when the
     /// path doesn't exist (or HEAD is unborn).
     #[tracing::instrument(name = "library.git.read_blob_at_head", skip_all, fields(%path))]
     pub async fn read_blob_at_head(&self, path: &str) -> Result<Option<Vec<u8>>, LibraryError> {
+        self.wait_until_current().await?;
         let repo_path = self.repo_path.clone();
         let path = path.to_string();
         tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, LibraryError> {
@@ -466,6 +448,7 @@ impl GitEngine {
         &self,
         dir_path: &str,
     ) -> Result<Option<Vec<DirEntry>>, LibraryError> {
+        self.wait_until_current().await?;
         let repo_path = self.repo_path.clone();
         let dir_path = dir_path.to_string();
         tokio::task::spawn_blocking(move || -> Result<Option<Vec<DirEntry>>, LibraryError> {
@@ -514,6 +497,7 @@ impl GitEngine {
         &self,
         dir_path: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, LibraryError> {
+        self.wait_until_current().await?;
         let repo_path = self.repo_path.clone();
         let dir_path = dir_path.to_string();
         tokio::task::spawn_blocking(move || -> Result<Vec<(String, Vec<u8>)>, LibraryError> {
@@ -566,10 +550,13 @@ impl GitEngine {
     #[tracing::instrument(name = "library.git.fetch_and_head", skip_all)]
     pub async fn fetch_and_head(&self) -> Result<Option<String>, LibraryError> {
         let _guard = self.repo_mutex.lock().await;
+        // Snapshotted before fetching: every version published up to here was
+        // pushed before the fetch started, so the fetch necessarily carries it.
+        let published = self.head.published().await?;
         let token = Self::fresh_token(self.github_app.as_ref()).await;
         let path = self.repo_path.clone();
 
-        tokio::task::spawn_blocking(move || -> Result<Option<String>, LibraryError> {
+        let head = tokio::task::spawn_blocking(move || -> Result<Option<String>, LibraryError> {
             let repo = git2::Repository::open_bare(&path)
                 .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
             Self::fetch_origin(&repo, token.as_deref())?;
@@ -580,7 +567,9 @@ impl GitEngine {
             Ok(head)
         })
         .await
-        .map_err(|e| LibraryError::Git(format!("fetch_and_head join: {e}")))?
+        .map_err(|e| LibraryError::Git(format!("fetch_and_head join: {e}")))??;
+        self.head.mark_applied(published);
+        Ok(head)
     }
 
     /// Blind overwrite (or create) of `path`.
@@ -738,6 +727,7 @@ impl GitEngine {
         commit_notify: Arc<Notify>,
         mut rx: mpsc::Receiver<QueuedOp>,
         pool: PgPool,
+        head: Arc<HeadWatermark>,
     ) {
         while let Some(first) = rx.recv().await {
             let mut batch = vec![first];
@@ -754,9 +744,15 @@ impl GitEngine {
                     Err(_) => break,    // window elapsed
                 }
             }
-            let any_ok =
-                Self::process_batch(&repo_path, github_app.as_ref(), &repo_mutex, &pool, batch)
-                    .await;
+            let any_ok = Self::process_batch(
+                &repo_path,
+                github_app.as_ref(),
+                &repo_mutex,
+                &pool,
+                &head,
+                batch,
+            )
+            .await;
             if any_ok {
                 commit_notify.notify_one();
             }
@@ -769,6 +765,7 @@ impl GitEngine {
         github_app: Option<&Arc<GitHubAppTokenProvider>>,
         repo_mutex: &Mutex<()>,
         pool: &PgPool,
+        head: &HeadWatermark,
         batch: Vec<QueuedOp>,
     ) -> bool {
         let _guard = repo_mutex.lock().await;
@@ -806,7 +803,7 @@ impl GitEngine {
         let (ops, responders): (Vec<BatchOp>, Vec<oneshot::Sender<Result<(), LibraryError>>>) =
             batch.into_iter().map(|q| (q.op, q.response)).unzip();
 
-        let results = tokio::task::spawn_blocking(move || -> Vec<Result<(), LibraryError>> {
+        let mut results = tokio::task::spawn_blocking(move || -> Vec<Result<(), LibraryError>> {
             Self::commit_each_then_push_blocking(&path, ops, token.as_deref())
         })
         .await
@@ -817,9 +814,20 @@ impl GitEngine {
                 .collect()
         });
 
-        let any_ok = results.iter().any(|r| r.is_ok());
-        if any_ok {
-            Self::notify_cluster_push(pool, lock_conn.as_deref_mut()).await;
+        // Published under the advisory lock and before the responders are
+        // answered: a version published after the ack would let a peer serve a
+        // read that predates the write the caller was just told had landed.
+        // If it fails the commits are upstream but no peer is obliged to have
+        // them, so the only honest answer is to fail the write — a later fetch
+        // still picks the commits up.
+        if results.iter().any(|r| r.is_ok()) {
+            if let Err(e) = head.publish().await {
+                tracing::warn!(error = %e, "library head publish failed; failing the batch");
+                let message = e.to_string();
+                for result in results.iter_mut().filter(|r| r.is_ok()) {
+                    *result = Err(LibraryError::HeadPublish(message.clone()));
+                }
+            }
         }
 
         if let Some(mut conn) = lock_conn.take() {
@@ -831,33 +839,11 @@ impl GitEngine {
                 tracing::warn!(error = %e, "library push lock: release failed");
             }
         }
+        let any_ok = results.iter().any(|r| r.is_ok());
         for (resp, res) in responders.into_iter().zip(results) {
             let _ = resp.send(res);
         }
         any_ok
-    }
-
-    /// Wake peer replicas' fetchers after a successful push so
-    /// cross-replica reads converge in milliseconds instead of after
-    /// each replica's fetch ticker. Best effort: failure degrades to
-    /// ticker-cadence convergence. Prefers the advisory-lock connection
-    /// (already held) over a fresh pool checkout.
-    async fn notify_cluster_push(pool: &PgPool, lock_conn: Option<&mut PgConnection>) {
-        let res = match lock_conn {
-            Some(conn) => sqlx::query("SELECT pg_notify($1, '')")
-                .bind(LIBRARY_HEAD_NOTIFY_CHANNEL)
-                .execute(conn)
-                .await
-                .map(|_| ()),
-            None => sqlx::query("SELECT pg_notify($1, '')")
-                .bind(LIBRARY_HEAD_NOTIFY_CHANNEL)
-                .execute(pool)
-                .await
-                .map(|_| ()),
-        };
-        if let Err(e) = res {
-            tracing::warn!(error = %e, "library head notify failed; peers converge on ticker");
-        }
     }
 
     /// Apply N ops as N commits, then push once. On non-FF push, fetch

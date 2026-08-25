@@ -18,6 +18,9 @@ dirs = { workspace = true }
 git2 = { version = "0.20", default-features = false, features = ["vendored-libgit2", "vendored-openssl", "https", "ssh"] }
 pgvector = { workspace = true }
 es-entity = { workspace = true }
+obix = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
 derive_builder = "0.20"
 chrono = { version = "0.4", features = ["clock", "serde"], default-features = false }
 
