@@ -20,7 +20,6 @@ use crate::auth::AuthSubject;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::{SearchableToolSet, TopLevelTool};
-use super::super::wrap::wrap_output_schema;
 use super::schema_for;
 
 pub struct CatalogEntry {
@@ -178,7 +177,16 @@ struct DescribeToolOutput {
     #[schemars(default)]
     #[schemars(schema_with = "crate::toolset::any_json_schema")]
     output_schema: Option<serde_json::Value>,
+    /// How `call_tool` wraps `output_schema` on the wire.
+    wire_shape: &'static str,
 }
+
+/// One sentence instead of the full `DruaToolResult` wrapper schema.
+/// `tools/list` still advertises the wrapper (strict clients validate
+/// against it); here it was ~700 bytes of identical boilerplate on
+/// every call, often larger than the tool's own schema.
+const WIRE_SHAPE: &str = "call_tool returns {result: <output_schema>}; when the result was \
+     elided it also carries `_recovery` (see tool_output_fetch).";
 
 static SEARCH_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<SearchToolsOutput>);
@@ -266,14 +274,11 @@ impl DescribeCatalogTool {
             .unwrap_or("No description available.");
         let schema =
             serde_json::to_string_pretty(&tool.input_schema).unwrap_or_else(|_| "{}".into());
-        let wrapped_output_schema = tool
+        let output_section = tool
             .output_schema
             .as_ref()
-            .map(|s| wrap_output_schema(&serde_json::Value::Object(s.as_ref().clone())));
-        let output_section = wrapped_output_schema
-            .as_ref()
             .and_then(|s| serde_json::to_string_pretty(s).ok())
-            .map(|s| format!("\n\n### Output schema (drua-wrapped)\n```json\n{s}\n```"))
+            .map(|s| format!("\n\n### Output schema\n```json\n{s}\n```\n{WIRE_SHAPE}"))
             .unwrap_or_default();
 
         // Embed a TS signature so agents writing `compose` scripts can read the typed
@@ -359,9 +364,11 @@ impl TopLevelTool for DescribeCatalogTool {
                     category: entry.category,
                     description: tool.description.as_deref().unwrap_or("").to_string(),
                     input_schema: serde_json::Value::Object(tool.input_schema.as_ref().clone()),
-                    output_schema: tool.output_schema.as_ref().map(|s| {
-                        wrap_output_schema(&serde_json::Value::Object(s.as_ref().clone()))
-                    }),
+                    output_schema: tool
+                        .output_schema
+                        .as_ref()
+                        .map(|s| serde_json::Value::Object(s.as_ref().clone())),
+                    wire_shape: WIRE_SHAPE,
                 };
                 let structured =
                     serde_json::to_value(&out).expect("DescribeToolOutput serialization");
@@ -941,6 +948,53 @@ mod tests {
             formatted.contains("id: string"),
             "missing return field in:\n{formatted}"
         );
+    }
+
+    /// The wrapper schema belongs in `tools/list`; here it is boilerplate
+    /// paid on every call, so `describe_tool` shows the upstream schema
+    /// and one sentence about the wire shape.
+    #[test]
+    fn describe_tool_shows_upstream_output_schema_unwrapped() {
+        let stub = StubToolSet::with_typed_tool(
+            "list_envs",
+            "List environments.",
+            json!({ "type": "object", "properties": {} }),
+            json!({
+                "type": "object",
+                "properties": { "id": { "type": "string" } },
+                "required": ["id"]
+            }),
+        );
+        let sets: Vec<Arc<dyn SearchableToolSet>> =
+            vec![Arc::new(stub) as Arc<dyn SearchableToolSet>];
+        let describe = DescribeCatalogTool::new(Arc::new(RwLock::new(sets)));
+        let entry = describe
+            .execute_describe(&AuthSubject::Anonymous, "stub_list_envs")
+            .expect("entry should be visible");
+
+        let formatted = DescribeCatalogTool::format_entry(&entry);
+        assert!(formatted.contains("### Output schema\n"), "{formatted}");
+        assert!(!formatted.contains("_recovery\""), "{formatted}");
+        assert!(formatted.contains(WIRE_SHAPE), "{formatted}");
+
+        let out = DescribeToolOutput {
+            name: entry.prefixed_name.clone(),
+            upstream: entry.upstream_name.clone(),
+            category: entry.category.clone(),
+            description: String::new(),
+            input_schema: json!({}),
+            output_schema: entry
+                .full_tool
+                .output_schema
+                .as_ref()
+                .map(|s| serde_json::Value::Object(s.as_ref().clone())),
+            wire_shape: WIRE_SHAPE,
+        };
+        let structured = serde_json::to_value(&out).unwrap();
+        let schema = &structured["output_schema"];
+        assert_eq!(schema["properties"]["id"]["type"], "string");
+        assert!(schema.get("properties").unwrap().get("result").is_none());
+        assert!(schema.get("properties").unwrap().get("_recovery").is_none());
     }
 
     #[test]
