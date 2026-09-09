@@ -274,9 +274,9 @@ assert_summarized_text_matches() {
 @test "fake-upstream: arr-large-passthrough-items summarized into array sentinel envelope" {
   # ~54KB top-level JSON array of 2500 small {id, tag} objects. Items are
   # sub-threshold so they passthrough verbatim; the root array is over
-  # threshold so the walker emits an {_elided, kind: "array", head, tail}
+  # threshold so the walker emits a `_recovery` path with an array-slice
   # sentinel and a json_array_slice recovery template. Sized so the
-  # elided (hidden) portion clears the min-hidden-bytes floor (32KB
+  # elided (hidden) portion clears the min-hidden-bytes floor (6KB
   # default) — the original 500-item/14KB fixture hid only ~5KB and
   # would now passthrough entirely, no longer exercising this test.
   assert_summarized_text_matches \

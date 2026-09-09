@@ -78,9 +78,9 @@ struct ComposeOutput {
 }
 
 /// `ComposeOutput` is generated with `additionalProperties: false` by
-/// `schema_for`, but `cache_envelope` merges `_recovery` / `_elided` into
-/// the ComposeOutput root when the walker elides. Without declaring them
-/// as optional properties here, strict MCP clients reject every elided
+/// `schema_for`, but `cache_envelope` merges `_recovery` into the
+/// ComposeOutput root when the walker elides. Without declaring it as an
+/// optional property here, strict MCP clients reject every elided
 /// compose response. Mirrors the recovery property shape in `wrap.rs`.
 static COMPOSE_OUTPUT_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     let mut schema = schema_for::<ComposeOutput>();
@@ -219,8 +219,8 @@ impl TopLevelTool for ComposeTool {
                 // reject the wrapped shape (which nests ComposeOutput under
                 // a `result` key, dropping its declared top-level fields).
                 // `cache_envelope` walks/persists identically but emits `T`
-                // verbatim, merging `_recovery`/`_elided` into the
-                // ComposeOutput root when the walker elides `result`.
+                // verbatim, merging `_recovery` into the ComposeOutput
+                // root when the walker elides `result`.
                 tc.cache_envelope(subject, "compose", &recorded_args, ctr, self.output_shape())
                     .await?
                     .result
@@ -288,6 +288,11 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
 
             return async move {
                 Audit::record_action(action);
+                // Own entrypoint, or these rows are indistinguishable from
+                // the outer `mcp: compose` result and `tokens_returned`
+                // (the raw sub-tool payload, which never reaches the model)
+                // pollutes any per-entrypoint context accounting.
+                Audit::record_entrypoint(format!("compose > mcp: {name_owned}"));
                 Audit::record_interaction_type(InteractionType::McpCall);
                 Audit::record_metadata(serde_json::json!({
                     "tool_name": name_owned,
@@ -381,6 +386,7 @@ impl CatalogDispatcher {
 
         async move {
             Audit::record_action(action);
+            Audit::record_entrypoint(format!("compose > mcp: {name_owned}"));
             Audit::record_interaction_type(InteractionType::McpCall);
             Audit::record_metadata(serde_json::json!({
                 "tool_name": name_owned,
@@ -945,10 +951,10 @@ mod tests {
         );
     }
 
-    /// `cache_envelope` merges `_recovery` and `_elided` into the
-    /// ComposeOutput root when the walker elides. The schema is generated
-    /// with `additionalProperties: false`, so those keys must be declared
-    /// up front or strict MCP clients reject every elided compose call.
+    /// `cache_envelope` merges `_recovery` into the ComposeOutput root
+    /// when the walker elides. The schema is generated with
+    /// `additionalProperties: false`, so the key must be declared up
+    /// front or strict MCP clients reject every elided compose call.
     #[test]
     fn compose_output_schema_declares_recovery_properties() {
         let props = COMPOSE_OUTPUT_SCHEMA
@@ -960,10 +966,10 @@ mod tests {
             "_recovery missing — strict validators reject elided compose"
         );
         assert!(
-            props.contains_key("_elided"),
-            "_elided missing — strict validators reject elided compose"
+            !props.contains_key("_elided"),
+            "_elided was a duplicate of _recovery.paths and is no longer emitted"
         );
-        // They MUST stay optional — non-elided compose responses don't carry them.
+        // It MUST stay optional — non-elided compose responses don't carry it.
         let required: Vec<&str> = COMPOSE_OUTPUT_SCHEMA
             .get("required")
             .and_then(|v| v.as_array())
@@ -973,7 +979,6 @@ mod tests {
             !required.contains(&"_recovery"),
             "_recovery must be optional"
         );
-        assert!(!required.contains(&"_elided"), "_elided must be optional");
     }
 
     /// Strict MCP clients (e.g. Claude Code) reject boolean schemas inside

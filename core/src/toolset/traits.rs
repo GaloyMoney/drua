@@ -103,7 +103,9 @@ pub trait SearchableToolSet: Send + Sync {
     /// Per-tool output shape, keyed by the set's own unprefixed tool
     /// name. Sets that front raw-log tools (build logs, `kubectl logs`)
     /// declare them here so tool-caching keeps summarising them at any
-    /// size; everything else is fine with the default.
+    /// size; document tools (space files, source files) declare
+    /// `Document` so they stay inline; everything else is fine with
+    /// the default.
     fn output_shape(&self, _tool_name: &str) -> ToolOutputShape {
         ToolOutputShape::default()
     }

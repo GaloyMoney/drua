@@ -23,6 +23,7 @@ async fn init_toolsets() {
             tool_prefix: None,
             allowed_tools: None,
             log_tools: Vec::new(),
+            document_tools: Vec::new(),
             required_scopes: None,
             internal_only: false,
             auth_mode: Default::default(),

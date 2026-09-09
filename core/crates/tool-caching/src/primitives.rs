@@ -87,10 +87,15 @@ pub struct ToolCallSummary {
 
 impl ToolCallSummary {
     /// Build the full agent-facing wire shape: text-channel envelope +
-    /// structured-channel `{result, _elided?: {invocation_id, paths}}`
+    /// structured-channel `{result, _recovery: {invocation_id, paths, …}}`
     /// payload. Both `cache()` (initial elision) and the `FetchQuery::Summary`
     /// replay path go through this single helper so the byte-identical
     /// guarantee between original-call and re-fetched summary can't drift.
+    ///
+    /// MCP clients that honour `outputSchema` (Claude Code among them)
+    /// hand the model the structured channel, not the text envelope, so
+    /// every byte here is context: the recovery metadata appears exactly
+    /// once, under `_recovery`.
     pub fn build_wire(&self, invocation_id: ToolInvocationId) -> (CallToolResult, Value) {
         let envelope = self.build_envelope_text();
         let mut obj = serde_json::Map::new();
@@ -99,15 +104,6 @@ impl ToolCallSummary {
             "_recovery".to_string(),
             serde_json::to_value(&recovery).unwrap(),
         );
-        if !self.elided_paths.is_empty() {
-            obj.insert(
-                "_elided".to_string(),
-                serde_json::json!({
-                    "invocation_id": invocation_id.to_string(),
-                    "paths": self.elided_paths.clone(),
-                }),
-            );
-        }
         obj.insert("result".to_string(), self.wire_result.clone());
         let structured = Value::Object(obj);
         let mut result = CallToolResult::success(vec![Content::text(envelope)]);
@@ -120,9 +116,9 @@ impl ToolCallSummary {
     /// `default_tool_caching() == false`, such as `compose`). The walker
     /// still operates on the full structured `T` and persists it for
     /// `tool_output_fetch` recovery, but the agent-facing structured
-    /// channel keeps `T`'s own top-level shape — merging `_recovery` /
-    /// `_elided` into `T`'s root object rather than nesting everything
-    /// under a synthetic `result` key.
+    /// channel keeps `T`'s own top-level shape — merging `_recovery`
+    /// into `T`'s root object rather than nesting everything under a
+    /// synthetic `result` key.
     ///
     /// This is what makes the returned `structuredContent` validate against
     /// such a tool's advertised `outputSchema` (e.g. `ComposeOutput`),
@@ -139,15 +135,6 @@ impl ToolCallSummary {
                     "_recovery".to_string(),
                     serde_json::to_value(&recovery).unwrap(),
                 );
-                if !self.elided_paths.is_empty() {
-                    map.insert(
-                        "_elided".to_string(),
-                        serde_json::json!({
-                            "invocation_id": invocation_id.to_string(),
-                            "paths": self.elided_paths.clone(),
-                        }),
-                    );
-                }
             }
             _ => {
                 // Non-object root — wrapping is the only way to attach
@@ -165,15 +152,7 @@ impl ToolCallSummary {
             invocation_id: invocation_id.to_string(),
             root_kind: value_kind(&self.wire_result).to_string(),
             root_path: self.root_path.clone(),
-            persisted_root: "persisted tool result root directly; catalog/sub-tool calls use upstream T, compose outer calls use ComposeOutput (JS return at $.result); not the outer {result: ...} MCP wire wrapper"
-                .to_string(),
             paths: self.elided_paths.clone(),
-            recommended_queries: self
-                .elided_paths
-                .iter()
-                .map(|p| p.recover.clone())
-                .collect(),
-            sub_invocations: extract_sub_invocations(&self.wire_result),
         }
     }
 
@@ -235,16 +214,15 @@ pub struct ElidedPath {
     pub recover: Value,
 }
 
+/// Each `paths[i].recover` is the verbatim `tool_output_fetch` call for
+/// that elision point; the persisted root is the upstream `T` (no
+/// `{result: …}` wrapper), which the fetch tool's description spells out.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecoveryManifest {
     pub invocation_id: String,
     pub root_kind: String,
     pub root_path: String,
-    pub persisted_root: String,
     pub paths: Vec<ElidedPath>,
-    pub recommended_queries: Vec<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub sub_invocations: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -303,13 +281,6 @@ fn value_kind(value: &Value) -> &'static str {
         Value::Array(_) => "array",
         Value::Object(_) => "object",
     }
-}
-
-fn extract_sub_invocations(root: &Value) -> Vec<Value> {
-    root.get("sub_invocations")
-        .and_then(Value::as_array)
-        .map(|arr| arr.to_vec())
-        .unwrap_or_default()
 }
 
 /// Returned by `ToolCaching::cache`. `elided_paths`

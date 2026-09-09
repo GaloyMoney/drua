@@ -37,6 +37,7 @@ async fn root_string_over_threshold_yields_envelope_with_recovery_section() {
         // still elides as before (see
         // `sub_floor_payload_yields_no_envelope_and_no_persistence`).
         min_hidden_bytes: 0,
+        min_hidden_per_path_bytes: 0,
         ..ToolCachingConfig::default()
     };
     let caching = ToolCaching::new(&pool().await, config);
@@ -108,9 +109,10 @@ async fn root_string_over_threshold_yields_envelope_with_recovery_section() {
     assert!(text.contains("<tail bytes=\""));
     assert!(text.contains("</tail>"));
 
-    // Structured channel mirrors the text envelope: {result, _elided} with
-    // `result` schema-conforming (the elided string in this case) and
-    // `_elided.paths` carrying the same recovery info as <recovery>.
+    // Structured channel mirrors the text envelope: {result, _recovery}
+    // with `result` schema-conforming (the elided string in this case)
+    // and `_recovery.paths` carrying the same recovery info as <recovery>,
+    // exactly once.
     let structured = response
         .result
         .structured_content
@@ -121,41 +123,35 @@ async fn root_string_over_threshold_yields_envelope_with_recovery_section() {
         structured.get("result").is_some(),
         "wrapper has `result`: {structured}",
     );
-    let elided = structured
-        .get("_elided")
-        .expect("`_elided` present when something was elided");
-    let inv_id = elided
-        .get("invocation_id")
-        .and_then(|v| v.as_str())
-        .expect("`_elided.invocation_id` is a string");
-    assert_eq!(inv_id.len(), 36, "uuid must be 36 chars; got: {inv_id}");
-    let paths = elided
-        .get("paths")
-        .and_then(|v| v.as_array())
-        .expect("`_elided.paths` is an array");
-    assert_eq!(paths.len(), 1, "one elided path: {paths:?}");
-
     let recovery = structured
         .get("_recovery")
         .expect("typed `_recovery` manifest present when something was elided");
-    assert_eq!(
-        recovery.get("invocation_id").and_then(|v| v.as_str()),
-        Some(inv_id),
-        "manifest and _elided share invocation id",
+    let inv_id = recovery
+        .get("invocation_id")
+        .and_then(|v| v.as_str())
+        .expect("`_recovery.invocation_id` is a string");
+    assert_eq!(inv_id.len(), 36, "uuid must be 36 chars; got: {inv_id}");
+    let paths = recovery
+        .get("paths")
+        .and_then(|v| v.as_array())
+        .expect("`_recovery.paths` is an array");
+    assert_eq!(paths.len(), 1, "one elided path: {paths:?}");
+    assert!(
+        paths[0].get("recover").is_some(),
+        "path carries its template"
     );
     assert_eq!(
         recovery.get("root_kind").and_then(|v| v.as_str()),
         Some("string")
     );
-    assert!(recovery
-        .get("persisted_root")
-        .and_then(|v| v.as_str())
-        .is_some_and(|s| s.contains("persisted tool result root directly")),);
-    let recommended = recovery
-        .get("recommended_queries")
-        .and_then(|v| v.as_array())
-        .expect("manifest exposes typed fetch templates");
-    assert_eq!(recommended.len(), 1);
+    assert!(
+        structured.get("_elided").is_none(),
+        "recovery metadata must not be duplicated under `_elided`",
+    );
+    assert!(
+        recovery.get("recommended_queries").is_none(),
+        "recovery templates live on `paths[i].recover` only",
+    );
 }
 
 #[tokio::test]
@@ -199,8 +195,8 @@ async fn sub_threshold_input_is_passthrough_with_no_envelope() {
         .expect("Elide passthrough emits {result: T}");
     assert_eq!(result_field, &serde_json::Value::String(small.clone()));
     assert!(
-        structured.get("_elided").is_none(),
-        "no elision → no `_elided` key",
+        structured.get("_recovery").is_none(),
+        "no elision → no `_recovery` key",
     );
 }
 
@@ -211,6 +207,7 @@ async fn persisted_invocation_round_trips_through_find_by_id() {
         // This test needs an actual persisted invocation to round-trip
         // through find_by_id — disable the floor so the payload elides.
         min_hidden_bytes: 0,
+        min_hidden_per_path_bytes: 0,
         ..ToolCachingConfig::default()
     };
     let caching = ToolCaching::new(&pool().await, config);
@@ -261,6 +258,7 @@ async fn persist_mode_emits_verbatim_t_without_elided_block() {
         // Disable the floor — this test needs the payload to actually
         // elide so it hits the persist path.
         min_hidden_bytes: 0,
+        min_hidden_per_path_bytes: 0,
         ..ToolCachingConfig::default()
     };
     let caching = ToolCaching::new(&pool().await, config);
@@ -306,6 +304,7 @@ async fn direct_and_compose_persistence_share_fetch_root_but_not_wire_wrapper() 
         // Disable the floor — this test needs both paths to actually
         // persist so it can round-trip a fetch afterwards.
         min_hidden_bytes: 0,
+        min_hidden_per_path_bytes: 0,
         ..ToolCachingConfig::default()
     };
     let caching = ToolCaching::new(&pool().await, config);
@@ -386,14 +385,14 @@ async fn direct_and_compose_persistence_share_fetch_root_but_not_wire_wrapper() 
 async fn sub_floor_payload_yields_no_envelope_and_no_persistence() {
     let config = ToolCachingConfig {
         generic_threshold_bytes: 512,
-        // Default `min_hidden_bytes` (32 KB) is exactly what's under test.
+        // Default `min_hidden_bytes` (6 KB) is exactly what's under test.
         ..ToolCachingConfig::default()
     };
     let caching = ToolCaching::new(&pool().await, config);
 
-    // 10 KB over a 512-byte threshold hides ~9.5 KB — comfortably under
-    // the default 32 KB floor.
-    let payload = "x".repeat(10_000);
+    // 5 KB over a 512-byte threshold hides ~4.5 KB — under the default
+    // 6 KB floor.
+    let payload = "x".repeat(5_000);
     let upstream = CallToolResult::success(vec![Content::text(payload.clone())]);
 
     let response = caching
@@ -434,7 +433,7 @@ async fn log_shaped_tool_elides_the_same_sub_floor_payload() {
     };
     let caching = ToolCaching::new(&pool().await, config);
 
-    let payload = "x".repeat(10_000);
+    let payload = "x".repeat(5_000);
     let upstream = CallToolResult::success(vec![Content::text(payload.clone())]);
 
     let response = caching

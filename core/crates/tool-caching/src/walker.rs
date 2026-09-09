@@ -31,6 +31,8 @@ struct WalkCtx<'a> {
     /// Budget for the array-truncation shrink loop, derived once from
     /// this call's threshold so `truncate_array` doesn't need the walker.
     sentinel_budget: usize,
+    /// See [`ToolCachingConfig::min_hidden_per_path_bytes`].
+    min_hidden_per_path: u64,
 }
 
 #[derive(Clone)]
@@ -98,6 +100,7 @@ impl Walker {
             primary_raw_string,
             primary_prefer_tail,
             sentinel_budget: self.sentinel_budget(budget.threshold_bytes),
+            min_hidden_per_path: budget.min_hidden_per_path_bytes as u64,
         };
         let wire_result = self.walk(
             root_for_walk,
@@ -123,10 +126,10 @@ impl Walker {
         let total_bytes = byte_size(raw_at_primary);
         let shown_bytes = byte_size(&summary);
 
-        // Floor: hiding fewer than `min_hidden_bytes` costs more (one
-        // `tool_output_fetch` round trip, worth ~100 KB of context) than
-        // it saves, so pass the whole value through instead. Root totals,
-        // not a sum over `elided_paths` — nested paths would double-count.
+        // Floor: hiding fewer than `min_hidden_bytes` costs more (the
+        // `tool_output_fetch` turn it may provoke) than it saves, so pass
+        // the whole value through instead. Root totals, not a sum over
+        // `elided_paths` — nested paths would double-count.
         //
         // Preprocessed payloads never take this branch whatever the
         // budget says: the bypass hands back `query_structure.root`, which
@@ -249,7 +252,7 @@ impl Walker {
         // Schema-conforming truncate: emit a shorter (head-only) array of
         // the same element type so the wrapped outputSchema's `result`
         // stays valid. Truncation metadata moves into the ElidedPath,
-        // where the structured envelope's `_elided.paths[i]` carries it.
+        // where the structured envelope's `_recovery.paths[i]` carries it.
         // Per-item elided_paths for kept items (e.g. $[0].body) survive;
         // those for dropped tail indices get pruned (or kept, if the
         // recovery slice wouldn't fit max_fetch_response_bytes — see
@@ -339,6 +342,9 @@ impl Walker {
         // done — record a json_path recover (boundaries aren't
         // extractable from a chain-compacted text).
         if modified && prepared.len() <= budget {
+            if !worth_eliding(total_bytes_at_path, prepared.len(), ctx) {
+                return Value::String(s.to_string());
+            }
             elided_paths.push(ElidedPath {
                 path: path.to_string(),
                 total_bytes: total_bytes_at_path,
@@ -365,6 +371,9 @@ impl Walker {
             &preprocessed_to_raw,
             prefer_tail,
         ) {
+            if !worth_eliding(total_bytes_at_path, elide.text.len(), ctx) {
+                return Value::String(s.to_string());
+            }
             elided_paths.push(ElidedPath {
                 path: path.to_string(),
                 total_bytes: total_bytes_at_path,
@@ -390,6 +399,9 @@ impl Walker {
         // the persisted raw bytes), so emit a full-value recover and
         // let the fetch cap gate response size.
         if modified {
+            if !worth_eliding(total_bytes_at_path, prepared.len(), ctx) {
+                return Value::String(s.to_string());
+            }
             elided_paths.push(ElidedPath {
                 path: path.to_string(),
                 total_bytes: total_bytes_at_path,
@@ -408,6 +420,9 @@ impl Walker {
             return Value::String(prepared);
         }
         if let Some(elide) = byte_elide_string(&prepared, budget) {
+            if !worth_eliding(total_bytes_at_path, elide.text.len(), ctx) {
+                return Value::String(s.to_string());
+            }
             elided_paths.push(ElidedPath {
                 path: path.to_string(),
                 total_bytes: total_bytes_at_path,
@@ -443,7 +458,7 @@ impl Walker {
         elided_paths: &mut Vec<ElidedPath>,
     ) -> Value {
         // Head-only truncate: emit `[item0..item(K-1)]` and record
-        // `_elided.paths[i]={length:N, head_count:K, recover:…}` so the
+        // `_recovery.paths[i]={length:N, head_count:K, recover:…}` so the
         // agent can slice `[K..N)` via `tool_output_fetch` if they need
         // more. Head+tail would be ambiguous on the wire — without a
         // delimiter the agent can't tell where the gap lives.
@@ -455,6 +470,9 @@ impl Walker {
         while (json_size(&truncated) as usize) > budget && head_count > 0 {
             head_count -= 1;
             truncated = make_truncated_array(walked, head_count);
+        }
+        if !worth_eliding(original_bytes, json_size(&truncated) as usize, ctx) {
+            return Value::Array(walked.to_vec());
         }
 
         let missing_len = original_length.saturating_sub(head_count);
@@ -536,6 +554,12 @@ fn parse_array_index(elided_path: &str, container_path: &str) -> Option<usize> {
 /// Smallest value worth eliding. Below this, marker overhead exceeds
 /// any byte savings — passthrough is strictly cheaper.
 const MIN_ELIDE_BYTES: usize = 512;
+
+/// One elision point is only worth its recovery template when it hides
+/// at least the call's per-path floor.
+fn worth_eliding(total_bytes: u64, shown_bytes: usize, ctx: &WalkCtx) -> bool {
+    total_bytes.saturating_sub(shown_bytes as u64) >= ctx.min_hidden_per_path
+}
 
 fn json_size(value: &Value) -> u64 {
     serde_json::to_string(value)
@@ -1148,14 +1172,134 @@ mod tests {
         ElisionBudget {
             threshold_bytes,
             min_hidden_bytes: 0,
+            min_hidden_per_path_bytes: 0,
         }
     }
 
-    /// Production-shaped budget: 8 KB elision threshold, 32 KB floor.
+    /// `budget()` plus the production per-path floor, for tests that
+    /// exercise it.
+    fn per_path_budget(threshold_bytes: usize) -> ElisionBudget {
+        ElisionBudget {
+            min_hidden_per_path_bytes: 2048,
+            ..budget(threshold_bytes)
+        }
+    }
+
+    /// One elision point costs ~350 bytes of recovery metadata; a
+    /// string over budget that would hide less than
+    /// `MIN_HIDDEN_PER_PATH` passes through whole instead.
+    #[test]
+    fn string_hiding_under_per_path_floor_is_not_elided() {
+        let s = "x".repeat(1_500);
+        let qs = QueryStructure {
+            root: Value::String(s.clone()),
+        };
+        let summary = walker_with_fetch_cap(16 * 1024).summarize(
+            &qs,
+            ToolInvocationId::new(),
+            "t",
+            per_path_budget(600),
+        );
+        assert!(
+            summary.elided_paths.is_empty(),
+            "{:?}",
+            summary.elided_paths
+        );
+        assert_eq!(summary.wire_result, Value::String(s));
+    }
+
+    #[test]
+    fn string_hiding_over_per_path_floor_still_elides() {
+        let s = "x".repeat(6_000);
+        let qs = QueryStructure {
+            root: Value::String(s),
+        };
+        let summary = walker_with_fetch_cap(16 * 1024).summarize(
+            &qs,
+            ToolInvocationId::new(),
+            "t",
+            per_path_budget(600),
+        );
+        assert_eq!(summary.elided_paths.len(), 1);
+        assert!(summary.elided_paths[0].total_bytes - summary.elided_paths[0].shown_bytes >= 2048);
+    }
+
+    /// A wide object hands each key a sliver of budget; without the
+    /// per-path floor every 600-byte cell became a marker plus ~1 KB of
+    /// metadata — more context than the cells themselves.
+    #[test]
+    fn wide_object_of_small_strings_is_not_micro_elided() {
+        let mut obj = serde_json::Map::new();
+        for i in 0..40 {
+            obj.insert(format!("k{i}"), Value::String("y".repeat(600)));
+        }
+        let root = Value::Object(obj);
+        let qs = QueryStructure { root: root.clone() };
+        let summary = walker_with_fetch_cap(16 * 1024).summarize(
+            &qs,
+            ToolInvocationId::new(),
+            "t",
+            per_path_budget(8192),
+        );
+        assert!(
+            summary.elided_paths.is_empty(),
+            "{:?}",
+            summary.elided_paths
+        );
+        assert_eq!(summary.wire_result, root);
+    }
+
+    fn small_items(n: usize) -> Value {
+        Value::Array(
+            (0..n)
+                .map(|i| serde_json::json!({"id": i, "tag": "z".repeat(60)}))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn array_truncation_hiding_under_per_path_floor_keeps_whole_array() {
+        let root = small_items(20);
+        let qs = QueryStructure { root: root.clone() };
+        let summary = walker_with_fetch_cap(16 * 1024).summarize(
+            &qs,
+            ToolInvocationId::new(),
+            "t",
+            per_path_budget(600),
+        );
+        assert!(
+            summary.elided_paths.is_empty(),
+            "{:?}",
+            summary.elided_paths
+        );
+        assert_eq!(summary.wire_result, root);
+    }
+
+    #[test]
+    fn array_truncation_hiding_over_per_path_floor_still_truncates() {
+        let qs = QueryStructure {
+            root: small_items(100),
+        };
+        let summary = walker_with_fetch_cap(16 * 1024).summarize(
+            &qs,
+            ToolInvocationId::new(),
+            "t",
+            per_path_budget(600),
+        );
+        let root_path = summary
+            .elided_paths
+            .iter()
+            .find(|e| e.path == "$")
+            .expect("array sentinel recorded");
+        assert!(root_path.shown_items.unwrap() < 100);
+    }
+
+    /// Production-shaped budget: 8 KB elision threshold, 6 KB floor.
     fn floor_budget() -> ElisionBudget {
         ElisionBudget {
             threshold_bytes: 8192,
-            min_hidden_bytes: 32 * 1024,
+            min_hidden_bytes: 6 * 1024,
+            min_hidden_per_path_bytes: 2048,
         }
     }
 
@@ -1450,8 +1594,8 @@ mod tests {
     /// value through unmodified.
     #[test]
     fn sub_floor_payload_is_not_elided() {
-        // 10 KB over an 8 KB threshold hides ~1.8 KB — well under the
-        // 32 KB floor.
+        // 10 KB over an 8 KB threshold hides ~1.8 KB — under the 6 KB
+        // floor.
         let s = "x".repeat(10_000);
         let qs = QueryStructure {
             root: Value::String(s.clone()),
@@ -1522,7 +1666,7 @@ mod tests {
     #[test]
     fn preprocessed_payload_ignores_the_floor() {
         // ~3,000 short numbered lines ≈ 27 KB raw: over the 8 KB
-        // threshold, but hiding well under the 32 KB floor.
+        // threshold, but hiding well under a 32 KB floor.
         let logs = numbered_lines(3_000);
         let qs = QueryStructure {
             root: serde_json::json!({ "logs": logs }),
@@ -1531,7 +1675,10 @@ mod tests {
             Arc::new(StringSummarizerChain::new()),
             &ToolCachingConfig::default(),
         );
-        let budget = floor_budget();
+        let budget = ElisionBudget {
+            min_hidden_bytes: 32 * 1024,
+            ..floor_budget()
+        };
         let summary = walker.summarize(&qs, ToolInvocationId::new(), "concourse-build-log", budget);
 
         let hidden = summary.total_bytes.saturating_sub(summary.shown_bytes);
