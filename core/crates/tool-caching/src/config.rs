@@ -17,6 +17,11 @@ const DEFAULT_MIN_HIDDEN_BYTES: usize = 6 * 1024;
 // defers the bytes to a fetch and costs a turn; only genuinely large
 // ones are worth withholding.
 const DEFAULT_DOCUMENT_MIN_HIDDEN_BYTES: usize = 64 * 1024;
+// Every elision point costs ~350 bytes of recovery metadata on the
+// wire, so a path that hides less than this spends more context than
+// it withholds — the wide object whose per-key budget nicks every
+// 500-byte cell was the canonical case.
+const DEFAULT_MIN_HIDDEN_PER_PATH_BYTES: usize = 2048;
 
 /// Knobs the walker actually reads. Per-string head/tail counts are
 /// derived adaptively from `generic_threshold_bytes` at walk time;
@@ -48,6 +53,11 @@ pub struct ToolCachingConfig {
     /// `min_hidden_bytes` for tools declaring [`ToolOutputShape::Document`].
     #[serde(default = "default_document_min_hidden_bytes")]
     pub document_min_hidden_bytes: usize,
+    /// Below this many hidden bytes at a single elision point, leave
+    /// that value whole — its recovery template would outweigh the
+    /// saving. `Log` shapes ignore it, like the root floor.
+    #[serde(default = "default_min_hidden_per_path_bytes")]
+    pub min_hidden_per_path_bytes: usize,
     /// Per-tool overrides, keyed by the prefixed tool name (e.g.
     /// `library_get_files`). Falls back to the fields above when a tool
     /// has no entry, or when an entry doesn't set a given field.
@@ -97,6 +107,7 @@ pub enum ToolOutputShape {
 pub struct ElisionBudget {
     pub threshold_bytes: usize,
     pub min_hidden_bytes: usize,
+    pub min_hidden_per_path_bytes: usize,
 }
 
 impl ToolCachingConfig {
@@ -107,6 +118,12 @@ impl ToolCachingConfig {
                 ToolOutputShape::Generic => self.min_hidden_bytes,
                 ToolOutputShape::Log => 0,
                 ToolOutputShape::Document => self.document_min_hidden_bytes,
+            },
+            min_hidden_per_path_bytes: match shape {
+                ToolOutputShape::Log => 0,
+                ToolOutputShape::Generic | ToolOutputShape::Document => {
+                    self.min_hidden_per_path_bytes
+                }
             },
         };
         // Operator config is last so a deployment can always overrule a
@@ -132,6 +149,7 @@ impl Default for ToolCachingConfig {
             max_fetch_response_bytes: DEFAULT_MAX_FETCH_RESPONSE_BYTES,
             min_hidden_bytes: DEFAULT_MIN_HIDDEN_BYTES,
             document_min_hidden_bytes: DEFAULT_DOCUMENT_MIN_HIDDEN_BYTES,
+            min_hidden_per_path_bytes: DEFAULT_MIN_HIDDEN_PER_PATH_BYTES,
             per_tool: HashMap::new(),
         }
     }
@@ -154,6 +172,9 @@ fn default_min_hidden_bytes() -> usize {
 }
 fn default_document_min_hidden_bytes() -> usize {
     DEFAULT_DOCUMENT_MIN_HIDDEN_BYTES
+}
+fn default_min_hidden_per_path_bytes() -> usize {
+    DEFAULT_MIN_HIDDEN_PER_PATH_BYTES
 }
 
 #[cfg(test)]
@@ -191,6 +212,7 @@ mod tests {
             ElisionBudget {
                 threshold_bytes: DEFAULT_GENERIC_THRESHOLD_BYTES,
                 min_hidden_bytes: DEFAULT_MIN_HIDDEN_BYTES,
+                min_hidden_per_path_bytes: DEFAULT_MIN_HIDDEN_PER_PATH_BYTES,
             }
         );
     }
@@ -203,6 +225,7 @@ mod tests {
         let cfg = ToolCachingConfig::default();
         let budget = cfg.budget_for("some_log_tool", ToolOutputShape::Log);
         assert_eq!(budget.min_hidden_bytes, 0);
+        assert_eq!(budget.min_hidden_per_path_bytes, 0);
         assert_eq!(budget.threshold_bytes, DEFAULT_GENERIC_THRESHOLD_BYTES);
     }
 
@@ -227,6 +250,8 @@ mod tests {
             ElisionBudget {
                 threshold_bytes: 65_536,
                 min_hidden_bytes: 4_096,
+                // The shape's per-path floor (0 for Log) is not overridable.
+                min_hidden_per_path_bytes: 0,
             }
         );
         // Tools without an entry are untouched by it.

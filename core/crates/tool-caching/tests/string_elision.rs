@@ -9,6 +9,7 @@ fn budget(threshold_bytes: usize) -> ElisionBudget {
     ElisionBudget {
         threshold_bytes,
         min_hidden_bytes: 0,
+        min_hidden_per_path_bytes: 0,
     }
 }
 

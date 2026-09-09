@@ -37,6 +37,7 @@ async fn root_string_over_threshold_yields_envelope_with_recovery_section() {
         // still elides as before (see
         // `sub_floor_payload_yields_no_envelope_and_no_persistence`).
         min_hidden_bytes: 0,
+        min_hidden_per_path_bytes: 0,
         ..ToolCachingConfig::default()
     };
     let caching = ToolCaching::new(&pool().await, config);
@@ -206,6 +207,7 @@ async fn persisted_invocation_round_trips_through_find_by_id() {
         // This test needs an actual persisted invocation to round-trip
         // through find_by_id — disable the floor so the payload elides.
         min_hidden_bytes: 0,
+        min_hidden_per_path_bytes: 0,
         ..ToolCachingConfig::default()
     };
     let caching = ToolCaching::new(&pool().await, config);
@@ -256,6 +258,7 @@ async fn persist_mode_emits_verbatim_t_without_elided_block() {
         // Disable the floor — this test needs the payload to actually
         // elide so it hits the persist path.
         min_hidden_bytes: 0,
+        min_hidden_per_path_bytes: 0,
         ..ToolCachingConfig::default()
     };
     let caching = ToolCaching::new(&pool().await, config);
@@ -301,6 +304,7 @@ async fn direct_and_compose_persistence_share_fetch_root_but_not_wire_wrapper() 
         // Disable the floor — this test needs both paths to actually
         // persist so it can round-trip a fetch afterwards.
         min_hidden_bytes: 0,
+        min_hidden_per_path_bytes: 0,
         ..ToolCachingConfig::default()
     };
     let caching = ToolCaching::new(&pool().await, config);

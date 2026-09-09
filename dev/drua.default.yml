@@ -63,5 +63,6 @@ tool_caching:
   max_fetch_response_bytes: 16384
   min_hidden_bytes: 6144
   document_min_hidden_bytes: 65536
+  min_hidden_per_path_bytes: 2048
   per_tool: {}
 

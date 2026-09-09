@@ -323,6 +323,9 @@ data:
       {{- if hasKey . "documentMinHiddenBytes" }}
       document_min_hidden_bytes: {{ .documentMinHiddenBytes }}
       {{- end }}
+      {{- if hasKey . "minHiddenPerPathBytes" }}
+      min_hidden_per_path_bytes: {{ .minHiddenPerPathBytes }}
+      {{- end }}
       {{- with .perTool }}
       per_tool:
         {{- range $tool, $override := . }}
