@@ -47,9 +47,9 @@ struct Processed {
 /// caller's choice.
 #[derive(Debug, Clone, Copy)]
 enum ProcessMode {
-    /// `{result: T, _recovery, _elided}` — the default `DruaToolResult` shape.
+    /// `{result: T, _recovery}` — the default `DruaToolResult` shape.
     Wrap,
-    /// T verbatim with `_recovery` / `_elided` merged into its root.
+    /// T verbatim with `_recovery` merged into its root.
     /// Used by tools that own their envelope shape (e.g. `compose`).
     Envelope,
 }
@@ -72,7 +72,7 @@ impl ToolCaching {
     /// (or parsed text as fallback), elides if over threshold, persists
     /// for `tool_output_fetch` recovery. Wire shape:
     ///
-    /// * structured channel: `{result: T-elided, _elided?: {invocation_id, paths}}`
+    /// * structured channel: `{result: T-elided, _recovery?: {invocation_id, paths, …}}`
     /// * text channel: `<summary path="…" …>…</summary><recovery><elided …>…</elided></recovery>`
     ///
     /// If the upstream has no text content but does carry a structured
@@ -140,7 +140,7 @@ impl ToolCaching {
     /// out of the `DruaToolResult` wrapper (`default_tool_caching() == false`,
     /// e.g. `compose`). Walks and persists identically to `cache()`, but on
     /// the structured channel emits the upstream `T` verbatim — merging
-    /// elision recovery (`_recovery` / `_elided`) into `T`'s top-level
+    /// elision recovery (`_recovery`) into `T`'s top-level
     /// object when the walker elides, rather than nesting under a
     /// synthetic `result` key.
     ///
@@ -304,7 +304,7 @@ impl ToolCaching {
     /// with `{mode: "summary"}` later.
     ///
     /// `mode` controls how a later `tool_output_fetch(query:{mode:"summary"})`
-    /// replays this invocation — wrap (`{result: T, _recovery, _elided}`)
+    /// replays this invocation — wrap (`{result: T, _recovery}`)
     /// or envelope (T verbatim with recovery merged in). It is persisted
     /// on the summary so the replay path can't drift from the live call.
     async fn process(
@@ -561,8 +561,8 @@ mod tests {
     }
 
     /// `build_wire_envelope` keeps the walked object's own top-level shape
-    /// (no synthetic `result` wrapper) while still attaching `_recovery` /
-    /// `_elided`. This is what lets envelope-owning tools like `compose`
+    /// (no synthetic `result` wrapper) while still attaching `_recovery`.
+    /// This is what lets envelope-owning tools like `compose`
     /// validate their `structuredContent` against a flat `outputSchema`
     /// (e.g. `ComposeOutput`). Mirrored against `build_wire` to lock the
     /// wrap-vs-merge contract.
@@ -612,7 +612,6 @@ mod tests {
         // `build_wire` nests everything under `result` (DruaToolResult).
         assert_eq!(wrapped["result"]["tool_calls"], 1);
         assert!(wrapped.get("_recovery").is_some());
-        assert!(wrapped.get("_elided").is_some());
         // The envelope's own fields are NOT at the wrapped root.
         assert!(wrapped.get("tool_calls").is_none());
 
@@ -626,11 +625,13 @@ mod tests {
             env["_recovery"]["invocation_id"],
             wrapped["_recovery"]["invocation_id"]
         );
-        assert_eq!(env["_elided"]["paths"][0]["path"], "$.result");
+        assert_eq!(env["_recovery"]["paths"][0]["path"], "$.result");
         // No synthetic `result` wrapper around the whole envelope.
         assert!(env.get("result").is_some()); // ComposeOutput.result, present
         assert!(env.get("_recovery").is_some());
-        assert!(env.get("_elided").is_some());
+        // The recovery metadata is carried exactly once.
+        assert!(env.get("_elided").is_none());
+        assert!(env["_recovery"].get("recommended_queries").is_none());
 
         // Same text-channel envelope on both (recovery rendering is shared).
         assert_eq!(extract_text(&wrapped_ctr), extract_text(&env_ctr));

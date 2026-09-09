@@ -1282,7 +1282,7 @@ mod tests {
         assert_eq!(fetched.structured["execution_time_ms"], 12);
         assert_eq!(fetched.structured["result"], "<elided body>");
         assert!(fetched.structured.get("_recovery").is_some());
-        assert!(fetched.structured.get("_elided").is_some());
+        assert!(fetched.structured.get("_elided").is_none());
     }
 
     #[test]

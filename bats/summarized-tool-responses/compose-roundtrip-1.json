@@ -1,57 +1,4 @@
 {
-  "_elided": {
-    "invocation_id": "<uuid>",
-    "paths": [
-      {
-        "path": "$.result.arr",
-        "recover": {
-          "args_template": {
-            "invocation_id": "<uuid>",
-            "path": "$.result.arr",
-            "query": {
-              "len": 772,
-              "mode": "json_array_slice",
-              "offset": 395
-            }
-          },
-          "complete": false,
-          "kind": "chunked_json_array_slice",
-          "next_offset": 1167,
-          "note": "This bounded recovery returns the first 772 of 2105 elided items; repeat with a later offset to continue.",
-          "tool": "tool_output_fetch",
-          "total_recovery_len": 2105
-        },
-        "shown_bytes": 8186,
-        "shown_items": 395,
-        "total_bytes": 53891,
-        "total_items": 2500
-      },
-      {
-        "path": "$.result.str",
-        "recover": {
-          "args_template": {
-            "invocation_id": "<uuid>",
-            "path": "$.result.str",
-            "query": {
-              "len": 50,
-              "mode": "lines",
-              "offset": 6
-            }
-          },
-          "complete": false,
-          "kind": "chunked_lines",
-          "next_offset": 56,
-          "note": "This bounded recovery returns the first 50 of 152 elided lines; repeat with a later offset to continue.",
-          "tool": "tool_output_fetch",
-          "total_recovery_len": 152
-        },
-        "shown_bytes": 3958,
-        "shown_lines": 13,
-        "total_bytes": 52246,
-        "total_lines": 165
-      }
-    ]
-  },
   "_recovery": {
     "invocation_id": "<uuid>",
     "paths": [
@@ -104,65 +51,8 @@
         "total_lines": 165
       }
     ],
-    "persisted_root": "persisted tool result root directly; catalog/sub-tool calls use upstream T, compose outer calls use ComposeOutput (JS return at $.result); not the outer {result: ...} MCP wire wrapper",
-    "recommended_queries": [
-      {
-        "args_template": {
-          "invocation_id": "<uuid>",
-          "path": "$.result.arr",
-          "query": {
-            "len": 772,
-            "mode": "json_array_slice",
-            "offset": 395
-          }
-        },
-        "complete": false,
-        "kind": "chunked_json_array_slice",
-        "next_offset": 1167,
-        "note": "This bounded recovery returns the first 772 of 2105 elided items; repeat with a later offset to continue.",
-        "tool": "tool_output_fetch",
-        "total_recovery_len": 2105
-      },
-      {
-        "args_template": {
-          "invocation_id": "<uuid>",
-          "path": "$.result.str",
-          "query": {
-            "len": 50,
-            "mode": "lines",
-            "offset": 6
-          }
-        },
-        "complete": false,
-        "kind": "chunked_lines",
-        "next_offset": 56,
-        "note": "This bounded recovery returns the first 50 of 152 elided lines; repeat with a later offset to continue.",
-        "tool": "tool_output_fetch",
-        "total_recovery_len": 152
-      }
-    ],
     "root_kind": "object",
-    "root_path": "$",
-    "sub_invocations": [
-      {
-        "args_digest": "fake_upstream_str-large-table({})",
-        "invocation_id": "<uuid>",
-        "kind": "lines",
-        "raw_size_bytes": 52412,
-        "root_path": "$",
-        "summary_envelope_bytes": 8390,
-        "tool_name": "fake_upstream_str-large-table"
-      },
-      {
-        "args_digest": "fake_upstream_arr-large-passthrough-items({})",
-        "invocation_id": "<uuid>",
-        "kind": "json_array_slice",
-        "raw_size_bytes": 53891,
-        "root_path": "$",
-        "summary_envelope_bytes": 8684,
-        "tool_name": "fake_upstream_arr-large-passthrough-items"
-      }
-    ]
+    "root_path": "$"
   },
   "console": [],
   "execution_time_ms": "<ms>",

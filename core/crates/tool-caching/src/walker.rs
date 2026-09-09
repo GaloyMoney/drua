@@ -249,7 +249,7 @@ impl Walker {
         // Schema-conforming truncate: emit a shorter (head-only) array of
         // the same element type so the wrapped outputSchema's `result`
         // stays valid. Truncation metadata moves into the ElidedPath,
-        // where the structured envelope's `_elided.paths[i]` carries it.
+        // where the structured envelope's `_recovery.paths[i]` carries it.
         // Per-item elided_paths for kept items (e.g. $[0].body) survive;
         // those for dropped tail indices get pruned (or kept, if the
         // recovery slice wouldn't fit max_fetch_response_bytes — see
@@ -443,7 +443,7 @@ impl Walker {
         elided_paths: &mut Vec<ElidedPath>,
     ) -> Value {
         // Head-only truncate: emit `[item0..item(K-1)]` and record
-        // `_elided.paths[i]={length:N, head_count:K, recover:…}` so the
+        // `_recovery.paths[i]={length:N, head_count:K, recover:…}` so the
         // agent can slice `[K..N)` via `tool_output_fetch` if they need
         // more. Head+tail would be ambiguous on the wire — without a
         // delimiter the agent can't tell where the gap lives.
