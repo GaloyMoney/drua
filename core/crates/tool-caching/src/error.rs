@@ -5,10 +5,12 @@ pub enum ToolCachingError {
     #[error("tool-caching serde_json error: {0}")]
     Serde(#[from] serde_json::Error),
     #[error(
-        "tool invocation not found — the ID may have expired \
-         (cached results have a limited lifetime) or belong to a \
-         different session. Do not retry; re-run the original tool \
-         call to get a fresh result."
+        "no persisted tool invocation with this id for this session. \
+         Invocation ids never expire; a valid one only ever comes verbatim \
+         from a `_recovery.invocation_id` (or `sub_invocations[].invocation_id`) \
+         in an earlier response in this conversation — do not guess or \
+         reconstruct one. If you did not copy it, re-run the original tool \
+         call and use the id it returns."
     )]
     InvocationNotFound,
     #[error("invalid fetch path: {0}")]

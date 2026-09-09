@@ -288,6 +288,11 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
 
             return async move {
                 Audit::record_action(action);
+                // Own entrypoint, or these rows are indistinguishable from
+                // the outer `mcp: compose` result and `tokens_returned`
+                // (the raw sub-tool payload, which never reaches the model)
+                // pollutes any per-entrypoint context accounting.
+                Audit::record_entrypoint(format!("compose > mcp: {name_owned}"));
                 Audit::record_interaction_type(InteractionType::McpCall);
                 Audit::record_metadata(serde_json::json!({
                     "tool_name": name_owned,
@@ -381,6 +386,7 @@ impl CatalogDispatcher {
 
         async move {
             Audit::record_action(action);
+            Audit::record_entrypoint(format!("compose > mcp: {name_owned}"));
             Audit::record_interaction_type(InteractionType::McpCall);
             Audit::record_metadata(serde_json::json!({
                 "tool_name": name_owned,
