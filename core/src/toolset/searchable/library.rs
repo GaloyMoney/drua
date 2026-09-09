@@ -1,3 +1,4 @@
+use drua_tool_caching::ToolOutputShape;
 use std::sync::{Arc, LazyLock};
 
 use drua_library::{DocType, SearchHit, SearchableFields, SPACE_DOC_TYPE};
@@ -529,6 +530,13 @@ impl SearchableToolSet for LibraryToolSet {
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
         !matches!(subject, AuthSubject::Anonymous)
+    }
+
+    fn output_shape(&self, tool_name: &str) -> ToolOutputShape {
+        match tool_name {
+            "get_files" => ToolOutputShape::Document,
+            _ => ToolOutputShape::Generic,
+        }
     }
 
     async fn call(

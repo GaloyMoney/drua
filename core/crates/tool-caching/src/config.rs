@@ -6,7 +6,17 @@ const DEFAULT_GENERIC_THRESHOLD_BYTES: usize = 8192;
 const DEFAULT_SENTINEL_HARD_CAP_BYTES: usize = 16 * 1024;
 const DEFAULT_SENTINEL_MIN_BYTES: usize = 512;
 const DEFAULT_MAX_FETCH_RESPONSE_BYTES: usize = 16 * 1024;
-const DEFAULT_MIN_HIDDEN_BYTES: usize = 32 * 1024;
+// Inlined bytes are re-read on every later turn of the session, so the
+// break-even against one recovery turn (~25k tokens, mostly cache
+// reads) sits in the single-digit KB — not the 32 KB a per-turn
+// accounting suggests. Measured Aug–Sep 2026: tools with <15% recovery
+// rate (`library_search`, `*_resources_get`) paid 2–3x more context
+// under a 32 KB floor than under elision.
+const DEFAULT_MIN_HIDDEN_BYTES: usize = 6 * 1024;
+// Documents are read in full 40–70% of the time, so eliding them mostly
+// defers the bytes to a fetch and costs a turn; only genuinely large
+// ones are worth withholding.
+const DEFAULT_DOCUMENT_MIN_HIDDEN_BYTES: usize = 64 * 1024;
 
 /// Knobs the walker actually reads. Per-string head/tail counts are
 /// derived adaptively from `generic_threshold_bytes` at walk time;
@@ -35,6 +45,9 @@ pub struct ToolCachingConfig {
     /// bytes it hides.
     #[serde(default = "default_min_hidden_bytes")]
     pub min_hidden_bytes: usize,
+    /// `min_hidden_bytes` for tools declaring [`ToolOutputShape::Document`].
+    #[serde(default = "default_document_min_hidden_bytes")]
+    pub document_min_hidden_bytes: usize,
     /// Per-tool overrides, keyed by the prefixed tool name (e.g.
     /// `library_get_files`). Falls back to the fields above when a tool
     /// has no entry, or when an entry doesn't set a given field.
@@ -69,6 +82,11 @@ pub enum ToolOutputShape {
     /// it, and rarely recovers the rest. Elision earns its keep at any
     /// size here, so the floor does not apply.
     Log,
+    /// A document the caller usually wants whole (space files, source
+    /// files, PR bodies). Recovery is likely, so eliding mostly defers
+    /// the bytes to a fetch and costs a turn: the floor is raised to
+    /// `document_min_hidden_bytes`.
+    Document,
 }
 
 /// The elision knobs resolved for one call, in precedence order:
@@ -88,6 +106,7 @@ impl ToolCachingConfig {
             min_hidden_bytes: match shape {
                 ToolOutputShape::Generic => self.min_hidden_bytes,
                 ToolOutputShape::Log => 0,
+                ToolOutputShape::Document => self.document_min_hidden_bytes,
             },
         };
         // Operator config is last so a deployment can always overrule a
@@ -112,6 +131,7 @@ impl Default for ToolCachingConfig {
             sentinel_hard_cap_bytes: DEFAULT_SENTINEL_HARD_CAP_BYTES,
             max_fetch_response_bytes: DEFAULT_MAX_FETCH_RESPONSE_BYTES,
             min_hidden_bytes: DEFAULT_MIN_HIDDEN_BYTES,
+            document_min_hidden_bytes: DEFAULT_DOCUMENT_MIN_HIDDEN_BYTES,
             per_tool: HashMap::new(),
         }
     }
@@ -131,6 +151,9 @@ fn default_max_fetch_response_bytes() -> usize {
 }
 fn default_min_hidden_bytes() -> usize {
     DEFAULT_MIN_HIDDEN_BYTES
+}
+fn default_document_min_hidden_bytes() -> usize {
+    DEFAULT_DOCUMENT_MIN_HIDDEN_BYTES
 }
 
 #[cfg(test)]
@@ -212,6 +235,15 @@ mod tests {
                 .threshold_bytes,
             DEFAULT_GENERIC_THRESHOLD_BYTES
         );
+    }
+
+    #[test]
+    fn document_shape_raises_the_floor() {
+        let cfg = ToolCachingConfig::default();
+        let budget = cfg.budget_for("library_get_files", ToolOutputShape::Document);
+        assert_eq!(budget.min_hidden_bytes, DEFAULT_DOCUMENT_MIN_HIDDEN_BYTES);
+        assert!(budget.min_hidden_bytes > cfg.min_hidden_bytes);
+        assert_eq!(budget.threshold_bytes, DEFAULT_GENERIC_THRESHOLD_BYTES);
     }
 
     /// A partial override leaves the field it doesn't set to whatever the

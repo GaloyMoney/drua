@@ -37,6 +37,8 @@ pub struct UpstreamToolSet {
     /// Unprefixed tool names declared as log-shaped by config. See
     /// [`McpUpstreamConfig::log_tools`].
     log_tools: Vec<String>,
+    /// See [`McpUpstreamConfig::document_tools`].
+    document_tools: Vec<String>,
     tools: Vec<ToolSetEntry>,
     client: Arc<RwLock<RunningService<RoleClient, ()>>>,
     _refresh_task: Option<tokio::task::JoinHandle<()>>,
@@ -115,6 +117,7 @@ impl UpstreamToolSet {
             required_scopes: upstream.required_scopes.clone().unwrap_or_default(),
             internal_only: upstream.internal_only,
             log_tools: upstream.log_tools.clone(),
+            document_tools: upstream.document_tools.clone(),
             tools,
             client,
             _refresh_task: refresh_task,
@@ -208,6 +211,8 @@ impl SearchableToolSet for UpstreamToolSet {
     fn output_shape(&self, tool_name: &str) -> ToolOutputShape {
         if self.log_tools.iter().any(|t| t == tool_name) {
             ToolOutputShape::Log
+        } else if self.document_tools.iter().any(|t| t == tool_name) {
+            ToolOutputShape::Document
         } else {
             ToolOutputShape::Generic
         }

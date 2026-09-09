@@ -239,20 +239,20 @@ galoyAgents:
       kubernetes:
         - pods_log
         - nodes_log
-        ## Tool-output elision thresholds (the walker in drua-tool-caching).
-        ## Omit entirely to keep the crate's own defaults; set an entry here
-        ## only to overrule what a tool declares about its own output.
-        ## Example (uncomment to override):
-        # toolCaching:
-        #   genericThresholdBytes: 8192
-        #   minHiddenBytes: 32768
-        #   perTool:
-        #     library_get_files:
-        #       genericThresholdBytes: 65536
-        #     drua_admin_spaces:
-        #       genericThresholdBytes: 65536
-        #     notes:
-        #       genericThresholdBytes: 65536
+    ## Tool-output elision thresholds (the walker in drua-tool-caching).
+    ## Omit entirely to keep the crate's own defaults (8 KB threshold,
+    ## 6 KB hidden-bytes floor, 64 KB floor for tools that declare
+    ## `Document` output — library files, spaces, and upstream tools
+    ## listed under `documentTools`). Set an entry here only to overrule
+    ## what a tool declares about its own output.
+    ## Example (uncomment to override):
+    # toolCaching:
+    #   genericThresholdBytes: 8192
+    #   minHiddenBytes: 6144
+    #   documentMinHiddenBytes: 65536
+    #   perTool:
+    #     honeycomb_run_query:
+    #       minHiddenBytes: 4096
   ## Optional postgres MCP sidecar exposing drua's own database to admins
   ## via MCP Streamable-HTTP at /mcp. Uses bytebase/dbhub (the same image
   ## lana-bank uses) — read-only posture should be enforced at the database

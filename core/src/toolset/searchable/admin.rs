@@ -5,6 +5,7 @@
 //! `agent`, `sandbox`, `log`, `project`, `spaces`, `workflow`, `skill`, `note`.
 //! Prefixed as `drua_admin_agent`, `drua_admin_sandbox`, etc.
 
+use drua_tool_caching::ToolOutputShape;
 use std::sync::{Arc, LazyLock};
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
@@ -863,6 +864,13 @@ impl SearchableToolSet for AdminToolSet {
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
         subject.is_admin()
+    }
+
+    fn output_shape(&self, tool_name: &str) -> ToolOutputShape {
+        match tool_name {
+            "spaces" => ToolOutputShape::Document,
+            _ => ToolOutputShape::Generic,
+        }
     }
 
     async fn call(

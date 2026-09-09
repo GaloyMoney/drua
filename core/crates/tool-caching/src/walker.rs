@@ -123,10 +123,10 @@ impl Walker {
         let total_bytes = byte_size(raw_at_primary);
         let shown_bytes = byte_size(&summary);
 
-        // Floor: hiding fewer than `min_hidden_bytes` costs more (one
-        // `tool_output_fetch` round trip, worth ~100 KB of context) than
-        // it saves, so pass the whole value through instead. Root totals,
-        // not a sum over `elided_paths` — nested paths would double-count.
+        // Floor: hiding fewer than `min_hidden_bytes` costs more (the
+        // `tool_output_fetch` turn it may provoke) than it saves, so pass
+        // the whole value through instead. Root totals, not a sum over
+        // `elided_paths` — nested paths would double-count.
         //
         // Preprocessed payloads never take this branch whatever the
         // budget says: the bypass hands back `query_structure.root`, which

@@ -145,6 +145,12 @@ pub struct McpUpstreamConfig {
     /// competing with tool-caching's min-hidden-bytes floor.
     #[serde(default)]
     pub log_tools: Vec<String>,
+    /// Unprefixed names of tools that return a document the caller
+    /// usually wants whole (`get_file_contents`, `pull_request_read`).
+    /// Listed tools get tool-caching's document floor instead of the
+    /// generic one, so they stay inline unless genuinely large.
+    #[serde(default)]
+    pub document_tools: Vec<String>,
     /// Empty means unrestricted.
     #[serde(default)]
     pub required_scopes: Option<Vec<AuthScope>>,
@@ -217,6 +223,27 @@ mcp_upstreams:
         )
         .expect("upstream config with log_tools parses");
         assert_eq!(cfg.mcp_upstreams[0].log_tools, ["pods_log", "nodes_log"]);
+        assert!(cfg.mcp_upstreams[0].document_tools.is_empty());
+    }
+
+    #[test]
+    fn upstream_document_tools_parse_from_yaml() {
+        let cfg: ToolSetsConfig = serde_yaml::from_str(
+            r#"
+mcp_upstreams:
+  - name: github
+    url: http://gh:8080/mcp
+    tool_prefix: github
+    document_tools:
+      - get_file_contents
+      - pull_request_read
+"#,
+        )
+        .expect("upstream config with document_tools parses");
+        assert_eq!(
+            cfg.mcp_upstreams[0].document_tools,
+            ["get_file_contents", "pull_request_read"]
+        );
     }
 
     #[test]

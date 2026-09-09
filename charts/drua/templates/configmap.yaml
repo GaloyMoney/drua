@@ -245,6 +245,12 @@ data:
             - {{ . | quote }}
           {{- end }}
           {{- end }}
+          {{- if .documentTools }}
+          document_tools:
+          {{- range .documentTools }}
+            - {{ . | quote }}
+          {{- end }}
+          {{- end }}
           {{- if .requiredScopes }}
           required_scopes:
           {{- range .requiredScopes }}
@@ -313,6 +319,9 @@ data:
       {{- end }}
       {{- if hasKey . "minHiddenBytes" }}
       min_hidden_bytes: {{ .minHiddenBytes }}
+      {{- end }}
+      {{- if hasKey . "documentMinHiddenBytes" }}
+      document_min_hidden_bytes: {{ .documentMinHiddenBytes }}
       {{- end }}
       {{- with .perTool }}
       per_tool:

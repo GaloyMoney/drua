@@ -386,14 +386,14 @@ async fn direct_and_compose_persistence_share_fetch_root_but_not_wire_wrapper() 
 async fn sub_floor_payload_yields_no_envelope_and_no_persistence() {
     let config = ToolCachingConfig {
         generic_threshold_bytes: 512,
-        // Default `min_hidden_bytes` (32 KB) is exactly what's under test.
+        // Default `min_hidden_bytes` (6 KB) is exactly what's under test.
         ..ToolCachingConfig::default()
     };
     let caching = ToolCaching::new(&pool().await, config);
 
-    // 10 KB over a 512-byte threshold hides ~9.5 KB — comfortably under
-    // the default 32 KB floor.
-    let payload = "x".repeat(10_000);
+    // 5 KB over a 512-byte threshold hides ~4.5 KB — under the default
+    // 6 KB floor.
+    let payload = "x".repeat(5_000);
     let upstream = CallToolResult::success(vec![Content::text(payload.clone())]);
 
     let response = caching
@@ -434,7 +434,7 @@ async fn log_shaped_tool_elides_the_same_sub_floor_payload() {
     };
     let caching = ToolCaching::new(&pool().await, config);
 
-    let payload = "x".repeat(10_000);
+    let payload = "x".repeat(5_000);
     let upstream = CallToolResult::success(vec![Content::text(payload.clone())]);
 
     let response = caching
