@@ -109,6 +109,14 @@ galoyAgents:
             modes: [pull, push]
             allowedPushRefs:
               - refs/heads/bot/*
+    toolCaching:
+      perTool:
+        # `spaces view` declares Document (64 KB floor) but is read in
+        # full only 28% of the time (Aug 2026, n=211) vs library_get_files'
+        # 70%; at 32 KB it inlines 87% of results and saves ~12.5k tokens
+        # per fetch turn it adds.
+        drua_admin_spaces:
+          minHiddenBytes: 32768
     mcpUpstreams:
       - name: honeycomb
         url: https://mcp.honeycomb.io/mcp
