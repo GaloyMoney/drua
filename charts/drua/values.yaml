@@ -239,21 +239,21 @@ galoyAgents:
       kubernetes:
         - pods_log
         - nodes_log
-    ## Tool-output elision thresholds (the walker in drua-tool-caching).
-    ## Omit entirely to keep the crate's own defaults (8 KB threshold,
-    ## 6 KB hidden-bytes floor, 64 KB floor for tools that declare
-    ## `Document` output — library files, spaces, and upstream tools
-    ## listed under `documentTools`). Set an entry here only to overrule
-    ## what a tool declares about its own output.
-    ## Example (uncomment to override):
-    # toolCaching:
-    #   genericThresholdBytes: 8192
-    #   minHiddenBytes: 6144
-    #   documentMinHiddenBytes: 65536
-    #   minHiddenPerPathBytes: 2048
-    #   perTool:
-    #     honeycomb_run_query:
-    #       minHiddenBytes: 4096
+        ## Tool-output elision thresholds (the walker in drua-tool-caching).
+        ## Omit entirely to keep the crate's own defaults (8 KB threshold,
+        ## 6 KB hidden-bytes floor, 64 KB floor for tools that declare
+        ## `Document` output — library files, spaces, and upstream tools
+        ## listed under `documentTools`). Set an entry here only to overrule
+        ## what a tool declares about its own output.
+        ## Example (uncomment to override):
+        # toolCaching:
+        #   genericThresholdBytes: 8192
+        #   minHiddenBytes: 6144
+        #   documentMinHiddenBytes: 65536
+        #   minHiddenPerPathBytes: 2048
+        #   perTool:
+        #     honeycomb_run_query:
+        #       minHiddenBytes: 4096
   ## Optional postgres MCP sidecar exposing drua's own database to admins
   ## via MCP Streamable-HTTP at /mcp. Uses bytebase/dbhub (the same image
   ## lana-bank uses) — read-only posture should be enforced at the database
@@ -296,7 +296,7 @@ galoyAgents:
     tunnelInternalSecret: ""
     annotations:
   codeAssistant:
-    indexHash: "ede73cc6ddad6c8bcdd1c802c052d1f7e178edfff277097a56b70f3887f4e435"
+    indexHash: "45bcd87ccfa5ca3d25427bee5b70179ef13134bc3cc1df821149f265c2b17001"
     embedderHash: "569359897109da21014e728cd4d618843766f7f5a52f95c0c35e57250c117d06"
     gcsBucket: galoy-agents-models
     gcsCreds: ""
