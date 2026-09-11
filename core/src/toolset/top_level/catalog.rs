@@ -109,13 +109,14 @@ impl SearchCatalog {
             .count()
     }
 
-    fn format_results(results: &[CatalogEntry]) -> String {
+    fn format_results(results: &[CatalogEntry], full: usize) -> String {
         if results.is_empty() {
             return "No tools found matching your query.".to_string();
         }
+        let (described, condensed) = results.split_at(full.min(results.len()));
         let mut lines = Vec::new();
         let mut current_category: Option<&str> = None;
-        for entry in results {
+        for entry in described {
             let cat = entry.category.as_str();
             if current_category != Some(cat) {
                 if !lines.is_empty() {
@@ -129,16 +130,53 @@ impl SearchCatalog {
                 entry.prefixed_name, entry.brief_description
             ));
         }
+        if !condensed.is_empty() {
+            lines.push(String::new());
+            lines.push(format!(
+                "{} more match(es), name only — describe_tool for details:",
+                condensed.len()
+            ));
+            for entry in condensed {
+                lines.push(format!("  {} [{}]", entry.prefixed_name, entry.category));
+            }
+        }
         lines.join("\n")
     }
+
+    fn build_output(results: &[CatalogEntry], full: usize) -> SearchToolsOutput {
+        SearchToolsOutput {
+            total: results.len(),
+            condensed_after: (results.len() > full).then_some(full),
+            tools: results
+                .iter()
+                .enumerate()
+                .map(|(i, e)| SearchToolEntry {
+                    name: e.prefixed_name.clone(),
+                    category: e.category.clone(),
+                    description: (i < full).then(|| e.brief_description.clone()),
+                })
+                .collect(),
+        }
+    }
 }
+
+/// Hits past this rank keep name + category but drop the description:
+/// every match stays visible (recall is unchanged), only the ~70-token
+/// brief is withheld for the tail. Measured Sep 2026: searches averaged
+/// ~17 hits / 1,217 tokens, 8.8% of external agents' context.
+const DEFAULT_FULL_RESULTS: usize = 10;
 
 static SEARCH_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
     json!({
         "type": "object",
         "properties": {
             "query": { "type": "string", "description": "Free-form search query" },
-            "category": { "type": "string", "description": "Optional category filter ('all' for any)" }
+            "category": { "type": "string", "description": "Optional category filter ('all' for any)" },
+            "full": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "How many top-ranked hits include a description (default 10). The rest are listed by name and category only; describe_tool works on any of them."
+            }
         }
     })
 });
@@ -147,13 +185,17 @@ static SEARCH_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
 struct SearchToolsOutput {
     tools: Vec<SearchToolEntry>,
     total: usize,
+    /// Set when hits past this index were condensed to name + category.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    condensed_after: Option<usize>,
 }
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct SearchToolEntry {
     name: String,
     category: String,
-    description: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
 }
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
@@ -177,8 +219,11 @@ struct DescribeToolOutput {
     #[schemars(default)]
     #[schemars(schema_with = "crate::toolset::any_json_schema")]
     output_schema: Option<serde_json::Value>,
-    /// How `call_tool` wraps `output_schema` on the wire.
-    wire_shape: &'static str,
+    /// How `call_tool` wraps `output_schema` on the wire. Absent when
+    /// there is no schema to wrap — then it was +35 tokens of noise on
+    /// every describe of an upstream that publishes none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wire_shape: Option<&'static str>,
 }
 
 /// One sentence instead of the full `DruaToolResult` wrapper schema.
@@ -198,8 +243,9 @@ impl TopLevelTool for SearchCatalog {
     }
     fn description(&self) -> &str {
         "Search for available tools across all upstream services. Returns tool \
-         names, brief descriptions, and categories. Use this first to find \
-         relevant tools before calling them."
+         names, brief descriptions, and categories; hits past the top 10 (`full`) \
+         are listed by name only. Use this first to find relevant tools before \
+         calling them."
     }
     fn input_schema(&self) -> &serde_json::Value {
         &SEARCH_SCHEMA
@@ -219,6 +265,10 @@ impl TopLevelTool for SearchCatalog {
         let category = args
             .and_then(|a| a.get("category"))
             .and_then(|v| v.as_str());
+        let full = args
+            .and_then(|a| a.get("full"))
+            .and_then(|v| v.as_u64())
+            .map_or(DEFAULT_FULL_RESULTS, |v| v as usize);
         let results = self.execute_search(subject, query, category);
         let text = if results.is_empty() {
             format!(
@@ -230,19 +280,9 @@ impl TopLevelTool for SearchCatalog {
                 query.unwrap_or(""),
             )
         } else {
-            Self::format_results(&results)
+            Self::format_results(&results, full)
         };
-        let out = SearchToolsOutput {
-            total: results.len(),
-            tools: results
-                .iter()
-                .map(|e| SearchToolEntry {
-                    name: e.prefixed_name.clone(),
-                    category: e.category.clone(),
-                    description: e.brief_description.clone(),
-                })
-                .collect(),
-        };
+        let out = Self::build_output(&results, full);
         let structured = serde_json::to_value(&out).expect("SearchToolsOutput serialization");
         let mut result = CallToolResult::success(vec![Content::text(text)]);
         result.structured_content = Some(structured);
@@ -358,17 +398,18 @@ impl TopLevelTool for DescribeCatalogTool {
             Some(entry) => {
                 let text = Self::format_entry(&entry);
                 let tool = &entry.full_tool;
+                let output_schema = tool
+                    .output_schema
+                    .as_ref()
+                    .map(|s| serde_json::Value::Object(s.as_ref().clone()));
                 let out = DescribeToolOutput {
                     name: entry.prefixed_name,
                     upstream: entry.upstream_name,
                     category: entry.category,
                     description: tool.description.as_deref().unwrap_or("").to_string(),
                     input_schema: serde_json::Value::Object(tool.input_schema.as_ref().clone()),
-                    output_schema: tool
-                        .output_schema
-                        .as_ref()
-                        .map(|s| serde_json::Value::Object(s.as_ref().clone())),
-                    wire_shape: WIRE_SHAPE,
+                    wire_shape: output_schema.is_some().then_some(WIRE_SHAPE),
+                    output_schema,
                 };
                 let structured =
                     serde_json::to_value(&out).expect("DescribeToolOutput serialization");
@@ -988,13 +1029,79 @@ mod tests {
                 .output_schema
                 .as_ref()
                 .map(|s| serde_json::Value::Object(s.as_ref().clone())),
-            wire_shape: WIRE_SHAPE,
+            wire_shape: Some(WIRE_SHAPE),
         };
         let structured = serde_json::to_value(&out).unwrap();
         let schema = &structured["output_schema"];
         assert_eq!(schema["properties"]["id"]["type"], "string");
         assert!(schema.get("properties").unwrap().get("result").is_none());
         assert!(schema.get("properties").unwrap().get("_recovery").is_none());
+        assert_eq!(structured["wire_shape"], WIRE_SHAPE);
+    }
+
+    /// Most proxied upstreams publish no output schema; the wire-shape
+    /// sentence has nothing to describe there and must not be emitted.
+    #[test]
+    fn describe_tool_omits_wire_shape_without_output_schema() {
+        let out = DescribeToolOutput {
+            name: "stub_x".into(),
+            upstream: "stub".into(),
+            category: "test".into(),
+            description: String::new(),
+            input_schema: json!({}),
+            output_schema: None,
+            wire_shape: None,
+        };
+        let structured = serde_json::to_value(&out).unwrap();
+        assert!(structured.get("wire_shape").is_none(), "{structured}");
+        assert!(structured.get("output_schema").is_none(), "{structured}");
+    }
+
+    #[test]
+    fn search_condenses_hits_past_full_limit() {
+        let tools: Vec<(String, String)> = (0..5)
+            .map(|i| (format!("pipeline_{i}"), format!("Pipeline tool {i}")))
+            .collect();
+        let refs: Vec<(&str, &str)> = tools
+            .iter()
+            .map(|(n, d)| (n.as_str(), d.as_str()))
+            .collect();
+        let catalog = search_catalog(vec![StubToolSet::with_tools(refs)]);
+        let results = catalog.execute_search(&AuthSubject::Anonymous, Some("pipeline"), None);
+        assert_eq!(results.len(), 5);
+
+        let out = SearchCatalog::build_output(&results, 2);
+        assert_eq!(out.total, 5);
+        assert_eq!(out.condensed_after, Some(2));
+        assert_eq!(out.tools.len(), 5, "every hit stays listed");
+        assert!(out.tools[..2].iter().all(|t| t.description.is_some()));
+        assert!(out.tools[2..].iter().all(|t| t.description.is_none()));
+        let json = serde_json::to_value(&out).unwrap();
+        assert!(json["tools"][4].get("description").is_none(), "{json}");
+
+        let text = SearchCatalog::format_results(&results, 2);
+        assert!(text.contains("stub_pipeline_0") && text.contains("Pipeline tool 0"));
+        assert!(text.contains("3 more match(es)"), "{text}");
+        assert!(text.contains("stub_pipeline_4 [test]"), "{text}");
+        assert!(!text.contains("Pipeline tool 4"), "{text}");
+    }
+
+    #[test]
+    fn search_within_full_limit_is_not_condensed() {
+        let catalog = search_catalog(vec![StubToolSet::with_tools(vec![
+            ("list_pipelines", "List CI pipelines"),
+            ("get_pipeline_status", "Get pipeline build status"),
+        ])]);
+        let results = catalog.execute_search(&AuthSubject::Anonymous, Some("pipeline"), None);
+        let out = SearchCatalog::build_output(&results, DEFAULT_FULL_RESULTS);
+        assert_eq!(out.condensed_after, None);
+        assert!(out.tools.iter().all(|t| t.description.is_some()));
+        let json = serde_json::to_value(&out).unwrap();
+        assert!(json.get("condensed_after").is_none(), "{json}");
+        assert!(
+            !SearchCatalog::format_results(&results, DEFAULT_FULL_RESULTS)
+                .contains("more match(es)")
+        );
     }
 
     #[test]
