@@ -250,7 +250,7 @@ galoyAgents:
         #   genericThresholdBytes: 8192
         #   minHiddenBytes: 6144
         #   documentMinHiddenBytes: 65536
-        #   minHiddenPerPathBytes: 2048
+        #   minHiddenPerPathBytes: 512
         #   perTool:
         #     honeycomb_run_query:
         #       minHiddenBytes: 4096

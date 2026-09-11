@@ -20,8 +20,10 @@ const DEFAULT_DOCUMENT_MIN_HIDDEN_BYTES: usize = 64 * 1024;
 // Every elision point costs ~350 bytes of recovery metadata on the
 // wire, so a path that hides less than this spends more context than
 // it withholds — the wide object whose per-key budget nicks every
-// 500-byte cell was the canonical case.
-const DEFAULT_MIN_HIDDEN_PER_PATH_BYTES: usize = 2048;
+// 500-byte cell was the canonical case. Break-even is therefore
+// ~350–500 B; a replay sweep over Sep 2026 prod payloads put 2048 (the
+// original value) as the worst setting tested and 512 ~3.5% better.
+const DEFAULT_MIN_HIDDEN_PER_PATH_BYTES: usize = 512;
 
 /// Knobs the walker actually reads. Per-string head/tail counts are
 /// derived adaptively from `generic_threshold_bytes` at walk time;
