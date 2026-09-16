@@ -1,3 +1,4 @@
+pub mod anti_pattern_triage;
 pub mod bats_chunker;
 pub mod chunker;
 pub mod classifier;
