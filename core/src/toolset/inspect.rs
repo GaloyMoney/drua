@@ -61,8 +61,9 @@ pub(crate) fn parse_view_range(args: &JsonObject) -> Option<(i64, i64)> {
 
 /// Runs a `ReadOp` against `space:<slug>/<op_args.path>`,
 /// formatting the response as plain text. `Ok(None)` from `SpaceFs`
-/// (an unresolvable slug, or a `path` that names nothing in the space)
-/// is converted to an error so callers never see a silent success.
+/// (only reachable for an empty slug, since callers always prefix
+/// `space:`) is converted to an error so callers never see a silent
+/// success.
 pub(crate) async fn dispatch_view(
     space_fs: &SpaceFs,
     subject: &AuthSubject,
