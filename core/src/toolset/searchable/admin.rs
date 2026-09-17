@@ -256,6 +256,8 @@ enum SpacesCommand {
     Unmount,
     /// Read-only file ops on a space. `op` selects the sub-tool
     /// (read|ls|grep|glob); `op_args` shape depends on it.
+    /// `op_args.path` scopes the op to a directory or a single file,
+    /// and errors when it names neither.
     View,
     /// Mutating file ops on a space. `op` selects the sub-tool
     /// (write|str_replace|insert|delete|move); `op_args` shape

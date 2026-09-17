@@ -380,7 +380,8 @@ impl SpaceFs {
     /// Glob walk across the space's tree. Pattern is the standard
     /// glob syntax (`*`, `**`, `?`); matches against the relative
     /// path inside `spaces/<slug>/`. `path`'s rel-component anchors
-    /// the search root.
+    /// the search root — a directory, or a single file. `Ok(None)`
+    /// when it names neither.
     #[instrument(name = "library.space_fs.glob", skip(self, sub))]
     pub async fn glob(
         &self,
@@ -391,17 +392,22 @@ impl SpaceFs {
         let Some(resolved) = self.resolve(sub, path).await? else {
             return Ok(None);
         };
-        let blobs = self
+        let Some(blobs) = self
             .spaces
             .walk(&resolved.space.slug, &resolved.rel_path)
             .await
-            .map_err(|e| -> ProjectError { e.into() })?;
+            .map_err(|e| -> ProjectError { e.into() })?
+        else {
+            return Ok(None);
+        };
         Ok(Some(glob_blobs(blobs, pattern)?))
     }
 
     /// Grep walk across the space's tree. Replicates the curated subset
     /// of flags the `Grep` top-level tool exposes, but without `rg` —
-    /// runs each blob's content through the `regex` crate.
+    /// runs each blob's content through the `regex` crate. `path`
+    /// anchors the search root — a directory, or a single file.
+    /// `Ok(None)` when it names neither.
     #[instrument(name = "library.space_fs.grep", skip(self, sub, args))]
     pub async fn grep(
         &self,
@@ -412,11 +418,14 @@ impl SpaceFs {
         let Some(resolved) = self.resolve(sub, path).await? else {
             return Ok(None);
         };
-        let blobs = self
+        let Some(blobs) = self
             .spaces
             .walk(&resolved.space.slug, &resolved.rel_path)
             .await
-            .map_err(|e| -> ProjectError { e.into() })?;
+            .map_err(|e| -> ProjectError { e.into() })?
+        else {
+            return Ok(None);
+        };
         Ok(Some(grep_blobs(blobs, args)?))
     }
 
