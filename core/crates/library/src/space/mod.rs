@@ -291,29 +291,34 @@ impl Spaces {
 
     /// Recursively walks every blob under `spaces/<slug>/<rel_path>`.
     /// Returned paths are relative to `spaces/<slug>/` (not the repo root).
+    /// A `rel_path` naming a single file yields just that file.
+    /// `Ok(None)` when the path doesn't exist.
     #[tracing::instrument(name = "library.spaces.walk", skip_all, fields(%slug, %rel_path))]
     pub async fn walk(
         &self,
         slug: &str,
         rel_path: &str,
-    ) -> Result<Vec<(String, Vec<u8>)>, SpaceError> {
+    ) -> Result<Option<crate::git::BlobEntries>, SpaceError> {
         let path = if rel_path.is_empty() {
             format!("spaces/{slug}")
         } else {
             format!("spaces/{slug}/{rel_path}")
         };
         let strip = format!("spaces/{slug}/");
-        let mut blobs = self
+        let Some(mut blobs) = self
             .git
             .walk_blobs_at_head(&path)
             .await
-            .map_err(|e| SpaceError::Git(e.to_string()))?;
+            .map_err(|e| SpaceError::Git(e.to_string()))?
+        else {
+            return Ok(None);
+        };
         for (p, _) in blobs.iter_mut() {
             if let Some(rest) = p.strip_prefix(&strip) {
                 *p = rest.to_string();
             }
         }
-        Ok(blobs)
+        Ok(Some(blobs))
     }
 
     /// Lists every space, paginated through the `slug` list_by index.

@@ -26,8 +26,8 @@ pub use search::{SearchHit, SearchStore, SearchableFields};
 pub use space::{NewSpace, Space, SpaceError, SpaceEvent, Spaces, SPACE_DOC_TYPE};
 pub use synced::LibrarySynced;
 
-pub use self::git::DirEntry;
 use self::git::GitEngine;
+pub use self::git::{BlobEntries, DirEntry};
 use self::job::{
     CommitTick, ImporterRegistry, LibraryEmbedConfig, LibraryEmbedJobInitializer,
     LibrarySyncConfig, LibrarySyncJobInitializer, LibraryWriteConfig, LibraryWriteJobInitializer,
@@ -208,11 +208,13 @@ impl Library {
     }
 
     /// Recursively walk every blob under `dir_path` at HEAD. Returns
-    /// `(path, content)` pairs (paths relative to repo root).
+    /// `(path, content)` pairs (paths relative to repo root); a `dir_path`
+    /// naming a blob yields just that blob. `Ok(None)` when the path
+    /// doesn't exist.
     pub async fn walk_blobs_at_head(
         &self,
         dir_path: &str,
-    ) -> Result<Vec<(String, Vec<u8>)>, LibraryError> {
+    ) -> Result<Option<BlobEntries>, LibraryError> {
         self.git.walk_blobs_at_head(dir_path).await
     }
 

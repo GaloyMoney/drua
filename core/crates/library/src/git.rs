@@ -36,6 +36,9 @@ pub enum DeltaKind {
     Deleted,
 }
 
+/// `(path, content)` pairs produced by a tree walk.
+pub type BlobEntries = Vec<(String, Vec<u8>)>;
+
 /// One immediate child of a tree at HEAD. Returned by `list_dir_at_head`.
 #[derive(Debug, Clone)]
 pub struct DirEntry {
@@ -508,59 +511,76 @@ impl GitEngine {
 
     /// Recursively walk every blob under `dir_path` at HEAD's tree.
     /// Returns `(absolute_path, content)` pairs (paths relative to the
-    /// repo root). Empty `dir_path` walks the entire tree.
+    /// repo root). Empty `dir_path` walks the entire tree; a `dir_path`
+    /// naming a blob yields just that blob, so callers can scope a walk
+    /// to a single file. `Ok(None)` when the path doesn't exist (or HEAD
+    /// is unborn) — distinct from `Ok(Some(vec![]))` for an empty tree.
     #[tracing::instrument(name = "library.git.walk_blobs_at_head", skip_all, fields(%dir_path))]
     pub async fn walk_blobs_at_head(
         &self,
         dir_path: &str,
-    ) -> Result<Vec<(String, Vec<u8>)>, LibraryError> {
+    ) -> Result<Option<BlobEntries>, LibraryError> {
         let repo_path = self.repo_path.clone();
         let dir_path = dir_path.to_string();
-        tokio::task::spawn_blocking(move || -> Result<Vec<(String, Vec<u8>)>, LibraryError> {
+        tokio::task::spawn_blocking(move || -> Result<Option<BlobEntries>, LibraryError> {
             let repo = git2::Repository::open_bare(&repo_path)
                 .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
-            let Ok(head) = repo.head() else {
-                return Ok(Vec::new());
-            };
-            let root = head
-                .peel_to_commit()
-                .and_then(|c| c.tree())
-                .map_err(|e| LibraryError::Git(format!("peel head tree: {e}")))?;
-            let (subtree, prefix) = if dir_path.is_empty() {
-                (root, String::new())
-            } else {
-                let entry = match root.get_path(Path::new(&dir_path)) {
-                    Ok(e) => e,
-                    Err(_) => return Ok(Vec::new()),
-                };
-                if entry.kind() != Some(git2::ObjectType::Tree) {
-                    return Ok(Vec::new());
-                }
-                let t = repo
-                    .find_tree(entry.id())
-                    .map_err(|e| LibraryError::Git(format!("find subtree: {e}")))?;
-                (t, format!("{dir_path}/"))
-            };
-            let mut out = Vec::new();
-            subtree
-                .walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
-                    if entry.kind() != Some(git2::ObjectType::Blob) {
-                        return git2::TreeWalkResult::Ok;
-                    }
-                    let Some(name) = entry.name() else {
-                        return git2::TreeWalkResult::Ok;
-                    };
-                    let rel = format!("{prefix}{dir}{name}");
-                    if let Ok(blob) = repo.find_blob(entry.id()) {
-                        out.push((rel, blob.content().to_vec()));
-                    }
-                    git2::TreeWalkResult::Ok
-                })
-                .map_err(|e| LibraryError::Git(format!("tree walk: {e}")))?;
-            Ok(out)
+            Self::walk_blobs_at(&repo, &dir_path)
         })
         .await
         .map_err(|e| LibraryError::Git(format!("walk_blobs_at_head join: {e}")))?
+    }
+
+    fn walk_blobs_at(
+        repo: &git2::Repository,
+        dir_path: &str,
+    ) -> Result<Option<BlobEntries>, LibraryError> {
+        let Ok(head) = repo.head() else {
+            return Ok(None);
+        };
+        let root = head
+            .peel_to_commit()
+            .and_then(|c| c.tree())
+            .map_err(|e| LibraryError::Git(format!("peel head tree: {e}")))?;
+        let (subtree, prefix) = if dir_path.is_empty() {
+            (root, String::new())
+        } else {
+            let Ok(entry) = root.get_path(Path::new(dir_path)) else {
+                return Ok(None);
+            };
+            match entry.kind() {
+                Some(git2::ObjectType::Blob) => {
+                    let blob = repo
+                        .find_blob(entry.id())
+                        .map_err(|e| LibraryError::Git(format!("find blob: {e}")))?;
+                    return Ok(Some(vec![(dir_path.to_string(), blob.content().to_vec())]));
+                }
+                Some(git2::ObjectType::Tree) => {
+                    let t = repo
+                        .find_tree(entry.id())
+                        .map_err(|e| LibraryError::Git(format!("find subtree: {e}")))?;
+                    (t, format!("{dir_path}/"))
+                }
+                _ => return Ok(None),
+            }
+        };
+        let mut out = Vec::new();
+        subtree
+            .walk(git2::TreeWalkMode::PreOrder, |dir, entry| {
+                if entry.kind() != Some(git2::ObjectType::Blob) {
+                    return git2::TreeWalkResult::Ok;
+                }
+                let Some(name) = entry.name() else {
+                    return git2::TreeWalkResult::Ok;
+                };
+                let rel = format!("{prefix}{dir}{name}");
+                if let Ok(blob) = repo.find_blob(entry.id()) {
+                    out.push((rel, blob.content().to_vec()));
+                }
+                git2::TreeWalkResult::Ok
+            })
+            .map_err(|e| LibraryError::Git(format!("tree walk: {e}")))?;
+        Ok(Some(out))
     }
 
     #[tracing::instrument(name = "library.git.fetch_and_head", skip_all)]
@@ -1560,6 +1580,98 @@ mod tests {
         let missing = "1111111111111111111111111111111111111111";
         let res = GitEngine::external_deltas(&repo, Some(missing), &c0.to_string());
         assert!(res.is_err(), "missing checkpoint must fail the tick");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Bare repo with `spaces/s/README.md` + `spaces/s/research/a.md`,
+    /// committed on HEAD so the `*_at_head` readers can see it.
+    fn repo_with_space_tree(tag: &str) -> (PathBuf, git2::Repository) {
+        let dir = unique_dir(tag);
+        let repo = git2::Repository::init_bare(&dir).unwrap();
+        let mut idx = repo.index().unwrap();
+        for (path, content) in [
+            ("spaces/s/README.md", &b"# s\nobix here\n"[..]),
+            ("spaces/s/research/a.md", &b"deeper obix\n"[..]),
+        ] {
+            let oid = repo.blob(content).unwrap();
+            let mut entry = index_entry(path);
+            entry.id = oid;
+            entry.file_size = content.len() as u32;
+            idx.add(&entry).unwrap();
+        }
+        let tree = repo.find_tree(idx.write_tree().unwrap()).unwrap();
+        let sig = git2::Signature::now("tester", "tester@example.com").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "init", &tree, &[])
+            .unwrap();
+        drop(tree);
+        (dir, repo)
+    }
+
+    fn index_entry(path: &str) -> git2::IndexEntry {
+        git2::IndexEntry {
+            ctime: git2::IndexTime::new(0, 0),
+            mtime: git2::IndexTime::new(0, 0),
+            dev: 0,
+            ino: 0,
+            mode: 0o100644,
+            uid: 0,
+            gid: 0,
+            file_size: 0,
+            id: git2::Oid::zero(),
+            flags: 0,
+            flags_extended: 0,
+            path: path.as_bytes().to_vec(),
+        }
+    }
+
+    #[test]
+    fn walk_blobs_at_dir_walks_recursively() {
+        let (dir, repo) = repo_with_space_tree("walk-dir");
+        let blobs = GitEngine::walk_blobs_at(&repo, "spaces/s")
+            .unwrap()
+            .unwrap();
+        let paths: std::collections::BTreeSet<&str> =
+            blobs.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["spaces/s/README.md", "spaces/s/research/a.md"]
+                .into_iter()
+                .collect()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn walk_blobs_at_file_yields_that_file() {
+        let (dir, repo) = repo_with_space_tree("walk-file");
+        let blobs = GitEngine::walk_blobs_at(&repo, "spaces/s/README.md")
+            .unwrap()
+            .unwrap();
+        assert_eq!(blobs.len(), 1, "a file path scopes the walk to that file");
+        assert_eq!(blobs[0].0, "spaces/s/README.md");
+        assert_eq!(blobs[0].1, b"# s\nobix here\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn walk_blobs_at_missing_path_is_none() {
+        let (dir, repo) = repo_with_space_tree("walk-missing");
+        // `None`, not an empty Vec: callers surface it as an error instead
+        // of a silent "no matches".
+        assert!(GitEngine::walk_blobs_at(&repo, "spaces/s/nope.md")
+            .unwrap()
+            .is_none());
+        assert!(GitEngine::walk_blobs_at(&repo, "spaces/other")
+            .unwrap()
+            .is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn walk_blobs_at_unborn_head_is_none() {
+        let dir = unique_dir("walk-unborn");
+        let repo = git2::Repository::init_bare(&dir).unwrap();
+        assert!(GitEngine::walk_blobs_at(&repo, "").unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

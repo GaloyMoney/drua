@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use tracing::instrument;
 
-use drua_library::{Space, SpaceError, Spaces};
+use drua_library::{BlobEntries, Space, SpaceError, Spaces};
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
@@ -380,7 +380,8 @@ impl SpaceFs {
     /// Glob walk across the space's tree. Pattern is the standard
     /// glob syntax (`*`, `**`, `?`); matches against the relative
     /// path inside `spaces/<slug>/`. `path`'s rel-component anchors
-    /// the search root.
+    /// the search root — a directory, or a single file; naming neither
+    /// is an error.
     #[instrument(name = "library.space_fs.glob", skip(self, sub))]
     pub async fn glob(
         &self,
@@ -391,17 +392,15 @@ impl SpaceFs {
         let Some(resolved) = self.resolve(sub, path).await? else {
             return Ok(None);
         };
-        let blobs = self
-            .spaces
-            .walk(&resolved.space.slug, &resolved.rel_path)
-            .await
-            .map_err(|e| -> ProjectError { e.into() })?;
+        let blobs = self.walk_search_root(&resolved).await?;
         Ok(Some(glob_blobs(blobs, pattern)?))
     }
 
     /// Grep walk across the space's tree. Replicates the curated subset
     /// of flags the `Grep` top-level tool exposes, but without `rg` —
-    /// runs each blob's content through the `regex` crate.
+    /// runs each blob's content through the `regex` crate. `path`
+    /// anchors the search root — a directory, or a single file; naming
+    /// neither is an error.
     #[instrument(name = "library.space_fs.grep", skip(self, sub, args))]
     pub async fn grep(
         &self,
@@ -412,12 +411,27 @@ impl SpaceFs {
         let Some(resolved) = self.resolve(sub, path).await? else {
             return Ok(None);
         };
-        let blobs = self
+        let blobs = self.walk_search_root(&resolved).await?;
+        Ok(Some(grep_blobs(blobs, args)?))
+    }
+
+    /// Blobs under an already-resolved search root. A path that names
+    /// nothing is an `Err`, never `Ok(None)` — post-`resolve`, `None`
+    /// would reach the top-level `Grep`/`Glob` tools as "not a space
+    /// path" and send `space:<slug>/...` on to the sandbox.
+    async fn walk_search_root(&self, resolved: &Resolved) -> Result<BlobEntries, ProjectError> {
+        match self
             .spaces
             .walk(&resolved.space.slug, &resolved.rel_path)
             .await
-            .map_err(|e| -> ProjectError { e.into() })?;
-        Ok(Some(grep_blobs(blobs, args)?))
+            .map_err(|e| -> ProjectError { e.into() })?
+        {
+            Some(blobs) => Ok(blobs),
+            // A space whose root has never been written has no tree yet;
+            // an empty result is the honest answer there.
+            None if resolved.rel_path.is_empty() => Ok(Vec::new()),
+            None => Err(io_err(format!("no such file or directory: {}", resolved.rel_path)).into()),
+        }
     }
 
     /// Rejects path-traversal, absolute paths, NUL bytes, and leading `/`.
