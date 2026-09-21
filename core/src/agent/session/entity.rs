@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 use crate::primitives::{AgentId, UserMessageSource};
 use es_entity::*;
 
-use crate::agent::{config::ModelChain, AgentRole};
+use crate::agent::{
+    config::{ModelChain, ModelDefaults},
+    AgentRole,
+};
 
 use super::{
     compaction, error::AgentSessionError, export, history, message::*, metadata::*, settings::*,
@@ -43,6 +46,8 @@ pub enum AgentSessionEvent {
         chain_override: Option<llm::ModelChain>,
         model_chain: ModelChain,
         compaction_config: CompactionConfig,
+        #[serde(default)]
+        breaker_config: BreakerConfig,
         system_blocks: Vec<SystemBlock>,
         tool_defs: Vec<ToolDefinition>,
     },
@@ -117,6 +122,15 @@ pub enum AgentSessionEvent {
         chain_override: Option<llm::ModelChain>,
         model_chain: ModelChain,
     },
+    /// Emitted by the misbehaviour breaker (D1-D7): rotates the session's
+    /// effective model chain by one position. The base `model_chain` is
+    /// untouched; `chain_advance` (derived from a count of these events)
+    /// is what rotates it. See `AgentSession::effective_chain`.
+    ModelChainAdvanced {
+        reason: String,
+        from_model: String,
+        to_model: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,6 +156,11 @@ pub struct AgentSession {
     #[builder(default)]
     compaction_config: CompactionConfig,
 
+    #[builder(default)]
+    breaker_config: BreakerConfig,
+    #[builder(default)]
+    chain_advance: usize,
+
     events: EntityEvents<AgentSessionEvent>,
 
     #[es_entity(nested)]
@@ -165,17 +184,93 @@ pub enum AgentSessionResponse {
     Done,
 }
 
+/// A misbehaviour-breaker detector firing (D4). Carries what's needed to
+/// build the `reason` string recorded on `ModelChainAdvanced` / returned in
+/// `AgentSessionError::BreakerTripped`.
+#[derive(Debug)]
+enum BreakerTrip {
+    ConsecutiveErrorTurns {
+        n: usize,
+        last_error: String,
+    },
+    IdenticalFailingCall {
+        n: usize,
+        tool: String,
+        last_error: String,
+    },
+    ConsecutiveMaxTokens {
+        n: usize,
+    },
+}
+
+/// Byte-truncates `s` to at most `max_bytes`, moved inward to a char
+/// boundary rather than panicking mid-codepoint.
+fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
+}
+
 impl AgentSession {
     pub fn current_main_thread_id(&self) -> Option<SessionThreadId> {
         self.current_main_thread
     }
 
     pub fn model(&self) -> &str {
-        &self.model_chain.primary.model
+        &self.effective_primary().model
     }
 
+    /// Base chain as configured, unaffected by breaker rotation. Callers
+    /// that build or compare a prompt's chain want [`Self::effective_chain`]
+    /// instead.
     pub fn chain(&self) -> &ModelChain {
         &self.model_chain
+    }
+
+    /// The primary entry the model chain currently resolves to. `chain_advance`
+    /// rotates it after a breaker trip (D2); `0` is the configured primary.
+    fn effective_primary(&self) -> &ModelDefaults {
+        if self.chain_advance == 0 {
+            &self.model_chain.primary
+        } else {
+            &self.model_chain.fallbacks[self.chain_advance - 1]
+        }
+    }
+
+    /// The chain a prompt should actually be built against: the base chain
+    /// rotated by `chain_advance` positions. Every prompt-building or
+    /// prompt-comparing site must read this, not `model_chain` directly.
+    pub(super) fn effective_chain(&self) -> ModelChain {
+        if self.chain_advance == 0 {
+            return self.model_chain.clone();
+        }
+        ModelChain {
+            primary: self.model_chain.fallbacks[self.chain_advance - 1].clone(),
+            fallbacks: self.model_chain.fallbacks[self.chain_advance..].to_vec(),
+        }
+    }
+
+    fn can_advance_chain(&self) -> bool {
+        self.chain_advance < self.model_chain.fallbacks.len()
+    }
+
+    /// `Some` when the most recently persisted event is a breaker rotation —
+    /// `(reason, from_model, to_model)`. Lets the service layer log the
+    /// chain advance without leaking raw events across the module boundary.
+    pub fn last_chain_advance(&self) -> Option<(&str, &str, &str)> {
+        match self.events.iter_all().next_back()? {
+            AgentSessionEvent::ModelChainAdvanced {
+                reason,
+                from_model,
+                to_model,
+            } => Some((reason, from_model, to_model)),
+            _ => None,
+        }
     }
 
     pub fn is_workflow_agent(&self) -> bool {
@@ -195,7 +290,7 @@ impl AgentSession {
 
         Ok(export::build_exportable_thread(
             self.id,
-            &self.model_chain.primary.model,
+            &self.effective_primary().model,
             &self.events,
             thread_id,
             self.current_main_thread,
@@ -220,6 +315,7 @@ impl AgentSession {
         );
         self.chain_override = new_override.clone();
         self.model_chain = new_chain.clone();
+        self.chain_advance = 0;
         self.events.push(AgentSessionEvent::ModelChainUpdated {
             chain_override: new_override,
             model_chain: new_chain,
@@ -562,12 +658,13 @@ impl AgentSession {
         view.indexes() != refreshed.indexes()
     }
 
-    /// Stale when session.model_chain has diverged from the thread's snapshot.
+    /// Stale when the effective chain (base chain rotated by any breaker
+    /// advance) has diverged from the thread's snapshot.
     fn thread_has_stale_model_chain(&self, thread_id: SessionThreadId) -> bool {
         let Some(thread) = self.threads.get_persisted(&thread_id) else {
             return false;
         };
-        thread.prompt_definition().model_chain() != &self.model_chain
+        thread.prompt_definition().model_chain() != &self.effective_chain()
     }
 
     /// Latest-per-kind ordered by `SystemBlockKind::ORDER`; skips unset kinds.
@@ -598,12 +695,13 @@ impl AgentSession {
             .prompt_definition()
             .tool_definitions_view()
             .clone();
+        let effective_chain = self.effective_chain();
 
         let new_thread_id = SessionThreadId::new();
         let new_thread = NewSessionThread::refreshed(
             new_thread_id,
             self.id,
-            self.model_chain.clone(),
+            effective_chain.clone(),
             new_view.clone(),
             tool_view.clone(),
             messages.clone(),
@@ -616,13 +714,219 @@ impl AgentSession {
         });
         self.current_main_thread = Some(new_thread_id);
 
-        let new_pd = PromptDefinition::for_refreshed_thread(
-            self.model_chain.clone(),
-            new_view,
-            tool_view,
-            messages,
-        );
+        let new_pd =
+            PromptDefinition::for_refreshed_thread(effective_chain, new_view, tool_view, messages);
         (new_thread_id, new_pd)
+    }
+
+    /// Misbehaviour-breaker detectors (D1-D4). Pure functions over the
+    /// trailing events of `thread_id`; deliberately does not detect
+    /// polling (identical *non-error* calls) — see the handoff's §2.1.
+    fn detect_misbehaviour(&self, thread_id: SessionThreadId) -> Option<BreakerTrip> {
+        let window = self
+            .breaker_config
+            .consecutive_error_turns
+            .max(self.breaker_config.identical_failing_calls);
+        let turns = self.thread_tool_turns(thread_id, window);
+
+        let identical_n = self.breaker_config.identical_failing_calls;
+        if identical_n > 0 && turns.len() >= identical_n {
+            if let Some(trip) = Self::identical_failing_call_trip(&turns[..identical_n]) {
+                return Some(trip);
+            }
+        }
+
+        let error_n = self.breaker_config.consecutive_error_turns;
+        if error_n > 0 && turns.len() >= error_n {
+            let all_errored = turns[..error_n]
+                .iter()
+                .all(|(_, results)| !results.is_empty() && results.iter().all(|r| r.is_error));
+            if all_errored {
+                let last_error = Self::last_error_text(turns[0].1);
+                return Some(BreakerTrip::ConsecutiveErrorTurns {
+                    n: error_n,
+                    last_error,
+                });
+            }
+        }
+
+        None
+    }
+
+    fn detect_consecutive_max_tokens(&self, thread_id: SessionThreadId) -> Option<BreakerTrip> {
+        let n = self.breaker_config.consecutive_max_tokens;
+        if n == 0 {
+            return None;
+        }
+        let mut count = 0usize;
+        for event in self.events.iter_all().rev() {
+            match event {
+                AgentSessionEvent::ThreadStarted { thread_id: tid, .. } if *tid == thread_id => {
+                    break;
+                }
+                AgentSessionEvent::AssistantResponseReceived {
+                    thread_id: tid,
+                    stop_reason,
+                    ..
+                } if *tid == thread_id => {
+                    if matches!(stop_reason, StopReason::Length) {
+                        count += 1;
+                        if count >= n {
+                            return Some(BreakerTrip::ConsecutiveMaxTokens { n });
+                        }
+                    } else {
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// The trailing tool-use turns of `thread_id`, newest first, up to
+    /// `max_n`. A "turn" pairs an `AssistantResponseReceived` with the
+    /// `ToolResultsAdded` that answered it; a text-only response with no
+    /// tool results (turn-ending) is not a turn and is skipped. Stops at
+    /// the thread's first event (`ThreadStarted`), so a chain advance —
+    /// which starts a fresh thread — resets the detectors naturally.
+    fn thread_tool_turns(
+        &self,
+        thread_id: SessionThreadId,
+        max_n: usize,
+    ) -> Vec<(&[AssistantBlock], &[ToolResultInput])> {
+        let mut turns = Vec::new();
+        let mut pending_results: Option<&[ToolResultInput]> = None;
+        for event in self.events.iter_all().rev() {
+            match event {
+                AgentSessionEvent::ThreadStarted { thread_id: tid, .. } if *tid == thread_id => {
+                    break;
+                }
+                AgentSessionEvent::ToolResultsAdded {
+                    thread_id: tid,
+                    results,
+                } if *tid == thread_id => {
+                    pending_results = Some(results.as_slice());
+                }
+                AgentSessionEvent::AssistantResponseReceived {
+                    thread_id: tid,
+                    content,
+                    ..
+                } if *tid == thread_id => {
+                    if let Some(results) = pending_results.take() {
+                        turns.push((content.as_slice(), results));
+                        if turns.len() >= max_n {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        turns
+    }
+
+    /// `Some` only when the turn's assistant content has exactly one
+    /// `ToolUse` block and all its results errored, and every turn in
+    /// `window` shares the same tool name + input.
+    fn identical_failing_call_trip(
+        window: &[(&[AssistantBlock], &[ToolResultInput])],
+    ) -> Option<BreakerTrip> {
+        let mut common: Option<(&str, &serde_json::Value)> = None;
+        for (content, results) in window {
+            let mut tool_uses = content.iter().filter_map(|block| match block {
+                AssistantBlock::ToolUse { name, input, .. } => Some((name.as_str(), input)),
+                _ => None,
+            });
+            let (name, input) = tool_uses.next()?;
+            if tool_uses.next().is_some() {
+                return None;
+            }
+            if results.is_empty() || !results.iter().all(|r| r.is_error) {
+                return None;
+            }
+            match common {
+                None => common = Some((name, input)),
+                Some((common_name, common_input)) => {
+                    if common_name != name || common_input != input {
+                        return None;
+                    }
+                }
+            }
+        }
+        let (name, _) = common?;
+        Some(BreakerTrip::IdenticalFailingCall {
+            n: window.len(),
+            tool: name.to_string(),
+            last_error: Self::last_error_text(window[0].1),
+        })
+    }
+
+    fn last_error_text(results: &[ToolResultInput]) -> String {
+        let text = results
+            .iter()
+            .find(|r| r.is_error)
+            .map(|r| r.content.as_str())
+            .unwrap_or_default();
+        truncate_on_char_boundary(text, 200)
+    }
+
+    /// Assistant turns across every thread of the session since the most
+    /// recent `UserInputAdded` — the D4 backstop budget, independent of
+    /// the pattern detectors above.
+    fn turns_since_last_user_input(&self) -> usize {
+        self.events
+            .iter_all()
+            .rev()
+            .take_while(|e| !matches!(e, AgentSessionEvent::UserInputAdded { .. }))
+            .filter(|e| matches!(e, AgentSessionEvent::AssistantResponseReceived { .. }))
+            .count()
+    }
+
+    /// Advances the effective chain when a fallback exists, else fails the
+    /// turn (D3). `chain_advance` is mutated directly (mirrors
+    /// `update_model_chain`) and re-derives identically on rehydration.
+    fn advance_chain_or_fail(&mut self, trip: BreakerTrip) -> Result<(), AgentSessionError> {
+        if self.can_advance_chain() {
+            let from_model = self.effective_primary().model.clone();
+            let reason = self.describe_trip(&trip, false);
+            self.chain_advance += 1;
+            let to_model = self.effective_primary().model.clone();
+            self.events.push(AgentSessionEvent::ModelChainAdvanced {
+                reason,
+                from_model,
+                to_model,
+            });
+            Ok(())
+        } else {
+            Err(AgentSessionError::BreakerTripped {
+                reason: self.describe_trip(&trip, true),
+            })
+        }
+    }
+
+    fn describe_trip(&self, trip: &BreakerTrip, chain_exhausted: bool) -> String {
+        let model = &self.effective_primary().model;
+        let suffix = if chain_exhausted {
+            ", chain exhausted"
+        } else {
+            ""
+        };
+        match trip {
+            BreakerTrip::ConsecutiveErrorTurns { n, last_error } => {
+                format!("{n} consecutive error turns on model {model}{suffix}: {last_error}")
+            }
+            BreakerTrip::IdenticalFailingCall {
+                n,
+                tool,
+                last_error,
+            } => {
+                format!("identical failing call {tool} x{n} on model {model}{suffix}: {last_error}")
+            }
+            BreakerTrip::ConsecutiveMaxTokens { n } => {
+                format!("{n} consecutive max_tokens stops on model {model}{suffix}")
+            }
+        }
     }
 
     pub fn add_tool_results(
@@ -676,6 +980,21 @@ impl AgentSession {
 
         if self.submitted_output().is_some() {
             return Ok(AgentSessionResponse::Done);
+        }
+
+        if self.breaker_config.enabled && self.submitted_output().is_none() {
+            if self.turns_since_last_user_input() > self.breaker_config.max_turns_per_prompt {
+                return Err(AgentSessionError::BreakerTripped {
+                    reason: format!(
+                        "turn budget {} exceeded on model {}",
+                        self.breaker_config.max_turns_per_prompt,
+                        self.effective_primary().model
+                    ),
+                });
+            }
+            if let Some(trip) = self.detect_misbehaviour(thread_id) {
+                self.advance_chain_or_fail(trip)?;
+            }
         }
 
         let target = if self.current_main_thread == Some(thread_id) {
@@ -893,6 +1212,7 @@ impl AgentSession {
             })
             .collect();
         let is_tool_use = matches!(stop_reason, StopReason::ToolUse) && !tool_uses.is_empty();
+        let is_max_tokens = matches!(stop_reason, StopReason::Length);
 
         // Strip orphan tool_use blocks: API rejects them without matching tool_results.
         let content = if !is_tool_use && !tool_uses.is_empty() {
@@ -912,6 +1232,12 @@ impl AgentSession {
                 error_message,
                 metadata,
             });
+
+        if self.breaker_config.enabled && is_max_tokens {
+            if let Some(trip) = self.detect_consecutive_max_tokens(thread_id) {
+                self.advance_chain_or_fail(trip)?;
+            }
+        }
 
         let view = self.materialize().assistant_blocks_since_last_breakpoint();
 
@@ -961,10 +1287,11 @@ impl AgentSession {
         current_prompt_def: &PromptDefinition,
     ) -> Option<(SessionThreadId, PromptDefinition)> {
         let is_main_thread = self.current_main_thread == Some(current_thread_id);
+        let effective_chain = self.effective_chain();
         let result = compaction::maybe_prune(
             &self.events,
             &self.compaction_config,
-            &self.model_chain,
+            &effective_chain,
             self.id,
             current_thread_id,
             is_main_thread,
@@ -987,7 +1314,7 @@ impl AgentSession {
             .id(thread_id)
             .session_id(self.id)
             .start_reason(ThreadStartReason::InitialThread)
-            .model_chain(self.model_chain.clone())
+            .model_chain(self.effective_chain())
             .system_view(prompt_definition.system_view().clone())
             .tool_definitions_view(prompt_definition.tool_definitions_view().clone())
             .initial_user_messages(prompt_definition.user_messages_view())
@@ -1013,7 +1340,7 @@ impl AgentSession {
     }
 
     fn materialize(&self) -> MaterializedSession<'_> {
-        let mut materialized = MaterializedSession::init(&self.model_chain);
+        let mut materialized = MaterializedSession::init(self.effective_chain());
         for event in self.events.iter_all() {
             match event {
                 AgentSessionEvent::Initialized {
@@ -1021,7 +1348,7 @@ impl AgentSession {
                     tool_defs,
                     ..
                 } => {
-                    materialized = MaterializedSession::init(&self.model_chain);
+                    materialized = MaterializedSession::init(self.effective_chain());
                     materialized.push_system_blocks(system_blocks.iter());
                     materialized.push_tool_defs(tool_defs.iter());
                 }
@@ -1116,6 +1443,7 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
         events: EntityEvents<AgentSessionEvent>,
     ) -> Result<Self, EntityHydrationError> {
         let mut builder = AgentSessionBuilder::default();
+        let mut advance = 0usize;
 
         for event in events.iter_all() {
             match event {
@@ -1126,6 +1454,7 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                     chain_override,
                     model_chain,
                     compaction_config,
+                    breaker_config,
                     ..
                 } => {
                     builder = builder
@@ -1134,7 +1463,9 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                         .agent_role(*agent_role)
                         .chain_override(chain_override.clone())
                         .model_chain(model_chain.clone())
-                        .compaction_config(compaction_config.clone());
+                        .compaction_config(compaction_config.clone())
+                        .breaker_config(breaker_config.clone());
+                    advance = 0;
                 }
                 AgentSessionEvent::ThreadStarted { thread_id, .. } => {
                     builder = builder.current_main_thread(Some(*thread_id));
@@ -1157,11 +1488,15 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                     builder = builder
                         .chain_override(chain_override.clone())
                         .model_chain(model_chain.clone());
+                    advance = 0;
+                }
+                AgentSessionEvent::ModelChainAdvanced { .. } => {
+                    advance += 1;
                 }
             }
         }
 
-        builder.events(events).build()
+        builder.chain_advance(advance).events(events).build()
     }
 }
 
@@ -1176,6 +1511,8 @@ pub struct NewAgentSession {
     pub(super) model_chain: ModelChain,
     #[builder(default)]
     pub(super) compaction_config: CompactionConfig,
+    #[builder(default)]
+    pub(super) breaker_config: BreakerConfig,
     pub(super) system_blocks: Vec<SystemBlock>,
     pub(super) tool_defs: Vec<ToolDefinition>,
 }
@@ -1199,6 +1536,7 @@ impl IntoEvents<AgentSessionEvent> for NewAgentSession {
                 chain_override: self.chain_override,
                 model_chain: self.model_chain,
                 compaction_config: self.compaction_config,
+                breaker_config: self.breaker_config,
                 system_blocks: self.system_blocks,
                 tool_defs: self.tool_defs,
             }],
@@ -1267,6 +1605,581 @@ mod tests {
     fn user_source() -> UserMessageSource {
         UserMessageSource::User {
             user_id: UserId::new(),
+        }
+    }
+
+    fn model_defaults(name: &str) -> ModelDefaults {
+        ModelDefaults {
+            model: name.into(),
+            max_tokens_per_response: 1024,
+            context_window_tokens: 200_000,
+            effort: ReasoningEffort::Low,
+        }
+    }
+
+    /// Session builder for breaker tests: explicit chain + breaker config
+    /// (compaction always disabled, as in [`new_session`]).
+    fn new_session_with(model_chain: ModelChain, breaker_config: BreakerConfig) -> AgentSession {
+        let new = NewAgentSession::builder()
+            .agent_id(AgentId::new())
+            .agent_role(AgentRole::Agent)
+            .model_chain(model_chain)
+            .compaction_config(CompactionConfig {
+                enabled: false,
+                ..Default::default()
+            })
+            .breaker_config(breaker_config)
+            .system_blocks(vec![])
+            .tool_defs(vec![])
+            .build()
+            .expect("NewAgentSession build");
+        AgentSession::try_from_events(new.into_events()).expect("hydrate")
+    }
+
+    /// Drives one tool-use turn on the session's current main thread: the
+    /// assistant calls `tool_name(input)`, the tool answers with a single
+    /// result. Returns whatever `add_tool_results` returns, breaker
+    /// outcome included.
+    fn drive_breaker_turn(
+        session: &mut AgentSession,
+        tool_name: &str,
+        input: serde_json::Value,
+        result_content: &str,
+        is_error: bool,
+    ) -> Result<AgentSessionResponse, AgentSessionError> {
+        let thread_id = session.current_main_thread_id().expect("main thread");
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::ToolUse {
+                    id: "t1".into(),
+                    name: tool_name.into(),
+                    input,
+                }],
+                StopReason::ToolUse,
+                None,
+                dummy_metadata(),
+            )
+            .expect("assistant_response_received");
+        session.add_tool_results(
+            thread_id,
+            vec![ToolResultInput {
+                tool_use_id: "t1".into(),
+                content: result_content.into(),
+                is_error,
+            }],
+        )
+    }
+
+    /// Rebuilds the prompt after a `PromptPending` result and hydrates any
+    /// newly spawned thread (a chain advance starts a fresh one) so the
+    /// next turn can be driven.
+    fn advance_turn(session: &mut AgentSession) {
+        let _ = session
+            .next_prompt(TargetThread::Main)
+            .expect("next_prompt");
+        hydrate_threads(session);
+    }
+
+    /// A session with an initial user message already prompted and its
+    /// first thread hydrated, ready for `drive_breaker_turn`.
+    fn started_session(model_chain: ModelChain, breaker_config: BreakerConfig) -> AgentSession {
+        let mut session = new_session_with(model_chain, breaker_config);
+        session
+            .add_user_input(TargetThread::Main, user_source(), "start".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+        hydrate_threads(&mut session);
+        session
+    }
+
+    // --- Misbehaviour breaker (D1-D7) ---------------------------------
+    //
+    // Positive cases confirm each detector trips on the exact pattern it
+    // targets; negative cases confirm it does NOT trip on adjacent, healthy
+    // traffic (varying input, a mix of errors and successes, polling on a
+    // non-error result). See the handoff's §2.1 and the "risk that matters
+    // most" note: a false-positive silently downgrades a healthy session.
+
+    #[test]
+    fn identical_failing_edit_advances_chain_after_three_turns() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![model_defaults("fallback-model")],
+        };
+        let mut session = started_session(chain, BreakerConfig::default());
+        let original_thread_id = session.current_main_thread_id().unwrap();
+        let input = serde_json::json!({"old_str": "x", "new_str": "y"});
+
+        for _ in 0..2 {
+            let result = drive_breaker_turn(
+                &mut session,
+                "Edit",
+                input.clone(),
+                "old_str is required",
+                true,
+            );
+            assert!(matches!(
+                result,
+                Ok(AgentSessionResponse::PromptPending { .. })
+            ));
+            assert!(session.last_chain_advance().is_none());
+            advance_turn(&mut session);
+        }
+
+        let result = drive_breaker_turn(
+            &mut session,
+            "Edit",
+            input.clone(),
+            "old_str is required",
+            true,
+        );
+        assert!(
+            matches!(result, Ok(AgentSessionResponse::PromptPending { .. })),
+            "third identical failing call should advance the chain, not fail the turn: {result:?}"
+        );
+
+        let (reason, from_model, to_model) =
+            session.last_chain_advance().expect("chain advance event");
+        assert_eq!(from_model, "primary-model");
+        assert_eq!(to_model, "fallback-model");
+        assert!(
+            reason.contains("Edit"),
+            "reason should name the tool: {reason}"
+        );
+        assert!(
+            reason.contains('3'),
+            "reason should mention the repeat count: {reason}"
+        );
+
+        let prompt = session
+            .next_prompt(TargetThread::Main)
+            .expect("next_prompt after advance");
+        assert_eq!(prompt.model_chain.primary.model, "fallback-model");
+        assert_ne!(
+            session.current_main_thread_id().unwrap(),
+            original_thread_id,
+            "a chain advance must start a fresh thread"
+        );
+    }
+
+    #[test]
+    fn identical_failing_call_without_fallback_fails_turn() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![],
+        };
+        let mut session = started_session(chain, BreakerConfig::default());
+        let input = serde_json::json!({"old_str": "x"});
+
+        for _ in 0..2 {
+            let result = drive_breaker_turn(
+                &mut session,
+                "Edit",
+                input.clone(),
+                "old_str is required",
+                true,
+            );
+            assert!(matches!(
+                result,
+                Ok(AgentSessionResponse::PromptPending { .. })
+            ));
+            advance_turn(&mut session);
+        }
+
+        let result = drive_breaker_turn(
+            &mut session,
+            "Edit",
+            input.clone(),
+            "old_str is required",
+            true,
+        );
+        match result {
+            Err(AgentSessionError::BreakerTripped { reason }) => {
+                assert!(reason.contains("Edit"), "{reason}");
+                assert!(reason.contains("old_str is required"), "{reason}");
+            }
+            other => panic!("expected BreakerTripped, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn consecutive_error_turns_with_varying_inputs_trips_at_threshold() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![model_defaults("fallback-model")],
+        };
+        let mut session = started_session(chain, BreakerConfig::default());
+
+        for i in 0..4 {
+            let input = serde_json::json!({"path": format!("file_{i}.rs")});
+            let result = drive_breaker_turn(&mut session, "read_file", input, "not found", true);
+            assert!(
+                matches!(result, Ok(AgentSessionResponse::PromptPending { .. })),
+                "turn {i}"
+            );
+            assert!(
+                session.last_chain_advance().is_none(),
+                "must not trip before the 5th consecutive error turn (turn {i})"
+            );
+            advance_turn(&mut session);
+        }
+
+        let input = serde_json::json!({"path": "file_4.rs"});
+        let result = drive_breaker_turn(&mut session, "read_file", input, "not found", true);
+        assert!(matches!(
+            result,
+            Ok(AgentSessionResponse::PromptPending { .. })
+        ));
+        let (reason, ..) = session
+            .last_chain_advance()
+            .expect("5th consecutive error turn should trip");
+        assert!(reason.contains('5'), "{reason}");
+    }
+
+    #[test]
+    fn a_successful_result_resets_the_error_streak() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![model_defaults("fallback-model")],
+        };
+        let mut session = started_session(chain, BreakerConfig::default());
+
+        for i in 0..4 {
+            let input = serde_json::json!({"path": format!("file_{i}.rs")});
+            let result = drive_breaker_turn(&mut session, "read_file", input, "not found", true);
+            assert!(matches!(
+                result,
+                Ok(AgentSessionResponse::PromptPending { .. })
+            ));
+            advance_turn(&mut session);
+        }
+
+        let result = drive_breaker_turn(
+            &mut session,
+            "read_file",
+            serde_json::json!({"path": "file_ok.rs"}),
+            "contents",
+            false,
+        );
+        assert!(matches!(
+            result,
+            Ok(AgentSessionResponse::PromptPending { .. })
+        ));
+        advance_turn(&mut session);
+
+        for i in 4..8 {
+            let input = serde_json::json!({"path": format!("file_{i}.rs")});
+            let result = drive_breaker_turn(&mut session, "read_file", input, "not found", true);
+            assert!(
+                matches!(result, Ok(AgentSessionResponse::PromptPending { .. })),
+                "turn {i}"
+            );
+            assert!(
+                session.last_chain_advance().is_none(),
+                "a successful result inside the trailing window must reset the error-turn count"
+            );
+            advance_turn(&mut session);
+        }
+    }
+
+    #[test]
+    fn identical_non_error_calls_do_not_trip() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![model_defaults("fallback-model")],
+        };
+        let mut session = started_session(chain, BreakerConfig::default());
+        let input = serde_json::json!({"build_id": 42});
+
+        for i in 0..8 {
+            let result = drive_breaker_turn(
+                &mut session,
+                "concourse_get_build",
+                input.clone(),
+                "running",
+                false,
+            );
+            assert!(
+                matches!(result, Ok(AgentSessionResponse::PromptPending { .. })),
+                "turn {i}"
+            );
+            assert!(
+                session.last_chain_advance().is_none(),
+                "polling on a non-error result must never trip (D4)"
+            );
+            advance_turn(&mut session);
+        }
+    }
+
+    #[test]
+    fn max_tokens_streak_trips_from_assistant_response_received() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![model_defaults("fallback-model")],
+        };
+        let mut session = started_session(chain, BreakerConfig::default());
+
+        for i in 0..3 {
+            let thread_id = session.current_main_thread_id().unwrap();
+            let result = session.assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::Text { text: "...".into() }],
+                StopReason::Length,
+                None,
+                dummy_metadata(),
+            );
+            assert!(result.is_ok(), "turn {i}: {result:?}");
+            if i < 2 {
+                assert!(
+                    session.last_chain_advance().is_none(),
+                    "must not trip before the 3rd consecutive max_tokens turn"
+                );
+                session
+                    .add_user_input(TargetThread::Main, user_source(), "continue".into())
+                    .unwrap();
+                advance_turn(&mut session);
+            }
+        }
+
+        let (reason, from_model, to_model) = session
+            .last_chain_advance()
+            .expect("3rd consecutive max_tokens turn should trip");
+        assert_eq!(from_model, "primary-model");
+        assert_eq!(to_model, "fallback-model");
+        assert!(reason.contains('3'), "{reason}");
+    }
+
+    #[test]
+    fn turn_budget_fails_turn_without_advancing() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![model_defaults("fallback-model")],
+        };
+        let breaker = BreakerConfig {
+            max_turns_per_prompt: 10,
+            ..BreakerConfig::default()
+        };
+        let mut session = started_session(chain, breaker);
+
+        // All-success, varying input: isolates the budget backstop from the
+        // pattern detectors, which both require an error result.
+        for i in 0..10 {
+            let input = serde_json::json!({"n": i});
+            let result = drive_breaker_turn(&mut session, "get_weather", input, "sunny", false);
+            assert!(
+                matches!(result, Ok(AgentSessionResponse::PromptPending { .. })),
+                "turn {i}"
+            );
+            advance_turn(&mut session);
+        }
+
+        let result = drive_breaker_turn(
+            &mut session,
+            "get_weather",
+            serde_json::json!({"n": 10}),
+            "sunny",
+            false,
+        );
+        match result {
+            Err(AgentSessionError::BreakerTripped { reason }) => {
+                assert!(reason.contains("turn budget"), "{reason}");
+                assert!(reason.contains("10"), "{reason}");
+            }
+            other => panic!("expected BreakerTripped (turn budget), got {other:?}"),
+        }
+        assert!(
+            session.last_chain_advance().is_none(),
+            "the budget backstop must fail the turn, never advance the chain"
+        );
+    }
+
+    #[test]
+    fn model_chain_updated_resets_advance() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![model_defaults("fallback-model")],
+        };
+        let mut session = started_session(chain, BreakerConfig::default());
+        let input = serde_json::json!({"old_str": "x"});
+        for _ in 0..3 {
+            let result = drive_breaker_turn(
+                &mut session,
+                "Edit",
+                input.clone(),
+                "old_str is required",
+                true,
+            );
+            assert!(matches!(
+                result,
+                Ok(AgentSessionResponse::PromptPending { .. })
+            ));
+            advance_turn(&mut session);
+        }
+        assert_eq!(session.effective_chain().primary.model, "fallback-model");
+
+        let new_chain = ModelChain {
+            primary: model_defaults("new-primary"),
+            fallbacks: vec![model_defaults("new-fallback")],
+        };
+        let outcome = session.update_model_chain(None, new_chain.clone());
+        assert!(outcome.did_execute());
+        assert_eq!(session.effective_chain(), new_chain);
+    }
+
+    /// The interactive case D2 calls out by name: `Sessions::next_prompt`
+    /// re-resolves the role's config chain on every call for non-workflow
+    /// agents and re-applies it via `update_model_chain`. When the config
+    /// hasn't actually changed that must be a no-op, or every interactive
+    /// turn would silently undo the breaker's rotation.
+    #[test]
+    fn interactive_drift_propagation_does_not_undo_advance() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![model_defaults("fallback-model")],
+        };
+        let mut session = started_session(chain.clone(), BreakerConfig::default());
+        let input = serde_json::json!({"old_str": "x"});
+        for _ in 0..3 {
+            let result = drive_breaker_turn(
+                &mut session,
+                "Edit",
+                input.clone(),
+                "old_str is required",
+                true,
+            );
+            assert!(matches!(
+                result,
+                Ok(AgentSessionResponse::PromptPending { .. })
+            ));
+            advance_turn(&mut session);
+        }
+        assert_eq!(session.effective_chain().primary.model, "fallback-model");
+
+        // Same chain_override (None) and same base chain as configured —
+        // exactly what drift propagation replays when config is unchanged.
+        let outcome = session.update_model_chain(None, chain.clone());
+        assert!(
+            !outcome.did_execute(),
+            "unchanged config should be idempotent"
+        );
+        assert_eq!(
+            session.effective_chain().primary.model,
+            "fallback-model",
+            "drift-propagating the unchanged base chain must not undo the rotation"
+        );
+    }
+
+    #[test]
+    fn disabled_breaker_never_trips() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![model_defaults("fallback-model")],
+        };
+        let breaker = BreakerConfig {
+            enabled: false,
+            ..BreakerConfig::default()
+        };
+        let mut session = started_session(chain, breaker);
+        let input = serde_json::json!({"old_str": "x"});
+
+        for i in 0..10 {
+            let result = drive_breaker_turn(
+                &mut session,
+                "Edit",
+                input.clone(),
+                "old_str is required",
+                true,
+            );
+            assert!(
+                matches!(result, Ok(AgentSessionResponse::PromptPending { .. })),
+                "turn {i}"
+            );
+            advance_turn(&mut session);
+        }
+        assert!(session.last_chain_advance().is_none());
+        assert_eq!(session.effective_chain().primary.model, "primary-model");
+    }
+
+    #[test]
+    fn hydration_round_trip_preserves_chain_advance() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![model_defaults("fallback-1"), model_defaults("fallback-2")],
+        };
+        let mut session = started_session(chain, BreakerConfig::default());
+        let input = serde_json::json!({"old_str": "x"});
+        for _ in 0..3 {
+            let result = drive_breaker_turn(
+                &mut session,
+                "Edit",
+                input.clone(),
+                "old_str is required",
+                true,
+            );
+            assert!(matches!(
+                result,
+                Ok(AgentSessionResponse::PromptPending { .. })
+            ));
+            advance_turn(&mut session);
+        }
+        assert_eq!(session.effective_chain().primary.model, "fallback-1");
+
+        let rehydrated = AgentSession::try_from_events(session.events.clone()).expect("rehydrate");
+        assert_eq!(rehydrated.chain_advance, session.chain_advance);
+        assert_eq!(rehydrated.effective_chain(), session.effective_chain());
+    }
+
+    /// Watches the thread-boundary semantics explicitly: a chain advance
+    /// starts a fresh thread, and the detectors must reset there rather
+    /// than keep counting the old thread's turns. Two more identical
+    /// failing calls on the new thread stay under its own threshold (3);
+    /// a detector that leaked across the boundary would trip immediately
+    /// and — since this chain has no further fallback — fail the turn.
+    #[test]
+    fn thread_boundary_resets_detectors_after_advance() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![model_defaults("fallback-model")],
+        };
+        let mut session = started_session(chain, BreakerConfig::default());
+        let original_thread_id = session.current_main_thread_id().unwrap();
+        let input = serde_json::json!({"old_str": "x"});
+
+        for _ in 0..3 {
+            let result = drive_breaker_turn(
+                &mut session,
+                "Edit",
+                input.clone(),
+                "old_str is required",
+                true,
+            );
+            assert!(matches!(
+                result,
+                Ok(AgentSessionResponse::PromptPending { .. })
+            ));
+            advance_turn(&mut session);
+        }
+        assert!(
+            !session.can_advance_chain(),
+            "the single fallback should be exhausted after one advance"
+        );
+        let new_thread_id = session.current_main_thread_id().unwrap();
+        assert_ne!(new_thread_id, original_thread_id);
+
+        for _ in 0..2 {
+            let result = drive_breaker_turn(
+                &mut session,
+                "Edit",
+                input.clone(),
+                "old_str is required",
+                true,
+            );
+            assert!(
+                matches!(result, Ok(AgentSessionResponse::PromptPending { .. })),
+                "detector must reset at the new thread's boundary: {result:?}"
+            );
+            advance_turn(&mut session);
         }
     }
 

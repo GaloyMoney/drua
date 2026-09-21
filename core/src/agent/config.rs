@@ -4,7 +4,7 @@ use llm::{ModelChain as LlmModelChain, ReasoningEffort};
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::error::AgentError;
-use super::session::CompactionConfig;
+use super::session::{BreakerConfig, CompactionConfig};
 use super::AgentRole;
 
 const REQUIRED_ROLES: &[AgentRole] = &[
@@ -19,6 +19,8 @@ pub struct RoleConfig {
     pub chain: Option<LlmModelChain>,
     #[serde(default)]
     pub compaction: CompactionConfig,
+    #[serde(default)]
+    pub breaker: BreakerConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -471,5 +473,56 @@ models:
         assert_eq!(lead.primary.model, "lead/special");
         let agent = cfg.resolve_chain(AgentRole::Agent, None).unwrap();
         assert_eq!(agent.primary.model, "primary/model");
+    }
+
+    #[test]
+    fn role_config_without_breaker_block_deserialises_to_defaults() {
+        let yaml = r#"
+chain:
+  primary: { name: "some/model" }
+"#;
+        let role: RoleConfig = serde_yaml::from_str(yaml).unwrap();
+        let defaults = BreakerConfig::default();
+        assert_eq!(role.breaker.enabled, defaults.enabled);
+        assert_eq!(
+            role.breaker.consecutive_error_turns,
+            defaults.consecutive_error_turns
+        );
+        assert_eq!(
+            role.breaker.identical_failing_calls,
+            defaults.identical_failing_calls
+        );
+        assert_eq!(
+            role.breaker.consecutive_max_tokens,
+            defaults.consecutive_max_tokens
+        );
+        assert_eq!(
+            role.breaker.max_turns_per_prompt,
+            defaults.max_turns_per_prompt
+        );
+    }
+
+    #[test]
+    fn role_config_breaker_disabled_round_trips() {
+        let yaml = r#"
+chain:
+  primary: { name: "some/model" }
+breaker:
+  enabled: false
+  consecutive_error_turns: 7
+"#;
+        let role: RoleConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(!role.breaker.enabled);
+        assert_eq!(role.breaker.consecutive_error_turns, 7);
+        // Fields left unset in the YAML still fall back to defaults.
+        assert_eq!(
+            role.breaker.identical_failing_calls,
+            BreakerConfig::default().identical_failing_calls
+        );
+
+        let reserialized = serde_yaml::to_string(&role).unwrap();
+        let round_tripped: RoleConfig = serde_yaml::from_str(&reserialized).unwrap();
+        assert!(!round_tripped.breaker.enabled);
+        assert_eq!(round_tripped.breaker.consecutive_error_turns, 7);
     }
 }

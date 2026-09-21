@@ -104,6 +104,24 @@ data:
             prune_after_seconds: {{ . }}
             {{- end }}
           {{- end }}
+          {{- with .Values.galoyAgents.config.agents.projectLead.breaker }}
+          breaker:
+            {{- if hasKey . "enabled" }}
+            enabled: {{ .enabled }}
+            {{- end }}
+            {{- with .consecutiveErrorTurns }}
+            consecutive_error_turns: {{ . }}
+            {{- end }}
+            {{- with .identicalFailingCalls }}
+            identical_failing_calls: {{ . }}
+            {{- end }}
+            {{- with .consecutiveMaxTokens }}
+            consecutive_max_tokens: {{ . }}
+            {{- end }}
+            {{- with .maxTurnsPerPrompt }}
+            max_turns_per_prompt: {{ . }}
+            {{- end }}
+          {{- end }}
         {{- with .Values.galoyAgents.config.agents.agent }}
         agent:
           {{- with .chain }}
@@ -136,6 +154,24 @@ data:
             {{- end }}
             {{- with .pruneAfterSeconds }}
             prune_after_seconds: {{ . }}
+            {{- end }}
+          {{- end }}
+          {{- with .breaker }}
+          breaker:
+            {{- if hasKey . "enabled" }}
+            enabled: {{ .enabled }}
+            {{- end }}
+            {{- with .consecutiveErrorTurns }}
+            consecutive_error_turns: {{ . }}
+            {{- end }}
+            {{- with .identicalFailingCalls }}
+            identical_failing_calls: {{ . }}
+            {{- end }}
+            {{- with .consecutiveMaxTokens }}
+            consecutive_max_tokens: {{ . }}
+            {{- end }}
+            {{- with .maxTurnsPerPrompt }}
+            max_turns_per_prompt: {{ . }}
             {{- end }}
           {{- end }}
         {{- end }}
@@ -171,6 +207,24 @@ data:
             {{- end }}
             {{- with .pruneAfterSeconds }}
             prune_after_seconds: {{ . }}
+            {{- end }}
+          {{- end }}
+          {{- with .breaker }}
+          breaker:
+            {{- if hasKey . "enabled" }}
+            enabled: {{ .enabled }}
+            {{- end }}
+            {{- with .consecutiveErrorTurns }}
+            consecutive_error_turns: {{ . }}
+            {{- end }}
+            {{- with .identicalFailingCalls }}
+            identical_failing_calls: {{ . }}
+            {{- end }}
+            {{- with .consecutiveMaxTokens }}
+            consecutive_max_tokens: {{ . }}
+            {{- end }}
+            {{- with .maxTurnsPerPrompt }}
+            max_turns_per_prompt: {{ . }}
             {{- end }}
           {{- end }}
         {{- end }}

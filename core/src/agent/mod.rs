@@ -519,6 +519,7 @@ impl Agents {
                 agent_role,
                 chain_override,
                 role_config.compaction.clone(),
+                role_config.breaker.clone(),
                 system_blocks,
                 tool_defs,
             )

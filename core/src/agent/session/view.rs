@@ -69,7 +69,7 @@ pub struct ToolResultsView {
 
 #[derive(Debug)]
 pub(super) struct MaterializedSession<'a> {
-    model_chain: &'a ModelChain,
+    model_chain: ModelChain,
     system_blocks: Vec<&'a SystemBlock>,
     system_breakpoints: Vec<SystemBlockIndex>,
     /// Per kind, the index of its most-recent block. Resolves latest-for-kind
@@ -84,7 +84,7 @@ pub(super) struct MaterializedSession<'a> {
 }
 
 impl<'a> MaterializedSession<'a> {
-    pub fn init(model_chain: &'a ModelChain) -> Self {
+    pub fn init(model_chain: ModelChain) -> Self {
         Self {
             model_chain,
             system_blocks: Vec::new(),
@@ -479,7 +479,7 @@ mod tests {
         let tool_d = tool_def("tool_d");
 
         let defaults = test_chain();
-        let mut m = MaterializedSession::init(&defaults);
+        let mut m = MaterializedSession::init(defaults);
         m.push_tool_defs([&tool_a, &tool_b].into_iter());
         m.push_tool_defs([&tool_c, &tool_d].into_iter());
 
@@ -494,7 +494,7 @@ mod tests {
         let block_c = system_block("Use examples.");
 
         let defaults = test_chain();
-        let mut m = MaterializedSession::init(&defaults);
+        let mut m = MaterializedSession::init(defaults);
         m.push_system_blocks([&block_a].into_iter());
         m.push_system_blocks([&block_b, &block_c].into_iter());
 

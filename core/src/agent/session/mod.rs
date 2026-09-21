@@ -88,6 +88,7 @@ impl Sessions {
         agent_role: AgentRole,
         chain_override: Option<llm::ModelChain>,
         compaction_config: CompactionConfig,
+        breaker_config: BreakerConfig,
         system_blocks: Vec<SystemBlock>,
         tool_defs: Vec<ToolDefinition>,
     ) -> Result<AgentSession, AgentSessionError> {
@@ -101,6 +102,7 @@ impl Sessions {
             .chain_override(chain_override)
             .model_chain(model_chain)
             .compaction_config(compaction_config)
+            .breaker_config(breaker_config)
             .system_blocks(system_blocks)
             .tool_defs(tool_defs)
             .build()
@@ -289,10 +291,31 @@ impl Sessions {
 
         let tool_results: Vec<ToolResultInput> =
             results.into_iter().map(ToolResultInput::from).collect();
-        let result = session.add_tool_results(thread_id, tool_results)?;
+        // Computed (not `?`) so a `BreakerTripped` turn still persists the
+        // `ToolResultsAdded` event it pushed before detecting the trip.
+        let result = session.add_tool_results(thread_id, tool_results);
+
+        if let Some((reason, from_model, to_model)) = session.last_chain_advance() {
+            tracing::warn!(
+                agent_id = %agent_id,
+                session_id = %session.id,
+                from_model,
+                to_model,
+                reason,
+                "agent_session.breaker: advanced model chain"
+            );
+        } else if let Err(AgentSessionError::BreakerTripped { reason }) = &result {
+            tracing::error!(
+                agent_id = %agent_id,
+                session_id = %session.id,
+                reason = %reason,
+                "agent_session.breaker: chain exhausted, failing turn"
+            );
+        }
+
         self.repo.update_in_op(&mut op, &mut session).await?;
         op.commit().await?;
-        Ok(result)
+        result
     }
 
     /// Records a sandbox attach/detach in chat history. `workspace_text` is

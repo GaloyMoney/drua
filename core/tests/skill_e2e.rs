@@ -123,6 +123,7 @@ fn agents_config_for_tests() -> AgentsConfig {
         RoleConfig {
             chain: Some(llm::ModelChain::new(model.clone())),
             compaction: Default::default(),
+            breaker: Default::default(),
         },
     );
     builtin_roles.insert(
@@ -130,6 +131,7 @@ fn agents_config_for_tests() -> AgentsConfig {
         RoleConfig {
             chain: Some(llm::ModelChain::new(model.clone())),
             compaction: Default::default(),
+            breaker: Default::default(),
         },
     );
     builtin_roles.insert(
@@ -137,6 +139,7 @@ fn agents_config_for_tests() -> AgentsConfig {
         RoleConfig {
             chain: Some(llm::ModelChain::new(model.clone())),
             compaction: Default::default(),
+            breaker: Default::default(),
         },
     );
     let mut models = HashMap::new();
