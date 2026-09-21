@@ -106,20 +106,24 @@ data:
           {{- end }}
           {{- with .Values.galoyAgents.config.agents.projectLead.breaker }}
           breaker:
+            {{- /* hasKey, not `with`: these are thresholds and `with` treats 0
+                   as empty, so e.g. `identicalFailingCalls: 0` — how you'd
+                   disable just that detector — would silently fall back to
+                   the crate default. */}}
             {{- if hasKey . "enabled" }}
             enabled: {{ .enabled }}
             {{- end }}
-            {{- with .consecutiveErrorTurns }}
-            consecutive_error_turns: {{ . }}
+            {{- if hasKey . "consecutiveErrorTurns" }}
+            consecutive_error_turns: {{ .consecutiveErrorTurns }}
             {{- end }}
-            {{- with .identicalFailingCalls }}
-            identical_failing_calls: {{ . }}
+            {{- if hasKey . "identicalFailingCalls" }}
+            identical_failing_calls: {{ .identicalFailingCalls }}
             {{- end }}
-            {{- with .consecutiveMaxTokens }}
-            consecutive_max_tokens: {{ . }}
+            {{- if hasKey . "consecutiveMaxTokens" }}
+            consecutive_max_tokens: {{ .consecutiveMaxTokens }}
             {{- end }}
-            {{- with .maxTurnsPerPrompt }}
-            max_turns_per_prompt: {{ . }}
+            {{- if hasKey . "maxTurnsPerPrompt" }}
+            max_turns_per_prompt: {{ .maxTurnsPerPrompt }}
             {{- end }}
           {{- end }}
         {{- with .Values.galoyAgents.config.agents.agent }}
@@ -158,20 +162,24 @@ data:
           {{- end }}
           {{- with .breaker }}
           breaker:
+            {{- /* hasKey, not `with`: these are thresholds and `with` treats 0
+                   as empty, so e.g. `identicalFailingCalls: 0` — how you'd
+                   disable just that detector — would silently fall back to
+                   the crate default. */}}
             {{- if hasKey . "enabled" }}
             enabled: {{ .enabled }}
             {{- end }}
-            {{- with .consecutiveErrorTurns }}
-            consecutive_error_turns: {{ . }}
+            {{- if hasKey . "consecutiveErrorTurns" }}
+            consecutive_error_turns: {{ .consecutiveErrorTurns }}
             {{- end }}
-            {{- with .identicalFailingCalls }}
-            identical_failing_calls: {{ . }}
+            {{- if hasKey . "identicalFailingCalls" }}
+            identical_failing_calls: {{ .identicalFailingCalls }}
             {{- end }}
-            {{- with .consecutiveMaxTokens }}
-            consecutive_max_tokens: {{ . }}
+            {{- if hasKey . "consecutiveMaxTokens" }}
+            consecutive_max_tokens: {{ .consecutiveMaxTokens }}
             {{- end }}
-            {{- with .maxTurnsPerPrompt }}
-            max_turns_per_prompt: {{ . }}
+            {{- if hasKey . "maxTurnsPerPrompt" }}
+            max_turns_per_prompt: {{ .maxTurnsPerPrompt }}
             {{- end }}
           {{- end }}
         {{- end }}
@@ -211,20 +219,24 @@ data:
           {{- end }}
           {{- with .breaker }}
           breaker:
+            {{- /* hasKey, not `with`: these are thresholds and `with` treats 0
+                   as empty, so e.g. `identicalFailingCalls: 0` — how you'd
+                   disable just that detector — would silently fall back to
+                   the crate default. */}}
             {{- if hasKey . "enabled" }}
             enabled: {{ .enabled }}
             {{- end }}
-            {{- with .consecutiveErrorTurns }}
-            consecutive_error_turns: {{ . }}
+            {{- if hasKey . "consecutiveErrorTurns" }}
+            consecutive_error_turns: {{ .consecutiveErrorTurns }}
             {{- end }}
-            {{- with .identicalFailingCalls }}
-            identical_failing_calls: {{ . }}
+            {{- if hasKey . "identicalFailingCalls" }}
+            identical_failing_calls: {{ .identicalFailingCalls }}
             {{- end }}
-            {{- with .consecutiveMaxTokens }}
-            consecutive_max_tokens: {{ . }}
+            {{- if hasKey . "consecutiveMaxTokens" }}
+            consecutive_max_tokens: {{ .consecutiveMaxTokens }}
             {{- end }}
-            {{- with .maxTurnsPerPrompt }}
-            max_turns_per_prompt: {{ . }}
+            {{- if hasKey . "maxTurnsPerPrompt" }}
+            max_turns_per_prompt: {{ .maxTurnsPerPrompt }}
             {{- end }}
           {{- end }}
         {{- end }}

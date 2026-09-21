@@ -153,10 +153,14 @@ impl Sessions {
             let _ = session.update_model_chain(None, resolved);
         }
 
-        let prompt = session.next_prompt(target)?;
+        // Computed (not `?`): stale-tool-use recovery inside `next_prompt`
+        // can itself trip the breaker (it closes the stale tool_use via
+        // `add_tool_results`), and that mutation must persist even when the
+        // trip fails the turn — see `add_tool_results` below.
+        let result = session.next_prompt(target);
         self.repo.update_in_op(&mut op, &mut session).await?;
         op.commit().await?;
-        Ok(prompt.into())
+        Ok(result?.into())
     }
 
     /// Rebuilds the prompt of the most recent unanswered `PromptSent`.
@@ -187,16 +191,23 @@ impl Sessions {
     ) -> Result<Option<llm::Prompt>, AgentSessionError> {
         let mut op = self.repo.begin_op().await?;
         let mut session = self.repo.find_by_agent_id_in_op(&mut op, agent_id).await?;
-        if !session
-            .abort_pending_tool_use(TOOL_INTERRUPTED_ON_RETRY)?
-            .did_execute()
-        {
-            return Ok(None);
-        }
-        let prompt = session.next_prompt(TargetThread::Main)?;
+
+        // Computed (not `?`): both the abort and the follow-up `next_prompt`
+        // can trip the breaker via `add_tool_results`, and that mutation
+        // must persist even when the trip fails the turn — see
+        // `add_tool_results` below.
+        let abort_result = session.abort_pending_tool_use(TOOL_INTERRUPTED_ON_RETRY);
+        let did_execute = matches!(&abort_result, Ok(outcome) if outcome.did_execute());
+        let prompt_result = did_execute.then(|| session.next_prompt(TargetThread::Main));
+
         self.repo.update_in_op(&mut op, &mut session).await?;
         op.commit().await?;
-        Ok(Some(prompt.into()))
+
+        let _ = abort_result?;
+        match prompt_result {
+            Some(result) => Ok(Some(result?.into())),
+            None => Ok(None),
+        }
     }
 
     #[instrument(
@@ -227,11 +238,15 @@ impl Sessions {
         let mut metadata = AssistantResponseMetadata::from(response.usage);
         metadata.model = model;
 
+        // Computed (not `?`): the entity closes the turn (flips the thread
+        // out of `NextTurn::Assistant`) before the breaker can error, so a
+        // `BreakerTripped` here must still persist that closure — otherwise
+        // the thread is stuck believing it's still awaiting this response.
         let result =
-            session.assistant_response_received(thread_id, content, stop_reason, None, metadata)?;
+            session.assistant_response_received(thread_id, content, stop_reason, None, metadata);
         self.repo.update_in_op(&mut op, &mut session).await?;
         op.commit().await?;
-        Ok(result)
+        result
     }
 
     /// Records a failed assistant turn. Without this the thread stays in

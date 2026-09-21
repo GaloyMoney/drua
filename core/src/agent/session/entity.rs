@@ -1233,12 +1233,6 @@ impl AgentSession {
                 metadata,
             });
 
-        if self.breaker_config.enabled && is_max_tokens {
-            if let Some(trip) = self.detect_consecutive_max_tokens(thread_id) {
-                self.advance_chain_or_fail(trip)?;
-            }
-        }
-
         let view = self.materialize().assistant_blocks_since_last_breakpoint();
 
         let thread = self
@@ -1251,6 +1245,12 @@ impl AgentSession {
             return Ok(AgentSessionResponse::ToolUseRequest(tool_uses));
         }
 
+        // Close the turn (flips the thread to `NextTurn::User`) before the
+        // breaker can error out below. Otherwise a `BreakerTripped` on an
+        // exhausted chain would leave the thread believing it's still
+        // awaiting this very response — permanently stuck, since the
+        // failed response is never retried (unlike a dropped tool result,
+        // there is no "resend the same LLM call" recovery path).
         thread.add_assistant_message(view);
 
         let has_pending_input = self
@@ -1269,16 +1269,24 @@ impl AgentSession {
                 _ => false,
             });
 
-        if has_pending_input {
+        let response = if has_pending_input {
             let target = if self.current_main_thread == Some(thread_id) {
                 TargetThread::Main
             } else {
                 TargetThread::Id(thread_id)
             };
-            Ok(AgentSessionResponse::PromptPending { target })
+            AgentSessionResponse::PromptPending { target }
         } else {
-            Ok(AgentSessionResponse::Done)
+            AgentSessionResponse::Done
+        };
+
+        if self.breaker_config.enabled && is_max_tokens {
+            if let Some(trip) = self.detect_consecutive_max_tokens(thread_id) {
+                self.advance_chain_or_fail(trip)?;
+            }
         }
+
+        Ok(response)
     }
 
     fn try_prune(
@@ -1948,6 +1956,53 @@ mod tests {
         assert_eq!(from_model, "primary-model");
         assert_eq!(to_model, "fallback-model");
         assert!(reason.contains('3'), "{reason}");
+    }
+
+    /// Regression for a stuck-session bug: `assistant_response_received`
+    /// must close the turn (flip the thread to `NextTurn::User`) even when
+    /// the breaker trips with no fallback. If the turn-closing mutation ran
+    /// *after* the breaker's early `?`, the thread would stay believing it's
+    /// still awaiting this very response forever — the failed response is
+    /// never retried, unlike a dropped tool result.
+    #[test]
+    fn max_tokens_trip_without_fallback_leaves_session_resumable() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![],
+        };
+        let mut session = started_session(chain, BreakerConfig::default());
+
+        for i in 0..3 {
+            let thread_id = session.current_main_thread_id().unwrap();
+            let result = session.assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::Text { text: "...".into() }],
+                StopReason::Length,
+                None,
+                dummy_metadata(),
+            );
+            if i < 2 {
+                assert!(result.is_ok(), "turn {i}: {result:?}");
+                session
+                    .add_user_input(TargetThread::Main, user_source(), "continue".into())
+                    .unwrap();
+                advance_turn(&mut session);
+            } else {
+                assert!(
+                    matches!(result, Err(AgentSessionError::BreakerTripped { .. })),
+                    "3rd turn should fail with no fallback: {result:?}"
+                );
+            }
+        }
+
+        // A new user message must be queueable (PromptPending), not stuck
+        // as AwaitingAssistantResponse with nothing left to ever drive it.
+        let result =
+            session.add_user_input(TargetThread::Main, user_source(), "are you there?".into());
+        assert!(
+            matches!(result, Ok(AgentSessionResponse::PromptPending { .. })),
+            "session must not be stuck awaiting a response that will never come: {result:?}"
+        );
     }
 
     #[test]
