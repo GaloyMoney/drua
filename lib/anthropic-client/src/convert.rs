@@ -54,8 +54,10 @@ pub(crate) fn prompt_to_request(prompt: &llm::Prompt) -> AnthropicRequest {
     let tool_choice = prompt.tool_choice.as_ref().map(convert_tool_choice);
 
     let max_tokens = prompt.max_tokens.unwrap_or(8192);
-    let thinking =
-        thinking_budget(prompt.effort, max_tokens).map(|budget_tokens| AnthropicThinking {
+    let thinking = prompt
+        .effort
+        .and_then(|effort| thinking_budget(effort, max_tokens))
+        .map(|budget_tokens| AnthropicThinking {
             r#type: "enabled",
             budget_tokens,
         });
@@ -420,7 +422,7 @@ mod tests {
     fn base_prompt() -> Prompt {
         Prompt {
             chain: ModelChain::new("claude-sonnet-4"),
-            effort: llm::ReasoningEffort::Low,
+            effort: None,
             system: vec![SystemBlock::Text { text: "sys".into() }],
             messages: vec![Message::User {
                 content: vec![UserBlock::Text { text: "hi".into() }],
@@ -460,5 +462,26 @@ mod tests {
     fn primary_model_id_is_used() {
         let req = prompt_to_request(&base_prompt());
         assert_eq!(req.model, "claude-sonnet-4");
+    }
+
+    #[test]
+    fn no_thinking_block_when_effort_unset() {
+        let req = prompt_to_request(&base_prompt());
+        assert!(
+            req.thinking.is_none(),
+            "unset effort must omit the thinking block, not enable it at low"
+        );
+    }
+
+    #[test]
+    fn thinking_block_enabled_when_effort_set() {
+        let mut p = base_prompt();
+        p.effort = Some(llm::ReasoningEffort::Low);
+        p.max_tokens = Some(8192);
+        let req = prompt_to_request(&p);
+        let thinking = req
+            .thinking
+            .expect("thinking block expected when effort is set");
+        assert_eq!(thinking.budget_tokens, 2048);
     }
 }

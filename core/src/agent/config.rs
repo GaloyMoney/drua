@@ -26,8 +26,8 @@ pub struct ModelDefaults {
     pub model: String,
     pub max_tokens_per_response: u32,
     pub context_window_tokens: u64,
-    #[serde(default, skip_serializing_if = "ReasoningEffort::is_low")]
-    pub effort: ReasoningEffort,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<ReasoningEffort>,
 }
 
 impl Default for ModelDefaults {
@@ -36,7 +36,7 @@ impl Default for ModelDefaults {
             model: String::new(),
             max_tokens_per_response: 4096,
             context_window_tokens: 200_000,
-            effort: ReasoningEffort::Low,
+            effort: None,
         }
     }
 }
@@ -79,7 +79,7 @@ fn resolve_entry(
         defaults.max_tokens_per_response = mt;
     }
     if let Some(effort) = spec.effort {
-        defaults.effort = effort;
+        defaults.effort = Some(effort);
     }
     Ok(defaults)
 }
@@ -179,8 +179,31 @@ mod tests {
             model: name.to_string(),
             max_tokens_per_response: 4096,
             context_window_tokens: 100_000,
-            effort: ReasoningEffort::Low,
+            effort: None,
         }
+    }
+
+    #[test]
+    fn model_defaults_effort_serde_backward_compatible() {
+        let no_effort_key = serde_json::json!({
+            "model": "primary",
+            "max_tokens_per_response": 4096,
+            "context_window_tokens": 100_000,
+        });
+        let parsed: ModelDefaults = serde_json::from_value(no_effort_key).unwrap();
+        assert_eq!(parsed.effort, None);
+
+        let with_medium = serde_json::json!({
+            "model": "primary",
+            "max_tokens_per_response": 4096,
+            "context_window_tokens": 100_000,
+            "effort": "medium",
+        });
+        let parsed: ModelDefaults = serde_json::from_value(with_medium).unwrap();
+        assert_eq!(parsed.effort, Some(ReasoningEffort::Medium));
+
+        let json = serde_json::to_value(defaults_for("primary")).unwrap();
+        assert!(json.get("effort").is_none());
     }
 
     #[test]
@@ -228,7 +251,7 @@ mod tests {
                 model: "primary".into(),
                 max_tokens_per_response: 8192,
                 context_window_tokens: 200_000,
-                effort: ReasoningEffort::Low,
+                effort: None,
             },
         );
         cfg.models.insert(
@@ -237,7 +260,7 @@ mod tests {
                 model: "backup".into(),
                 max_tokens_per_response: 4096,
                 context_window_tokens: 128_000,
-                effort: ReasoningEffort::Low,
+                effort: None,
             },
         );
         cfg.builtin_roles
@@ -268,7 +291,7 @@ mod tests {
                 model: "primary".into(),
                 max_tokens_per_response: 8192,
                 context_window_tokens: 200_000,
-                effort: ReasoningEffort::Low,
+                effort: None,
             },
         );
         cfg.models.insert(
@@ -277,7 +300,7 @@ mod tests {
                 model: "backup".into(),
                 max_tokens_per_response: 4096,
                 context_window_tokens: 128_000,
-                effort: ReasoningEffort::Low,
+                effort: None,
             },
         );
         cfg.builtin_roles
@@ -300,7 +323,28 @@ mod tests {
         cfg.builtin_roles
             .insert(AgentRole::Agent, RoleConfig::default());
         let chain = cfg.resolve_chain(AgentRole::Agent, None).unwrap();
-        assert_eq!(chain.primary.effort, ReasoningEffort::High);
+        assert_eq!(chain.primary.effort, Some(ReasoningEffort::High));
+    }
+
+    #[test]
+    fn spec_without_effort_keeps_registry_effort() {
+        let mut cfg = AgentsConfig {
+            default_chain: Some(LlmModelChain::new("primary")),
+            ..Default::default()
+        };
+        cfg.models.insert(
+            "primary".into(),
+            ModelDefaults {
+                model: "primary".into(),
+                max_tokens_per_response: 4096,
+                context_window_tokens: 100_000,
+                effort: Some(ReasoningEffort::Medium),
+            },
+        );
+        cfg.builtin_roles
+            .insert(AgentRole::Agent, RoleConfig::default());
+        let chain = cfg.resolve_chain(AgentRole::Agent, None).unwrap();
+        assert_eq!(chain.primary.effort, Some(ReasoningEffort::Medium));
     }
 
     #[test]

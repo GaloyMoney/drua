@@ -64,10 +64,10 @@ pub(crate) fn prompt_to_request(
 
     let tool_choice = prompt.tool_choice.as_ref().map(convert_tool_choice);
 
-    let effort = reasoning_effort_str(prompt.effort);
+    let effort = prompt.effort.map(reasoning_effort_str);
     let (reasoning_effort, reasoning) = match reasoning_dialect {
-        ReasoningDialect::OpenAi => (Some(effort), None),
-        ReasoningDialect::OpenRouter => (None, Some(ReasoningConfig { effort })),
+        ReasoningDialect::OpenAi => (effort, None),
+        ReasoningDialect::OpenRouter => (None, effort.map(|effort| ReasoningConfig { effort })),
     };
     let mut request = OpenAiRequest {
         model: prompt.chain.primary.name.clone(),
@@ -454,7 +454,7 @@ mod tests {
     fn sample_prompt() -> llm::Prompt {
         llm::Prompt {
             chain: llm::ModelChain::new("gpt-4o"),
-            effort: llm::ReasoningEffort::Low,
+            effort: None,
             system: vec![SystemBlock::Text {
                 text: "You are a helpful assistant.".to_string(),
             }],
@@ -478,7 +478,7 @@ mod tests {
     #[test]
     fn reasoning_effort_serialized_when_set() {
         let mut prompt = sample_prompt();
-        prompt.effort = llm::ReasoningEffort::High;
+        prompt.effort = Some(llm::ReasoningEffort::High);
         let req = prompt_to_request(&prompt, ReasoningDialect::OpenAi);
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["reasoning_effort"], "high");
@@ -488,7 +488,7 @@ mod tests {
     #[test]
     fn openrouter_reasoning_serialized_when_set() {
         let mut prompt = sample_prompt();
-        prompt.effort = llm::ReasoningEffort::High;
+        prompt.effort = Some(llm::ReasoningEffort::High);
         let req = prompt_to_request(&prompt, ReasoningDialect::OpenRouter);
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["reasoning"]["effort"], "high");
@@ -496,11 +496,25 @@ mod tests {
     }
 
     #[test]
-    fn low_reasoning_serialized_by_default() {
+    fn no_reasoning_field_when_effort_unset() {
         let req = prompt_to_request(&sample_prompt(), ReasoningDialect::OpenAi);
         let json = serde_json::to_value(&req).unwrap();
         assert!(json.get("reasoning").is_none());
-        assert_eq!(json["reasoning_effort"], "low");
+        assert!(
+            json.get("reasoning_effort").is_none(),
+            "unset effort must omit reasoning_effort, not send low: {json}"
+        );
+    }
+
+    #[test]
+    fn no_reasoning_field_when_effort_unset_openrouter() {
+        let req = prompt_to_request(&sample_prompt(), ReasoningDialect::OpenRouter);
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(
+            json.get("reasoning").is_none(),
+            "unset effort must omit reasoning, not send low: {json}"
+        );
+        assert!(json.get("reasoning_effort").is_none());
     }
 
     #[test]
@@ -533,7 +547,7 @@ mod tests {
     fn prompt_with_tool_results() {
         let prompt = llm::Prompt {
             chain: llm::ModelChain::new("gpt-4o"),
-            effort: llm::ReasoningEffort::Low,
+            effort: None,
             system: vec![],
             messages: vec![
                 Message::Assistant {
@@ -572,7 +586,7 @@ mod tests {
     fn thinking_blocks_dropped() {
         let prompt = llm::Prompt {
             chain: llm::ModelChain::new("gpt-4o"),
-            effort: llm::ReasoningEffort::Low,
+            effort: None,
             system: vec![],
             messages: vec![Message::Assistant {
                 content: vec![
@@ -896,7 +910,7 @@ mod tests {
     fn anthropic_via_openrouter_prompt() -> llm::Prompt {
         llm::Prompt {
             chain: llm::ModelChain::new("anthropic/claude-sonnet-4.6"),
-            effort: llm::ReasoningEffort::Low,
+            effort: None,
             system: vec![SystemBlock::Text {
                 text: "system instructions".to_string(),
             }],
