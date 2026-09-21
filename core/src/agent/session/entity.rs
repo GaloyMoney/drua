@@ -1180,7 +1180,37 @@ impl AgentSession {
                 is_error: true,
             })
             .collect();
-        let _ = self.add_tool_results(thread_id, results)?;
+        if let Err(e) = self.add_tool_results(thread_id, results) {
+            // `add_tool_results` already flipped the thread to
+            // `NextTurn::Assistant` before hitting the exhausted-chain
+            // breaker error (it mutates before checking — see the comment
+            // there). Both callers (`recover_stale_tool_use`,
+            // `abort_pending_tool_use`) treat this error as terminal and
+            // never send the follow-up prompt the thread is now expecting,
+            // so close the turn the same way `assistant_response_failed`
+            // closes a genuine failed LLM call. Otherwise the thread is
+            // stuck forever believing a response is already in flight.
+            let _ = self.assistant_response_received(
+                thread_id,
+                Vec::new(),
+                StopReason::Error,
+                Some(e.to_string()),
+                AssistantResponseMetadata {
+                    api: String::new(),
+                    model: self.effective_primary().model.clone(),
+                    usage: Usage {
+                        input: 0,
+                        output: 0,
+                        cache_read: 0,
+                        cache_write: 0,
+                        total_tokens: 0,
+                        reasoning: 0,
+                    },
+                    cost: Cost::default(),
+                },
+            );
+            return Err(e);
+        }
         Ok(Idempotent::Executed(()))
     }
 
@@ -2236,6 +2266,78 @@ mod tests {
             );
             advance_turn(&mut session);
         }
+    }
+
+    /// Mirrors `session_awaiting_tool_result` (below) but with a caller-chosen
+    /// chain and breaker config, so breaker tests can drive an abort into an
+    /// exhausted chain without needing a `session_awaiting_tool_result`-shaped
+    /// default.
+    fn session_awaiting_tool_result_with(
+        model_chain: ModelChain,
+        breaker_config: BreakerConfig,
+    ) -> (AgentSession, SessionThreadId) {
+        let mut session = new_session_with(model_chain, breaker_config);
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Use the tool".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+        let thread_id = session.current_main_thread.unwrap();
+        hydrate_threads(&mut session);
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![
+                    AssistantBlock::Text {
+                        text: "Let me check.".into(),
+                    },
+                    AssistantBlock::ToolUse {
+                        id: "tool_1".into(),
+                        name: "get_weather".into(),
+                        input: serde_json::json!({"city": "NYC"}),
+                    },
+                ],
+                StopReason::ToolUse,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+        (session, thread_id)
+    }
+
+    /// Regression for a second stuck-session shape found in review:
+    /// `abort_tool_use_on_thread` (shared by `recover_stale_tool_use` and
+    /// `abort_pending_tool_use`) flips the thread to `NextTurn::Assistant` via
+    /// `add_tool_results` before the breaker can trip. Both callers treat a
+    /// `BreakerTripped` as terminal and never send the follow-up prompt the
+    /// thread now expects — so the turn must close to `NextTurn::User`, or
+    /// the session is stuck exactly like the `assistant_response_received`
+    /// case, one step later.
+    #[test]
+    fn aborting_a_tool_use_into_an_exhausted_chain_leaves_session_resumable() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![],
+        };
+        let breaker = BreakerConfig {
+            identical_failing_calls: 1,
+            ..BreakerConfig::default()
+        };
+        let (mut session, _thread_id) = session_awaiting_tool_result_with(chain, breaker);
+
+        let outcome = session.abort_pending_tool_use("dispatcher restarted");
+        assert!(
+            matches!(outcome, Err(AgentSessionError::BreakerTripped { .. })),
+            "expected BreakerTripped with no fallback"
+        );
+
+        // A new user message must be queueable, not stuck as
+        // AwaitingAssistantResponse with nothing left to ever drive it.
+        let result =
+            session.add_user_input(TargetThread::Main, user_source(), "are you there?".into());
+        assert!(
+            matches!(result, Ok(AgentSessionResponse::PromptPending { .. })),
+            "session must not be stuck awaiting a response that will never come: {result:?}"
+        );
     }
 
     #[test]
