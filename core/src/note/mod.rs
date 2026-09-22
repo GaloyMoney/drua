@@ -594,7 +594,8 @@ impl Notes {
         non_pinned.extend(space_notes.iter().filter(|n| !n.pinned));
 
         let header = "# Project Notes\n\n\
-             Use the `notes` tool with command `search` to retrieve full content.\n";
+             Pinned notes appear below in full — do not re-fetch them. \
+             Use the `notes` tool with command `search` for anything else.\n";
         let mut buf = String::from(header);
         let mut remaining = Self::PINNED_INJECTION_BUDGET.saturating_sub(header.len());
 
