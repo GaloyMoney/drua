@@ -45,6 +45,7 @@ async fn build_agents(pool: &sqlx::PgPool) -> (Agents, Arc<Sandboxes>) {
         RoleConfig {
             chain: Some(llm::ModelChain::new(model_name.clone())),
             compaction: Default::default(),
+            breaker: Default::default(),
         },
     );
     builtin_roles.insert(
@@ -52,6 +53,7 @@ async fn build_agents(pool: &sqlx::PgPool) -> (Agents, Arc<Sandboxes>) {
         RoleConfig {
             chain: Some(llm::ModelChain::new(model_name.clone())),
             compaction: Default::default(),
+            breaker: Default::default(),
         },
     );
     builtin_roles.insert(
@@ -59,6 +61,7 @@ async fn build_agents(pool: &sqlx::PgPool) -> (Agents, Arc<Sandboxes>) {
         RoleConfig {
             chain: Some(llm::ModelChain::new(model_name.clone())),
             compaction: Default::default(),
+            breaker: Default::default(),
         },
     );
     let mut models = HashMap::new();
@@ -122,6 +125,7 @@ async fn send_message_round_trip_via_prompt_channel() {
         RoleConfig {
             chain: Some(llm::ModelChain::new(model_name.clone())),
             compaction: Default::default(),
+            breaker: Default::default(),
         },
     );
     let mut models = HashMap::new();
@@ -286,6 +290,7 @@ async fn send_message_dispatches_registered_tool_call() {
         RoleConfig {
             chain: Some(llm::ModelChain::new(model_name.clone())),
             compaction: Default::default(),
+            breaker: Default::default(),
         },
     );
     let mut models = HashMap::new();
@@ -460,6 +465,294 @@ async fn send_message_dispatches_registered_tool_call() {
     }
 }
 
+struct AlwaysFailingTool {
+    schema: serde_json::Value,
+}
+
+impl AlwaysFailingTool {
+    fn new() -> Self {
+        Self {
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false,
+            }),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TopLevelTool for AlwaysFailingTool {
+    fn name(&self) -> &str {
+        "bad_tool"
+    }
+    fn description(&self) -> &str {
+        "Always errors. Test-only tool."
+    }
+    fn input_schema(&self) -> &serde_json::Value {
+        &self.schema
+    }
+    async fn call(
+        &self,
+        _subject: &AuthSubject,
+        _arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        Ok(CallToolResult::error(vec![Content::text("boom")]))
+    }
+}
+
+#[tokio::test]
+async fn identical_failing_tool_calls_advance_chain_to_fallback() {
+    let pool = pool().await;
+
+    let (prompt_tx, mut prompt_rx) = mpsc::channel::<PromptRequest>(64);
+
+    let primary_model = "claude-haiku-4-5-20251001".to_string();
+    let fallback_model = "claude-haiku-4-5-fallback".to_string();
+    let mut builtin_roles = HashMap::new();
+    builtin_roles.insert(
+        AgentRole::ProjectLead,
+        RoleConfig {
+            chain: Some(
+                llm::ModelChain::new(primary_model.clone()).with_fallback(fallback_model.clone()),
+            ),
+            compaction: Default::default(),
+            breaker: Default::default(),
+        },
+    );
+    let mut models = HashMap::new();
+    for name in [&primary_model, &fallback_model] {
+        models.insert(
+            name.clone(),
+            ModelDefaults {
+                model: name.clone(),
+                max_tokens_per_response: 1024,
+                context_window_tokens: 200_000,
+                effort: None,
+            },
+        );
+    }
+    let config = AgentsConfig {
+        builtin_roles,
+        models,
+        ..Default::default()
+    };
+
+    let toolsets = ToolSets::init(ToolSetsConfig::default(), None, None, None)
+        .await
+        .expect("init toolsets");
+    toolsets.register_top_level(AlwaysFailingTool::new());
+    let toolsets = Arc::new(toolsets);
+
+    let sandboxes = Arc::new(
+        Sandboxes::init(
+            &pool,
+            SandboxConfig::default(),
+            std::sync::Arc::new(drua_git_proxy::Allowlist::default()),
+        )
+        .await
+        .expect("init sandboxes"),
+    );
+    let skills = Arc::new(drua_core::skill::Skills::new_without_library(
+        &pool,
+        Arc::clone(&sandboxes),
+    ));
+    let agents = Agents::new(
+        &pool,
+        config,
+        toolsets,
+        prompt_tx,
+        Arc::clone(&sandboxes),
+        Arc::clone(&skills),
+        None,
+        ContextGeneration::new(),
+        Arc::new(drua_core::library::SpaceMounts::empty()),
+    );
+
+    let sub = AuthSubject::User(UserId::new());
+    let agent = agents
+        .create_project_lead(&sub, ProjectId::new(), "lead", "test-project")
+        .await
+        .expect("create agent");
+
+    let mut events_rx = agents
+        .send_message(sub, agent.id, "Call bad_tool".to_string())
+        .await
+        .expect("send_message");
+
+    let input = serde_json::json!({});
+    for i in 0..3 {
+        let request = prompt_rx
+            .recv()
+            .await
+            .unwrap_or_else(|| panic!("prompt request #{i}"));
+        assert_eq!(
+            request.prompt.chain.primary.name, primary_model,
+            "turn {i} should still be on the primary model"
+        );
+        request
+            .response_channel
+            .send(Ok(PromptResult::Complete(PromptResponse {
+                content: vec![AssistantBlock::ToolUse {
+                    id: format!("tu_{i}"),
+                    name: "bad_tool".to_string(),
+                    input: input.clone(),
+                }],
+                usage: Usage {
+                    input_tokens: 5,
+                    output_tokens: 3,
+                    ..Default::default()
+                },
+                stop_reason: Some(StopReason::ToolUse),
+                model_used: None,
+            })))
+            .unwrap_or_else(|_| panic!("send response #{i}"));
+    }
+
+    let fourth = prompt_rx
+        .recv()
+        .await
+        .expect("4th prompt request after chain advance");
+    assert_eq!(
+        fourth.prompt.chain.primary.name, fallback_model,
+        "identical failing call should have advanced the chain to the fallback"
+    );
+
+    fourth
+        .response_channel
+        .send(Ok(PromptResult::Complete(PromptResponse {
+            content: vec![AssistantBlock::Text {
+                text: "recovered on fallback".to_string(),
+            }],
+            usage: Usage::default(),
+            stop_reason: None,
+            model_used: None,
+        })))
+        .expect("send fallback response");
+
+    while events_rx.recv().await.is_some() {}
+}
+
+#[tokio::test]
+async fn identical_failing_tool_calls_without_fallback_error_the_turn() {
+    let pool = pool().await;
+
+    let (prompt_tx, mut prompt_rx) = mpsc::channel::<PromptRequest>(64);
+
+    let model_name = "claude-haiku-4-5-20251001".to_string();
+    let mut builtin_roles = HashMap::new();
+    builtin_roles.insert(
+        AgentRole::ProjectLead,
+        RoleConfig {
+            chain: Some(llm::ModelChain::new(model_name.clone())),
+            compaction: Default::default(),
+            breaker: Default::default(),
+        },
+    );
+    let mut models = HashMap::new();
+    models.insert(
+        model_name.clone(),
+        ModelDefaults {
+            model: model_name,
+            max_tokens_per_response: 1024,
+            context_window_tokens: 200_000,
+            effort: None,
+        },
+    );
+    let config = AgentsConfig {
+        builtin_roles,
+        models,
+        ..Default::default()
+    };
+
+    let toolsets = ToolSets::init(ToolSetsConfig::default(), None, None, None)
+        .await
+        .expect("init toolsets");
+    toolsets.register_top_level(AlwaysFailingTool::new());
+    let toolsets = Arc::new(toolsets);
+
+    let sandboxes = Arc::new(
+        Sandboxes::init(
+            &pool,
+            SandboxConfig::default(),
+            std::sync::Arc::new(drua_git_proxy::Allowlist::default()),
+        )
+        .await
+        .expect("init sandboxes"),
+    );
+    let skills = Arc::new(drua_core::skill::Skills::new_without_library(
+        &pool,
+        Arc::clone(&sandboxes),
+    ));
+    let agents = Agents::new(
+        &pool,
+        config,
+        toolsets,
+        prompt_tx,
+        Arc::clone(&sandboxes),
+        Arc::clone(&skills),
+        None,
+        ContextGeneration::new(),
+        Arc::new(drua_core::library::SpaceMounts::empty()),
+    );
+
+    let sub = AuthSubject::User(UserId::new());
+    let agent = agents
+        .create_project_lead(&sub, ProjectId::new(), "lead", "test-project")
+        .await
+        .expect("create agent");
+
+    let mut events_rx = agents
+        .send_message(sub, agent.id, "Call bad_tool".to_string())
+        .await
+        .expect("send_message");
+
+    let input = serde_json::json!({});
+    for i in 0..3 {
+        let request = prompt_rx
+            .recv()
+            .await
+            .unwrap_or_else(|| panic!("prompt request #{i}"));
+        request
+            .response_channel
+            .send(Ok(PromptResult::Complete(PromptResponse {
+                content: vec![AssistantBlock::ToolUse {
+                    id: format!("tu_{i}"),
+                    name: "bad_tool".to_string(),
+                    input: input.clone(),
+                }],
+                usage: Usage {
+                    input_tokens: 5,
+                    output_tokens: 3,
+                    ..Default::default()
+                },
+                stop_reason: Some(StopReason::ToolUse),
+                model_used: None,
+            })))
+            .unwrap_or_else(|_| panic!("send response #{i}"));
+    }
+
+    assert!(
+        prompt_rx.try_recv().is_err(),
+        "chain has no fallback; the loop must not send another prompt request"
+    );
+
+    let mut events = Vec::new();
+    while let Some(event) = events_rx.recv().await {
+        events.push(event);
+    }
+    let last = events.last().expect("at least one event");
+    match last {
+        ChatOutputEvent::Error { message } => {
+            assert!(
+                message.contains("breaker tripped"),
+                "error should name the breaker: {message}"
+            );
+        }
+        other => panic!("expected ChatOutputEvent::Error, got {other:?}"),
+    }
+}
+
 /// A registered top-level tool whose call never returns — it signals entry
 /// then parks forever. Lets a test freeze an agent in a persisted ToolUse
 /// turn (assistant requested the tool, no result recorded), the exact state a
@@ -524,6 +817,7 @@ async fn resume_message_continues_past_interrupted_tool_call() {
         RoleConfig {
             chain: Some(llm::ModelChain::new(model_name.clone())),
             compaction: Default::default(),
+            breaker: Default::default(),
         },
     );
     let mut models = HashMap::new();

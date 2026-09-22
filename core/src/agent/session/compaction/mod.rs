@@ -44,7 +44,8 @@ pub(super) fn event_belongs_to_thread(
         | AgentSessionEvent::ThreadStarted { .. }
         | AgentSessionEvent::ToolResultsMasked { .. }
         | AgentSessionEvent::OutputSubmitted { .. }
-        | AgentSessionEvent::ModelChainUpdated { .. } => false,
+        | AgentSessionEvent::ModelChainUpdated { .. }
+        | AgentSessionEvent::ModelChainAdvanced { .. } => false,
     }
 }
 

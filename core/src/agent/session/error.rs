@@ -22,4 +22,6 @@ pub enum AgentSessionError {
     NotToolUseTurn,
     #[error("AgentSessionError - proposed model chain is invalid: {0}")]
     ModelChainInvalid(String),
+    #[error("AgentSessionError - breaker tripped: {reason}")]
+    BreakerTripped { reason: String },
 }

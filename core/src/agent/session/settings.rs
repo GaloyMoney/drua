@@ -83,3 +83,25 @@ impl Default for CompactionConfig {
         }
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BreakerConfig {
+    pub enabled: bool,
+    pub consecutive_error_turns: usize,
+    pub identical_failing_calls: usize,
+    pub consecutive_max_tokens: usize,
+    pub max_turns_per_prompt: usize,
+}
+
+impl Default for BreakerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            consecutive_error_turns: 5,
+            identical_failing_calls: 3,
+            consecutive_max_tokens: 3,
+            max_turns_per_prompt: 250,
+        }
+    }
+}
