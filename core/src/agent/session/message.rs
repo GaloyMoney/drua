@@ -184,7 +184,7 @@ pub struct ToolResultInput {
     pub is_error: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {
     Stop,

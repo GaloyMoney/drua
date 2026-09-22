@@ -211,7 +211,7 @@ enum WorkflowStepParam {
         output_schema: Option<serde_json::Value>,
         /// Bare CEL boolean expression — when present and false, the
         /// step is skipped (run continues to the next step). Evaluated
-        /// against `(trigger, steps)` like `${{ … }}` substitution.
+        /// against `(trigger, steps, run)` like `${{ … }}` substitution.
         #[serde(default)]
         condition: Option<String>,
     },
@@ -220,8 +220,9 @@ enum WorkflowStepParam {
         /// Top-level tool name (e.g. `"workflow"`). Must be
         /// `composable: true`. Dispatched with `AuthSubject::WorkflowExecutor`.
         tool: String,
-        /// Pre-substitution params; `${{ trigger.X }}` and
-        /// `${{ steps.<name>.outputs.Y }}` resolve at run time.
+        /// Pre-substitution params; `${{ trigger.X }}`,
+        /// `${{ steps.<name>.outputs.Y }}` and `${{ run.date }}` /
+        /// `${{ run.started_at }}` resolve at run time.
         #[serde(default)]
         params: serde_json::Value,
         #[serde(default)]

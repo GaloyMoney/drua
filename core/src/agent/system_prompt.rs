@@ -9,7 +9,7 @@ use super::session::message::SystemBlock;
 const BASE_PROMPT_PREFIX: &str = "You are an AI agent operating inside the \
 Galoy Agents platform, in project";
 
-const BEHAVIORAL_GUIDELINES: &str = "\
+const BEHAVIORAL_CORE: &str = "\
 <investigate_before_answering>
 Never speculate about sandbox contents you have not read. Always use \
 read, grep, or ls tools before answering questions about code in a \
@@ -38,8 +38,9 @@ Before writing the script, fetch typed signatures via \
 `compose_types({tool_names: ['<prefix>_*']})` for batch lookups, or \
 `describe_tool({tool_name: '<name>'})` for a single-tool deep-dive — \
 never guess tool or parameter names.
-</use_compose_for_efficiency>
+</use_compose_for_efficiency>";
 
+const PROJECT_NOTES_INTERACTIVE: &str = "\
 <project_notes>
 The project has a shared notes system (the `notes` tool). Notes are \
 concise knowledge snippets that persist across agent sessions. They are \
@@ -71,6 +72,19 @@ must see immediately — ongoing incidents, active conventions, critical \
 warnings. Pinned notes appear in every agent's system prompt, so pin \
 sparingly. Unpin when the context is no longer urgent; the note remains \
 searchable.
+</project_notes>";
+
+/// Workflow step agents are single-turn and terminate via
+/// `submit_output` — a note they create would never be read by the
+/// step itself, only by whatever agent's system prompt it gets pinned
+/// into next, so the interactive guidance (\"when to store a note\")
+/// doesn't apply.
+const PROJECT_NOTES_WORKFLOW_STEP: &str = "\
+<project_notes>
+Pinned notes in your system prompt are the project's active context — read \
+them before acting. Do not create, update or pin notes: a workflow step's \
+record is its `submit_output` payload and the files it writes. Use the \
+`notes` tool with command `search` only if the step's skill tells you to.
 </project_notes>";
 
 const PROJECT_LEAD_ROLE: &str = "\
@@ -133,12 +147,17 @@ pub fn system_blocks_for_role(
         AgentRole::Agent => AGENT_ROLE.to_string(),
         AgentRole::WorkflowStepAgent => render_workflow_role(output_schema),
     };
+    let project_notes = match role {
+        AgentRole::WorkflowStepAgent => PROJECT_NOTES_WORKFLOW_STEP,
+        AgentRole::ProjectLead | AgentRole::Agent => PROJECT_NOTES_INTERACTIVE,
+    };
+    let behavioral_text = format!("{BEHAVIORAL_CORE}\n\n{project_notes}");
 
     vec![
         SystemBlock::Base { text: base_text },
         SystemBlock::Tools { text: tools_text },
         SystemBlock::Behavioral {
-            text: BEHAVIORAL_GUIDELINES.to_string(),
+            text: behavioral_text,
         },
         SystemBlock::Role { text: role_text },
     ]
@@ -205,6 +224,7 @@ mod tests {
         assert!(blocks[1].text().contains("progressive disclosure"));
         assert!(matches!(&blocks[2], SystemBlock::Behavioral { .. }));
         assert!(blocks[2].text().contains("investigate_before_answering"));
+        assert!(blocks[2].text().contains("When to store a note"));
         assert!(matches!(&blocks[3], SystemBlock::Role { .. }));
         assert!(blocks[3].text().contains("project lead"));
         assert!(!blocks[3].text().contains("submit_output"));
@@ -220,9 +240,29 @@ mod tests {
         assert!(blocks[1].text().contains("Sandbox tools"));
         assert!(blocks[1].text().contains("require an attached sandbox"));
         assert!(blocks[2].text().contains("investigate_before_answering"));
+        assert!(blocks[2].text().contains("When to store a note"));
         assert!(matches!(&blocks[3], SystemBlock::Role { .. }));
         assert!(blocks[3].text().contains("task agent"));
         assert!(!blocks[3].text().contains("submit_output"));
+    }
+
+    #[test]
+    fn workflow_step_agent_behavioral_block_forbids_creating_notes() {
+        let toolsets = toolsets_for_test();
+        let subject = AuthSubject::Anonymous;
+        let blocks = system_blocks_for_role(
+            AgentRole::WorkflowStepAgent,
+            &toolsets,
+            &subject,
+            "test-project",
+            None,
+        );
+        assert_eq!(blocks.len(), 4);
+        assert!(matches!(&blocks[2], SystemBlock::Behavioral { .. }));
+        let behavioral_text = blocks[2].text();
+        assert!(behavioral_text.contains("investigate_before_answering"));
+        assert!(behavioral_text.contains("Do not create, update or pin notes"));
+        assert!(!behavioral_text.contains("When to store a note"));
     }
 
     #[test]

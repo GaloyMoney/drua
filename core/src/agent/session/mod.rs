@@ -227,6 +227,16 @@ impl Sessions {
             .stop_reason
             .map(StopReason::from)
             .unwrap_or(StopReason::Stop);
+        if matches!(stop_reason, StopReason::Length) {
+            tracing::warn!(
+                agent_id = %agent_id,
+                model,
+                output_tokens = response.usage.output_tokens,
+                reasoning_tokens = response.usage.reasoning_output_tokens,
+                content_blocks = content.len(),
+                "agent_session: assistant turn stopped on max_tokens"
+            );
+        }
         let mut metadata = AssistantResponseMetadata::from(response.usage);
         metadata.model = model;
 
@@ -389,6 +399,40 @@ impl Sessions {
     ) -> Result<Option<serde_json::Value>, AgentSessionError> {
         let session = self.repo.find_by_agent_id(agent_id).await?;
         Ok(session.submitted_output().cloned())
+    }
+
+    /// Reads the `stop_reason` of the agent's most recent assistant
+    /// turn, across every thread. Workflow executor consumes this to
+    /// decide whether a closed turn without `submit_output` was a
+    /// `max_tokens` truncation that should be continued.
+    #[instrument(name = "domain.agent_session.last_stop_reason", skip(self))]
+    pub async fn last_stop_reason(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Option<message::StopReason>, AgentSessionError> {
+        let session = self.repo.find_by_agent_id(agent_id).await?;
+        Ok(session.last_stop_reason())
+    }
+
+    #[instrument(name = "domain.agent_session.breaker_config", skip(self))]
+    pub async fn breaker_config(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<BreakerConfig, AgentSessionError> {
+        let session = self.repo.find_by_agent_id(agent_id).await?;
+        Ok(session.breaker_config().clone())
+    }
+
+    /// `true` iff the breaker advanced the model chain on the agent's
+    /// most recent assistant turn (i.e. `ModelChainAdvanced` is the
+    /// newest event in the session). Workflow executor consumes this
+    /// to reset its own max_tokens continuation budget when the chain
+    /// just advanced — otherwise a fallback model's first turn would
+    /// inherit a budget already exhausted by the model it replaced.
+    #[instrument(name = "domain.agent_session.chain_just_advanced", skip(self))]
+    pub async fn chain_just_advanced(&self, agent_id: AgentId) -> Result<bool, AgentSessionError> {
+        let session = self.repo.find_by_agent_id(agent_id).await?;
+        Ok(session.last_chain_advance().is_some())
     }
 
     #[instrument(name = "domain.agent_session.thread_infos", skip(self))]

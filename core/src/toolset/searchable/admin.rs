@@ -355,8 +355,9 @@ enum WorkflowStepParams {
         /// Top-level tool name (e.g. `"whoami"`, `"workflow"`). Must
         /// be `composable: true` and declare an `output_schema`.
         tool: String,
-        /// Pre-substitution params; `${{ trigger.X }}` and
-        /// `${{ steps.<name>.outputs.Y }}` resolve at run time.
+        /// Pre-substitution params; `${{ trigger.X }}`,
+        /// `${{ steps.<name>.outputs.Y }}` and `${{ run.date }}` /
+        /// `${{ run.started_at }}` resolve at run time.
         #[serde(default)]
         params: serde_json::Value,
         #[serde(default)]
@@ -557,7 +558,8 @@ struct WorkflowParams {
     #[serde(default)]
     manual: bool,
     /// Bare CEL boolean expression evaluated against `trigger`
-    /// (only — `steps` is rejected) before a run is created.
+    /// (only — `steps` and `run` are rejected, since no step has
+    /// run and no run exists yet) before a run is created.
     /// Omit to leave the trigger ungated. Applies on `create` and
     /// when `update_trigger=true` on `update`. Memo `019e20a2`.
     #[serde(default)]

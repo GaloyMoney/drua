@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::agent::session::message::SUBMIT_OUTPUT_TOOL_NAME;
+use crate::agent::session::message::{StopReason, SUBMIT_OUTPUT_TOOL_NAME};
 use crate::agent::{Agent, Agents};
 use crate::auth::AuthSubject;
 use crate::primitives::{
@@ -132,6 +132,11 @@ impl Executor {
         let workflow_id = run.definition_id;
         let trigger_context = run.trigger_context.clone();
         let steps = run.steps_snapshot.clone();
+        let run_context = serde_json::json!({
+            "id": run_id.to_string(),
+            "started_at": run.started_at().to_rfc3339(),
+            "date": run.started_at().format("%Y-%m-%d").to_string(),
+        });
 
         // Stamp every audit row recorded during this run so they can be
         // queried by `resource_ids->>'workflow_run_id'`.
@@ -199,6 +204,7 @@ impl Executor {
                 let ctx = TemplateContext {
                     trigger: &trigger_context,
                     steps: &step_outputs,
+                    run: &run_context,
                 };
                 match ctx.evaluate_condition(body) {
                     Ok(ConditionOutcome::True) => {
@@ -257,6 +263,7 @@ impl Executor {
                     step,
                     &trigger_context,
                     &step_outputs,
+                    &run_context,
                     &sandbox_ids,
                     &preexisting_ids,
                     &mut borrowed_preexisting,
@@ -490,6 +497,7 @@ impl Executor {
         step: &WorkflowStepDef,
         trigger_context: &serde_json::Value,
         step_outputs: &HashMap<String, serde_json::Value>,
+        run_context: &serde_json::Value,
         sandbox_ids: &HashMap<String, SandboxId>,
         preexisting_ids: &HashSet<SandboxId>,
         borrowed_preexisting: &mut HashSet<SandboxId>,
@@ -540,16 +548,25 @@ impl Executor {
                 let template_ctx = TemplateContext {
                     trigger: trigger_context,
                     steps: step_outputs,
+                    run: run_context,
                 };
                 let templated_body = template_ctx
                     .substitute_in_string(&raw_body)
                     .map_err(|e| WorkflowError::Skill(e.to_string()))?;
                 let pretty = serde_json::to_string_pretty(trigger_context)
                     .unwrap_or_else(|_| trigger_context.to_string());
+                let run_pretty = serde_json::to_string_pretty(run_context)
+                    .unwrap_or_else(|_| run_context.to_string());
+                let run_context_block = format!("\n\nRUN_CONTEXT:\n```json\n{run_pretty}\n```");
                 let prompt = if templated_body.contains("$ARGUMENTS") {
-                    crate::skill::SkillBody::new(templated_body).interpolate(Some(&pretty))
+                    format!(
+                        "{}{run_context_block}",
+                        crate::skill::SkillBody::new(templated_body).interpolate(Some(&pretty))
+                    )
                 } else {
-                    format!("{templated_body}\n\nTRIGGER_CONTEXT:\n```json\n{pretty}\n```")
+                    format!(
+                        "{templated_body}\n\nTRIGGER_CONTEXT:\n```json\n{pretty}\n```{run_context_block}"
+                    )
                 };
 
                 let agent_name = format!("workflow-{}-{name}", run_id.short());
@@ -644,6 +661,7 @@ impl Executor {
                     *timeout_seconds,
                     trigger_context,
                     step_outputs,
+                    run_context,
                 )
                 .await
             }
@@ -656,9 +674,16 @@ impl Executor {
         }
     }
 
-    /// First the regular send/resume loop; if the agent finished without
-    /// calling `submit_output`, retry once with `tool_choice` forced to
-    /// the synthetic tool. After a second miss the step fails.
+    /// A turn that closes on `max_tokens` without a tool call is
+    /// continued (not treated as a finished reply) up to the session
+    /// breaker's `consecutive_max_tokens` threshold — the breaker
+    /// itself advances the chain to a fallback (or fails the turn)
+    /// once that threshold is hit, so this loop only has to keep the
+    /// conversation going long enough for that to happen. Once the
+    /// agent finishes a turn without calling `submit_output` for any
+    /// OTHER reason (a plain text reply, an empty tool-less `Stop`),
+    /// retry once with `tool_choice` forced to the synthetic tool.
+    /// After a second miss the step fails.
     async fn run_agent_until_submit_output(
         &self,
         agent: &Agent,
@@ -666,11 +691,47 @@ impl Executor {
         step_name: &str,
         timeout_seconds: Option<u64>,
     ) -> Result<serde_json::Value, WorkflowError> {
-        if let Some(value) = self
-            .stream_agent_response(agent, Some(prompt), None, step_name, timeout_seconds)
+        const MAX_TOKENS_CONTINUATION: &str =
+            "Your previous turn hit the output token limit before making a tool call. \
+             Continue from where you were: make the next tool call now. Do not restate \
+             your plan or summarise what you have read.";
+
+        let limit = self
+            .agents
+            .breaker_config(agent.id)
             .await?
-        {
-            return Ok(value);
+            .consecutive_max_tokens
+            .max(1);
+        let mut next_prompt = Some(prompt);
+        let mut continuations = 0usize;
+        loop {
+            if let Some(value) = self
+                .stream_agent_response(agent, next_prompt.take(), None, step_name, timeout_seconds)
+                .await?
+            {
+                return Ok(value);
+            }
+            // The breaker's own per-thread counter resets when it advances
+            // the chain (a fresh thread starts). Mirror that here: a flat
+            // `continuations` counter that never reset would let the
+            // primary's max_tokens streak exhaust the fallback's budget
+            // before the fallback gets a single turn.
+            if self.agents.chain_just_advanced(agent.id).await? {
+                continuations = 0;
+            }
+            match self.agents.last_stop_reason(agent.id).await? {
+                Some(StopReason::Length) if continuations < limit => {
+                    continuations += 1;
+                    tracing::warn!(
+                        step = step_name,
+                        agent_id = %agent.id,
+                        continuations,
+                        "workflow step: turn hit max_tokens without submit_output; continuing"
+                    );
+                    next_prompt = Some(MAX_TOKENS_CONTINUATION.to_string());
+                }
+                _ => break,
+            }
         }
 
         // Forced retry: the agent ended its turn without calling
@@ -792,6 +853,7 @@ impl Executor {
         timeout_seconds: Option<u64>,
         trigger_context: &serde_json::Value,
         step_outputs: &HashMap<String, serde_json::Value>,
+        run_context: &serde_json::Value,
     ) -> Result<serde_json::Value, WorkflowError> {
         // Workflow contract is enforced by `find_for_workflow`
         // (registered + composable + declares output_schema). The
@@ -805,6 +867,7 @@ impl Executor {
         let template_ctx = TemplateContext {
             trigger: trigger_context,
             steps: step_outputs,
+            run: run_context,
         };
         let resolved_params = template_ctx
             .substitute(params)

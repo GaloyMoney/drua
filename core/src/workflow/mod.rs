@@ -5,7 +5,7 @@ pub mod error;
 pub mod executor;
 pub mod importer;
 pub(crate) mod job;
-pub(crate) mod repo;
+pub mod repo;
 pub mod run;
 pub mod template;
 pub mod yaml;
@@ -1054,9 +1054,15 @@ impl Workflows {
                     })
                     .collect();
 
+                let run_context = serde_json::json!({
+                    "id": run.id.to_string(),
+                    "started_at": run.started_at().to_rfc3339(),
+                    "date": run.started_at().format("%Y-%m-%d").to_string(),
+                });
                 let ctx = template::ResumeContext {
                     trigger: &run.trigger_context,
                     steps: &step_outputs,
+                    run: &run_context,
                     resume_payload: event,
                 };
 

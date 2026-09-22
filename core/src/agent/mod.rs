@@ -621,6 +621,34 @@ impl Agents {
         Ok(self.sessions.submitted_output(agent_id).await?)
     }
 
+    /// Reads the agent's session for the `stop_reason` of its most
+    /// recent assistant turn. Workflow executor consumes this to
+    /// decide whether to continue a turn that closed on `max_tokens`
+    /// without a tool call.
+    #[instrument(name = "domain.agent.last_stop_reason", skip(self))]
+    pub async fn last_stop_reason(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Option<session::message::StopReason>, AgentError> {
+        Ok(self.sessions.last_stop_reason(agent_id).await?)
+    }
+
+    #[instrument(name = "domain.agent.breaker_config", skip(self))]
+    pub async fn breaker_config(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<session::BreakerConfig, AgentError> {
+        Ok(self.sessions.breaker_config(agent_id).await?)
+    }
+
+    /// `true` iff the breaker advanced the model chain on the agent's
+    /// most recent assistant turn. Workflow executor consumes this to
+    /// reset its own max_tokens continuation budget on chain advance.
+    #[instrument(name = "domain.agent.chain_just_advanced", skip(self))]
+    pub async fn chain_just_advanced(&self, agent_id: AgentId) -> Result<bool, AgentError> {
+        Ok(self.sessions.chain_just_advanced(agent_id).await?)
+    }
+
     /// Workflow-spawned agents are filtered out; see
     /// [`Self::list_for_workflow_run`] for those.
     #[instrument(name = "domain.agent.list_for_project", skip(self, sub))]

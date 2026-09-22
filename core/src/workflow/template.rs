@@ -1,17 +1,20 @@
 //! `${{ … }}` template substitution for workflow steps.
 //!
-//! Two contexts are addressable:
+//! Three contexts are addressable:
 //!
 //! - `${{ trigger.X.Y }}` — fields of `WorkflowRun.trigger_context`.
 //! - `${{ steps.<name>.outputs.X.Y }}` — prior-step `StepResult.output`
 //!   (the namespace mirrors GitHub Actions' `steps.<id>.outputs.<name>`
 //!   so authors familiar with one syntax read the other).
+//! - `${{ run.id }}` / `${{ run.started_at }}` / `${{ run.date }}` —
+//!   the run's own identity and start time. Not in scope for
+//!   `trigger.condition:` bodies — no run exists yet at that point.
 //!
 //! The expression body inside the delimiters is plain CEL evaluated by
 //! the `cel` crate (Common Expression Language — same family Swamp
-//! and GHA use). The two namespace identifiers `trigger` and `steps`
-//! are bound as variables on the evaluation context; everything else
-//! the language offers (boolean operators, `size(…)`, `has(…)`,
+//! and GHA use). The namespace identifiers `trigger`, `steps` and
+//! `run` are bound as variables on the evaluation context; everything
+//! else the language offers (boolean operators, `size(…)`, `has(…)`,
 //! `map`/`filter` macros, …) comes for free.
 //!
 //! Substitution semantics (memo `019e01a4`, §"what's new §2"):
@@ -58,7 +61,7 @@ pub enum TemplateError {
     EmptyPath(String),
     #[error("template ref `{0}`: failed to compile CEL expression: {1}")]
     Compile(String, String),
-    #[error("template ref `{0}`: references unknown identifier `{1}` (only `trigger` and `steps` are bound)")]
+    #[error("template ref `{0}`: references unknown identifier `{1}` (only `trigger`, `steps` and `run` are bound)")]
     UnknownRoot(String, String),
     #[error("template ref `{0}`: failed to evaluate at run time: {1}")]
     Resolve(String, String),
@@ -66,13 +69,16 @@ pub enum TemplateError {
     JsonConvert(String, String),
     #[error("trigger condition `{0}`: references `steps` but no step has run yet at trigger-evaluation time; only `trigger` is in scope")]
     StepsNotInScopeAtTrigger(String),
+    #[error("trigger condition `{0}`: references `run` but no run has been created yet at trigger-evaluation time; only `trigger` is in scope")]
+    RunNotInScopeAtTrigger(String),
 }
 
-/// Resolution context borrowed for one substitution pass. The two
+/// Resolution context borrowed for one substitution pass. The three
 /// namespaces are bound as CEL variables of the matching name.
 pub struct TemplateContext<'a> {
     pub trigger: &'a Value,
     pub steps: &'a std::collections::HashMap<String, Value>,
+    pub run: &'a Value,
 }
 
 /// CEL context built from a [`TemplateContext`], cached so a single
@@ -84,13 +90,14 @@ struct BuiltContext {
     cel: Context<'static>,
 }
 
-/// Bind `trigger` and `steps` — the two roots shared by every
+/// Bind `trigger`, `steps` and `run` — the three roots shared by every
 /// evaluation context. Null/non-object payloads are coerced to `{}`
 /// so `trigger.payload.X` resolves to `null` instead of CEL's
 /// surprising `Bool(false)`.
 fn build_base_cel_context(
     trigger: &Value,
     steps: &std::collections::HashMap<String, Value>,
+    run: &Value,
 ) -> Result<Context<'static>, TemplateError> {
     let mut ctx = Context::default();
     let payload = match trigger {
@@ -112,6 +119,8 @@ fn build_base_cel_context(
     );
     ctx.add_variable("steps", steps_value)
         .map_err(|e| TemplateError::Resolve("<context>".to_string(), format!("steps: {e}")))?;
+    ctx.add_variable("run", run.clone())
+        .map_err(|e| TemplateError::Resolve("<context>".to_string(), format!("run: {e}")))?;
     Ok(ctx)
 }
 
@@ -143,7 +152,7 @@ fn evaluate_condition_with_built(
 
 impl TemplateContext<'_> {
     fn build_cel_context(&self) -> Result<BuiltContext, TemplateError> {
-        let cel = build_base_cel_context(self.trigger, self.steps)?;
+        let cel = build_base_cel_context(self.trigger, self.steps, self.run)?;
         Ok(BuiltContext { cel })
     }
 
@@ -187,12 +196,13 @@ impl TemplateContext<'_> {
 pub struct ResumeContext<'a> {
     pub trigger: &'a Value,
     pub steps: &'a std::collections::HashMap<String, Value>,
+    pub run: &'a Value,
     pub resume_payload: &'a Value,
 }
 
 impl ResumeContext<'_> {
     fn build_cel_context(&self) -> Result<BuiltContext, TemplateError> {
-        let mut cel = build_base_cel_context(self.trigger, self.steps)?;
+        let mut cel = build_base_cel_context(self.trigger, self.steps, self.run)?;
         cel.add_variable("resume_payload", self.resume_payload.clone())
             .map_err(|e| {
                 TemplateError::Resolve("<context>".to_string(), format!("resume_payload: {e}"))
@@ -300,8 +310,8 @@ pub fn parse_condition(body: &str) -> Result<TemplateRef, TemplateError> {
 
 /// Compile-time parse + root validation for a `trigger.condition:`.
 /// Stricter than [`parse_condition`]: rejects any reference to
-/// `steps` because no step has run yet at trigger-evaluation time —
-/// the run hasn't even been created. Only `trigger` is in scope.
+/// `steps` or `run` because no step has run yet and no run has been
+/// created at trigger-evaluation time. Only `trigger` is in scope.
 pub fn parse_trigger_condition(body: &str) -> Result<TemplateRef, TemplateError> {
     let r = parse_path(body)?;
     let program = Program::compile(&r.body)
@@ -312,6 +322,9 @@ pub fn parse_trigger_condition(body: &str) -> Result<TemplateRef, TemplateError>
         }
         if ident == "steps" {
             return Err(TemplateError::StepsNotInScopeAtTrigger(r.raw.clone()));
+        }
+        if ident == "run" {
+            return Err(TemplateError::RunNotInScopeAtTrigger(r.raw.clone()));
         }
         return Err(TemplateError::UnknownRoot(r.raw.clone(), ident.to_string()));
     }
@@ -332,6 +345,7 @@ pub fn evaluate_trigger_condition(
     let ctx = TemplateContext {
         trigger: trigger_payload,
         steps: &empty_steps,
+        run: &Value::Null,
     };
     ctx.evaluate_condition(body)
 }
@@ -351,11 +365,11 @@ fn validate_root_inner(r: &TemplateRef, allowed: &[&str]) -> Result<(), Template
 }
 
 pub fn validate_root(r: &TemplateRef) -> Result<(), TemplateError> {
-    validate_root_inner(r, &["trigger", "steps"])
+    validate_root_inner(r, &["trigger", "steps", "run"])
 }
 
 pub fn validate_resume_root(r: &TemplateRef) -> Result<(), TemplateError> {
-    validate_root_inner(r, &["trigger", "steps", "resume_payload"])
+    validate_root_inner(r, &["trigger", "steps", "run", "resume_payload"])
 }
 
 /// Compile-time parse + root validation for a wait step
@@ -668,6 +682,11 @@ mod tests {
     }
 
     #[test]
+    fn validate_root_accepts_run_date() {
+        validate_root(&parse_path("run.date").unwrap()).unwrap();
+    }
+
+    #[test]
     fn validate_root_rejects_unknown() {
         assert!(matches!(
             validate_root(&parse_path("env.HOME").unwrap()),
@@ -690,6 +709,7 @@ mod tests {
         let ctx = TemplateContext {
             trigger: &trigger,
             steps: &steps,
+            run: &Value::Null,
         };
         let input = json!({ "payload": "${{ steps.triage.outputs.args }}" });
         let out = ctx.substitute(&input).unwrap();
@@ -714,6 +734,7 @@ mod tests {
         let ctx = TemplateContext {
             trigger: &trigger,
             steps: &steps,
+            run: &Value::Null,
         };
         let input = json!({
             "note": "Build ${{ trigger.payload.build }} failed in ${{ trigger.payload.pipeline }}."
@@ -729,11 +750,29 @@ mod tests {
         let ctx = TemplateContext {
             trigger: &trigger,
             steps: &steps,
+            run: &Value::Null,
         };
         let s = ctx
             .substitute_in_string("ids=${{ trigger.payload.list }}")
             .unwrap();
         assert_eq!(s, "ids=[1,2,3]");
+    }
+
+    #[test]
+    fn embedded_resolves_run_date() {
+        let trigger = json!({});
+        let steps = HashMap::new();
+        let run =
+            json!({ "id": "01a0c826", "started_at": "2026-09-22T08:05:43Z", "date": "2026-09-22" });
+        let ctx = TemplateContext {
+            trigger: &trigger,
+            steps: &steps,
+            run: &run,
+        };
+        let s = ctx
+            .substitute_in_string("today is ${{ run.date }}")
+            .unwrap();
+        assert_eq!(s, "today is 2026-09-22");
     }
 
     #[test]
@@ -743,6 +782,7 @@ mod tests {
         let ctx = TemplateContext {
             trigger: &trigger,
             steps: &steps,
+            run: &Value::Null,
         };
         let input = json!({ "x": "${{ trigger.payload.absent }}" });
         let out = ctx.substitute(&input).unwrap();
@@ -756,6 +796,7 @@ mod tests {
         let ctx = TemplateContext {
             trigger: &trigger,
             steps: &steps,
+            run: &Value::Null,
         };
         assert_eq!(
             ctx.substitute_in_string("[${{ trigger.payload.x }}]")
@@ -775,6 +816,7 @@ mod tests {
         let ctx = TemplateContext {
             trigger: &trigger,
             steps: &steps,
+            run: &Value::Null,
         };
         let input = json!({ "x": "${{ trigger.payload.pipeline }}" });
         let out = ctx.substitute(&input).unwrap();
@@ -788,6 +830,7 @@ mod tests {
         let ctx = TemplateContext {
             trigger: &trigger,
             steps: &steps,
+            run: &Value::Null,
         };
         let s = ctx
             .substitute_in_string("build-${{ trigger.payload.build }}")
@@ -806,6 +849,7 @@ mod tests {
         let ctx = TemplateContext {
             trigger: &trigger,
             steps: &steps,
+            run: &Value::Null,
         };
         let s = ctx
             .substitute_in_string("${{ steps.s.outputs.items[1].name }}")
@@ -835,6 +879,7 @@ mod tests {
         let ctx = TemplateContext {
             trigger: &trigger,
             steps: &steps,
+            run: &Value::Null,
         };
         let res = ctx.substitute_in_string("build ${{ trigger.x is unterminated");
         assert!(matches!(res, Err(TemplateError::Unterminated(_))));
@@ -862,6 +907,7 @@ mod tests {
         let ctx = TemplateContext {
             trigger: &trigger,
             steps: &steps,
+            run: &Value::Null,
         };
         let out = ctx
             .substitute_in_string("commit: ${{ trigger.payload.commit_msg }}")
@@ -884,6 +930,7 @@ mod tests {
         let ctx = TemplateContext {
             trigger: &trigger,
             steps: &steps,
+            run: &Value::Null,
         };
         let input = json!({ "v": "${{ trigger.payload.x }} suffix }}" });
         let out = ctx.substitute(&input).unwrap();
@@ -899,6 +946,7 @@ mod tests {
         let ctx = TemplateContext {
             trigger: &trigger,
             steps: &steps,
+            run: &Value::Null,
         };
         let v = json!({ "k": "no templates here" });
         assert_eq!(ctx.substitute(&v).unwrap(), v);
@@ -925,6 +973,7 @@ mod tests {
         let ctx = TemplateContext {
             trigger: &trigger,
             steps: &steps,
+            run: &Value::Null,
         };
         let original = json!({
             "title": "run-${{ steps.identify.outputs.workflow_run_id }}",
@@ -980,6 +1029,7 @@ mod tests {
         let ctx = TemplateContext {
             trigger: &trigger,
             steps: &steps,
+            run: &Value::Null,
         };
         assert_eq!(
             ctx.evaluate_condition("steps.triage.outputs.kind == 'autofix'")
@@ -996,6 +1046,7 @@ mod tests {
         let ctx = TemplateContext {
             trigger: &trigger,
             steps: &steps,
+            run: &Value::Null,
         };
         assert_eq!(
             ctx.evaluate_condition("steps.triage.outputs.kind == 'autofix'")
@@ -1012,6 +1063,7 @@ mod tests {
         let ctx = TemplateContext {
             trigger: &trigger,
             steps: &steps,
+            run: &Value::Null,
         };
         // String concat → string; not a bool.
         match ctx.evaluate_condition("steps.triage.outputs.kind + '!'") {
@@ -1038,6 +1090,7 @@ mod tests {
         let ctx = TemplateContext {
             trigger: &trigger,
             steps: &steps,
+            run: &Value::Null,
         };
         assert_eq!(
             ctx.evaluate_condition("steps.triage.outputs.kind == 'autofix'")
@@ -1053,6 +1106,7 @@ mod tests {
         let ctx = TemplateContext {
             trigger: &trigger,
             steps: &steps,
+            run: &Value::Null,
         };
         let err = ctx.evaluate_condition("steps.x ==").unwrap_err();
         assert!(matches!(err, TemplateError::Compile(_, _)));
@@ -1070,6 +1124,7 @@ mod tests {
         let ctx = TemplateContext {
             trigger: &trigger,
             steps: &steps,
+            run: &Value::Null,
         };
         let err = ctx.evaluate_condition("env.HOME == 'x'").unwrap_err();
         assert!(matches!(err, TemplateError::Resolve(_, _)));
@@ -1082,6 +1137,7 @@ mod tests {
         let ctx = TemplateContext {
             trigger: &trigger,
             steps: &steps,
+            run: &Value::Null,
         };
         let err = ctx.evaluate_condition("   ").unwrap_err();
         assert!(matches!(err, TemplateError::EmptyPath(_)));
@@ -1102,6 +1158,12 @@ mod tests {
     fn parse_trigger_condition_rejects_steps_reference() {
         let err = parse_trigger_condition("steps.x.outputs.y == 1").unwrap_err();
         assert!(matches!(err, TemplateError::StepsNotInScopeAtTrigger(_)));
+    }
+
+    #[test]
+    fn parse_trigger_condition_rejects_run_reference() {
+        let err = parse_trigger_condition("run.date == '2026-09-22'").unwrap_err();
+        assert!(matches!(err, TemplateError::RunNotInScopeAtTrigger(_)));
     }
 
     #[test]
