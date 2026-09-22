@@ -16,17 +16,22 @@ use serde::Deserialize;
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
 use crate::sandbox::Sandboxes;
-use crate::space_fs::SpaceFs;
+use crate::space_fs::{DetailedEntry, SpaceFs};
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
-use super::{parse_params, schema_for, EntriesOutput, OutputSchema};
+use super::{parse_params, render_detailed, schema_for, EntriesOutput, OutputSchema};
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct LsParams {
     path: String,
     #[serde(default)]
     ignore: Vec<String>,
+    /// `space:` paths only — append each file's first-commit and
+    /// last-commit dates (`created=`, `modified=`, UTC days).
+    /// Directories carry no dates.
+    #[serde(default)]
+    details: bool,
 }
 
 pub struct Ls {
@@ -56,7 +61,8 @@ impl TopLevelTool for Ls {
         "List directory contents. Accepts either an in-sandbox path, a \
          `space:<slug>/...` path that reads from the project's mounted spaces, \
          or the bare prefix `space:` (no slug) to enumerate the spaces this \
-         agent can address."
+         agent can address. Pass `details: true` on a `space:` path to get \
+         each file's first- and last-commit dates."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -79,12 +85,31 @@ impl TopLevelTool for Ls {
         let params: LsParams = parse_params(arguments)?;
         Audit::record_action("ls");
 
+        if params.details {
+            let space_entries = self
+                .space_fs
+                .view_dir_detailed(subject, &params.path)
+                .await?;
+            if let Some(entries) = space_entries {
+                let filtered = filter_ignored_detailed(entries, &params.ignore);
+                let (entries, text, details) = render_detailed(filtered);
+                let out = EntriesOutput { entries, details };
+                return Ok(LS_OUTPUT.success(text, &out));
+            }
+            return Err(ToolSetsError::InvalidArgument(
+                "details is only supported for space: paths".into(),
+            ));
+        }
+
         let space_entries = self.space_fs.view_dir(subject, &params.path).await?;
 
         if let Some(entries) = space_entries {
             let filtered = filter_ignored(entries, &params.ignore);
             let text = filtered.join("\n");
-            let out = EntriesOutput { entries: filtered };
+            let out = EntriesOutput {
+                entries: filtered,
+                details: None,
+            };
             return Ok(LS_OUTPUT.success(text, &out));
         }
 
@@ -111,7 +136,10 @@ impl TopLevelTool for Ls {
                 let entries: Vec<String> = resp.output.lines().map(String::from).collect();
                 let filtered = filter_ignored(entries, &params.ignore);
                 let text = filtered.join("\n");
-                let out = EntriesOutput { entries: filtered };
+                let out = EntriesOutput {
+                    entries: filtered,
+                    details: None,
+                };
                 Ok(if resp.is_error {
                     LS_OUTPUT.error(text, &out)
                 } else {
@@ -131,9 +159,20 @@ fn filter_ignored(entries: Vec<String>, ignore: &[String]) -> Vec<String> {
     entries
         .into_iter()
         .filter(|l| !l.is_empty())
-        .filter(|name| {
-            let trimmed = name.trim_end_matches('/');
-            !ignore.iter().any(|ig| ig == trimmed)
-        })
+        .filter(|name| !is_ignored(name, ignore))
         .collect()
+}
+
+/// `filter_ignored`, applied to each entry's `entry` field.
+fn filter_ignored_detailed(entries: Vec<DetailedEntry>, ignore: &[String]) -> Vec<DetailedEntry> {
+    entries
+        .into_iter()
+        .filter(|e| !e.entry.is_empty())
+        .filter(|e| !is_ignored(&e.entry, ignore))
+        .collect()
+}
+
+fn is_ignored(name: &str, ignore: &[String]) -> bool {
+    let trimmed = name.trim_end_matches('/');
+    ignore.iter().any(|ig| ig == trimmed)
 }
