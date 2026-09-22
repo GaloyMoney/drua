@@ -87,9 +87,10 @@ async fn wait_for_blob(library: &Library, path: &str, expected: &[u8]) {
 
 async fn path_dates(library: &Library, slug: &str) -> Arc<PathDatesMap> {
     library
-        .path_dates_at_head(&format!("spaces/{slug}/"))
+        .spaces()
+        .path_dates(slug)
         .await
-        .expect("path_dates_at_head")
+        .expect("path_dates")
         .expect("HEAD is born")
 }
 
