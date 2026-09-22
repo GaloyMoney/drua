@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use tracing::instrument;
 
-use drua_library::{BlobEntries, Space, SpaceError, Spaces};
+use drua_library::{BlobEntries, PathDates, PathDatesMap, Space, SpaceError, Spaces};
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
@@ -37,6 +37,17 @@ const MAX_VIEW_FILE_BYTES: usize = 1_048_576; // 1 MiB
 pub enum FileView {
     File(String),
     Dir(Vec<String>),
+}
+
+/// One `LS`/`Glob` entry alongside its git-derived dates, for `details:
+/// true` callers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetailedEntry {
+    /// Same string `view_dir` / `glob` would have returned (directories
+    /// keep their trailing `/`).
+    pub entry: String,
+    /// `None` for directories and for a path with no commit history.
+    pub dates: Option<PathDates>,
 }
 
 /// Parsed view of a `space:<slug>` or `space:<slug>/<rel>` path.
@@ -214,6 +225,52 @@ impl SpaceFs {
             .map_err(|e| -> ProjectError { e.into() })?
             .unwrap_or_default();
         Ok(Some(format_dir(entries)))
+    }
+
+    /// `view_dir` with each file's `created`/`modified` attached. The
+    /// bare `space:` listing has no dates — mounted slugs come back
+    /// with `dates: None` rather than an error.
+    #[instrument(name = "library.space_fs.view_dir_detailed", skip(self, sub))]
+    pub async fn view_dir_detailed(
+        &self,
+        sub: &AuthSubject,
+        path: &str,
+    ) -> Result<Option<Vec<DetailedEntry>>, ProjectError> {
+        if is_bare_space_path(path) {
+            let mounted = self.list_mounted_spaces(sub).await?;
+            return Ok(Some(
+                mounted
+                    .into_iter()
+                    .map(|entry| DetailedEntry { entry, dates: None })
+                    .collect(),
+            ));
+        }
+        let Some(resolved) = self.resolve(sub, path).await? else {
+            return Ok(None);
+        };
+        let entries = self
+            .spaces
+            .list_dir(&resolved.space.slug, &resolved.rel_path)
+            .await
+            .map_err(|e| -> ProjectError { e.into() })?
+            .unwrap_or_default();
+        let dates = self
+            .spaces
+            .path_dates(&resolved.space.slug)
+            .await
+            .map_err(|e| -> ProjectError { e.into() })?;
+        let rel_path = resolved.rel_path;
+        Ok(Some(join_dates(
+            format_dir(entries),
+            dates.as_deref(),
+            |name| {
+                if rel_path.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{rel_path}/{name}")
+                }
+            },
+        )))
     }
 
     /// Blind overwrite of `space:<slug>/<rel>` with `content`.
@@ -394,6 +451,31 @@ impl SpaceFs {
         };
         let blobs = self.walk_search_root(&resolved).await?;
         Ok(Some(glob_blobs(blobs, pattern)?))
+    }
+
+    /// `glob` with each match's `created`/`modified` attached. A glob
+    /// result is already a `spaces/<slug>/`-relative path, so it *is*
+    /// its own `PathDatesMap` key — no prefixing needed.
+    #[instrument(name = "library.space_fs.glob_detailed", skip(self, sub))]
+    pub async fn glob_detailed(
+        &self,
+        sub: &AuthSubject,
+        path: &str,
+        pattern: &str,
+    ) -> Result<Option<Vec<DetailedEntry>>, ProjectError> {
+        let Some(resolved) = self.resolve(sub, path).await? else {
+            return Ok(None);
+        };
+        let blobs = self.walk_search_root(&resolved).await?;
+        let files = glob_blobs(blobs, pattern)?;
+        let dates = self
+            .spaces
+            .path_dates(&resolved.space.slug)
+            .await
+            .map_err(|e| -> ProjectError { e.into() })?;
+        Ok(Some(join_dates(files, dates.as_deref(), |entry| {
+            entry.to_string()
+        })))
     }
 
     /// Grep walk across the space's tree. Replicates the curated subset
@@ -583,6 +665,33 @@ fn format_dir(entries: Vec<drua_library::DirEntry>) -> Vec<String> {
                 format!("{}/", e.name)
             } else {
                 e.name
+            }
+        })
+        .collect()
+}
+
+/// Joins entry strings (as `format_dir` / `glob_blobs` return them)
+/// with their dates from `dates`, via `key_for` mapping a bare entry
+/// to its `PathDatesMap` key. Directories (entries ending in `/`)
+/// never get dates — D7: dates are a per-file git-history property, a
+/// directory has none of its own — so `key_for` is never called for
+/// one.
+fn join_dates(
+    entries: Vec<String>,
+    dates: Option<&PathDatesMap>,
+    key_for: impl Fn(&str) -> String,
+) -> Vec<DetailedEntry> {
+    entries
+        .into_iter()
+        .map(|entry| {
+            let found = if entry.ends_with('/') {
+                None
+            } else {
+                dates.and_then(|m| m.get(&key_for(&entry)).copied())
+            };
+            DetailedEntry {
+                entry,
+                dates: found,
             }
         })
         .collect()
@@ -842,5 +951,59 @@ mod tests {
         let r = glob_to_regex("?.md").unwrap();
         assert!(r.is_match("a.md"));
         assert!(!r.is_match("ab.md"));
+    }
+
+    fn dated(secs: i64) -> PathDates {
+        let at = chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0).unwrap();
+        PathDates {
+            created: at,
+            modified: at,
+        }
+    }
+
+    #[test]
+    fn join_dates_looks_up_files_by_mapped_key() {
+        let mut map = PathDatesMap::new();
+        map.insert("research/a.md".into(), dated(100));
+        let entries = vec!["a.md".to_string()];
+        let out = join_dates(entries, Some(&map), |name| format!("research/{name}"));
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].entry, "a.md");
+        assert_eq!(out[0].dates, Some(dated(100)));
+    }
+
+    #[test]
+    fn join_dates_directories_never_get_dates() {
+        let mut map = PathDatesMap::new();
+        // Even a same-named entry in the map must not leak onto a dir —
+        // `key_for` is never invoked for a trailing-slash entry.
+        map.insert("research/".into(), dated(100));
+        let entries = vec!["research/".to_string()];
+        let out = join_dates(entries, Some(&map), |name| name.to_string());
+        assert_eq!(out[0].dates, None);
+    }
+
+    #[test]
+    fn join_dates_missing_key_is_none() {
+        let map = PathDatesMap::new();
+        let entries = vec!["ghost.md".to_string()];
+        let out = join_dates(entries, Some(&map), |name| name.to_string());
+        assert_eq!(out[0].dates, None);
+    }
+
+    #[test]
+    fn join_dates_no_map_is_none_for_every_entry() {
+        let entries = vec!["a.md".to_string(), "dir/".to_string()];
+        let out = join_dates(entries, None, |name| name.to_string());
+        assert!(out.iter().all(|e| e.dates.is_none()));
+    }
+
+    #[test]
+    fn join_dates_glob_result_is_its_own_key() {
+        let mut map = PathDatesMap::new();
+        map.insert("research/a.md".into(), dated(200));
+        let entries = vec!["research/a.md".to_string()];
+        let out = join_dates(entries, Some(&map), |entry| entry.to_string());
+        assert_eq!(out[0].dates, Some(dated(200)));
     }
 }

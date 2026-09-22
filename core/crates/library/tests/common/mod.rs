@@ -145,6 +145,30 @@ impl TestRepo {
         git(&self.work, &["commit", "--quiet", "-m", message]);
         git(&self.work, &["push", "--quiet", "origin", "main"]);
     }
+
+    /// Like `commit`, but pins both `GIT_AUTHOR_DATE` and
+    /// `GIT_COMMITTER_DATE` to `unix_secs` instead of letting git use
+    /// wall-clock time. Without this, every commit a test makes lands
+    /// in the same second and every date assertion degenerates to
+    /// equality — use this, not `commit`, for anything that asserts on
+    /// `created`/`modified`.
+    pub fn commit_at(&self, files: &[(&str, &str)], message: &str, unix_secs: i64) {
+        git(&self.work, &["fetch", "--quiet", "origin"]);
+        git(&self.work, &["reset", "--hard", "origin/main"]);
+
+        write_files(&self.work, files);
+        git(&self.work, &["add", "."]);
+        let date = format!("{unix_secs} +0000");
+        git_with_env(
+            &self.work,
+            &["commit", "--quiet", "-m", message],
+            &[
+                ("GIT_AUTHOR_DATE", date.as_str()),
+                ("GIT_COMMITTER_DATE", date.as_str()),
+            ],
+        );
+        git(&self.work, &["push", "--quiet", "origin", "main"]);
+    }
 }
 
 fn write_files(root: &Path, files: &[(&str, &str)]) {
@@ -161,6 +185,16 @@ fn git(cwd: &Path, args: &[&str]) {
     let status = Command::new("git")
         .args(args)
         .current_dir(cwd)
+        .status()
+        .expect("spawn git");
+    assert!(status.success(), "git {args:?} failed in {cwd:?}");
+}
+
+fn git_with_env(cwd: &Path, args: &[&str], env: &[(&str, &str)]) {
+    let status = Command::new("git")
+        .args(args)
+        .current_dir(cwd)
+        .envs(env.iter().copied())
         .status()
         .expect("spawn git");
     assert!(status.success(), "git {args:?} failed in {cwd:?}");

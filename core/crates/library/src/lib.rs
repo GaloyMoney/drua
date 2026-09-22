@@ -27,7 +27,7 @@ pub use space::{NewSpace, Space, SpaceError, SpaceEvent, Spaces, SPACE_DOC_TYPE}
 pub use synced::LibrarySynced;
 
 use self::git::GitEngine;
-pub use self::git::{BlobEntries, DirEntry};
+pub use self::git::{BlobEntries, DirEntry, PathDates, PathDatesMap};
 use self::job::{
     CommitTick, ImporterRegistry, LibraryEmbedConfig, LibraryEmbedJobInitializer,
     LibrarySyncConfig, LibrarySyncJobInitializer, LibraryWriteConfig, LibraryWriteJobInitializer,
@@ -216,6 +216,17 @@ impl Library {
         dir_path: &str,
     ) -> Result<Option<BlobEntries>, LibraryError> {
         self.git.walk_blobs_at_head(dir_path).await
+    }
+
+    /// Dates for every blob under `prefix` (repo-relative, trailing
+    /// slash optional) at HEAD, keyed relative to `prefix`. `Ok(None)`
+    /// when HEAD is unborn. See [`GitEngine::path_dates_at_head`] for
+    /// the caching and rename-tracking contract.
+    pub async fn path_dates_at_head(
+        &self,
+        prefix: &str,
+    ) -> Result<Option<Arc<PathDatesMap>>, LibraryError> {
+        self.git.path_dates_at_head(prefix).await
     }
 
     /// Per-repo `post_persist_hook` body collapses to a one-liner over

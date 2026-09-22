@@ -151,12 +151,56 @@ pub(super) struct ContentOutput {
 #[derive(serde::Serialize, schemars::JsonSchema)]
 pub(super) struct FilesOutput {
     pub files: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Vec<EntryDates>>,
 }
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
 pub(super) struct EntriesOutput {
     /// Directory entries (directories have trailing '/').
     pub entries: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Vec<EntryDates>>,
+}
+
+/// One `details: true` entry's git-derived dates, UTC calendar days.
+#[derive(serde::Serialize, schemars::JsonSchema)]
+pub(super) struct EntryDates {
+    pub path: String,
+    pub created: String,
+    pub modified: String,
+}
+
+/// Renders `LS`/`Glob` `details: true` results into the plain entry
+/// strings (unchanged `entries`/`files` shape), the
+/// `entry\tcreated=YYYY-MM-DD\tmodified=YYYY-MM-DD` text lines (bare
+/// `entry` when it has no dates), and the structured `details` array
+/// — only entries that do have dates appear there.
+pub(super) fn render_detailed(
+    entries: Vec<crate::space_fs::DetailedEntry>,
+) -> (Vec<String>, String, Option<Vec<EntryDates>>) {
+    let mut plain = Vec::with_capacity(entries.len());
+    let mut lines = Vec::with_capacity(entries.len());
+    let mut details = Vec::new();
+    for crate::space_fs::DetailedEntry { entry, dates } in entries {
+        match dates {
+            Some(d) => {
+                let created = d.created.date_naive();
+                let modified = d.modified.date_naive();
+                lines.push(format!("{entry}\tcreated={created}\tmodified={modified}"));
+                details.push(EntryDates {
+                    path: entry.clone(),
+                    created: created.to_string(),
+                    modified: modified.to_string(),
+                });
+            }
+            None => lines.push(entry.clone()),
+        }
+        plain.push(entry);
+    }
+    let text = lines.join("\n");
+    let details = (!details.is_empty()).then_some(details);
+    (plain, text, details)
 }
 
 mod agent;

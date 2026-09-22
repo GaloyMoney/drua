@@ -59,6 +59,14 @@ pub(crate) fn parse_view_range(args: &JsonObject) -> Option<(i64, i64)> {
     Some((start, end))
 }
 
+/// `op_args.details` for the `ls`/`glob` sub-ops — always safe to read
+/// here since `dispatch_view` only ever runs against a `space:` path.
+fn op_args_details(args: &JsonObject) -> bool {
+    args.get("details")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// Runs a `ReadOp` against `space:<slug>/<op_args.path>`,
 /// formatting the response as plain text. `Ok(None)` from `SpaceFs`
 /// (only reachable for an empty slug, since callers always prefix
@@ -91,6 +99,14 @@ pub(crate) async fn dispatch_view(
             Ok(CallToolResult::success(vec![Content::text(text)]))
         }
         ReadOp::Ls => {
+            if op_args_details(&op_args) {
+                let entries = space_fs
+                    .view_dir_detailed(subject, &space_path)
+                    .await?
+                    .ok_or_else(invalid)?;
+                let (_, text, _) = super::top_level::render_detailed(entries);
+                return Ok(CallToolResult::success(vec![Content::text(text)]));
+            }
             let entries = space_fs
                 .view_dir(subject, &space_path)
                 .await?
@@ -104,6 +120,14 @@ pub(crate) async fn dispatch_view(
                 .get("pattern")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolSetsError::MissingArgument("pattern".to_string()))?;
+            if op_args_details(&op_args) {
+                let entries = space_fs
+                    .glob_detailed(subject, &space_path, pattern)
+                    .await?
+                    .ok_or_else(invalid)?;
+                let (_, text, _) = super::top_level::render_detailed(entries);
+                return Ok(CallToolResult::success(vec![Content::text(text)]));
+            }
             let matches = space_fs
                 .glob(subject, &space_path, pattern)
                 .await?

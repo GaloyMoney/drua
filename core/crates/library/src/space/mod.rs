@@ -321,6 +321,21 @@ impl Spaces {
         Ok(Some(blobs))
     }
 
+    /// First/last commit dates for every blob in `spaces/<slug>/`, keyed
+    /// relative to it (not the repo root). `Ok(None)` when the repo is
+    /// unborn. See [`crate::git::GitEngine::path_dates_at_head`] for the
+    /// caching and rename-tracking contract.
+    #[tracing::instrument(name = "library.spaces.path_dates", skip_all, fields(%slug))]
+    pub async fn path_dates(
+        &self,
+        slug: &str,
+    ) -> Result<Option<Arc<crate::git::PathDatesMap>>, SpaceError> {
+        self.git
+            .path_dates_at_head(&format!("spaces/{slug}/"))
+            .await
+            .map_err(|e| SpaceError::Git(e.to_string()))
+    }
+
     /// Lists every space, paginated through the `slug` list_by index.
     #[tracing::instrument(name = "library.spaces.list_all", skip_all)]
     pub async fn list_all(&self) -> Result<Vec<Space>, SpaceError> {

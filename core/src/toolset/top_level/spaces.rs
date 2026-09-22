@@ -159,7 +159,7 @@ static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "op_args": {
                 "type": "object",
-                "description": "Sub-op arguments. view: read/ls take {path, ...}; grep/glob take {pattern, path?, ...}. edit: write {path, content}; str_replace {path, old_str, new_str}; insert {path, line, text}; delete {path}; move {from, to}."
+                "description": "Sub-op arguments. view: read/ls take {path, ...} (ls also takes details? — append each file's first-/last-commit dates); grep/glob take {pattern, path?, ...} (glob also takes details?). edit: write {path, content}; str_replace {path, old_str, new_str}; insert {path, line, text}; delete {path}; move {from, to}."
             },
             "query": {
                 "type": "string",
@@ -258,9 +258,9 @@ impl TopLevelTool for SpacesTool {
          `list` (defaults to spaces mounted by the caller's project; \
          pass `all: true` to discover every space in the library), \
          `view` (read-only file ops; requires `slug`, `op`, `op_args`; \
-         op=read {path, offset?, limit?}, ls {path}, \
+         op=read {path, offset?, limit?}, ls {path, details?}, \
          grep {pattern, path?, glob?, output_mode?, ...}, \
-         glob {pattern, path?}), \
+         glob {pattern, path?, details?}), \
          `edit` (mutating file ops; requires `slug`, `op`, `op_args`; \
          op=write {path, content} (full overwrite), \
          str_replace {path, old_str, new_str} (old_str must occur once), \
