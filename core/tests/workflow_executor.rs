@@ -15,7 +15,7 @@ use drua_core::workflow::{
     default_output_schema, NewWorkflowDefinition, WorkflowRunRepo, WorkflowRunState,
     WorkflowStepDef, WorkflowTrigger,
 };
-use llm::prompt::{AssistantBlock, Message, UserBlock};
+use llm::prompt::{AssistantBlock, Message, ToolChoice, UserBlock};
 use llm::response::StopReason;
 use llm::{ModelChain, PromptRequest, PromptResponse, PromptResult, Usage};
 use tokio::sync::mpsc;
@@ -255,6 +255,15 @@ fn last_user_text(prompt: &llm::Prompt) -> String {
     panic!("no user text found in prompt: {prompt:?}");
 }
 
+fn max_tokens_response() -> PromptResponse {
+    PromptResponse {
+        content: Vec::new(),
+        usage: Usage::default(),
+        stop_reason: Some(StopReason::MaxTokens),
+        model_used: None,
+    }
+}
+
 fn submit_output_response(id: &str, args: serde_json::Value) -> PromptResponse {
     PromptResponse {
         content: vec![AssistantBlock::ToolUse {
@@ -321,4 +330,272 @@ async fn run_agent_step_prompt_carries_run_context() {
         run.step_results[0].output,
         Some(serde_json::json!({"success": true, "output": "hi"}))
     );
+}
+
+/// Test (1) from handoff §3.3: two `MaxTokens` stops (empty content),
+/// then a `submit_output` call on the third turn. Demonstrated RED
+/// against the pre-fix executor: the unpatched
+/// `run_agent_until_submit_output` treats the first empty `MaxTokens`
+/// turn as a closed reply and forces `submit_output` with
+/// `tool_choice` on the very next turn — it never sends a second
+/// prompt request, so this test's second `prompt_rx.recv()` would
+/// see the FORCED nudge (`tool_choice: Some(Tool{..})`) with the
+/// "Investigation complete" text instead of the plain continuation
+/// text asserted below, and the model would have to submit_output on
+/// turn 2, not turn 3.
+#[tokio::test]
+async fn continues_past_max_tokens_until_tool_call() {
+    let pool = pool().await;
+    let primary = "claude-haiku-4-5-20251001".to_string();
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx) = build_stack(
+        &pool,
+        ModelChain::new(primary.clone()),
+        BreakerConfig::default(),
+    )
+    .await;
+
+    let (run_id, _) = seed_one_step_run(
+        &skills,
+        &definitions,
+        &runs,
+        &sub,
+        project_id,
+        ModelChain::new(primary.clone()),
+        "Do a very long plan before your first tool call.",
+    )
+    .await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move { executor.run(run_id, cancel).await });
+
+    let mut continuation_texts = Vec::new();
+    for i in 0..2 {
+        let request = recv_prompt(&mut prompt_rx, &format!("prompt request #{i}")).await;
+        assert!(
+            matches!(request.prompt.tool_choice, None | Some(ToolChoice::Auto)),
+            "turn {i} must not force tool_choice: {:?}",
+            request.prompt.tool_choice
+        );
+        if i > 0 {
+            continuation_texts.push(last_user_text(&request.prompt));
+        }
+        request
+            .response_channel
+            .send(Ok(PromptResult::Complete(max_tokens_response())))
+            .unwrap_or_else(|_| panic!("send response #{i}"));
+    }
+
+    let third = recv_prompt(&mut prompt_rx, "third prompt request").await;
+    assert!(
+        matches!(third.prompt.tool_choice, None | Some(ToolChoice::Auto)),
+        "third turn must still be a plain continuation, not the forced nudge: {:?}",
+        third.prompt.tool_choice
+    );
+    continuation_texts.push(last_user_text(&third.prompt));
+    for text in &continuation_texts {
+        assert!(
+            text.contains("Continue from where you were"),
+            "continuation prompt text: {text}"
+        );
+        assert!(!text.contains("Investigation complete"));
+    }
+    third
+        .response_channel
+        .send(Ok(PromptResult::Complete(submit_output_response(
+            "tu_1",
+            serde_json::json!({"success": true, "output": "done"}),
+        ))))
+        .expect("send response");
+
+    handle.await.expect("join").expect("run succeeds");
+
+    assert!(
+        prompt_rx.try_recv().is_err(),
+        "no forced nudge should have been sent"
+    );
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(run.state, WorkflowRunState::Succeeded);
+}
+
+/// Test (2) from handoff §3.3: chain `[primary, fallback]`, three
+/// consecutive `MaxTokens` stops on primary trip the breaker
+/// (`consecutive_max_tokens` default 3 — NOT lowered), advancing the
+/// chain; the fourth prompt request lands on the fallback model.
+#[tokio::test]
+async fn breaker_chain_advance_interacts_with_continuation_loop() {
+    let pool = pool().await;
+    let primary = "claude-haiku-4-5-20251001".to_string();
+    let fallback = "claude-haiku-4-5-fallback".to_string();
+    let chain = ModelChain::new(primary.clone()).with_fallback(fallback.clone());
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx) =
+        build_stack(&pool, chain.clone(), BreakerConfig::default()).await;
+
+    let (run_id, _) = seed_one_step_run(
+        &skills,
+        &definitions,
+        &runs,
+        &sub,
+        project_id,
+        chain,
+        "Do a very long plan before your first tool call.",
+    )
+    .await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move { executor.run(run_id, cancel).await });
+
+    for i in 0..3 {
+        let request = recv_prompt(&mut prompt_rx, &format!("prompt request #{i}")).await;
+        assert_eq!(
+            request.prompt.chain.primary.name, primary,
+            "turn {i} should still be on the primary model"
+        );
+        request
+            .response_channel
+            .send(Ok(PromptResult::Complete(max_tokens_response())))
+            .unwrap_or_else(|_| panic!("send response #{i}"));
+    }
+
+    let fourth = recv_prompt(&mut prompt_rx, "fourth prompt request after chain advance").await;
+    assert_eq!(
+        fourth.prompt.chain.primary.name, fallback,
+        "breaker should have advanced the chain to the fallback"
+    );
+    fourth
+        .response_channel
+        .send(Ok(PromptResult::Complete(submit_output_response(
+            "tu_1",
+            serde_json::json!({"success": true, "output": "recovered on fallback"}),
+        ))))
+        .expect("send response");
+
+    handle.await.expect("join").expect("run succeeds");
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(run.state, WorkflowRunState::Succeeded);
+}
+
+/// Test (3) from handoff §3.3: no fallback declared; three
+/// consecutive `MaxTokens` stops trip the breaker with the chain
+/// exhausted — the step errors instead of forcing a content-free
+/// `submit_output`.
+#[tokio::test]
+async fn breaker_trip_without_fallback_errors_the_step() {
+    let pool = pool().await;
+    let primary = "claude-haiku-4-5-20251001".to_string();
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx) = build_stack(
+        &pool,
+        ModelChain::new(primary.clone()),
+        BreakerConfig::default(),
+    )
+    .await;
+
+    let (run_id, _) = seed_one_step_run(
+        &skills,
+        &definitions,
+        &runs,
+        &sub,
+        project_id,
+        ModelChain::new(primary.clone()),
+        "Do a very long plan before your first tool call.",
+    )
+    .await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move { executor.run(run_id, cancel).await });
+
+    for i in 0..3 {
+        let request = recv_prompt(&mut prompt_rx, &format!("prompt request #{i}")).await;
+        request
+            .response_channel
+            .send(Ok(PromptResult::Complete(max_tokens_response())))
+            .unwrap_or_else(|_| panic!("send response #{i}"));
+    }
+
+    handle.await.expect("join").expect("run() itself succeeds");
+
+    assert!(
+        prompt_rx.try_recv().is_err(),
+        "chain has no fallback; no further prompt should be sent"
+    );
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(run.state, WorkflowRunState::Errored);
+    let reason = run.step_results[0]
+        .error
+        .as_ref()
+        .expect("step should have errored");
+    assert!(
+        reason.contains("breaker tripped"),
+        "reason should name the breaker: {reason}"
+    );
+}
+
+/// Test (4) from handoff §3.3 — REGRESSION GUARD, must be green both
+/// before and after the fix: a turn that closes with `EndTurn` text
+/// and no `submit_output` call still triggers the existing forced
+/// nudge (`tool_choice: Tool { name: "submit_output" }`).
+#[tokio::test]
+async fn end_turn_without_submit_output_still_triggers_forced_nudge() {
+    let pool = pool().await;
+    let primary = "claude-haiku-4-5-20251001".to_string();
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx) = build_stack(
+        &pool,
+        ModelChain::new(primary.clone()),
+        BreakerConfig::default(),
+    )
+    .await;
+
+    let (run_id, _) = seed_one_step_run(
+        &skills,
+        &definitions,
+        &runs,
+        &sub,
+        project_id,
+        ModelChain::new(primary),
+        "Say hi.",
+    )
+    .await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move { executor.run(run_id, cancel).await });
+
+    let first = recv_prompt(&mut prompt_rx, "first prompt request").await;
+    first
+        .response_channel
+        .send(Ok(PromptResult::Complete(PromptResponse {
+            content: vec![AssistantBlock::Text {
+                text: "I looked around but did not call a tool.".to_string(),
+            }],
+            usage: Usage::default(),
+            stop_reason: Some(StopReason::EndTurn),
+            model_used: None,
+        })))
+        .expect("send response");
+
+    let second = recv_prompt(&mut prompt_rx, "forced nudge prompt").await;
+    assert!(
+        matches!(
+            second.prompt.tool_choice,
+            Some(ToolChoice::Tool { ref name }) if name == "submit_output"
+        ),
+        "expected forced tool_choice on the nudge: {:?}",
+        second.prompt.tool_choice
+    );
+    let text = last_user_text(&second.prompt);
+    assert!(text.contains("Investigation complete"));
+
+    second
+        .response_channel
+        .send(Ok(PromptResult::Complete(submit_output_response(
+            "tu_1",
+            serde_json::json!({"success": true, "output": "done"}),
+        ))))
+        .expect("send response");
+
+    handle.await.expect("join").expect("run succeeds");
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(run.state, WorkflowRunState::Succeeded);
 }

@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::agent::session::message::SUBMIT_OUTPUT_TOOL_NAME;
+use crate::agent::session::message::{StopReason, SUBMIT_OUTPUT_TOOL_NAME};
 use crate::agent::{Agent, Agents};
 use crate::auth::AuthSubject;
 use crate::primitives::{
@@ -674,9 +674,16 @@ impl Executor {
         }
     }
 
-    /// First the regular send/resume loop; if the agent finished without
-    /// calling `submit_output`, retry once with `tool_choice` forced to
-    /// the synthetic tool. After a second miss the step fails.
+    /// A turn that closes on `max_tokens` without a tool call is
+    /// continued (not treated as a finished reply) up to the session
+    /// breaker's `consecutive_max_tokens` threshold — the breaker
+    /// itself advances the chain to a fallback (or fails the turn)
+    /// once that threshold is hit, so this loop only has to keep the
+    /// conversation going long enough for that to happen. Once the
+    /// agent finishes a turn without calling `submit_output` for any
+    /// OTHER reason (a plain text reply, an empty tool-less `Stop`),
+    /// retry once with `tool_choice` forced to the synthetic tool.
+    /// After a second miss the step fails.
     async fn run_agent_until_submit_output(
         &self,
         agent: &Agent,
@@ -684,11 +691,39 @@ impl Executor {
         step_name: &str,
         timeout_seconds: Option<u64>,
     ) -> Result<serde_json::Value, WorkflowError> {
-        if let Some(value) = self
-            .stream_agent_response(agent, Some(prompt), None, step_name, timeout_seconds)
+        const MAX_TOKENS_CONTINUATION: &str =
+            "Your previous turn hit the output token limit before making a tool call. \
+             Continue from where you were: make the next tool call now. Do not restate \
+             your plan or summarise what you have read.";
+
+        let limit = self
+            .agents
+            .breaker_config(agent.id)
             .await?
-        {
-            return Ok(value);
+            .consecutive_max_tokens
+            .max(1);
+        let mut next_prompt = Some(prompt);
+        let mut continuations = 0usize;
+        loop {
+            if let Some(value) = self
+                .stream_agent_response(agent, next_prompt.take(), None, step_name, timeout_seconds)
+                .await?
+            {
+                return Ok(value);
+            }
+            match self.agents.last_stop_reason(agent.id).await? {
+                Some(StopReason::Length) if continuations < limit => {
+                    continuations += 1;
+                    tracing::warn!(
+                        step = step_name,
+                        agent_id = %agent.id,
+                        continuations,
+                        "workflow step: turn hit max_tokens without submit_output; continuing"
+                    );
+                    next_prompt = Some(MAX_TOKENS_CONTINUATION.to_string());
+                }
+                _ => break,
+            }
         }
 
         // Forced retry: the agent ended its turn without calling
