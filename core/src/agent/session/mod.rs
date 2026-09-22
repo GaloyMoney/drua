@@ -391,6 +391,28 @@ impl Sessions {
         Ok(session.submitted_output().cloned())
     }
 
+    /// Reads the `stop_reason` of the agent's most recent assistant
+    /// turn, across every thread. Workflow executor consumes this to
+    /// decide whether a closed turn without `submit_output` was a
+    /// `max_tokens` truncation that should be continued.
+    #[instrument(name = "domain.agent_session.last_stop_reason", skip(self))]
+    pub async fn last_stop_reason(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Option<message::StopReason>, AgentSessionError> {
+        let session = self.repo.find_by_agent_id(agent_id).await?;
+        Ok(session.last_stop_reason())
+    }
+
+    #[instrument(name = "domain.agent_session.breaker_config", skip(self))]
+    pub async fn breaker_config(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<BreakerConfig, AgentSessionError> {
+        let session = self.repo.find_by_agent_id(agent_id).await?;
+        Ok(session.breaker_config().clone())
+    }
+
     #[instrument(name = "domain.agent_session.thread_infos", skip(self))]
     pub async fn thread_infos(
         &self,

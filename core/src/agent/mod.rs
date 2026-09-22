@@ -621,6 +621,26 @@ impl Agents {
         Ok(self.sessions.submitted_output(agent_id).await?)
     }
 
+    /// Reads the agent's session for the `stop_reason` of its most
+    /// recent assistant turn. Workflow executor consumes this to
+    /// decide whether to continue a turn that closed on `max_tokens`
+    /// without a tool call.
+    #[instrument(name = "domain.agent.last_stop_reason", skip(self))]
+    pub async fn last_stop_reason(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Option<session::message::StopReason>, AgentError> {
+        Ok(self.sessions.last_stop_reason(agent_id).await?)
+    }
+
+    #[instrument(name = "domain.agent.breaker_config", skip(self))]
+    pub async fn breaker_config(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<session::BreakerConfig, AgentError> {
+        Ok(self.sessions.breaker_config(agent_id).await?)
+    }
+
     /// Workflow-spawned agents are filtered out; see
     /// [`Self::list_for_workflow_run`] for those.
     #[instrument(name = "domain.agent.list_for_project", skip(self, sub))]

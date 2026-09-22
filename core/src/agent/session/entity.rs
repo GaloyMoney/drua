@@ -551,6 +551,26 @@ impl AgentSession {
         })
     }
 
+    /// The `stop_reason` of the newest `AssistantResponseReceived`
+    /// event, on ANY thread — not just the current main thread. A
+    /// breaker chain-advance spawns a context-refreshed thread, so
+    /// the newest assistant response can sit on a thread other than
+    /// `current_main_thread`; `self.events` is one flat, chronologically
+    /// ordered stream across every thread, so walking it back finds
+    /// the newest response regardless of which thread it landed on.
+    pub fn last_stop_reason(&self) -> Option<StopReason> {
+        self.events.iter_all().rev().find_map(|e| match e {
+            AgentSessionEvent::AssistantResponseReceived { stop_reason, .. } => {
+                Some(stop_reason.clone())
+            }
+            _ => None,
+        })
+    }
+
+    pub fn breaker_config(&self) -> &BreakerConfig {
+        &self.breaker_config
+    }
+
     pub fn update_tool_definitions(&mut self, tool_defs: Vec<ToolDefinition>) -> Idempotent<()> {
         let latest = self.events.iter_all().rev().find_map(|e| match e {
             AgentSessionEvent::ToolDefsUpdated { tool_defs } => Some(tool_defs),
@@ -1984,6 +2004,127 @@ mod tests {
         assert!(
             matches!(result, Ok(AgentSessionResponse::PromptPending { .. })),
             "session must not be stuck awaiting a response that will never come: {result:?}"
+        );
+    }
+
+    #[test]
+    fn last_stop_reason_is_none_before_any_response() {
+        let session = new_session_with(
+            ModelChain {
+                primary: model_defaults("primary-model"),
+                fallbacks: vec![],
+            },
+            BreakerConfig::default(),
+        );
+        assert_eq!(session.last_stop_reason(), None);
+    }
+
+    #[test]
+    fn last_stop_reason_reads_latest_response_on_current_thread() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![],
+        };
+        let mut session = started_session(chain, BreakerConfig::default());
+        let thread_id = session.current_main_thread_id().unwrap();
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::Text { text: "...".into() }],
+                StopReason::Length,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+        assert_eq!(session.last_stop_reason(), Some(StopReason::Length));
+    }
+
+    #[test]
+    fn breaker_config_returns_the_configured_value() {
+        let breaker = BreakerConfig {
+            consecutive_max_tokens: 7,
+            ..BreakerConfig::default()
+        };
+        let session = new_session_with(
+            ModelChain {
+                primary: model_defaults("primary-model"),
+                fallbacks: vec![],
+            },
+            breaker.clone(),
+        );
+        assert_eq!(session.breaker_config().consecutive_max_tokens, 7);
+        assert_eq!(session.breaker_config().enabled, breaker.enabled);
+    }
+
+    /// A single-thread test would pass trivially even if
+    /// `last_stop_reason` were scoped to `current_main_thread` — it
+    /// wouldn't exercise the "any thread" contract at all. This test
+    /// drives a REAL breaker chain-advance (3 consecutive `Length`
+    /// stops with a fallback declared), which leaves the model chain
+    /// stale; the next `next_prompt` call detects that staleness and
+    /// spawns a context-refreshed thread. Only once that second
+    /// thread actually exists does the test assert that
+    /// `last_stop_reason` reads the newest response off of it rather
+    /// than the (older, and differently-stopped) response left on the
+    /// original thread.
+    #[test]
+    fn last_stop_reason_reads_newest_response_across_threads() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![model_defaults("fallback-model")],
+        };
+        let mut session = started_session(chain, BreakerConfig::default());
+        let original_thread_id = session.current_main_thread_id().unwrap();
+
+        for i in 0..3 {
+            let thread_id = session.current_main_thread_id().unwrap();
+            let result = session.assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::Text { text: "...".into() }],
+                StopReason::Length,
+                None,
+                dummy_metadata(),
+            );
+            assert!(result.is_ok(), "turn {i}: {result:?}");
+            session
+                .add_user_input(TargetThread::Main, user_source(), "continue".into())
+                .unwrap();
+            advance_turn(&mut session);
+        }
+
+        assert_eq!(
+            session.model(),
+            "fallback-model",
+            "3rd consecutive max_tokens turn should have advanced the chain"
+        );
+        let new_thread_id = session.current_main_thread_id().unwrap();
+        assert_ne!(
+            new_thread_id, original_thread_id,
+            "the stale model chain should have spawned a context-refreshed thread"
+        );
+        assert_eq!(
+            session.last_stop_reason(),
+            Some(StopReason::Length),
+            "before the fallback answers, the newest response (on the new thread's \
+             predecessor) is still the 3rd Length stop"
+        );
+
+        session
+            .assistant_response_received(
+                new_thread_id,
+                vec![AssistantBlock::Text {
+                    text: "recovered".into(),
+                }],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            session.last_stop_reason(),
+            Some(StopReason::Stop),
+            "must read the newest response off the new thread, not the old thread's Length"
         );
     }
 
