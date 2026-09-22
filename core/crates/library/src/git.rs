@@ -1,7 +1,9 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use chrono::{DateTime, Utc};
 use sqlx::{PgConnection, PgPool};
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use tokio::task::JoinHandle;
@@ -44,6 +46,90 @@ pub type BlobEntries = Vec<(String, Vec<u8>)>;
 pub struct DirEntry {
     pub name: String,
     pub is_dir: bool,
+}
+
+/// First/last commit times for one path at HEAD. `created` follows renames
+/// (a pure rename keeps the source's `created`); `modified` is the last
+/// commit that added, modified or renamed the path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathDates {
+    pub created: DateTime<Utc>,
+    pub modified: DateTime<Utc>,
+}
+
+/// `path → PathDates` for every blob under one prefix at HEAD, keyed
+/// relative to that prefix (the prefix itself is stripped before the
+/// map is cached — see [`GitEngine::path_dates_at_head`]).
+pub type PathDatesMap = HashMap<String, PathDates>;
+
+/// One path-affecting change from a single commit's diff, in the order
+/// `fold_path_dates` needs to apply them.
+#[derive(Debug, Clone)]
+enum PathEvent {
+    Touched { path: String },
+    Renamed { from: String, to: String },
+    Deleted { path: String },
+}
+
+/// A previously computed [`PathDatesMap`] and the HEAD it was computed
+/// at, so a later call can fold forward instead of walking from scratch.
+struct CachedPathDates {
+    head: git2::Oid,
+    dates: Arc<PathDatesMap>,
+}
+
+/// Applies one commit's path events, in the order libgit2 reported
+/// them, to `map`. Pure — no git access — so the four properties below
+/// are unit-tested without a repository:
+/// - touch-touch keeps the first `created`.
+/// - a rename preserves `created` and moves `modified` to `at`.
+/// - delete then re-add restarts `created` at the re-add's time.
+/// - a rename whose source isn't in `map` (the incremental walk's
+///   cached base started after the source was created — never happens
+///   in practice, since the source would already be in the cached map)
+///   falls back to `created: at`.
+fn fold_path_dates(map: &mut PathDatesMap, at: DateTime<Utc>, events: Vec<PathEvent>) {
+    for ev in events {
+        match ev {
+            PathEvent::Touched { path } => {
+                let entry = map.entry(path).or_insert(PathDates {
+                    created: at,
+                    modified: at,
+                });
+                entry.modified = at;
+            }
+            PathEvent::Renamed { from, to } => {
+                let created = map.remove(&from).map(|d| d.created).unwrap_or(at);
+                map.insert(
+                    to,
+                    PathDates {
+                        created,
+                        modified: at,
+                    },
+                );
+            }
+            PathEvent::Deleted { path } => {
+                map.remove(&path);
+            }
+        }
+    }
+}
+
+/// Ensures `prefix` ends with `/` (unless empty), so it's both a valid
+/// directory pathspec and an unambiguous strip prefix.
+fn normalize_prefix(prefix: &str) -> String {
+    if prefix.is_empty() || prefix.ends_with('/') {
+        prefix.to_string()
+    } else {
+        format!("{prefix}/")
+    }
+}
+
+/// Strips `prefix` (already `/`-normalized) off `path`, falling back to
+/// the untouched path if it doesn't start with `prefix` (defensive —
+/// the diff is already scoped to `prefix` via `pathspec`).
+fn strip(prefix: &str, path: &str) -> String {
+    path.strip_prefix(prefix).unwrap_or(path).to_string()
 }
 
 #[derive(Debug, Clone)]
@@ -139,6 +225,13 @@ pub struct GitEngine {
     /// batch and by the head listener on any peer replica's push.
     commit_notify: Arc<Notify>,
     github_app: Option<Arc<GitHubAppTokenProvider>>,
+    /// Per-prefix `path_dates_at_head` cache. Held only to clone the
+    /// `Arc` out and to store a freshly computed result back — never
+    /// across the blocking walk. Two concurrent misses for the same
+    /// prefix may both compute; the second store wins, and both
+    /// results are correct for the HEAD they were computed at, so
+    /// there is deliberately no per-prefix lock.
+    path_dates: Arc<std::sync::Mutex<HashMap<String, CachedPathDates>>>,
     _writer: OwnedTaskHandle,
     _listener: OwnedTaskHandle,
 }
@@ -193,6 +286,7 @@ impl GitEngine {
             write_tx,
             commit_notify,
             github_app,
+            path_dates: Arc::new(std::sync::Mutex::new(HashMap::new())),
             _writer: OwnedTaskHandle::new(writer),
             _listener: OwnedTaskHandle::new(listener),
         })
@@ -581,6 +675,171 @@ impl GitEngine {
             })
             .map_err(|e| LibraryError::Git(format!("tree walk: {e}")))?;
         Ok(Some(out))
+    }
+
+    /// Dates for every blob under `prefix` (repo-relative, trailing
+    /// slash optional) at HEAD. `Ok(None)` when HEAD is unborn.
+    /// Returned keys — and the cache's — have `prefix` stripped off,
+    /// so callers get paths relative to it.
+    ///
+    /// Served from a per-prefix cache keyed by HEAD; a stale entry is
+    /// brought forward by folding only the first-parent commits since
+    /// the cached HEAD, rather than re-walking all of history. If the
+    /// cached HEAD is no longer an ancestor of the current HEAD (a
+    /// force-push to the library, or `main` moved sideways), the
+    /// cached entry is discarded and a full walk runs instead —
+    /// folding onto a disconnected base would silently attribute
+    /// dates to the wrong history.
+    #[tracing::instrument(name = "library.git.path_dates_at_head", skip_all, fields(%prefix))]
+    pub async fn path_dates_at_head(
+        &self,
+        prefix: &str,
+    ) -> Result<Option<Arc<PathDatesMap>>, LibraryError> {
+        let repo_path = self.repo_path.clone();
+        let prefix = prefix.to_string();
+        let cache = Arc::clone(&self.path_dates);
+        tokio::task::spawn_blocking(move || -> Result<Option<Arc<PathDatesMap>>, LibraryError> {
+            let repo = git2::Repository::open_bare(&repo_path)
+                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
+            Self::path_dates_blocking(&repo, &prefix, &cache)
+        })
+        .await
+        .map_err(|e| LibraryError::Git(format!("path_dates_at_head join: {e}")))?
+    }
+
+    /// Blocking body of [`Self::path_dates_at_head`], factored out so
+    /// unit tests can exercise it against a hand-built `git2::Repository`
+    /// without a full `GitEngine` (mirrors `walk_blobs_at_head` /
+    /// `walk_blobs_at`).
+    fn path_dates_blocking(
+        repo: &git2::Repository,
+        prefix: &str,
+        cache: &std::sync::Mutex<HashMap<String, CachedPathDates>>,
+    ) -> Result<Option<Arc<PathDatesMap>>, LibraryError> {
+        let Ok(head) = repo.head() else {
+            return Ok(None);
+        };
+        let Some(head_oid) = head.target() else {
+            return Ok(None);
+        };
+
+        let stale = {
+            let guard = cache.lock().expect("path_dates cache lock poisoned");
+            guard.get(prefix).map(|c| (c.head, Arc::clone(&c.dates)))
+        };
+        if let Some((cached_head, dates)) = &stale {
+            if *cached_head == head_oid {
+                return Ok(Some(Arc::clone(dates)));
+            }
+        }
+
+        let fold_base = match &stale {
+            Some((cached_head, dates))
+                if repo
+                    .graph_descendant_of(head_oid, *cached_head)
+                    .map_err(|e| {
+                        LibraryError::Git(format!("path_dates graph_descendant_of: {e}"))
+                    })? =>
+            {
+                Some((*cached_head, (**dates).clone()))
+            }
+            _ => None,
+        };
+
+        let mut walk = repo
+            .revwalk()
+            .map_err(|e| LibraryError::Git(format!("path_dates revwalk: {e}")))?;
+        walk.simplify_first_parent()
+            .map_err(|e| LibraryError::Git(format!("path_dates simplify: {e}")))?;
+        walk.set_sorting(git2::Sort::TOPOLOGICAL | git2::Sort::TIME)
+            .map_err(|e| LibraryError::Git(format!("path_dates sort: {e}")))?;
+        walk.push(head_oid)
+            .map_err(|e| LibraryError::Git(format!("path_dates push: {e}")))?;
+        if let Some((cached_head, _)) = &fold_base {
+            walk.hide(*cached_head)
+                .map_err(|e| LibraryError::Git(format!("path_dates hide: {e}")))?;
+        }
+
+        let mut oids = Vec::new();
+        for oid in walk {
+            oids.push(oid.map_err(|e| LibraryError::Git(format!("path_dates next: {e}")))?);
+        }
+        oids.reverse();
+
+        let strip_prefix = normalize_prefix(prefix);
+        let mut map = fold_base.map(|(_, m)| m).unwrap_or_default();
+        for oid in oids {
+            let commit = repo
+                .find_commit(oid)
+                .map_err(|e| LibraryError::Git(format!("path_dates find commit: {e}")))?;
+            let parent_tree = commit.parent(0).ok().and_then(|p| p.tree().ok());
+            let commit_tree = commit
+                .tree()
+                .map_err(|e| LibraryError::Git(format!("path_dates commit tree: {e}")))?;
+
+            let mut opts = git2::DiffOptions::new();
+            if !strip_prefix.is_empty() {
+                opts.pathspec(&strip_prefix);
+            }
+            let mut diff = repo
+                .diff_tree_to_tree(parent_tree.as_ref(), Some(&commit_tree), Some(&mut opts))
+                .map_err(|e| LibraryError::Git(format!("path_dates diff: {e}")))?;
+            let mut find_opts = git2::DiffFindOptions::new();
+            find_opts.renames(true);
+            diff.find_similar(Some(&mut find_opts))
+                .map_err(|e| LibraryError::Git(format!("path_dates find_similar: {e}")))?;
+
+            let events: Vec<PathEvent> = diff
+                .deltas()
+                .filter_map(|delta| match delta.status() {
+                    git2::Delta::Added | git2::Delta::Modified => {
+                        delta.new_file().path().and_then(|p| p.to_str()).map(|p| {
+                            PathEvent::Touched {
+                                path: strip(&strip_prefix, p),
+                            }
+                        })
+                    }
+                    git2::Delta::Renamed => {
+                        let from = delta.old_file().path().and_then(|p| p.to_str());
+                        let to = delta.new_file().path().and_then(|p| p.to_str());
+                        match (from, to) {
+                            (Some(from), Some(to)) => Some(PathEvent::Renamed {
+                                from: strip(&strip_prefix, from),
+                                to: strip(&strip_prefix, to),
+                            }),
+                            _ => None,
+                        }
+                    }
+                    git2::Delta::Deleted => {
+                        delta.old_file().path().and_then(|p| p.to_str()).map(|p| {
+                            PathEvent::Deleted {
+                                path: strip(&strip_prefix, p),
+                            }
+                        })
+                    }
+                    _ => None,
+                })
+                .collect();
+            if events.is_empty() {
+                continue;
+            }
+            let at = DateTime::<Utc>::from_timestamp(commit.time().seconds(), 0)
+                .unwrap_or(DateTime::<Utc>::UNIX_EPOCH);
+            fold_path_dates(&mut map, at, events);
+        }
+
+        let dates = Arc::new(map);
+        {
+            let mut guard = cache.lock().expect("path_dates cache lock poisoned");
+            guard.insert(
+                prefix.to_string(),
+                CachedPathDates {
+                    head: head_oid,
+                    dates: Arc::clone(&dates),
+                },
+            );
+        }
+        Ok(Some(dates))
     }
 
     #[tracing::instrument(name = "library.git.fetch_and_head", skip_all)]
@@ -1673,5 +1932,217 @@ mod tests {
         let repo = git2::Repository::init_bare(&dir).unwrap();
         assert!(GitEngine::walk_blobs_at(&repo, "").unwrap().is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn t(secs: i64) -> DateTime<Utc> {
+        DateTime::<Utc>::from_timestamp(secs, 0).unwrap()
+    }
+
+    #[test]
+    fn fold_touch_touch_keeps_first_created() {
+        let mut map = PathDatesMap::new();
+        fold_path_dates(
+            &mut map,
+            t(100),
+            vec![PathEvent::Touched {
+                path: "a.md".into(),
+            }],
+        );
+        fold_path_dates(
+            &mut map,
+            t(200),
+            vec![PathEvent::Touched {
+                path: "a.md".into(),
+            }],
+        );
+        let dates = map["a.md"];
+        assert_eq!(dates.created, t(100));
+        assert_eq!(dates.modified, t(200));
+    }
+
+    #[test]
+    fn fold_rename_preserves_created_moves_modified() {
+        let mut map = PathDatesMap::new();
+        fold_path_dates(
+            &mut map,
+            t(100),
+            vec![PathEvent::Touched {
+                path: "old.md".into(),
+            }],
+        );
+        fold_path_dates(
+            &mut map,
+            t(300),
+            vec![PathEvent::Renamed {
+                from: "old.md".into(),
+                to: "new.md".into(),
+            }],
+        );
+        assert!(!map.contains_key("old.md"));
+        let dates = map["new.md"];
+        assert_eq!(dates.created, t(100));
+        assert_eq!(dates.modified, t(300));
+    }
+
+    #[test]
+    fn fold_delete_then_readd_restarts_created() {
+        let mut map = PathDatesMap::new();
+        fold_path_dates(
+            &mut map,
+            t(100),
+            vec![PathEvent::Touched {
+                path: "a.md".into(),
+            }],
+        );
+        fold_path_dates(
+            &mut map,
+            t(200),
+            vec![PathEvent::Deleted {
+                path: "a.md".into(),
+            }],
+        );
+        assert!(!map.contains_key("a.md"));
+        fold_path_dates(
+            &mut map,
+            t(300),
+            vec![PathEvent::Touched {
+                path: "a.md".into(),
+            }],
+        );
+        let dates = map["a.md"];
+        assert_eq!(dates.created, t(300));
+        assert_eq!(dates.modified, t(300));
+    }
+
+    #[test]
+    fn fold_rename_of_unseen_source_uses_commit_time() {
+        let mut map = PathDatesMap::new();
+        fold_path_dates(
+            &mut map,
+            t(400),
+            vec![PathEvent::Renamed {
+                from: "ghost.md".into(),
+                to: "new.md".into(),
+            }],
+        );
+        let dates = map["new.md"];
+        assert_eq!(dates.created, t(400));
+        assert_eq!(dates.modified, t(400));
+    }
+
+    #[test]
+    fn normalize_prefix_adds_trailing_slash() {
+        assert_eq!(normalize_prefix("spaces/s"), "spaces/s/");
+        assert_eq!(normalize_prefix("spaces/s/"), "spaces/s/");
+        assert_eq!(normalize_prefix(""), "");
+    }
+
+    #[test]
+    fn strip_removes_normalized_prefix() {
+        assert_eq!(strip("spaces/s/", "spaces/s/a.md"), "a.md");
+        assert_eq!(
+            strip("spaces/s/", "spaces/s/research/a.md"),
+            "research/a.md"
+        );
+        // Defensive fallback when the path doesn't carry the prefix.
+        assert_eq!(strip("spaces/s/", "elsewhere/a.md"), "elsewhere/a.md");
+    }
+
+    /// Rename tracking itself is exercised end-to-end by the
+    /// `move_keeps_created` integration test (`space_path_dates.rs`),
+    /// against the production `Spaces::move_file` commit shape. This
+    /// covers the plainer diff/revwalk mechanics: `created` pins to
+    /// the first commit that touches a path, `modified` follows the
+    /// last.
+    #[test]
+    fn path_dates_blocking_pins_created_follows_modified() {
+        let dir = unique_dir("pd-happy");
+        let repo = git2::Repository::init_bare(&dir).unwrap();
+        let cache: std::sync::Mutex<HashMap<String, CachedPathDates>> =
+            std::sync::Mutex::new(HashMap::new());
+
+        // `commit_file`'s treebuilder only supports single-level names,
+        // so this exercises the fold/revwalk mechanics at the repo
+        // root (prefix ""); `normalize_prefix`/`strip` above cover the
+        // `spaces/<slug>/` scoping in isolation, and the DB-backed
+        // `space_path_dates.rs` integration tests exercise the real
+        // `spaces/<slug>/...` layout end to end.
+        let c0 = commit_file(&repo, None, "a.md", b"v0", "human@example.com", "add a.md");
+        let c1 = commit_file(
+            &repo,
+            Some(c0),
+            "a.md",
+            b"v1",
+            "human@example.com",
+            "edit a.md",
+        );
+        repo.set_head_detached(c1).unwrap();
+
+        let dates = GitEngine::path_dates_blocking(&repo, "", &cache)
+            .unwrap()
+            .unwrap();
+        let a = dates["a.md"];
+        assert_eq!(a.created, a_time(&repo, c0));
+        assert_eq!(a.modified, a_time(&repo, c1));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Simulates the hidden-commit caveat (§2.2 of the handoff): a
+    /// cached entry whose HEAD is no longer an ancestor of the current
+    /// HEAD — e.g. a force-push, or `main` reset sideways — must be
+    /// discarded rather than folded onto, which would silently
+    /// attribute dates to a disconnected base.
+    #[test]
+    fn path_dates_blocking_discards_cache_when_stale_head_not_ancestor() {
+        let dir = unique_dir("pd-nonancestor");
+        let repo = git2::Repository::init_bare(&dir).unwrap();
+        let cache: std::sync::Mutex<HashMap<String, CachedPathDates>> =
+            std::sync::Mutex::new(HashMap::new());
+
+        // History A: c0 -> c1. Populate the cache at HEAD = c1.
+        let c0 = commit_file(&repo, None, "a.md", b"v0", "human@example.com", "add a.md");
+        let c1 = commit_file(
+            &repo,
+            Some(c0),
+            "b.md",
+            b"v0",
+            "human@example.com",
+            "add b.md",
+        );
+        repo.set_head_detached(c1).unwrap();
+        let first = GitEngine::path_dates_blocking(&repo, "", &cache)
+            .unwrap()
+            .unwrap();
+        assert!(first.contains_key("a.md"));
+        assert!(first.contains_key("b.md"));
+
+        // History B: an unrelated root commit. HEAD moves sideways —
+        // c1 is not an ancestor of it (equivalent to an abandoned
+        // branch after a force-push / reset).
+        let d0 = commit_file(
+            &repo,
+            None,
+            "c.md",
+            b"v0",
+            "human@example.com",
+            "unrelated root",
+        );
+        repo.set_head_detached(d0).unwrap();
+        assert!(!repo.graph_descendant_of(d0, c1).unwrap());
+
+        let second = GitEngine::path_dates_blocking(&repo, "", &cache)
+            .unwrap()
+            .unwrap();
+        assert!(second.contains_key("c.md"));
+        assert!(
+            !second.contains_key("a.md") && !second.contains_key("b.md"),
+            "folding onto the disconnected stale base must not resurrect history A: {second:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn a_time(repo: &git2::Repository, oid: git2::Oid) -> DateTime<Utc> {
+        let commit = repo.find_commit(oid).unwrap();
+        DateTime::<Utc>::from_timestamp(commit.time().seconds(), 0).unwrap()
     }
 }
