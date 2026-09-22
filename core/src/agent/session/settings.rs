@@ -84,20 +84,13 @@ impl Default for CompactionConfig {
     }
 }
 
-/// Detects a model stuck in a degenerate loop (identical failing tool calls,
-/// runs of error results, runaway `max_tokens` stops) and advances the
-/// session to the next entry in its model chain. See D1-D7 in the handoff.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BreakerConfig {
     pub enabled: bool,
-    /// Consecutive turns where every tool result errored.
     pub consecutive_error_turns: usize,
-    /// Consecutive turns with the same single tool call (name + input) and an errored result.
     pub identical_failing_calls: usize,
-    /// Consecutive assistant responses that stopped on `max_tokens`.
     pub consecutive_max_tokens: usize,
-    /// Backstop: assistant turns per user prompt, regardless of pattern. Fails the turn; never advances.
     pub max_turns_per_prompt: usize,
 }
 

@@ -465,9 +465,6 @@ async fn send_message_dispatches_registered_tool_call() {
     }
 }
 
-/// A registered top-level tool that always errors. Drives the misbehaviour
-/// breaker's identical-failing-call detector end to end through the real
-/// `drive_session_loop`.
 struct AlwaysFailingTool {
     schema: serde_json::Value,
 }
@@ -504,10 +501,6 @@ impl TopLevelTool for AlwaysFailingTool {
     }
 }
 
-/// End-to-end: the same failing `bad_tool` call three turns in a row trips
-/// the identical-failing-call detector (default threshold 3) and the very
-/// next `PromptRequest` the loop sends out names the fallback model —
-/// through the real `drive_session_loop`, no entity-level shortcuts.
 #[tokio::test]
 async fn identical_failing_tool_calls_advance_chain_to_fallback() {
     let pool = pool().await;
@@ -587,7 +580,6 @@ async fn identical_failing_tool_calls_advance_chain_to_fallback() {
         .await
         .expect("send_message");
 
-    // Three turns of the identical failing call — same tool, same input.
     let input = serde_json::json!({});
     for i in 0..3 {
         let request = prompt_rx
@@ -617,7 +609,6 @@ async fn identical_failing_tool_calls_advance_chain_to_fallback() {
             .unwrap_or_else(|_| panic!("send response #{i}"));
     }
 
-    // The loop's 4th outbound prompt request must name the fallback.
     let fourth = prompt_rx
         .recv()
         .await
@@ -627,7 +618,6 @@ async fn identical_failing_tool_calls_advance_chain_to_fallback() {
         "identical failing call should have advanced the chain to the fallback"
     );
 
-    // Let the fallback "succeed" so the loop terminates cleanly.
     fourth
         .response_channel
         .send(Ok(PromptResult::Complete(PromptResponse {
@@ -643,9 +633,6 @@ async fn identical_failing_tool_calls_advance_chain_to_fallback() {
     while events_rx.recv().await.is_some() {}
 }
 
-/// End-to-end negative: the same failing `bad_tool` call, but the chain has
-/// no fallback — the 3rd turn's `ChatOutputEvent::Error` must name the
-/// breaker, and the loop must not send a 4th `PromptRequest`.
 #[tokio::test]
 async fn identical_failing_tool_calls_without_fallback_error_the_turn() {
     let pool = pool().await;
@@ -745,7 +732,6 @@ async fn identical_failing_tool_calls_without_fallback_error_the_turn() {
             .unwrap_or_else(|_| panic!("send response #{i}"));
     }
 
-    // No 4th prompt request — the turn should error out instead.
     assert!(
         prompt_rx.try_recv().is_err(),
         "chain has no fallback; the loop must not send another prompt request"

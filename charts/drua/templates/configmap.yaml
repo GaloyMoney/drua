@@ -106,10 +106,6 @@ data:
           {{- end }}
           {{- with .Values.galoyAgents.config.agents.projectLead.breaker }}
           breaker:
-            {{- /* hasKey, not `with`: these are thresholds and `with` treats 0
-                   as empty, so e.g. `identicalFailingCalls: 0` — how you'd
-                   disable just that detector — would silently fall back to
-                   the crate default. */}}
             {{- if hasKey . "enabled" }}
             enabled: {{ .enabled }}
             {{- end }}
@@ -162,10 +158,6 @@ data:
           {{- end }}
           {{- with .breaker }}
           breaker:
-            {{- /* hasKey, not `with`: these are thresholds and `with` treats 0
-                   as empty, so e.g. `identicalFailingCalls: 0` — how you'd
-                   disable just that detector — would silently fall back to
-                   the crate default. */}}
             {{- if hasKey . "enabled" }}
             enabled: {{ .enabled }}
             {{- end }}
@@ -219,10 +211,6 @@ data:
           {{- end }}
           {{- with .breaker }}
           breaker:
-            {{- /* hasKey, not `with`: these are thresholds and `with` treats 0
-                   as empty, so e.g. `identicalFailingCalls: 0` — how you'd
-                   disable just that detector — would silently fall back to
-                   the crate default. */}}
             {{- if hasKey . "enabled" }}
             enabled: {{ .enabled }}
             {{- end }}

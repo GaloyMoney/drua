@@ -111,26 +111,10 @@ galoyAgents:
           ## unset to disable the time-based path entirely (token-budget
           ## pruning still applies).
           pruneAfterSeconds: 300
-        ## Misbehaviour breaker: advance to the chain fallback when the model
-        ## is stuck; fail the turn when there is no fallback. Defaults shown.
-        # breaker:
-        #   enabled: true
-        #   consecutiveErrorTurns: 5
-        #   identicalFailingCalls: 3
-        #   consecutiveMaxTokens: 3
-        #   maxTurnsPerPrompt: 250
       agent:
         compaction:
           resetTimeDeltaSeconds: 600
           pruneAfterSeconds: 300
-        ## Misbehaviour breaker: advance to the chain fallback when the model
-        ## is stuck; fail the turn when there is no fallback. Defaults shown.
-        # breaker:
-        #   enabled: true
-        #   consecutiveErrorTurns: 5
-        #   identicalFailingCalls: 3
-        #   consecutiveMaxTokens: 3
-        #   maxTurnsPerPrompt: 250
       workflowStepAgent:
         ## Workflow-step agents share the default chain unless this
         ## block sets its own. No `resetTimeDeltaSeconds` — workflow
@@ -139,14 +123,6 @@ galoyAgents:
         ## long-lived interactive `projectLead` sessions.
         compaction:
           pruneAfterSeconds: 300
-        ## Misbehaviour breaker: advance to the chain fallback when the model
-        ## is stuck; fail the turn when there is no fallback. Defaults shown.
-        # breaker:
-        #   enabled: true
-        #   consecutiveErrorTurns: 5
-        #   identicalFailingCalls: 3
-        #   consecutiveMaxTokens: 3
-        #   maxTurnsPerPrompt: 250
     codeAssistant:
       dbPath: "/data/code-assistant/code-assistant.db"
     concourse:

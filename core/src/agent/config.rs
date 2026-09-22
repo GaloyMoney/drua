@@ -514,7 +514,6 @@ breaker:
         let role: RoleConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(!role.breaker.enabled);
         assert_eq!(role.breaker.consecutive_error_turns, 7);
-        // Fields left unset in the YAML still fall back to defaults.
         assert_eq!(
             role.breaker.identical_failing_calls,
             BreakerConfig::default().identical_failing_calls

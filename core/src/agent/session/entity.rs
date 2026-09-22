@@ -122,10 +122,6 @@ pub enum AgentSessionEvent {
         chain_override: Option<llm::ModelChain>,
         model_chain: ModelChain,
     },
-    /// Emitted by the misbehaviour breaker (D1-D7): rotates the session's
-    /// effective model chain by one position. The base `model_chain` is
-    /// untouched; `chain_advance` (derived from a count of these events)
-    /// is what rotates it. See `AgentSession::effective_chain`.
     ModelChainAdvanced {
         reason: String,
         from_model: String,
@@ -184,9 +180,6 @@ pub enum AgentSessionResponse {
     Done,
 }
 
-/// A misbehaviour-breaker detector firing (D4). Carries what's needed to
-/// build the `reason` string recorded on `ModelChainAdvanced` / returned in
-/// `AgentSessionError::BreakerTripped`.
 #[derive(Debug)]
 enum BreakerTrip {
     ConsecutiveErrorTurns {
@@ -203,8 +196,6 @@ enum BreakerTrip {
     },
 }
 
-/// Byte-truncates `s` to at most `max_bytes`, moved inward to a char
-/// boundary rather than panicking mid-codepoint.
 fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         return s.to_string();
@@ -225,15 +216,10 @@ impl AgentSession {
         &self.effective_primary().model
     }
 
-    /// Base chain as configured, unaffected by breaker rotation. Callers
-    /// that build or compare a prompt's chain want [`Self::effective_chain`]
-    /// instead.
     pub fn chain(&self) -> &ModelChain {
         &self.model_chain
     }
 
-    /// The primary entry the model chain currently resolves to. `chain_advance`
-    /// rotates it after a breaker trip (D2); `0` is the configured primary.
     fn effective_primary(&self) -> &ModelDefaults {
         if self.chain_advance == 0 {
             &self.model_chain.primary
@@ -242,9 +228,6 @@ impl AgentSession {
         }
     }
 
-    /// The chain a prompt should actually be built against: the base chain
-    /// rotated by `chain_advance` positions. Every prompt-building or
-    /// prompt-comparing site must read this, not `model_chain` directly.
     pub(super) fn effective_chain(&self) -> ModelChain {
         if self.chain_advance == 0 {
             return self.model_chain.clone();
@@ -259,9 +242,6 @@ impl AgentSession {
         self.chain_advance < self.model_chain.fallbacks.len()
     }
 
-    /// `Some` when the most recently persisted event is a breaker rotation —
-    /// `(reason, from_model, to_model)`. Lets the service layer log the
-    /// chain advance without leaking raw events across the module boundary.
     pub fn last_chain_advance(&self) -> Option<(&str, &str, &str)> {
         match self.events.iter_all().next_back()? {
             AgentSessionEvent::ModelChainAdvanced {
@@ -658,8 +638,6 @@ impl AgentSession {
         view.indexes() != refreshed.indexes()
     }
 
-    /// Stale when the effective chain (base chain rotated by any breaker
-    /// advance) has diverged from the thread's snapshot.
     fn thread_has_stale_model_chain(&self, thread_id: SessionThreadId) -> bool {
         let Some(thread) = self.threads.get_persisted(&thread_id) else {
             return false;
@@ -719,9 +697,6 @@ impl AgentSession {
         (new_thread_id, new_pd)
     }
 
-    /// Misbehaviour-breaker detectors (D1-D4). Pure functions over the
-    /// trailing events of `thread_id`; deliberately does not detect
-    /// polling (identical *non-error* calls) — see the handoff's §2.1.
     fn detect_misbehaviour(&self, thread_id: SessionThreadId) -> Option<BreakerTrip> {
         let window = self
             .breaker_config
@@ -784,12 +759,6 @@ impl AgentSession {
         None
     }
 
-    /// The trailing tool-use turns of `thread_id`, newest first, up to
-    /// `max_n`. A "turn" pairs an `AssistantResponseReceived` with the
-    /// `ToolResultsAdded` that answered it; a text-only response with no
-    /// tool results (turn-ending) is not a turn and is skipped. Stops at
-    /// the thread's first event (`ThreadStarted`), so a chain advance —
-    /// which starts a fresh thread — resets the detectors naturally.
     fn thread_tool_turns(
         &self,
         thread_id: SessionThreadId,
@@ -826,9 +795,6 @@ impl AgentSession {
         turns
     }
 
-    /// `Some` only when the turn's assistant content has exactly one
-    /// `ToolUse` block and all its results errored, and every turn in
-    /// `window` shares the same tool name + input.
     fn identical_failing_call_trip(
         window: &[(&[AssistantBlock], &[ToolResultInput])],
     ) -> Option<BreakerTrip> {
@@ -871,9 +837,6 @@ impl AgentSession {
         truncate_on_char_boundary(text, 200)
     }
 
-    /// Assistant turns across every thread of the session since the most
-    /// recent `UserInputAdded` — the D4 backstop budget, independent of
-    /// the pattern detectors above.
     fn turns_since_last_user_input(&self) -> usize {
         self.events
             .iter_all()
@@ -883,9 +846,6 @@ impl AgentSession {
             .count()
     }
 
-    /// Advances the effective chain when a fallback exists, else fails the
-    /// turn (D3). `chain_advance` is mutated directly (mirrors
-    /// `update_model_chain`) and re-derives identically on rehydration.
     fn advance_chain_or_fail(&mut self, trip: BreakerTrip) -> Result<(), AgentSessionError> {
         if self.can_advance_chain() {
             let from_model = self.effective_primary().model.clone();
@@ -1181,15 +1141,6 @@ impl AgentSession {
             })
             .collect();
         if let Err(e) = self.add_tool_results(thread_id, results) {
-            // `add_tool_results` already flipped the thread to
-            // `NextTurn::Assistant` before hitting the exhausted-chain
-            // breaker error (it mutates before checking — see the comment
-            // there). Both callers (`recover_stale_tool_use`,
-            // `abort_pending_tool_use`) treat this error as terminal and
-            // never send the follow-up prompt the thread is now expecting,
-            // so close the turn the same way `assistant_response_failed`
-            // closes a genuine failed LLM call. Otherwise the thread is
-            // stuck forever believing a response is already in flight.
             let _ = self.assistant_response_received(
                 thread_id,
                 Vec::new(),
@@ -1275,12 +1226,6 @@ impl AgentSession {
             return Ok(AgentSessionResponse::ToolUseRequest(tool_uses));
         }
 
-        // Close the turn (flips the thread to `NextTurn::User`) before the
-        // breaker can error out below. Otherwise a `BreakerTripped` on an
-        // exhausted chain would leave the thread believing it's still
-        // awaiting this very response — permanently stuck, since the
-        // failed response is never retried (unlike a dropped tool result,
-        // there is no "resend the same LLM call" recovery path).
         thread.add_assistant_message(view);
 
         let has_pending_input = self
@@ -1655,8 +1600,6 @@ mod tests {
         }
     }
 
-    /// Session builder for breaker tests: explicit chain + breaker config
-    /// (compaction always disabled, as in [`new_session`]).
     fn new_session_with(model_chain: ModelChain, breaker_config: BreakerConfig) -> AgentSession {
         let new = NewAgentSession::builder()
             .agent_id(AgentId::new())
@@ -1674,10 +1617,6 @@ mod tests {
         AgentSession::try_from_events(new.into_events()).expect("hydrate")
     }
 
-    /// Drives one tool-use turn on the session's current main thread: the
-    /// assistant calls `tool_name(input)`, the tool answers with a single
-    /// result. Returns whatever `add_tool_results` returns, breaker
-    /// outcome included.
     fn drive_breaker_turn(
         session: &mut AgentSession,
         tool_name: &str,
@@ -1709,9 +1648,6 @@ mod tests {
         )
     }
 
-    /// Rebuilds the prompt after a `PromptPending` result and hydrates any
-    /// newly spawned thread (a chain advance starts a fresh one) so the
-    /// next turn can be driven.
     fn advance_turn(session: &mut AgentSession) {
         let _ = session
             .next_prompt(TargetThread::Main)
@@ -1719,8 +1655,6 @@ mod tests {
         hydrate_threads(session);
     }
 
-    /// A session with an initial user message already prompted and its
-    /// first thread hydrated, ready for `drive_breaker_turn`.
     fn started_session(model_chain: ModelChain, breaker_config: BreakerConfig) -> AgentSession {
         let mut session = new_session_with(model_chain, breaker_config);
         session
@@ -1730,14 +1664,6 @@ mod tests {
         hydrate_threads(&mut session);
         session
     }
-
-    // --- Misbehaviour breaker (D1-D7) ---------------------------------
-    //
-    // Positive cases confirm each detector trips on the exact pattern it
-    // targets; negative cases confirm it does NOT trip on adjacent, healthy
-    // traffic (varying input, a mix of errors and successes, polling on a
-    // non-error result). See the handoff's §2.1 and the "risk that matters
-    // most" note: a false-positive silently downgrades a healthy session.
 
     #[test]
     fn identical_failing_edit_advances_chain_after_three_turns() {
@@ -1988,12 +1914,6 @@ mod tests {
         assert!(reason.contains('3'), "{reason}");
     }
 
-    /// Regression for a stuck-session bug: `assistant_response_received`
-    /// must close the turn (flip the thread to `NextTurn::User`) even when
-    /// the breaker trips with no fallback. If the turn-closing mutation ran
-    /// *after* the breaker's early `?`, the thread would stay believing it's
-    /// still awaiting this very response forever — the failed response is
-    /// never retried, unlike a dropped tool result.
     #[test]
     fn max_tokens_trip_without_fallback_leaves_session_resumable() {
         let chain = ModelChain {
@@ -2025,8 +1945,6 @@ mod tests {
             }
         }
 
-        // A new user message must be queueable (PromptPending), not stuck
-        // as AwaitingAssistantResponse with nothing left to ever drive it.
         let result =
             session.add_user_input(TargetThread::Main, user_source(), "are you there?".into());
         assert!(
@@ -2047,8 +1965,6 @@ mod tests {
         };
         let mut session = started_session(chain, breaker);
 
-        // All-success, varying input: isolates the budget backstop from the
-        // pattern detectors, which both require an error result.
         for i in 0..10 {
             let input = serde_json::json!({"n": i});
             let result = drive_breaker_turn(&mut session, "get_weather", input, "sunny", false);
@@ -2112,11 +2028,6 @@ mod tests {
         assert_eq!(session.effective_chain(), new_chain);
     }
 
-    /// The interactive case D2 calls out by name: `Sessions::next_prompt`
-    /// re-resolves the role's config chain on every call for non-workflow
-    /// agents and re-applies it via `update_model_chain`. When the config
-    /// hasn't actually changed that must be a no-op, or every interactive
-    /// turn would silently undo the breaker's rotation.
     #[test]
     fn interactive_drift_propagation_does_not_undo_advance() {
         let chain = ModelChain {
@@ -2141,8 +2052,6 @@ mod tests {
         }
         assert_eq!(session.effective_chain().primary.model, "fallback-model");
 
-        // Same chain_override (None) and same base chain as configured —
-        // exactly what drift propagation replays when config is unchanged.
         let outcome = session.update_model_chain(None, chain.clone());
         assert!(
             !outcome.did_execute(),
@@ -2215,12 +2124,6 @@ mod tests {
         assert_eq!(rehydrated.effective_chain(), session.effective_chain());
     }
 
-    /// Watches the thread-boundary semantics explicitly: a chain advance
-    /// starts a fresh thread, and the detectors must reset there rather
-    /// than keep counting the old thread's turns. Two more identical
-    /// failing calls on the new thread stay under its own threshold (3);
-    /// a detector that leaked across the boundary would trip immediately
-    /// and — since this chain has no further fallback — fail the turn.
     #[test]
     fn thread_boundary_resets_detectors_after_advance() {
         let chain = ModelChain {
@@ -2268,10 +2171,6 @@ mod tests {
         }
     }
 
-    /// Mirrors `session_awaiting_tool_result` (below) but with a caller-chosen
-    /// chain and breaker config, so breaker tests can drive an abort into an
-    /// exhausted chain without needing a `session_awaiting_tool_result`-shaped
-    /// default.
     fn session_awaiting_tool_result_with(
         model_chain: ModelChain,
         breaker_config: BreakerConfig,
@@ -2304,14 +2203,6 @@ mod tests {
         (session, thread_id)
     }
 
-    /// Regression for a second stuck-session shape found in review:
-    /// `abort_tool_use_on_thread` (shared by `recover_stale_tool_use` and
-    /// `abort_pending_tool_use`) flips the thread to `NextTurn::Assistant` via
-    /// `add_tool_results` before the breaker can trip. Both callers treat a
-    /// `BreakerTripped` as terminal and never send the follow-up prompt the
-    /// thread now expects — so the turn must close to `NextTurn::User`, or
-    /// the session is stuck exactly like the `assistant_response_received`
-    /// case, one step later.
     #[test]
     fn aborting_a_tool_use_into_an_exhausted_chain_leaves_session_resumable() {
         let chain = ModelChain {
@@ -2330,8 +2221,6 @@ mod tests {
             "expected BreakerTripped with no fallback"
         );
 
-        // A new user message must be queueable, not stuck as
-        // AwaitingAssistantResponse with nothing left to ever drive it.
         let result =
             session.add_user_input(TargetThread::Main, user_source(), "are you there?".into());
         assert!(
