@@ -17,30 +17,33 @@ providers:
   - name: openai
     base_url: https://openrouter.ai/api
     models:
-      - name: deepseek/deepseek-v3.2
-        max_tokens_per_response: 16384
-        context_window_tokens: 131072
-      - name: deepseek/deepseek-v4-pro
+      - name: deepseek/deepseek-v4-pro-0813
         max_tokens_per_response: 16384
         context_window_tokens: 1048576
-      - name: deepseek/deepseek-v4-flash
+      - name: deepseek/deepseek-v4.1-flash
         max_tokens_per_response: 16384
         context_window_tokens: 1048576
-      - name: openai/gpt-5-mini
+      - name: openai/gpt-6-luna
         max_tokens_per_response: 16384
-        context_window_tokens: 400000
-      - name: anthropic/claude-sonnet-4.6
-        max_tokens_per_response: 16384
-        context_window_tokens: 200000
-      - name: minimax/minimax-m3
-        max_tokens_per_response: 16384
-        context_window_tokens: 1048576
-      - name: qwen/qwen3.7-plus
+        context_window_tokens: 1050000
+      - name: anthropic/claude-sonnet-5
         max_tokens_per_response: 16384
         context_window_tokens: 1000000
-      - name: moonshotai/kimi-k2.6
+      - name: minimax/minimax-m3
         max_tokens_per_response: 16384
-        context_window_tokens: 262144
+        context_window_tokens: 524288
+      - name: qwen/qwen3.8-flash
+        max_tokens_per_response: 16384
+        context_window_tokens: 1000000
+      - name: moonshotai/kimi-k3
+        max_tokens_per_response: 16384
+        context_window_tokens: 1048576
+      - name: z-ai/glm-5.3-flash
+        max_tokens_per_response: 16384
+        context_window_tokens: 1048576
+      - name: z-ai/glm-5.3
+        max_tokens_per_response: 16384
+        context_window_tokens: 1048576
 agents:
   # Resolution precedence (highest first):
   #   1. chain_override passed at the call site (workflow definition /
@@ -48,9 +51,9 @@ agents:
   #   2. builtin_roles.<role>.chain — optional per-role override
   #   3. default_chain
   default_chain:
-    primary: { name: openai/gpt-5-mini, max_tokens: 8192 }
+    primary: { name: openai/gpt-6-luna, max_tokens: 8192 }
     fallbacks:
-      - { name: deepseek/deepseek-v3.2, max_tokens: 8192 }
+      - { name: deepseek/deepseek-v4.1-flash, max_tokens: 8192 }
   builtin_roles:
     project_lead:
       # Optional: chain: { primary: { name: ... }, fallbacks: [ ... ] }

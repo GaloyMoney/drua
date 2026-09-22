@@ -41,34 +41,31 @@ galoyAgents:
       - name: openai
         baseUrl: https://openrouter.ai/api
         models:
-          - name: deepseek/deepseek-v3.2
-            maxTokensPerResponse: 16384
-            contextWindowTokens: 131072
-          - name: deepseek/deepseek-v4-pro
+          - name: deepseek/deepseek-v4-pro-0813
             maxTokensPerResponse: 16384
             contextWindowTokens: 1048576
-          - name: deepseek/deepseek-v4-flash
+          - name: deepseek/deepseek-v4.1-flash
             maxTokensPerResponse: 16384
             contextWindowTokens: 1048576
-          - name: openai/gpt-5-mini
+          - name: openai/gpt-6-luna
             maxTokensPerResponse: 16384
-            contextWindowTokens: 400000
-          - name: anthropic/claude-sonnet-4.6
-            maxTokensPerResponse: 16384
-            contextWindowTokens: 200000
-          - name: minimax/minimax-m3
-            maxTokensPerResponse: 16384
-            contextWindowTokens: 1048576
-          - name: qwen/qwen3.7-plus
+            contextWindowTokens: 1050000
+          - name: anthropic/claude-sonnet-5
             maxTokensPerResponse: 16384
             contextWindowTokens: 1000000
-          - name: moonshotai/kimi-k2.6
+          - name: minimax/minimax-m3
             maxTokensPerResponse: 16384
-            contextWindowTokens: 262144
-          - name: z-ai/glm-4.6
+            contextWindowTokens: 524288
+          - name: qwen/qwen3.8-flash
             maxTokensPerResponse: 16384
-            contextWindowTokens: 200000
-          - name: z-ai/glm-5.2
+            contextWindowTokens: 1000000
+          - name: moonshotai/kimi-k3
+            maxTokensPerResponse: 16384
+            contextWindowTokens: 1048576
+          - name: z-ai/glm-5.3-flash
+            maxTokensPerResponse: 16384
+            contextWindowTokens: 1048576
+          - name: z-ai/glm-5.3
             maxTokensPerResponse: 16384
             contextWindowTokens: 1048576
     ## Per-role defaults applied when an agent with that role is created.
@@ -89,9 +86,9 @@ galoyAgents:
     ## WorkflowDefinition entity itself rather than a separate config key.
     agents:
       defaultChain:
-        primary: {name: "openai/gpt-5-mini", maxTokens: 8192}
+        primary: {name: "openai/gpt-6-luna", maxTokens: 8192}
         fallbacks:
-          - {name: "deepseek/deepseek-v3.2", maxTokens: 8192}
+          - {name: "deepseek/deepseek-v4.1-flash", maxTokens: 8192}
       projectLead:
         ## Optional per-role chain override:
         # chain:
