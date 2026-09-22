@@ -227,6 +227,16 @@ impl Sessions {
             .stop_reason
             .map(StopReason::from)
             .unwrap_or(StopReason::Stop);
+        if matches!(stop_reason, StopReason::Length) {
+            tracing::warn!(
+                agent_id = %agent_id,
+                model,
+                output_tokens = response.usage.output_tokens,
+                reasoning_tokens = response.usage.reasoning_output_tokens,
+                content_blocks = content.len(),
+                "agent_session: assistant turn stopped on max_tokens"
+            );
+        }
         let mut metadata = AssistantResponseMetadata::from(response.usage);
         metadata.model = model;
 
