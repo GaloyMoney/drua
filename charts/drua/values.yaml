@@ -42,37 +42,34 @@ galoyAgents:
         baseUrl: https://openrouter.ai/api
         models:
           - name: deepseek/deepseek-v3.2
-            maxTokensPerResponse: 8192
+            maxTokensPerResponse: 16384
             contextWindowTokens: 131072
           - name: deepseek/deepseek-v4-pro
-            maxTokensPerResponse: 8192
+            maxTokensPerResponse: 16384
             contextWindowTokens: 1048576
           - name: deepseek/deepseek-v4-flash
-            maxTokensPerResponse: 8192
+            maxTokensPerResponse: 16384
             contextWindowTokens: 1048576
           - name: openai/gpt-5-mini
-            maxTokensPerResponse: 8192
+            maxTokensPerResponse: 16384
             contextWindowTokens: 400000
           - name: anthropic/claude-sonnet-4.6
-            maxTokensPerResponse: 8192
+            maxTokensPerResponse: 16384
             contextWindowTokens: 200000
           - name: minimax/minimax-m3
-            maxTokensPerResponse: 8192
+            maxTokensPerResponse: 16384
             contextWindowTokens: 1048576
           - name: qwen/qwen3.7-plus
-            maxTokensPerResponse: 8192
+            maxTokensPerResponse: 16384
             contextWindowTokens: 1000000
-          - name: moonshotai/kimi-k2.6:free
-            maxTokensPerResponse: 8192
-            contextWindowTokens: 262144
           - name: moonshotai/kimi-k2.6
-            maxTokensPerResponse: 8192
+            maxTokensPerResponse: 16384
             contextWindowTokens: 262144
           - name: z-ai/glm-4.6
-            maxTokensPerResponse: 8192
+            maxTokensPerResponse: 16384
             contextWindowTokens: 200000
           - name: z-ai/glm-5.2
-            maxTokensPerResponse: 8192
+            maxTokensPerResponse: 16384
             contextWindowTokens: 1048576
     ## Per-role defaults applied when an agent with that role is created.
     ## All three of `projectLead`, `agent`, and `workflowStepAgent` are
