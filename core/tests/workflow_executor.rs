@@ -476,6 +476,96 @@ async fn breaker_chain_advance_interacts_with_continuation_loop() {
     assert_eq!(run.state, WorkflowRunState::Succeeded);
 }
 
+/// Regression test for a Cursor Bugbot finding on PR #494: the
+/// continuation budget was a single flat counter, never reset when
+/// the breaker advanced the chain — so a fallback model's first
+/// `max_tokens` stop inherited a budget already exhausted by the
+/// primary and went straight to the forced `submit_output` nudge,
+/// the exact defect this PR exists to fix, just one model later.
+#[tokio::test]
+async fn fallback_gets_its_own_continuation_budget_after_chain_advance() {
+    let pool = pool().await;
+    let primary = "claude-haiku-4-5-20251001".to_string();
+    let fallback = "claude-haiku-4-5-fallback".to_string();
+    let chain = ModelChain::new(primary.clone()).with_fallback(fallback.clone());
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx) =
+        build_stack(&pool, chain.clone(), BreakerConfig::default()).await;
+
+    let (run_id, _) = seed_one_step_run(
+        &skills,
+        &definitions,
+        &runs,
+        &sub,
+        project_id,
+        chain,
+        "Do a very long plan before your first tool call.",
+    )
+    .await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move { executor.run(run_id, cancel).await });
+
+    // Primary: 3 consecutive MaxTokens stops trip the breaker and advance
+    // the chain to the fallback.
+    for i in 0..3 {
+        let request = recv_prompt(&mut prompt_rx, &format!("primary prompt #{i}")).await;
+        assert_eq!(
+            request.prompt.chain.primary.name, primary,
+            "turn {i} should still be on the primary model"
+        );
+        request
+            .response_channel
+            .send(Ok(PromptResult::Complete(max_tokens_response())))
+            .unwrap_or_else(|_| panic!("send response #{i}"));
+    }
+
+    // Fallback's own first turn ALSO hits max_tokens. It must still get a
+    // plain continuation, not the forced nudge — its budget must not have
+    // been exhausted by the primary's streak.
+    let fallback_first = recv_prompt(&mut prompt_rx, "fallback first prompt").await;
+    assert_eq!(fallback_first.prompt.chain.primary.name, fallback);
+    assert!(
+        matches!(
+            fallback_first.prompt.tool_choice,
+            None | Some(ToolChoice::Auto)
+        ),
+        "fallback's first max_tokens stop must not force submit_output: {:?}",
+        fallback_first.prompt.tool_choice
+    );
+    fallback_first
+        .response_channel
+        .send(Ok(PromptResult::Complete(max_tokens_response())))
+        .expect("send response");
+
+    // Fallback recovers on its second turn.
+    let fallback_second = recv_prompt(&mut prompt_rx, "fallback second prompt").await;
+    assert!(
+        matches!(
+            fallback_second.prompt.tool_choice,
+            None | Some(ToolChoice::Auto)
+        ),
+        "still a plain continuation: {:?}",
+        fallback_second.prompt.tool_choice
+    );
+    fallback_second
+        .response_channel
+        .send(Ok(PromptResult::Complete(submit_output_response(
+            "tu_1",
+            serde_json::json!({"success": true, "output": "recovered"}),
+        ))))
+        .expect("send response");
+
+    handle.await.expect("join").expect("run succeeds");
+
+    assert!(
+        prompt_rx.try_recv().is_err(),
+        "no forced nudge should have been sent"
+    );
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(run.state, WorkflowRunState::Succeeded);
+}
+
 /// Test (3) from handoff §3.3: no fallback declared; three
 /// consecutive `MaxTokens` stops trip the breaker with the chain
 /// exhausted — the step errors instead of forcing a content-free

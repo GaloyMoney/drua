@@ -641,6 +641,14 @@ impl Agents {
         Ok(self.sessions.breaker_config(agent_id).await?)
     }
 
+    /// `true` iff the breaker advanced the model chain on the agent's
+    /// most recent assistant turn. Workflow executor consumes this to
+    /// reset its own max_tokens continuation budget on chain advance.
+    #[instrument(name = "domain.agent.chain_just_advanced", skip(self))]
+    pub async fn chain_just_advanced(&self, agent_id: AgentId) -> Result<bool, AgentError> {
+        Ok(self.sessions.chain_just_advanced(agent_id).await?)
+    }
+
     /// Workflow-spawned agents are filtered out; see
     /// [`Self::list_for_workflow_run`] for those.
     #[instrument(name = "domain.agent.list_for_project", skip(self, sub))]

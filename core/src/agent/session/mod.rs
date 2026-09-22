@@ -423,6 +423,18 @@ impl Sessions {
         Ok(session.breaker_config().clone())
     }
 
+    /// `true` iff the breaker advanced the model chain on the agent's
+    /// most recent assistant turn (i.e. `ModelChainAdvanced` is the
+    /// newest event in the session). Workflow executor consumes this
+    /// to reset its own max_tokens continuation budget when the chain
+    /// just advanced — otherwise a fallback model's first turn would
+    /// inherit a budget already exhausted by the model it replaced.
+    #[instrument(name = "domain.agent_session.chain_just_advanced", skip(self))]
+    pub async fn chain_just_advanced(&self, agent_id: AgentId) -> Result<bool, AgentSessionError> {
+        let session = self.repo.find_by_agent_id(agent_id).await?;
+        Ok(session.last_chain_advance().is_some())
+    }
+
     #[instrument(name = "domain.agent_session.thread_infos", skip(self))]
     pub async fn thread_infos(
         &self,

@@ -711,6 +711,14 @@ impl Executor {
             {
                 return Ok(value);
             }
+            // The breaker's own per-thread counter resets when it advances
+            // the chain (a fresh thread starts). Mirror that here: a flat
+            // `continuations` counter that never reset would let the
+            // primary's max_tokens streak exhaust the fallback's budget
+            // before the fallback gets a single turn.
+            if self.agents.chain_just_advanced(agent.id).await? {
+                continuations = 0;
+            }
             match self.agents.last_stop_reason(agent.id).await? {
                 Some(StopReason::Length) if continuations < limit => {
                     continuations += 1;
