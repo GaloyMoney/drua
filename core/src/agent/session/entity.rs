@@ -889,6 +889,28 @@ impl AgentSession {
         }
     }
 
+    fn close_turn_as_breaker_error(&mut self, thread_id: SessionThreadId, error_message: String) {
+        let _ = self.assistant_response_received(
+            thread_id,
+            Vec::new(),
+            StopReason::Error,
+            Some(error_message),
+            AssistantResponseMetadata {
+                api: String::new(),
+                model: self.effective_primary().model.clone(),
+                usage: Usage {
+                    input: 0,
+                    output: 0,
+                    cache_read: 0,
+                    cache_write: 0,
+                    total_tokens: 0,
+                    reasoning: 0,
+                },
+                cost: Cost::default(),
+            },
+        );
+    }
+
     pub fn add_tool_results(
         &mut self,
         thread_id: SessionThreadId,
@@ -943,17 +965,20 @@ impl AgentSession {
         }
 
         if self.breaker_config.enabled && self.submitted_output().is_none() {
-            if self.turns_since_last_user_input() > self.breaker_config.max_turns_per_prompt {
-                return Err(AgentSessionError::BreakerTripped {
-                    reason: format!(
-                        "turn budget {} exceeded on model {}",
-                        self.breaker_config.max_turns_per_prompt,
-                        self.effective_primary().model
-                    ),
-                });
+            let max_turns = self.breaker_config.max_turns_per_prompt;
+            if max_turns > 0 && self.turns_since_last_user_input() > max_turns {
+                let reason = format!(
+                    "turn budget {max_turns} exceeded on model {}",
+                    self.effective_primary().model
+                );
+                self.close_turn_as_breaker_error(thread_id, reason.clone());
+                return Err(AgentSessionError::BreakerTripped { reason });
             }
             if let Some(trip) = self.detect_misbehaviour(thread_id) {
-                self.advance_chain_or_fail(trip)?;
+                if let Err(e) = self.advance_chain_or_fail(trip) {
+                    self.close_turn_as_breaker_error(thread_id, e.to_string());
+                    return Err(e);
+                }
             }
         }
 
@@ -1140,28 +1165,7 @@ impl AgentSession {
                 is_error: true,
             })
             .collect();
-        if let Err(e) = self.add_tool_results(thread_id, results) {
-            let _ = self.assistant_response_received(
-                thread_id,
-                Vec::new(),
-                StopReason::Error,
-                Some(e.to_string()),
-                AssistantResponseMetadata {
-                    api: String::new(),
-                    model: self.effective_primary().model.clone(),
-                    usage: Usage {
-                        input: 0,
-                        output: 0,
-                        cache_read: 0,
-                        cache_write: 0,
-                        total_tokens: 0,
-                        reasoning: 0,
-                    },
-                    cost: Cost::default(),
-                },
-            );
-            return Err(e);
-        }
+        self.add_tool_results(thread_id, results)?;
         Ok(Idempotent::Executed(()))
     }
 
@@ -1765,6 +1769,36 @@ mod tests {
             }
             other => panic!("expected BreakerTripped, got {other:?}"),
         }
+
+        let result =
+            session.add_user_input(TargetThread::Main, user_source(), "are you there?".into());
+        assert!(
+            matches!(result, Ok(AgentSessionResponse::PromptPending { .. })),
+            "session must not be stuck awaiting tool results that will never come: {result:?}"
+        );
+    }
+
+    #[test]
+    fn turn_budget_zero_disables_backstop() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![],
+        };
+        let breaker = BreakerConfig {
+            max_turns_per_prompt: 0,
+            ..BreakerConfig::default()
+        };
+        let mut session = started_session(chain, breaker);
+
+        for i in 0..20 {
+            let input = serde_json::json!({"n": i});
+            let result = drive_breaker_turn(&mut session, "get_weather", input, "sunny", false);
+            assert!(
+                matches!(result, Ok(AgentSessionResponse::PromptPending { .. })),
+                "turn {i}: {result:?}"
+            );
+            advance_turn(&mut session);
+        }
     }
 
     #[test]
@@ -1992,6 +2026,13 @@ mod tests {
         assert!(
             session.last_chain_advance().is_none(),
             "the budget backstop must fail the turn, never advance the chain"
+        );
+
+        let result =
+            session.add_user_input(TargetThread::Main, user_source(), "are you there?".into());
+        assert!(
+            matches!(result, Ok(AgentSessionResponse::PromptPending { .. })),
+            "session must not be stuck awaiting tool results that will never come: {result:?}"
         );
     }
 
