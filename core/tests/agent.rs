@@ -528,7 +528,7 @@ async fn identical_failing_tool_calls_advance_chain_to_fallback() {
                 model: name.clone(),
                 max_tokens_per_response: 1024,
                 context_window_tokens: 200_000,
-                effort: ReasoningEffort::Low,
+                effort: None,
             },
         );
     }
@@ -656,7 +656,7 @@ async fn identical_failing_tool_calls_without_fallback_error_the_turn() {
             model: model_name,
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
-            effort: ReasoningEffort::Low,
+            effort: None,
         },
     );
     let config = AgentsConfig {
