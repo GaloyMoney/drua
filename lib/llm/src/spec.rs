@@ -4,24 +4,16 @@ use serde::{Deserialize, Serialize};
 
 /// Provider-agnostic reasoning level; each client maps it to its own wire
 /// shape (OpenAI `reasoning_effort`, OpenRouter `reasoning.effort`,
-/// Anthropic thinking `budget_tokens`).
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema,
-)]
+/// Anthropic thinking `budget_tokens`). Absence (`Option::None` wherever this
+/// type is held) means no opinion: the provider's own default applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ReasoningEffort {
-    #[default]
     Low,
     Medium,
     High,
     #[serde(rename = "xhigh")]
     XHigh,
-}
-
-impl ReasoningEffort {
-    pub fn is_low(effort: &Self) -> bool {
-        *effort == Self::Low
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]

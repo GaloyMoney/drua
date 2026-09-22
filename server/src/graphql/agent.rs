@@ -85,7 +85,7 @@ impl From<drua_core::agent::ModelChain> for ModelChain {
             primary: ModelSpec {
                 name: c.primary.model,
                 max_tokens: Some(c.primary.max_tokens_per_response as i32),
-                effort: Some(c.primary.effort.into()),
+                effort: c.primary.effort.map(Into::into),
             },
             fallbacks: c
                 .fallbacks
@@ -93,7 +93,7 @@ impl From<drua_core::agent::ModelChain> for ModelChain {
                 .map(|m| ModelSpec {
                     name: m.model,
                     max_tokens: Some(m.max_tokens_per_response as i32),
-                    effort: Some(m.effort.into()),
+                    effort: m.effort.map(Into::into),
                 })
                 .collect(),
         }

@@ -14,7 +14,7 @@ use crate::{Prompt, StreamHandle};
 pub struct ChainEntry {
     pub model_id: String,
     pub max_tokens: Option<u32>,
-    pub effort: ReasoningEffort,
+    pub effort: Option<ReasoningEffort>,
     pub provider: Arc<dyn LlmProvider>,
 }
 
@@ -23,6 +23,7 @@ impl std::fmt::Debug for ChainEntry {
         f.debug_struct("ChainEntry")
             .field("model_id", &self.model_id)
             .field("max_tokens", &self.max_tokens)
+            .field("effort", &self.effort)
             .field("provider", &self.provider.name())
             .finish()
     }
@@ -200,7 +201,7 @@ mod tests {
         ChainEntry {
             model_id: model_id.to_string(),
             max_tokens: None,
-            effort: ReasoningEffort::Low,
+            effort: None,
             provider,
         }
     }

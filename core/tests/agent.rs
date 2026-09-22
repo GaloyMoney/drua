@@ -5,7 +5,6 @@ use drua_core::agent::{AgentRole, Agents, AgentsConfig, ModelDefaults, RoleConfi
 use drua_core::primitives::{AuthSubject, ChatOutputEvent, ContextGeneration, ProjectId, UserId};
 use drua_core::sandbox::{SandboxConfig, Sandboxes};
 use drua_core::toolset::{ToolSets, ToolSetsConfig, ToolSetsError, TopLevelTool};
-use drua_core::ReasoningEffort;
 use llm::prompt::AssistantBlock;
 use llm::response::StopReason;
 use llm::{PromptRequest, PromptResponse, PromptResult, Usage};
@@ -69,7 +68,7 @@ async fn build_agents(pool: &sqlx::PgPool) -> (Agents, Arc<Sandboxes>) {
             model: model_name,
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
-            effort: ReasoningEffort::Low,
+            effort: None,
         },
     );
     let config = AgentsConfig {
@@ -132,7 +131,7 @@ async fn send_message_round_trip_via_prompt_channel() {
             model: model_name,
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
-            effort: ReasoningEffort::Low,
+            effort: None,
         },
     );
     let config = AgentsConfig {
@@ -296,7 +295,7 @@ async fn send_message_dispatches_registered_tool_call() {
             model: model_name,
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
-            effort: ReasoningEffort::Low,
+            effort: None,
         },
     );
     let config = AgentsConfig {
@@ -534,7 +533,7 @@ async fn resume_message_continues_past_interrupted_tool_call() {
             model: model_name,
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
-            effort: ReasoningEffort::Low,
+            effort: None,
         },
     );
     let config = AgentsConfig {

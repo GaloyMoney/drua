@@ -315,7 +315,8 @@ struct ResponsesTextConfig {
 
 #[derive(Debug, Serialize)]
 struct ResponsesReasoningConfig {
-    effort: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<&'static str>,
     summary: &'static str,
 }
 
@@ -371,7 +372,7 @@ fn prompt_to_responses_request(prompt: &Prompt, auth: &OpenAiResponsesAuth) -> R
         },
         include: vec!["reasoning.encrypted_content"],
         reasoning: ResponsesReasoningConfig {
-            effort: responses_effort_str(prompt.effort),
+            effort: prompt.effort.map(responses_effort_str),
             summary: "auto",
         },
     }
@@ -1058,7 +1059,7 @@ mod tests {
     fn sample_prompt() -> Prompt {
         Prompt {
             chain: llm::ModelChain::new("gpt-5.4-mini"),
-            effort: ReasoningEffort::Low,
+            effort: None,
             messages: vec![Message::User {
                 content: vec![UserBlock::Text {
                     text: "hello".to_string(),
@@ -1183,6 +1184,40 @@ mod tests {
             value.get("max_output_tokens").is_none(),
             "subscription endpoint should not receive max_output_tokens"
         );
+    }
+
+    #[test]
+    fn reasoning_omits_effort_when_unset() {
+        let request = prompt_to_responses_request(
+            &sample_prompt(),
+            &OpenAiResponsesAuth::ApiKey {
+                api_key: "sk-test".to_string(),
+            },
+        );
+
+        let value = serde_json::to_value(request).expect("request serializes");
+        assert_eq!(value["reasoning"]["summary"], "auto");
+        assert!(
+            value["reasoning"].get("effort").is_none(),
+            "unset effort must omit reasoning.effort, not send low: {value}"
+        );
+    }
+
+    #[test]
+    fn reasoning_includes_effort_when_set() {
+        let mut prompt = sample_prompt();
+        prompt.effort = Some(ReasoningEffort::High);
+
+        let request = prompt_to_responses_request(
+            &prompt,
+            &OpenAiResponsesAuth::ApiKey {
+                api_key: "sk-test".to_string(),
+            },
+        );
+
+        let value = serde_json::to_value(request).expect("request serializes");
+        assert_eq!(value["reasoning"]["effort"], "high");
+        assert_eq!(value["reasoning"]["summary"], "auto");
     }
 
     #[test]
