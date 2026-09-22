@@ -132,6 +132,11 @@ impl Executor {
         let workflow_id = run.definition_id;
         let trigger_context = run.trigger_context.clone();
         let steps = run.steps_snapshot.clone();
+        let run_context = serde_json::json!({
+            "id": run_id.to_string(),
+            "started_at": run.started_at().to_rfc3339(),
+            "date": run.started_at().format("%Y-%m-%d").to_string(),
+        });
 
         // Stamp every audit row recorded during this run so they can be
         // queried by `resource_ids->>'workflow_run_id'`.
@@ -199,6 +204,7 @@ impl Executor {
                 let ctx = TemplateContext {
                     trigger: &trigger_context,
                     steps: &step_outputs,
+                    run: &run_context,
                 };
                 match ctx.evaluate_condition(body) {
                     Ok(ConditionOutcome::True) => {
@@ -257,6 +263,7 @@ impl Executor {
                     step,
                     &trigger_context,
                     &step_outputs,
+                    &run_context,
                     &sandbox_ids,
                     &preexisting_ids,
                     &mut borrowed_preexisting,
@@ -490,6 +497,7 @@ impl Executor {
         step: &WorkflowStepDef,
         trigger_context: &serde_json::Value,
         step_outputs: &HashMap<String, serde_json::Value>,
+        run_context: &serde_json::Value,
         sandbox_ids: &HashMap<String, SandboxId>,
         preexisting_ids: &HashSet<SandboxId>,
         borrowed_preexisting: &mut HashSet<SandboxId>,
@@ -540,16 +548,25 @@ impl Executor {
                 let template_ctx = TemplateContext {
                     trigger: trigger_context,
                     steps: step_outputs,
+                    run: run_context,
                 };
                 let templated_body = template_ctx
                     .substitute_in_string(&raw_body)
                     .map_err(|e| WorkflowError::Skill(e.to_string()))?;
                 let pretty = serde_json::to_string_pretty(trigger_context)
                     .unwrap_or_else(|_| trigger_context.to_string());
+                let run_pretty = serde_json::to_string_pretty(run_context)
+                    .unwrap_or_else(|_| run_context.to_string());
+                let run_context_block = format!("\n\nRUN_CONTEXT:\n```json\n{run_pretty}\n```");
                 let prompt = if templated_body.contains("$ARGUMENTS") {
-                    crate::skill::SkillBody::new(templated_body).interpolate(Some(&pretty))
+                    format!(
+                        "{}{run_context_block}",
+                        crate::skill::SkillBody::new(templated_body).interpolate(Some(&pretty))
+                    )
                 } else {
-                    format!("{templated_body}\n\nTRIGGER_CONTEXT:\n```json\n{pretty}\n```")
+                    format!(
+                        "{templated_body}\n\nTRIGGER_CONTEXT:\n```json\n{pretty}\n```{run_context_block}"
+                    )
                 };
 
                 let agent_name = format!("workflow-{}-{name}", run_id.short());
@@ -644,6 +661,7 @@ impl Executor {
                     *timeout_seconds,
                     trigger_context,
                     step_outputs,
+                    run_context,
                 )
                 .await
             }
@@ -792,6 +810,7 @@ impl Executor {
         timeout_seconds: Option<u64>,
         trigger_context: &serde_json::Value,
         step_outputs: &HashMap<String, serde_json::Value>,
+        run_context: &serde_json::Value,
     ) -> Result<serde_json::Value, WorkflowError> {
         // Workflow contract is enforced by `find_for_workflow`
         // (registered + composable + declares output_schema). The
@@ -805,6 +824,7 @@ impl Executor {
         let template_ctx = TemplateContext {
             trigger: trigger_context,
             steps: step_outputs,
+            run: run_context,
         };
         let resolved_params = template_ctx
             .substitute(params)

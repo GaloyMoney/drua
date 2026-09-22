@@ -211,7 +211,7 @@ pub enum WorkflowStepDef {
         #[serde(default = "default_output_schema_boxed")]
         output_schema: Box<OutputSchema>,
         /// Bare CEL boolean expression evaluated against the same
-        /// `(trigger, steps)` context as `${{ … }}` substitution.
+        /// `(trigger, steps, run)` context as `${{ … }}` substitution.
         /// `None` → step always runs (back-compat). `Some(expr)` and
         /// `expr` evaluates to `false` → step is skipped: emits
         /// `WorkflowRunEvent::StepSkipped`, the run continues to the
