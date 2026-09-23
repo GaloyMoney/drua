@@ -143,6 +143,7 @@ impl App {
             pool,
             config.tool_caching.clone(),
         ));
+        let compose_config = config.toolsets.compose.clone();
         let toolsets = ToolSets::init(
             config.toolsets,
             Some(Arc::clone(&audit)),
@@ -241,11 +242,9 @@ impl App {
             context_generation.clone(),
         ));
 
-        // Sandbox-backed tools must be registered after sandboxes is up
-        // but before toolsets is wrapped in Arc. The five read tools
-        // (text_editor, grep, glob, read, ls) are deferred — they take
-        // `Arc<SpaceFs>` for the `space:<slug>/...` re-routing branch
-        // and `SpaceFs` depends on Projects, which doesn't exist yet.
+        // Register sandbox tools now. Space-aware tools and compose wait for
+        // SpaceFs, which depends on Projects. The shared registry supports
+        // registration after ToolSets is wrapped in Arc.
         toolsets.register_top_level(Bash::new(Arc::clone(&sandboxes)));
         let toolsets = Arc::new(toolsets);
 
@@ -308,7 +307,6 @@ impl App {
             Arc::clone(&projects),
             Arc::clone(&users),
         ));
-        toolsets.script_provider.initialize(Arc::clone(&space_fs));
         toolsets.register_top_level(TextEditor::new(
             Arc::clone(&sandboxes),
             Arc::clone(&space_fs),
@@ -356,6 +354,10 @@ impl App {
             Arc::clone(&skills),
             Arc::clone(&notes),
         ));
+
+        // Compose is constructed with its complete dependencies after the other
+        // builtins, before jobs can execute agent requests.
+        toolsets.register_compose(compose_config, Arc::clone(&space_fs));
 
         // Reverse-sync (file → entity) for skills + workflows runs
         // through drua_library's tick-driven importer registry. The

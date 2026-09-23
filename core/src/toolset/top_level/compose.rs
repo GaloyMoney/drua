@@ -1,7 +1,7 @@
 //! Execute JavaScript that chains multiple MCP tool calls in a single round trip.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Duration;
 
 use drua_library::SpaceError;
@@ -33,7 +33,8 @@ pub struct ComposeTool {
     audit: Option<Arc<Audit>>,
     tool_caching: Option<Arc<ToolCaching>>,
     config: ComposeConfig,
-    script_provider: Arc<ScriptProviderFactory>,
+    // Absent only in standalone inline-compose test harnesses.
+    space_fs: Option<Arc<SpaceFs>>,
 }
 
 impl ComposeTool {
@@ -43,7 +44,7 @@ impl ComposeTool {
         audit: Option<Arc<Audit>>,
         tool_caching: Option<Arc<ToolCaching>>,
         config: ComposeConfig,
-        script_provider: Arc<ScriptProviderFactory>,
+        space_fs: Arc<SpaceFs>,
     ) -> Self {
         Self {
             sets,
@@ -51,7 +52,24 @@ impl ComposeTool {
             audit,
             tool_caching,
             config,
-            script_provider,
+            space_fs: Some(space_fs),
+        }
+    }
+
+    pub(crate) fn without_space_fs_for_test(
+        sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
+        top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
+        audit: Option<Arc<Audit>>,
+        tool_caching: Option<Arc<ToolCaching>>,
+        config: ComposeConfig,
+    ) -> Self {
+        Self {
+            sets,
+            top_level,
+            audit,
+            tool_caching,
+            config,
+            space_fs: None,
         }
     }
 }
@@ -60,28 +78,6 @@ impl ComposeTool {
 struct SpaceScriptProvider {
     fs: Arc<SpaceFs>,
     subject: AuthSubject,
-}
-
-#[derive(Default)]
-pub struct ScriptProviderFactory(OnceLock<Arc<SpaceFs>>);
-
-impl ScriptProviderFactory {
-    pub fn initialize(&self, fs: Arc<SpaceFs>) {
-        assert!(
-            self.0.set(fs).is_ok(),
-            "script provider already initialized"
-        );
-    }
-
-    pub fn for_subject(
-        &self,
-        subject: &AuthSubject,
-    ) -> Option<Arc<dyn js_engine::ScriptSourceProvider>> {
-        Some(Arc::new(SpaceScriptProvider {
-            fs: self.0.get()?.clone(),
-            subject: subject.clone(),
-        }))
-    }
 }
 
 #[async_trait::async_trait]
@@ -248,7 +244,12 @@ impl TopLevelTool for ComposeTool {
                 &script,
                 dispatcher,
                 timeout,
-                self.script_provider.for_subject(subject),
+                self.space_fs.as_ref().map(|fs| {
+                    Arc::new(SpaceScriptProvider {
+                        fs: Arc::clone(fs),
+                        subject: subject.clone(),
+                    }) as Arc<dyn js_engine::ScriptSourceProvider>
+                }),
                 script_audit.clone(),
             )
             .await;

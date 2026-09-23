@@ -28,7 +28,10 @@ The engine's loader receives bytes from the ordinary
 canonical addresses, UTF-8 and source sizes before compilation, and owns the
 invocation-local cache, initialization, dependency graph and source audit. The
 caller-bound adapter only forwards reads and maps errors; storage has no script
-policy or compose state. Source never passes through numbered tool output or the
+policy or compose state. Application startup registers compose after constructing
+`SpaceFs`, passing it directly to the constructor before jobs start. Provider
+creation stays private to compose; the registry has no provider factory or late
+initialization slot. Source never passes through numbered tool output or the
 search index. Audit metadata records each source's
 path, SHA-256, byte length, initialization outcome, dependency edges
 and duration. Parent failures retain this metadata. Source text and automatic

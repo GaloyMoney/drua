@@ -88,6 +88,7 @@ async fn build_toolsets(pool: &sqlx::PgPool, set: StubSet) -> (ToolSets, Arc<Aud
     )
     .await
     .expect("init toolsets");
+    toolsets.register_inline_compose_for_test();
     toolsets.register_searchable(set);
     (toolsets, audit)
 }

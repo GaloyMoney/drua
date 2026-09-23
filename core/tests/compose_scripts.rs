@@ -358,7 +358,6 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
         assert!(error.to_string().contains("access_denied"), "{error}");
     }
 
-    let provider = app.toolsets().script_provider.for_subject(&agent).unwrap();
     let compose = app
         .toolsets()
         .top_level_tool_arcs(&agent)
@@ -391,16 +390,6 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
         next.structured_content.unwrap()["result"],
         serde_json::json!({"version":2})
     );
-    // The adapter itself has no cache or snapshot; its ordinary reads see HEAD.
-    assert_eq!(
-        provider.read("space:docs/helper.js").await.unwrap(),
-        b"return {version: 2};"
-    );
-    assert!(provider
-        .read("space:docs/missing.js")
-        .await
-        .unwrap_err()
-        .contains("missing_file"));
     spaces
         .write_file(
             "docs",
@@ -410,7 +399,17 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
         )
         .await
         .unwrap();
-    assert!(provider.read("space:docs/dir.js").await.is_err());
+    for (path, expected) in [("missing.js", "missing_file"), ("dir.js", "directory")] {
+        let script = format!("return await loadScript('space:docs/{path}');");
+        let error = compose
+            .call(
+                &agent,
+                serde_json::json!({"script":script}).as_object().cloned(),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+    }
     spaces
         .write_file(
             "docs",
@@ -496,10 +495,5 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
         .await
         .unwrap_err()
         .to_string()
-        .contains("access_denied"));
-    assert!(provider
-        .read("space:docs/helper.js")
-        .await
-        .unwrap_err()
         .contains("access_denied"));
 }

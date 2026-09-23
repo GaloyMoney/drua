@@ -229,7 +229,7 @@ mod workflow;
 pub use agent::ProjectAgent;
 pub use bash::Bash;
 pub use catalog::{CallCatalogTool, DescribeCatalogTool, SearchCatalog};
-pub use compose::{ComposeTool, ScriptProviderFactory};
+pub use compose::ComposeTool;
 pub use compose_types::ComposeTypes;
 pub use delete::Delete;
 pub use glob::GlobTool;
