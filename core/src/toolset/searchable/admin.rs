@@ -175,6 +175,9 @@ struct SandboxParams {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 struct LogParams {
+    #[schemars(with = "Option<uuid::Uuid>")]
+    workflow_run_id: Option<crate::primitives::WorkflowRunId>,
+    workflow_step: Option<String>,
     entrypoint: Option<String>,
     action: Option<String>,
     outcome: Option<String>,
@@ -219,6 +222,8 @@ impl LogParams {
             outcome,
             acting_user_id: self.user_id,
             acting_agent_id: self.agent_id,
+            workflow_run_id: self.workflow_run_id,
+            workflow_step: self.workflow_step,
             sandbox_id: self.sandbox_id,
             error,
             ..Default::default()
@@ -366,6 +371,17 @@ enum WorkflowStepParams {
         #[serde(default)]
         condition: Option<String>,
     },
+    ScriptStep {
+        name: String,
+        script: String,
+        entry: Option<String>,
+        #[serde(default = "crate::workflow::definition::default_script_args")]
+        args: serde_json::Value,
+        timeout_seconds: Option<u64>,
+        max_tool_calls: Option<usize>,
+        output_schema: Option<serde_json::Value>,
+        condition: Option<String>,
+    },
     Wait {
         name: String,
         /// Webhook provider to listen on (e.g. `"concourse"`,
@@ -426,6 +442,35 @@ impl WorkflowStepParams {
                 timeout_seconds,
                 condition,
             }),
+            WorkflowStepParams::ScriptStep {
+                name,
+                script,
+                entry,
+                args,
+                timeout_seconds,
+                max_tool_calls,
+                output_schema,
+                condition,
+            } => {
+                let output_schema = match output_schema {
+                    Some(value) => serde_json::from_value(value).map_err(|e| {
+                        ToolSetsError::MissingArgument(format!(
+                            "step '{name}': invalid output_schema: {e}"
+                        ))
+                    })?,
+                    None => crate::workflow::default_output_schema(),
+                };
+                Ok(WorkflowStepDef::ScriptStep {
+                    name,
+                    script,
+                    entry,
+                    args,
+                    timeout_seconds,
+                    max_tool_calls,
+                    output_schema: Box::new(output_schema),
+                    condition,
+                })
+            }
             WorkflowStepParams::Wait {
                 name,
                 provider,
@@ -3059,5 +3104,31 @@ mod tests {
         let chain = llm::ModelChain::from("claude-sonnet-4-5");
         let err = resolve_model_chain_update(Some(chain), true).expect_err("must reject");
         assert!(matches!(err, ToolSetsError::InvalidArgument(_)));
+    }
+}
+
+#[cfg(test)]
+mod script_step_tests {
+    use super::*;
+
+    #[test]
+    fn admin_workflow_accepts_script_defaults_and_log_filters() {
+        let input: WorkflowStepParams = serde_json::from_value(serde_json::json!({
+            "type":"script_step", "name":"inventory", "script":"space:docs/tasks.js"
+        }))
+        .unwrap();
+        let WorkflowStepDef::ScriptStep { args, entry, .. } = input.into_step().unwrap() else {
+            panic!()
+        };
+        assert_eq!(args, serde_json::json!({}));
+        assert_eq!(entry, None);
+        let run = crate::primitives::WorkflowRunId::new();
+        let params: LogParams = serde_json::from_value(
+            serde_json::json!({"workflow_run_id":run, "workflow_step":"inventory"}),
+        )
+        .unwrap();
+        let query = params.into_query();
+        assert_eq!(query.workflow_run_id, Some(run));
+        assert_eq!(query.workflow_step.as_deref(), Some("inventory"));
     }
 }

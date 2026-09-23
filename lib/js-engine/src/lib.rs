@@ -6,8 +6,8 @@ mod allocator;
 mod error;
 mod scripts;
 pub use scripts::{
-    ScriptAudit, ScriptLimits, ScriptSourceProvider, SharedScriptAudit, SourceIdentity,
-    LOAD_SCRIPT_DECLARATION,
+    validate_script_path, ScriptAudit, ScriptLimits, ScriptSourceProvider, SharedScriptAudit,
+    SourceIdentity, LOAD_SCRIPT_DECLARATION,
 };
 
 pub use error::JsEngineError;

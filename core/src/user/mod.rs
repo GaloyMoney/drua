@@ -126,6 +126,7 @@ impl Users {
             ("project_id", "Drua-Project"),
             ("workflow_id", "Drua-Workflow-Definition"),
             ("workflow_run_id", "Drua-Workflow-Run"),
+            ("workflow_step", "Drua-Workflow-Step"),
             ("agent_id", "Drua-Agent"),
             ("sandbox_id", "Drua-Sandbox"),
             ("space_id", "Drua-Space"),

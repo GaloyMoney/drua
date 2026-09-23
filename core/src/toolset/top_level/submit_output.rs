@@ -109,7 +109,7 @@ impl TopLevelTool for SubmitOutputTool {
 /// Confirms the value is an object and has every key listed in
 /// `schema.required`. Type/enum/nested validation is the model's job
 /// (strict mode); this catches degraded providers that ignore strict.
-fn validate_against_schema(
+pub(crate) fn validate_against_schema(
     schema: &crate::workflow::OutputSchema,
     value: &serde_json::Value,
 ) -> Result<(), String> {

@@ -187,7 +187,20 @@ fn specs_from_parts(
 /// tool_step` dispatches a single top-level MCP tool.
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(clippy::enum_variant_names)]
 enum WorkflowStepParam {
+    ScriptStep {
+        name: String,
+        script: String,
+        entry: Option<String>,
+        #[serde(default = "crate::workflow::definition::default_script_args")]
+        args: serde_json::Value,
+        timeout_seconds: Option<u64>,
+        max_tool_calls: Option<usize>,
+        output_schema: Option<serde_json::Value>,
+        condition: Option<String>,
+    },
+
     AgentStep {
         name: String,
         /// NAME of an existing skill in this project (created via the
@@ -261,6 +274,35 @@ impl WorkflowStepParam {
                     sandbox_mode,
                     timeout_seconds,
                     model_chain,
+                    output_schema: Box::new(output_schema),
+                    condition,
+                })
+            }
+            WorkflowStepParam::ScriptStep {
+                name,
+                script,
+                entry,
+                args,
+                timeout_seconds,
+                max_tool_calls,
+                output_schema,
+                condition,
+            } => {
+                let output_schema = match output_schema {
+                    Some(value) => serde_json::from_value(value).map_err(|e| {
+                        ToolSetsError::MissingArgument(format!(
+                            "step '{name}': invalid output_schema: {e}"
+                        ))
+                    })?,
+                    None => crate::workflow::default_output_schema(),
+                };
+                Ok(WorkflowStepDef::ScriptStep {
+                    name,
+                    script,
+                    entry,
+                    args,
+                    timeout_seconds,
+                    max_tool_calls,
                     output_schema: Box::new(output_schema),
                     condition,
                 })
@@ -387,8 +429,16 @@ struct WorkflowSandboxOutput {
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct WorkflowStepOutput {
     name: String,
-    /// `"agent_step"` or `"tool_step"`.
+    /// `agent_step`, `tool_step`, `script_step`, or `wait`.
     step_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    script: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    entry: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    args: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tool_calls: Option<usize>,
     /// Empty string for `tool_step`.
     skill: String,
     /// Set on `tool_step`.
@@ -1054,6 +1104,10 @@ fn step_to_output(s: &WorkflowStepDef) -> WorkflowStepOutput {
             ..
         } => WorkflowStepOutput {
             name: name.clone(),
+            script: None,
+            entry: None,
+            args: None,
+            max_tool_calls: None,
             step_type: "agent_step".to_string(),
             skill: skill.clone(),
             sandbox: sandbox.clone(),
@@ -1067,14 +1121,42 @@ fn step_to_output(s: &WorkflowStepDef) -> WorkflowStepOutput {
             ..
         } => WorkflowStepOutput {
             name: name.clone(),
+            script: None,
+            entry: None,
+            args: None,
+            max_tool_calls: None,
             step_type: "tool_step".to_string(),
             skill: String::new(),
             sandbox: None,
             timeout_seconds: *timeout_seconds,
             tool: Some(tool.clone()),
         },
+        WorkflowStepDef::ScriptStep {
+            name,
+            script,
+            entry,
+            args,
+            timeout_seconds,
+            max_tool_calls,
+            ..
+        } => WorkflowStepOutput {
+            name: name.clone(),
+            step_type: "script_step".into(),
+            skill: String::new(),
+            script: Some(script.clone()),
+            entry: Some(entry.clone().unwrap_or_else(|| "run".into())),
+            args: Some(args.clone()),
+            max_tool_calls: *max_tool_calls,
+            sandbox: None,
+            timeout_seconds: *timeout_seconds,
+            tool: None,
+        },
         WorkflowStepDef::Wait { name, .. } => WorkflowStepOutput {
             name: name.clone(),
+            script: None,
+            entry: None,
+            args: None,
+            max_tool_calls: None,
             step_type: "wait".to_string(),
             skill: String::new(),
             sandbox: None,
@@ -1290,6 +1372,15 @@ fn format_get_text(d: &WorkflowDefinition) -> String {
                     "  - tool_step name={name} tool={tool} timeout_s={timeout_seconds:?}\n"
                 ));
             }
+            WorkflowStepDef::ScriptStep {
+                name,
+                script,
+                entry,
+                timeout_seconds,
+                ..
+            } => {
+                out.push_str(&format!("  - script_step name={name} script={script} entry={} timeout_s={timeout_seconds:?}\n", entry.as_deref().unwrap_or("run")));
+            }
             WorkflowStepDef::Wait { name, provider, .. } => {
                 out.push_str(&format!("  - wait name={name} provider={provider}\n"));
             }
@@ -1413,5 +1504,25 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         s.chars().take(max).collect()
+    }
+}
+
+#[cfg(test)]
+mod script_step_tests {
+    use super::*;
+
+    #[test]
+    fn public_workflow_tool_accepts_and_reports_script_steps() {
+        let input: WorkflowStepParam = serde_json::from_value(serde_json::json!({
+            "type":"script_step", "name":"inventory", "script":"space:docs/tasks.js",
+            "entry":"inventory", "args":{"date":"${{ run.date }}"}, "max_tool_calls":1500
+        }))
+        .unwrap();
+        let output = serde_json::to_value(step_to_output(&input.into_step().unwrap())).unwrap();
+        assert_eq!(output["step_type"], "script_step");
+        assert_eq!(output["script"], "space:docs/tasks.js");
+        assert_eq!(output["entry"], "inventory");
+        assert_eq!(output["args"]["date"], "${{ run.date }}");
+        assert_eq!(output["max_tool_calls"], 1500);
     }
 }

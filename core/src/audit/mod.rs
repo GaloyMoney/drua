@@ -59,6 +59,9 @@ impl Audit {
                 ctx.on_behalf_of_user_id = Some(*user_id);
             }
             AuthSubject::WorkflowExecutor(project_id, definition_id, run_id, _) => {
+                ctx.acting_user_id = None;
+                ctx.acting_agent_id = None;
+                ctx.on_behalf_of_user_id = None;
                 Self::set_resource_id(ctx, "project_id", *project_id);
                 Self::set_resource_id(ctx, "workflow_id", *definition_id);
                 Self::set_resource_id(ctx, "workflow_run_id", *run_id);
@@ -127,6 +130,12 @@ impl Audit {
 
     pub fn record_workflow_id(workflow_id: WorkflowDefinitionId) {
         Self::update_context(|ctx| Self::set_resource_id(ctx, "workflow_id", workflow_id));
+    }
+
+    pub fn record_workflow_step(step: &str) {
+        Self::update_context(|ctx| {
+            ctx.resource_ids.insert("workflow_step".into(), step.into());
+        });
     }
 
     pub fn record_workflow_run_id(workflow_run_id: WorkflowRunId) {
@@ -201,7 +210,10 @@ impl Audit {
         let Some(ctx_data) = Self::collect_context() else {
             return;
         };
-        if ctx_data.acting_user_id.is_none() && ctx_data.acting_agent_id.is_none() {
+        if ctx_data.acting_user_id.is_none()
+            && ctx_data.acting_agent_id.is_none()
+            && !ctx_data.resource_ids.contains_key("workflow_run_id")
+        {
             return;
         }
         let audit = self.clone();
@@ -256,6 +268,8 @@ impl Audit {
         let outcome = query.outcome.as_deref();
         let error = query.error;
         let limit = query.limit;
+        let workflow_run_id = query.workflow_run_id.map(|id| id.to_string());
+        let workflow_step = query.workflow_step.as_deref();
 
         let rows = sqlx::query_as!(
             AuditEntry,
@@ -285,6 +299,8 @@ impl Audit {
               AND ($7::text IS NULL OR action ILIKE $7)
               AND ($8::text IS NULL OR outcome ILIKE $8)
               AND ($9::bool IS NULL OR error = $9)
+              AND ($11::text IS NULL OR resource_ids->>'workflow_run_id' = $11)
+              AND ($12::text IS NULL OR resource_ids->>'workflow_step' = $12)
             ORDER BY id DESC
             LIMIT $10"#,
             project_id.as_deref(),
@@ -297,6 +313,8 @@ impl Audit {
             outcome,
             error,
             limit,
+            workflow_run_id.as_deref(),
+            workflow_step,
         )
         .fetch_all(&self.pool)
         .await?;

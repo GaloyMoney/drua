@@ -71,9 +71,11 @@ pub struct AuditContextData {
     pub metadata: Option<serde_json::Value>,
 }
 
-/// Unset fields are excluded from the WHERE clause; strings use `ILIKE`.
+/// Unset fields are excluded; entrypoint/action/outcome use ILIKE, resource filters use equality.
 #[derive(Debug, Clone, Default)]
 pub struct AuditLogQuery {
+    pub workflow_run_id: Option<WorkflowRunId>,
+    pub workflow_step: Option<String>,
     pub project_id: Option<ProjectId>,
     pub acting_user_id: Option<UserId>,
     pub acting_agent_id: Option<AgentId>,

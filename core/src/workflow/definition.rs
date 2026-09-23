@@ -246,6 +246,23 @@ pub enum WorkflowStepDef {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         condition: Option<String>,
     },
+    /// Runs a library JavaScript export as `(args, run)` without a model turn.
+    ScriptStep {
+        name: String,
+        script: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry: Option<String>,
+        #[serde(default = "default_script_args")]
+        args: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_seconds: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_tool_calls: Option<usize>,
+        #[serde(default = "default_output_schema_boxed")]
+        output_schema: Box<OutputSchema>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        condition: Option<String>,
+    },
     /// Parks the run until an inbound webhook event matches
     /// `resume_condition`. The webhook infrastructure resumes the
     /// run by evaluating inbound events against parked runs.
@@ -275,6 +292,7 @@ impl WorkflowStepDef {
     pub fn name(&self) -> &str {
         match self {
             WorkflowStepDef::AgentStep { name, .. }
+            | WorkflowStepDef::ScriptStep { name, .. }
             | WorkflowStepDef::ToolStep { name, .. }
             | WorkflowStepDef::Wait { name, .. } => name,
         }
@@ -283,16 +301,17 @@ impl WorkflowStepDef {
     pub fn model_chain(&self) -> Option<&ModelChain> {
         match self {
             WorkflowStepDef::AgentStep { model_chain, .. } => model_chain.as_ref(),
-            WorkflowStepDef::ToolStep { .. } | WorkflowStepDef::Wait { .. } => None,
+            WorkflowStepDef::ScriptStep { .. }
+            | WorkflowStepDef::ToolStep { .. }
+            | WorkflowStepDef::Wait { .. } => None,
         }
     }
 
-    /// AgentSteps carry an explicit `output_schema` enforced via the
-    /// synthesised `submit_output` tool. ToolSteps have none — the
-    /// called tool's own declared schema is the contract.
+    /// Agent and script outputs share validation; tool steps use the tool's schema.
     pub fn output_schema(&self) -> Option<&OutputSchema> {
         match self {
-            WorkflowStepDef::AgentStep { output_schema, .. } => Some(output_schema.as_ref()),
+            WorkflowStepDef::AgentStep { output_schema, .. }
+            | WorkflowStepDef::ScriptStep { output_schema, .. } => Some(output_schema.as_ref()),
             WorkflowStepDef::ToolStep { .. } | WorkflowStepDef::Wait { .. } => None,
         }
     }
@@ -302,10 +321,15 @@ impl WorkflowStepDef {
     pub fn condition(&self) -> Option<&str> {
         match self {
             WorkflowStepDef::AgentStep { condition, .. }
+            | WorkflowStepDef::ScriptStep { condition, .. }
             | WorkflowStepDef::ToolStep { condition, .. }
             | WorkflowStepDef::Wait { condition, .. } => condition.as_deref(),
         }
     }
+}
+
+pub(crate) fn default_script_args() -> serde_json::Value {
+    serde_json::json!({})
 }
 
 /// Boxed factory used by `serde(default = …)` on the `AgentStep` variant.

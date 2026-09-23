@@ -84,6 +84,7 @@ The audit log MCP tool is the easy path. Use the admin variant
 (`drua_admin_log`) for prod inspections; the local `log` tool when working
 against your dev DB:
 
+- `log workflow_run_id=<run-id> workflow_step=<step-name>` — script, tool, and agent step calls
 - `log agent_id=<agent-id>` — every tool call this agent made
 - `log agent_id=<agent-id> errors_only=true` — only failures
 - `log entrypoint=<tool-name> agent_id=<agent-id>` — e.g. all sandbox calls
@@ -94,6 +95,7 @@ Or directly:
 SELECT recorded_at, action, error_message, jsonb_pretty(metadata) AS metadata
 FROM audit_entries
 WHERE acting_agent_id = '<agent-id>'::uuid
+   OR resource_ids->>'workflow_run_id' = '<run-id>'
 ORDER BY recorded_at;
 ```
 
@@ -109,6 +111,14 @@ SELECT sequence, event_type, jsonb_pretty(event) AS event
 FROM workflow_run_events
 WHERE id = '<workflow_run_id>'::uuid
 ORDER BY sequence;
+
+-- Tool activity grouped by workflow step, including steps without agents
+SELECT resource_ids->>'workflow_step' AS step, count(*) AS calls,
+       count(*) FILTER (WHERE error) AS errors
+FROM audit_entries
+WHERE acting_agent_id = '<agent-id>'::uuid
+   OR resource_ids->>'workflow_run_id' = '<workflow_run_id>'
+GROUP BY resource_ids->>'workflow_step';
 
 -- Sandbox lifecycle for the run's workspace
 SELECT s.id, s.name, s.workflow_id, s.created_at

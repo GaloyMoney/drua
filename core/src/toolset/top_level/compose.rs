@@ -27,6 +27,7 @@ struct ComposeParams {
     script: String,
 }
 
+#[derive(Clone)]
 pub struct ComposeTool {
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
     top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
@@ -38,6 +39,19 @@ pub struct ComposeTool {
 }
 
 impl ComposeTool {
+    pub(crate) fn script_step_limits(&self) -> super::super::ScriptStepLimits {
+        self.config.script_step
+    }
+
+    pub(crate) fn with_limits(&self, limits: super::super::ScriptStepLimits) -> Self {
+        let mut tool = self.clone();
+        tool.config.max_tool_calls = limits
+            .max_tool_calls
+            .min(self.config.script_step.max_tool_calls);
+        tool.config.timeout_ms = limits.timeout_ms.min(self.config.script_step.timeout_ms);
+        tool
+    }
+
     pub fn new(
         sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
         top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
@@ -283,6 +297,16 @@ impl TopLevelTool for ComposeTool {
             result: result.value.clone(),
         };
 
+        Audit::merge_metadata(serde_json::json!({"compose": {
+            "tool_calls": out.tool_calls,
+            "execution_time_ms": out.execution_time_ms,
+            "console": out.console,
+        }}));
+        tracing::info!(
+            tool_calls = out.tool_calls,
+            execution_time_ms = out.execution_time_ms,
+            "compose completed"
+        );
         let structured = serde_json::to_value(&out).expect("ComposeOutput serialization");
         let mut ctr = CallToolResult::success(Vec::new());
         ctr.structured_content = Some(structured);

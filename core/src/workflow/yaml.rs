@@ -7,6 +7,7 @@ use llm::ModelChain;
 use crate::primitives::WorkflowDefinitionId;
 use crate::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
 
+use super::definition::default_script_args;
 use super::definition::{default_output_schema, OutputSchema};
 
 fn default_output_schema_boxed() -> Box<OutputSchema> {
@@ -255,6 +256,22 @@ enum WorkflowStepYaml {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         condition: Option<String>,
     },
+    ScriptStep {
+        name: String,
+        script: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        entry: Option<String>,
+        #[serde(default = "default_script_args")]
+        args: serde_json::Value,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_seconds: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_tool_calls: Option<usize>,
+        #[serde(default = "default_output_schema_boxed")]
+        output_schema: Box<OutputSchema>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        condition: Option<String>,
+    },
     Wait {
         name: String,
         provider: String,
@@ -299,6 +316,25 @@ impl WorkflowStepYaml {
                 tool: tool.clone(),
                 params: params.clone(),
                 timeout_seconds: *timeout_seconds,
+                condition: condition.clone(),
+            },
+            WorkflowStepDef::ScriptStep {
+                name,
+                script,
+                entry,
+                args,
+                timeout_seconds,
+                max_tool_calls,
+                output_schema,
+                condition,
+            } => WorkflowStepYaml::ScriptStep {
+                name: name.clone(),
+                script: script.clone(),
+                entry: entry.clone(),
+                args: args.clone(),
+                timeout_seconds: *timeout_seconds,
+                max_tool_calls: *max_tool_calls,
+                output_schema: output_schema.clone(),
                 condition: condition.clone(),
             },
             WorkflowStepDef::Wait {
@@ -349,6 +385,25 @@ impl WorkflowStepYaml {
                 tool,
                 params,
                 timeout_seconds,
+                condition,
+            },
+            WorkflowStepYaml::ScriptStep {
+                name,
+                script,
+                entry,
+                args,
+                timeout_seconds,
+                max_tool_calls,
+                output_schema,
+                condition,
+            } => WorkflowStepDef::ScriptStep {
+                name,
+                script,
+                entry,
+                args,
+                timeout_seconds,
+                max_tool_calls,
+                output_schema,
                 condition,
             },
             WorkflowStepYaml::Wait {
@@ -870,5 +925,30 @@ steps:
             &parsed.sandboxes[0],
             WorkflowSandboxDecl::Preexisting { name } if name == "investigation"
         ));
+    }
+}
+
+#[cfg(test)]
+mod script_step_tests {
+    use super::*;
+
+    #[test]
+    fn script_step_yaml_round_trip_and_defaults() {
+        for yaml in [
+            "type: script_step\nname: inventory\nscript: space:docs/tasks.js\n",
+            "type: script_step\nname: inventory\nscript: space:docs/tasks.js\nentry: inventory\nargs:\n  plan: '${{ steps.plan.outputs }}'\nmax_tool_calls: 1500\ntimeout_seconds: 900\ncondition: steps.plan.outputs.success\noutput_schema:\n  type: object\n  required: [success, inventory_path]\n",
+        ] {
+            let step: WorkflowStepYaml = serde_yaml::from_str(yaml).unwrap();
+            let runtime = step.into_runtime();
+            let rendered = serde_yaml::to_string(&WorkflowStepYaml::from_runtime(&runtime)).unwrap();
+            let back: WorkflowStepYaml = serde_yaml::from_str(&rendered).unwrap();
+            assert_eq!(serde_json::to_value(&runtime).unwrap(), serde_json::to_value(back.into_runtime()).unwrap());
+            if !yaml.contains("entry:") {
+                let WorkflowStepDef::ScriptStep { entry, args, output_schema, .. } = runtime else { panic!() };
+                assert_eq!(entry.as_deref().unwrap_or("run"), "run");
+                assert_eq!(args, serde_json::json!({}));
+                assert_eq!(serde_json::to_value(output_schema).unwrap(), serde_json::to_value(default_output_schema()).unwrap());
+            }
+        }
     }
 }

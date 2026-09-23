@@ -29,6 +29,9 @@ struct AuditLogParams {
     #[schemars(with = "Option<uuid::Uuid>")]
     agent_id: Option<AgentId>,
     #[schemars(with = "Option<uuid::Uuid>")]
+    workflow_run_id: Option<crate::primitives::WorkflowRunId>,
+    workflow_step: Option<String>,
+    #[schemars(with = "Option<uuid::Uuid>")]
     sandbox_id: Option<SandboxId>,
     #[serde(
         default = "default_limit",
@@ -64,6 +67,8 @@ impl AuditLogParams {
             outcome,
             acting_user_id: self.user_id,
             acting_agent_id: self.agent_id,
+            workflow_run_id: self.workflow_run_id,
+            workflow_step: self.workflow_step,
             sandbox_id: self.sandbox_id,
             error,
             ..Default::default()

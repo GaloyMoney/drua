@@ -14,13 +14,8 @@ pub enum AuthSubject {
     /// Agent acting on behalf of a `User` or `ExportedAgent` originator,
     /// so downstream actions are attributable back to the user.
     AgentOnBehalfOfUser(UserId, ProjectId, AgentId, Vec<AuthScope>),
-    /// Workflow executor invoking a top-level tool from a `ToolStep`.
-    /// Carries `ProjectAdmin(project_id)` scope so the step can act
-    /// on any resource the workflow's project covers. Distinct from
-    /// `Agent` so audit + visibility paths can tell them apart. Both
-    /// the definition id and the run id are part of the identity so
-    /// audit trails and observability link the dispatch back to the
-    /// definition without a second DB hop.
+    /// Deterministic workflow dispatch with run attribution. Tool steps carry
+    /// project-admin scope; script steps carry project membership plus WorkflowScript.
     WorkflowExecutor(
         ProjectId,
         WorkflowDefinitionId,
@@ -150,18 +145,10 @@ impl AuthSubject {
             .any(|s| matches!(s, AuthScope::ProjectAdmin(_)))
     }
 
-    /// Visibility predicate for sandbox/space file tools (Bash, Read,
-    /// LS, Glob, Grep, Edit, Move, Delete). Mirrors the dual gate
-    /// these tools share: subject must be an Agent (users and
-    /// anonymous never run files) and must NOT be a project admin
-    /// (admins orchestrate; they don't run files themselves).
-    ///
-    /// Centralised here so a future scope/resource refactor can
-    /// replace the body with a `can(...)` call once the auth model
-    /// gains a verb that maps cleanly to "agent task tools" — see
-    /// `core/src/auth/scope.rs` for the current scope model.
     pub fn can_use_agent_file_tools(&self) -> bool {
-        self.is_agent() && !self.is_project_admin()
+        // Markers must be explicit: has_scope() treats users as having every scope.
+        self.scopes().contains(&AuthScope::WorkflowScript)
+            || (self.is_agent() && !self.is_project_admin())
     }
 
     /// `SandboxUse` implies read; first match wins.
@@ -222,11 +209,23 @@ impl From<&AuthSubject> for Option<drua_tool_caching::ToolCallOwnerId> {
 }
 
 impl AuthSubject {
-    /// Mints a `WorkflowExecutor` subject scoped to `project_id` with
-    /// implicit `ProjectAdmin(project_id)` scope. The workflow tier
-    /// owns the definition + run identity; the dispatched tool sees
-    /// the project authority it needs to read/write its own
-    /// resources.
+    /// Scripts can use mounted-space file tools without project administration.
+    pub fn workflow_script(
+        project_id: ProjectId,
+        definition_id: WorkflowDefinitionId,
+        run_id: WorkflowRunId,
+    ) -> Self {
+        Self::WorkflowExecutor(
+            project_id,
+            definition_id,
+            run_id,
+            vec![
+                AuthScope::ProjectMember(project_id),
+                AuthScope::WorkflowScript,
+            ],
+        )
+    }
+
     pub fn workflow_executor(
         project_id: ProjectId,
         definition_id: WorkflowDefinitionId,
@@ -381,5 +380,42 @@ mod tests {
         assert!(s
             .can(AuthVerb::Update, AuthResource::Skill(other_ws(), None))
             .is_err());
+    }
+}
+
+#[cfg(test)]
+mod workflow_script_tests {
+    use super::*;
+
+    #[test]
+    fn workflow_script_is_a_member_with_workflow_attribution_and_no_agent() {
+        let project = ProjectId::new();
+        let run = WorkflowRunId::new();
+        let subject = AuthSubject::workflow_script(project, WorkflowDefinitionId::new(), run);
+        assert_eq!(subject.project_id(), Some(project));
+        assert_eq!(subject.acting_workflow_run_id(), Some(run));
+        assert!(subject.acting_agent_id().is_none());
+        assert!(subject.originating_user_id().is_none());
+        assert!(subject.writable_sandbox_id().is_none());
+        assert!(!subject.is_project_admin());
+        assert!(subject.can_use_agent_file_tools());
+        assert!(!AuthSubject::User(UserId::new()).can_use_agent_file_tools());
+        assert!(!AuthSubject::Anonymous.can_use_agent_file_tools());
+        assert!(!subject.has_scope(&AuthScope::WorkflowStepAgent));
+        assert!(subject
+            .can(AuthVerb::Read, AuthResource::Project(Some(project)))
+            .is_ok());
+        assert!(subject
+            .can(AuthVerb::Update, AuthResource::Project(Some(project)))
+            .is_err());
+        assert!(subject
+            .can(
+                AuthVerb::Read,
+                AuthResource::Project(Some(ProjectId::new()))
+            )
+            .is_err());
+        assert!(Option::<drua_tool_caching::ToolCallOwnerId>::from(&subject).is_none());
+        assert!(!AuthScope::WorkflowScript
+            .permits(AuthVerb::Read, &AuthResource::Project(Some(project))));
     }
 }

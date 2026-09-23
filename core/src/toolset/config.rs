@@ -27,6 +27,8 @@ pub struct ToolSetsConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ComposeConfig {
+    #[serde(default)]
+    pub script_step: ScriptStepLimits,
     #[serde(default = "default_max_script_file_bytes")]
     pub max_script_file_bytes: usize,
     #[serde(default = "default_max_script_total_bytes")]
@@ -64,6 +66,7 @@ pub struct ComposeConfig {
 impl Default for ComposeConfig {
     fn default() -> Self {
         Self {
+            script_step: ScriptStepLimits::default(),
             max_script_file_bytes: default_max_script_file_bytes(),
             max_script_total_bytes: default_max_script_total_bytes(),
             max_script_loads: default_max_script_loads(),
@@ -75,6 +78,22 @@ impl Default for ComposeConfig {
             memory_limit_bytes: default_memory_limit_bytes(),
             stack_limit_bytes: default_stack_limit_bytes(),
             timeout_ms: default_timeout_ms(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScriptStepLimits {
+    pub max_tool_calls: usize,
+    pub timeout_ms: u64,
+}
+
+impl Default for ScriptStepLimits {
+    fn default() -> Self {
+        Self {
+            max_tool_calls: 2000,
+            timeout_ms: 1_800_000,
         }
     }
 }
@@ -320,5 +339,24 @@ mod script_limit_tests {
         );
         let config: ComposeConfig = serde_json::from_str(r#"{"max_script_loads":2}"#).unwrap();
         assert_eq!(config.max_script_loads, 2);
+    }
+}
+
+#[cfg(test)]
+mod script_step_tests {
+    use super::*;
+
+    #[test]
+    fn workflow_limits_default_independently_from_agent_compose() {
+        let config: ComposeConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(config.max_tool_calls, 50);
+        assert_eq!(config.timeout_ms, 420_000);
+        assert_eq!(config.script_step.max_tool_calls, 2000);
+        assert_eq!(config.script_step.timeout_ms, 1_800_000);
+        let config: ComposeConfig =
+            serde_yaml::from_str("script_step:\n  max_tool_calls: 80\n").unwrap();
+        assert_eq!(config.script_step.max_tool_calls, 80);
+        assert_eq!(config.script_step.timeout_ms, 1_800_000);
+        assert_eq!(config.max_tool_calls, 50);
     }
 }
