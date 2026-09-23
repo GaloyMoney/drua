@@ -88,7 +88,7 @@ impl ScriptProviderFactory {
 impl js_engine::ScriptSourceProvider for SpaceScriptProvider {
     async fn read(&self, path: &str) -> Result<Vec<u8>, String> {
         self.fs
-            .read_file(&self.subject, path)
+            .read_file_bytes(&self.subject, path)
             .await
             .map_err(|error| match error {
                 ProjectError::Authorization(_)

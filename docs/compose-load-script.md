@@ -16,7 +16,7 @@ Initialization promises (including failures) and exported objects are cached onl
 for that invocation. Cycles are rejected before waiting on another initialization.
 
 Only canonical `space:<slug>/<path>.js` addresses are accepted. Filenames are
-literal, not URL-decoded. Cache misses use ordinary authorized `SpaceFs::read_file`
+literal, not URL-decoded. Cache misses use ordinary authorized `SpaceFs::read_file_bytes`
 reads. Cache hits reuse the same promise/exports without another read or permission
 check, even if access is revoked during the invocation. Uncached dependencies and
 the next invocation observe current permissions. Project agents need mounts; external Admin credentials

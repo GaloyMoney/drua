@@ -109,8 +109,8 @@ impl SpaceFs {
 
     /// Read complete bytes through ordinary space resolution and authorization.
     /// Non-space paths return `None`; missing space files return `PathNotFound`.
-    #[instrument(name = "library.space_fs.read_file", skip(self, sub))]
-    pub async fn read_file(
+    #[instrument(name = "library.space_fs.read_file_bytes", skip(self, sub))]
+    pub async fn read_file_bytes(
         &self,
         sub: &AuthSubject,
         path: &str,
