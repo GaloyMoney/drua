@@ -214,6 +214,56 @@ impl Drop for OwnedTaskHandle {
     }
 }
 
+#[derive(Debug)]
+pub struct ScriptBlob {
+    pub revision: String,
+    pub blob_oid: String,
+    pub text: String,
+}
+
+fn read_script_blob(
+    repo: &git2::Repository,
+    path: &str,
+    revision: Option<&str>,
+    max_bytes: usize,
+) -> Result<ScriptBlob, LibraryError> {
+    let commit = match revision {
+        Some(revision) => repo.find_commit(
+            git2::Oid::from_str(revision).map_err(|e| LibraryError::Git(e.to_string()))?,
+        ),
+        None => repo.head().and_then(|head| head.peel_to_commit()),
+    }
+    .map_err(|e| LibraryError::Git(format!("script revision: {e}")))?;
+    let tree = commit
+        .tree()
+        .map_err(|e| LibraryError::Git(e.to_string()))?;
+    let entry = tree
+        .get_path(Path::new(path))
+        .map_err(|_| LibraryError::Validation("missing_file: script does not exist".into()))?;
+    if !matches!(entry.filemode(), 0o100644 | 0o100755) {
+        return Err(LibraryError::Validation(
+            "invalid_source: expected a regular Git blob".into(),
+        ));
+    }
+    let blob = repo
+        .find_blob(entry.id())
+        .map_err(|e| LibraryError::Git(e.to_string()))?;
+    if blob.size() > max_bytes {
+        return Err(LibraryError::Validation(format!(
+            "size_limit: {} bytes exceeds {max_bytes}",
+            blob.size()
+        )));
+    }
+    let text = std::str::from_utf8(blob.content())
+        .map_err(|_| LibraryError::Validation("invalid_source: script is not UTF-8".into()))?
+        .to_owned();
+    Ok(ScriptBlob {
+        revision: commit.id().to_string(),
+        blob_oid: blob.id().to_string(),
+        text,
+    })
+}
+
 pub struct GitEngine {
     repo_path: PathBuf,
     /// Held by the writer for each batch and by `fetch_and_head`.
@@ -531,6 +581,36 @@ impl GitEngine {
             )?);
         }
         Ok(deltas)
+    }
+
+    pub async fn read_script(
+        &self,
+        path: &str,
+        snapshot: Arc<std::sync::Mutex<Option<String>>>,
+        max_bytes: usize,
+    ) -> Result<ScriptBlob, LibraryError> {
+        let repo_path = self.repo_path.clone();
+        let path = path.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let repo = git2::Repository::open_bare(repo_path)
+                .map_err(|e| LibraryError::Git(e.to_string()))?;
+            let revision = {
+                let mut snapshot = snapshot.lock().unwrap();
+                if snapshot.is_none() {
+                    *snapshot = Some(
+                        repo.head()
+                            .and_then(|h| h.peel_to_commit())
+                            .map_err(|e| LibraryError::Git(e.to_string()))?
+                            .id()
+                            .to_string(),
+                    );
+                }
+                snapshot.clone()
+            };
+            read_script_blob(&repo, &path, revision.as_deref(), max_bytes)
+        })
+        .await
+        .map_err(|e| LibraryError::Git(format!("script read join: {e}")))?
     }
 
     /// Read the blob at `path` from HEAD's tree. `Ok(None)` when the
@@ -1684,6 +1764,79 @@ mod tests {
         let parent_refs: Vec<&git2::Commit> = parents.iter().collect();
         repo.commit(None, &sig, &sig, message, &tree, &parent_refs)
             .unwrap()
+    }
+
+    #[test]
+    fn script_reads_pin_revision_and_validate_blob_before_copying() {
+        let dir = unique_dir("scripts");
+        let repo = git2::Repository::init_bare(&dir).unwrap();
+        let first = commit_file(&repo, None, "a.js", b"return 1;", LIB_BOT, "first");
+        repo.reference("refs/heads/main", first, true, "test")
+            .unwrap();
+        repo.set_head("refs/heads/main").unwrap();
+        let loaded = read_script_blob(&repo, "a.js", None, 1024).unwrap();
+        assert_eq!(loaded.revision, first.to_string());
+        assert_eq!(
+            loaded.blob_oid,
+            repo.blob(b"return 1;").unwrap().to_string()
+        );
+        let second = commit_file(&repo, Some(first), "a.js", b"return 2;", LIB_BOT, "second");
+        repo.reference("refs/heads/main", second, true, "test")
+            .unwrap();
+        assert_eq!(
+            read_script_blob(&repo, "a.js", Some(&loaded.revision), 1024)
+                .unwrap()
+                .text,
+            "return 1;"
+        );
+        assert_eq!(
+            read_script_blob(&repo, "a.js", None, 1024).unwrap().text,
+            "return 2;"
+        );
+        assert!(read_script_blob(&repo, "a.js", None, 2)
+            .unwrap_err()
+            .to_string()
+            .contains("size_limit"));
+        assert!(read_script_blob(&repo, "missing.js", None, 1024)
+            .unwrap_err()
+            .to_string()
+            .contains("missing_file"));
+        let third = commit_file(
+            &repo,
+            Some(second),
+            "bad.js",
+            &[0xff],
+            LIB_BOT,
+            "invalid UTF8",
+        );
+        assert!(
+            read_script_blob(&repo, "bad.js", Some(&third.to_string()), 1024)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid_source")
+        );
+        let mut builder = repo.treebuilder(None).unwrap();
+        builder
+            .insert("link.js", repo.blob(b"a.js").unwrap(), 0o120000)
+            .unwrap();
+        let empty = repo.treebuilder(None).unwrap().write().unwrap();
+        builder.insert("dir.js", empty, 0o040000).unwrap();
+        let tree = repo.find_tree(builder.write().unwrap()).unwrap();
+        let sig = git2::Signature::now("test", LIB_BOT).unwrap();
+        let revision = repo
+            .commit(None, &sig, &sig, "types", &tree, &[])
+            .unwrap()
+            .to_string();
+        for path in ["link.js", "dir.js"] {
+            assert!(read_script_blob(&repo, path, Some(&revision), 1024)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid_source"));
+        }
+        drop(tree);
+        drop(builder);
+        drop(repo);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn projection_msg() -> String {

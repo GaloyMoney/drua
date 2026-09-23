@@ -76,6 +76,16 @@ fn parse_space_path(path: &str) -> Option<SpaceRef<'_>> {
     })
 }
 
+fn validate_script_path(path: &str) -> Result<SpaceRef<'_>, String> {
+    let sref = parse_space_path(path).ok_or("invalid_path: expected space:<slug>/<path>.js")?;
+    drua_library::space::validate_slug(sref.slug).map_err(|e| format!("invalid_path: {e}"))?;
+    SpaceFs::validate_rel_path(sref.rel_path).map_err(|e| format!("invalid_path: {e}"))?;
+    if !sref.rel_path.ends_with(".js") {
+        return Err("invalid_path: expected a .js file".into());
+    }
+    Ok(sref)
+}
+
 /// True for slugless space URIs (`space:`, `space:/`, etc.); routed to `list_mounted_spaces` for runtime discovery.
 fn is_bare_space_path(path: &str) -> bool {
     let Some(rest) = path.strip_prefix("space:") else {
@@ -105,6 +115,44 @@ impl SpaceFs {
             projects,
             users,
         }
+    }
+
+    #[instrument(name = "library.space_fs.authorize_script", skip(self, sub))]
+    pub async fn authorize_script(&self, sub: &AuthSubject, path: &str) -> Result<(), String> {
+        let sref = validate_script_path(path)?;
+        self.projects
+            .space_for_subject(sub, sref.slug)
+            .await
+            .map_err(|_| "access_denied: script space is not accessible".to_owned())?;
+        Ok(())
+    }
+
+    #[instrument(name = "library.space_fs.read_script", skip_all, fields(%path))]
+    pub async fn read_script(
+        &self,
+        sub: &AuthSubject,
+        path: &str,
+        snapshot: Arc<std::sync::Mutex<Option<String>>>,
+        max_bytes: usize,
+    ) -> Result<js_engine::ScriptSource, String> {
+        use sha2::{Digest, Sha256};
+        self.authorize_script(sub, path).await?;
+        let sref = validate_script_path(path)?;
+        let blob = self
+            .spaces
+            .read_script(sref.slug, sref.rel_path, snapshot, max_bytes)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(js_engine::ScriptSource {
+            identity: js_engine::SourceIdentity {
+                path: path.to_owned(),
+                revision: blob.revision,
+                blob_oid: blob.blob_oid,
+                sha256: format!("{:x}", Sha256::digest(blob.text.as_bytes())),
+                byte_length: blob.text.len(),
+            },
+            text: blob.text,
+        })
     }
 
     /// Pure peek — does `path` start with the `space:` prefix and have
@@ -522,7 +570,7 @@ impl SpaceFs {
         if rel.is_empty() {
             return Ok(());
         }
-        if rel.contains('\0') || rel.starts_with('/') || rel.starts_with('\\') {
+        if rel.chars().any(char::is_control) || rel.starts_with('/') || rel.contains('\\') {
             return Err(invalid_rel_path(rel));
         }
         for segment in rel.split('/') {
@@ -1005,5 +1053,74 @@ mod tests {
         let entries = vec!["research/a.md".to_string()];
         let out = join_dates(entries, Some(&map), |entry| entry.to_string());
         assert_eq!(out[0].dates, Some(dated(200)));
+    }
+}
+
+#[cfg(test)]
+mod script_path_tests {
+    use super::validate_script_path;
+
+    #[test]
+    fn canonical_script_addresses_use_literal_filenames() {
+        for path in ["space:tools/a.js", "space:tools/sub/雪 %20 #?.js"] {
+            assert!(validate_script_path(path).is_ok(), "{path}");
+        }
+        for path in [
+            "file:/a.js",
+            "https://example/a.js",
+            "space:/a.js",
+            "space:Bad/a.js",
+            "space:tools/../a.js",
+            "space:tools/./a.js",
+            "space:tools//a.js",
+            "space:tools/a\\b.js",
+            "space:tools/a\nb.js",
+            "space:tools/",
+            "space:tools/a.ts",
+        ] {
+            assert!(validate_script_path(path).is_err(), "{path}");
+        }
+    }
+}
+
+struct SpaceScriptProvider {
+    fs: Arc<SpaceFs>,
+    subject: AuthSubject,
+    snapshot: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+#[derive(Default)]
+pub struct ScriptProviderFactory(std::sync::OnceLock<Arc<SpaceFs>>);
+
+impl ScriptProviderFactory {
+    pub fn initialize(&self, fs: Arc<SpaceFs>) {
+        assert!(
+            self.0.set(fs).is_ok(),
+            "script provider already initialized"
+        );
+    }
+
+    pub fn for_subject(
+        &self,
+        subject: &AuthSubject,
+    ) -> Option<Arc<dyn js_engine::ScriptSourceProvider>> {
+        Some(Arc::new(SpaceScriptProvider {
+            fs: self.0.get()?.clone(),
+            subject: subject.clone(),
+            snapshot: Arc::default(),
+        }))
+    }
+}
+
+#[async_trait::async_trait]
+impl js_engine::ScriptSourceProvider for SpaceScriptProvider {
+    async fn authorize(&self, path: &str) -> Result<(), String> {
+        self.fs.authorize_script(&self.subject, path).await
+    }
+
+    async fn read(&self, path: &str, max_bytes: usize) -> Result<js_engine::ScriptSource, String> {
+        self.fs
+            .read_script(&self.subject, path, self.snapshot.clone(), max_bytes)
+            .await
     }
 }

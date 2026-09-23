@@ -308,6 +308,7 @@ impl App {
             Arc::clone(&projects),
             Arc::clone(&users),
         ));
+        toolsets.script_provider.initialize(Arc::clone(&space_fs));
         toolsets.register_top_level(TextEditor::new(
             Arc::clone(&sandboxes),
             Arc::clone(&space_fs),

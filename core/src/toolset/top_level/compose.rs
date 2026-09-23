@@ -30,9 +30,18 @@ pub struct ComposeTool {
     audit: Option<Arc<Audit>>,
     tool_caching: Option<Arc<ToolCaching>>,
     config: ComposeConfig,
+    script_provider: Arc<crate::space_fs::ScriptProviderFactory>,
 }
 
 impl ComposeTool {
+    pub fn with_script_provider(
+        mut self,
+        provider: Arc<crate::space_fs::ScriptProviderFactory>,
+    ) -> Self {
+        self.script_provider = provider;
+        self
+    }
+
     pub fn new(
         sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
         top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
@@ -46,6 +55,7 @@ impl ComposeTool {
             audit,
             tool_caching,
             config,
+            script_provider: Arc::default(),
         }
     }
 }
@@ -95,24 +105,15 @@ impl TopLevelTool for ComposeTool {
     }
 
     fn description(&self) -> &str {
-        "Execute JavaScript that composes multiple tool calls in a single round trip. \
-         The script has access to a `tools` namespace with nested server namespaces \
-         (e.g. `tools.honeycomb.list_environments({...})`). Flat prefixed names also work \
-         (e.g. `tools.honeycomb_list_environments({...})`). \
-         Use `return` for the final value. Top-level `await` and `Promise.all()` are supported. \
-         **Call `compose_types` first** to fetch exact tool signatures and parameter names \
-         — guessing leads to runtime errors that waste a round trip. \
-         **Reduce before you return.** The script reads full upstream payloads for free, \
-         but the value you `return` is elided against the same ~8 KB budget as any tool \
-         result — return the fields and rows you actually need, not whole responses, or \
-         the agent spends `tool_output_fetch` round trips reading back what the script \
-         already had in hand. \
-         Scope is plain JavaScript plus `tools`, `console`, and `setTimeout` — \
-         no Node.js builtins (`require`, `module`, `process`, `fs` are unavailable).\n\n\
-         Example:\n```js\nconst envs = await tools.honeycomb.list_environments({});\n\
-         const issues = await tools.github.list_issues({ repo: 'org/repo', state: 'open' });\n\
-         const stale = issues.filter(i => Date.now() - Date.parse(i.updated_at) > 7*86400*1000);\n\
-         return { envs, stale_issues: stale.map(i => i.number) };\n```"
+        static DESCRIPTION: LazyLock<String> = LazyLock::new(|| {
+            format!(
+                "{}\n{}\n{}",
+                COMPOSE_DESCRIPTION,
+                js_engine::LOAD_SCRIPT_DOC,
+                js_engine::LOAD_SCRIPT_DECLARATION
+            )
+        });
+        &DESCRIPTION
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -170,16 +171,33 @@ impl TopLevelTool for ComposeTool {
         });
 
         let engine = js_engine::JsEngine::new()
+            .with_script_limits(js_engine::ScriptLimits {
+                max_file_bytes: self.config.max_script_file_bytes,
+                max_total_bytes: self.config.max_script_total_bytes,
+                max_loads: self.config.max_script_loads,
+                max_dependency_depth: self.config.max_script_dependency_depth,
+            })
             .with_max_tool_calls(self.config.max_tool_calls)
             .with_max_tool_result_bytes(self.config.max_tool_result_bytes)
             .with_max_return_bytes(self.config.max_return_bytes)
             .with_max_console_bytes(self.config.max_console_bytes)
             .with_memory_limit(self.config.memory_limit_bytes)
             .with_stack_limit(self.config.stack_limit_bytes);
+        let script_audit: js_engine::SharedScriptAudit = Arc::default();
         let result = engine
-            .execute(&script, dispatcher, timeout)
-            .await
-            .map_err(|e| ToolSetsError::Compose(e.to_string()))?;
+            .execute_with_sources(
+                &script,
+                dispatcher,
+                timeout,
+                self.script_provider.for_subject(subject),
+                script_audit.clone(),
+            )
+            .await;
+        Audit::merge_metadata(serde_json::json!({ "script_execution": {
+            "loads": &*script_audit.lock().unwrap(),
+            "error": result.as_ref().err().map(ToString::to_string),
+        }}));
+        let result = result.map_err(|e| ToolSetsError::Compose(e.to_string()))?;
 
         let collected_sub_invocations = sub_invocations
             .lock()
@@ -998,3 +1016,23 @@ mod tests {
         }
     }
 }
+
+const COMPOSE_DESCRIPTION: &str =
+    "Execute JavaScript that composes multiple tool calls in a single round trip. \
+         The script has access to a `tools` namespace with nested server namespaces \
+         (e.g. `tools.honeycomb.list_environments({...})`). Flat prefixed names also work \
+         (e.g. `tools.honeycomb_list_environments({...})`). \
+         Use `return` for the final value. Top-level `await` and `Promise.all()` are supported. \
+         **Call `compose_types` first** to fetch exact tool signatures and parameter names \
+         — guessing leads to runtime errors that waste a round trip. \
+         **Reduce before you return.** The script reads full upstream payloads for free, \
+         but the value you `return` is elided against the same ~8 KB budget as any tool \
+         result — return the fields and rows you actually need, not whole responses, or \
+         the agent spends `tool_output_fetch` round trips reading back what the script \
+         already had in hand. \
+         Scope is plain JavaScript plus `tools`, `console`, and `setTimeout` — \
+         no Node.js builtins (`require`, `module`, `process`, `fs` are unavailable).\n\n\
+         Example:\n```js\nconst envs = await tools.honeycomb.list_environments({});\n\
+         const issues = await tools.github.list_issues({ repo: 'org/repo', state: 'open' });\n\
+         const stale = issues.filter(i => Date.now() - Date.parse(i.updated_at) > 7*86400*1000);\n\
+         return { envs, stale_issues: stale.map(i => i.number) };\n```";
