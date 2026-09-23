@@ -4,8 +4,8 @@ use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 
 use crate::primitives::{
-    AgentId, AuthScope, AuthSubject, ProjectId, SandboxId, UserId, WorkflowDefinitionId,
-    WorkflowRunId,
+    AgentId, AuthScope, AuthSubject, ChangesetId, ProjectId, SandboxId, UserId,
+    WorkflowDefinitionId, WorkflowRunId,
 };
 use crate::sandbox::SandboxAgentMode;
 use crate::workflow::OutputSchema;
@@ -61,6 +61,12 @@ pub enum AgentEvent {
     SandboxDetached {
         sandbox_id: SandboxId,
     },
+    ChangesetBound {
+        changeset_id: ChangesetId,
+    },
+    ChangesetUnbound {
+        changeset_id: ChangesetId,
+    },
 }
 
 #[derive(EsEntity, Builder)]
@@ -89,6 +95,11 @@ pub struct Agent {
     /// agents.
     #[builder(default)]
     pub output_schema: Option<OutputSchema>,
+    /// The changeset this agent's `space:` writes resolve to — `None`
+    /// writes `main` directly (subject to `Update`/`Propose` scopes; see
+    /// `SpaceFs::resolve`). At most one at a time.
+    #[builder(default)]
+    pub active_changeset: Option<ChangesetId>,
     events: EntityEvents<AgentEvent>,
 }
 
@@ -193,6 +204,39 @@ impl Agent {
         Idempotent::Executed(())
     }
 
+    /// At most one changeset per agent: a different changeset returns
+    /// `AlreadyBoundToChangeset`. Same id is idempotent. `pub(crate)`,
+    /// not `pub(super)`: `Changesets` (a different module) calls this
+    /// directly against `AgentRepo`, bypassing the `Agents` service —
+    /// the handoff's "repos, not services" dependency shape.
+    pub(crate) fn changeset_bound(
+        &mut self,
+        changeset_id: ChangesetId,
+    ) -> Result<Idempotent<()>, super::error::AgentError> {
+        if self.active_changeset == Some(changeset_id) {
+            return Ok(Idempotent::AlreadyApplied);
+        }
+        if let Some(current) = self.active_changeset {
+            return Err(super::error::AgentError::AlreadyBoundToChangeset { current });
+        }
+        self.active_changeset = Some(changeset_id);
+        self.events
+            .push(AgentEvent::ChangesetBound { changeset_id });
+        Ok(Idempotent::Executed(()))
+    }
+
+    /// Idempotent when not bound to `changeset_id`. `pub(crate)` — see
+    /// `changeset_bound`.
+    pub(crate) fn changeset_unbound(&mut self, changeset_id: ChangesetId) -> Idempotent<()> {
+        if self.active_changeset != Some(changeset_id) {
+            return Idempotent::AlreadyApplied;
+        }
+        self.active_changeset = None;
+        self.events
+            .push(AgentEvent::ChangesetUnbound { changeset_id });
+        Idempotent::Executed(())
+    }
+
     /// Read grants `SandboxRead` (removes `SandboxUse`); Write grants
     /// `SandboxUse` (removes `SandboxRead`).
     fn apply_sandbox_scopes(
@@ -219,6 +263,7 @@ impl TryFromEvents<AgentEvent> for Agent {
         let mut builder = AgentBuilder::default();
         let mut scopes: HashSet<AuthScope> = HashSet::new();
         let mut attached_sandbox: Option<(SandboxId, SandboxAgentMode)> = None;
+        let mut active_changeset: Option<ChangesetId> = None;
 
         for event in events.iter_all() {
             match event {
@@ -260,12 +305,21 @@ impl TryFromEvents<AgentEvent> for Agent {
                         attached_sandbox = None;
                     }
                 }
+                AgentEvent::ChangesetBound { changeset_id } => {
+                    active_changeset = Some(*changeset_id);
+                }
+                AgentEvent::ChangesetUnbound { changeset_id } => {
+                    if active_changeset == Some(*changeset_id) {
+                        active_changeset = None;
+                    }
+                }
             }
         }
 
         builder
             .authz_scopes(scopes)
             .attached_sandbox(attached_sandbox)
+            .active_changeset(active_changeset)
             .events(events)
             .build()
     }
@@ -384,5 +438,66 @@ mod tests {
             .sandbox_attached(sandbox_id, SandboxAgentMode::Write)
             .expect("re-attach");
         assert!(matches!(outcome, es_entity::Idempotent::AlreadyApplied));
+    }
+
+    #[test]
+    fn changeset_bind_and_unbind_round_trip() {
+        let mut agent = build(None, None);
+        assert!(agent.active_changeset.is_none());
+
+        let id = ChangesetId::new();
+        assert!(agent.changeset_bound(id).unwrap().did_execute());
+        assert_eq!(agent.active_changeset, Some(id));
+
+        assert!(agent.changeset_unbound(id).did_execute());
+        assert!(agent.active_changeset.is_none());
+    }
+
+    #[test]
+    fn changeset_bind_same_id_is_idempotent() {
+        let mut agent = build(None, None);
+        let id = ChangesetId::new();
+        agent.changeset_bound(id).unwrap().did_execute();
+        let outcome = agent.changeset_bound(id).unwrap();
+        assert!(matches!(outcome, es_entity::Idempotent::AlreadyApplied));
+    }
+
+    #[test]
+    fn changeset_bind_different_id_while_bound_errors() {
+        let mut agent = build(None, None);
+        let first = ChangesetId::new();
+        let second = ChangesetId::new();
+        agent.changeset_bound(first).unwrap().did_execute();
+
+        let result = agent.changeset_bound(second);
+        assert!(matches!(
+            result,
+            Err(super::super::error::AgentError::AlreadyBoundToChangeset { current }) if current == first
+        ));
+        // The failed attempt didn't change anything.
+        assert_eq!(agent.active_changeset, Some(first));
+    }
+
+    #[test]
+    fn changeset_unbind_wrong_id_is_noop() {
+        let mut agent = build(None, None);
+        let bound = ChangesetId::new();
+        let other = ChangesetId::new();
+        agent.changeset_bound(bound).unwrap().did_execute();
+
+        let outcome = agent.changeset_unbound(other);
+        assert!(matches!(outcome, es_entity::Idempotent::AlreadyApplied));
+        assert_eq!(agent.active_changeset, Some(bound));
+    }
+
+    #[test]
+    fn changeset_binding_hydrates_from_events() {
+        let mut agent = build(None, None);
+        let id = ChangesetId::new();
+        agent.changeset_bound(id).unwrap().did_execute();
+
+        let events = agent.events;
+        let rehydrated = Agent::try_from_events(events).unwrap();
+        assert_eq!(rehydrated.active_changeset, Some(id));
     }
 }

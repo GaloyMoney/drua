@@ -23,7 +23,8 @@ es_entity::entity_id! {
     SkillId,
     NoteId,
     WorkflowDefinitionId,
-    WorkflowRunId;
+    WorkflowRunId,
+    ChangesetId;
 
     UserId => McpCredsOwnerId,
     AgentId => McpCredsOwnerId,

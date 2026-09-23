@@ -4,6 +4,7 @@ pub mod agent;
 mod arguments_envelope;
 pub mod audit;
 pub mod auth;
+pub mod changeset;
 pub mod code_assistant;
 mod config;
 pub mod encryption;

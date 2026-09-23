@@ -27,7 +27,9 @@ pub use space::{NewSpace, Space, SpaceError, SpaceEvent, Spaces, SPACE_DOC_TYPE}
 pub use synced::LibrarySynced;
 
 use self::git::GitEngine;
-pub use self::git::{BatchRmwFn, BlobEntries, DirEntry, PathDates, PathDatesMap};
+pub use self::git::{
+    BatchRmwFn, BlobEntries, CommitDelta, DeltaKind, DirEntry, PathDates, PathDatesMap,
+};
 use self::job::{
     CommitTick, ImporterRegistry, LibraryEmbedConfig, LibraryEmbedJobInitializer,
     LibrarySyncConfig, LibrarySyncJobInitializer, LibraryWriteConfig, LibraryWriteJobInitializer,
@@ -259,6 +261,26 @@ impl Library {
         dir_path: &str,
     ) -> Result<Option<BlobEntries>, LibraryError> {
         self.git.walk_blobs_at(commit_oid, dir_path).await
+    }
+
+    /// Forces an immediate fetch and returns the resulting HEAD (`main`)
+    /// oid. `Ok(None)` when the repo is unborn. Used by `Changesets::open`
+    /// to pin a changeset's `base_oid` to a fresh `main`, not whatever
+    /// the periodic fetcher last observed.
+    pub async fn fetch_and_head(&self) -> Result<Option<String>, LibraryError> {
+        self.git.fetch_and_head().await
+    }
+
+    /// Diff between two commits (`None` `from` walks all of `to`'s tree
+    /// as `Added`), each changed path with its blob content at `to` (or
+    /// the removed blob for deletes). Used by `Changesets::status`'s
+    /// touched-files computation.
+    pub async fn changes_since(
+        &self,
+        from: Option<&str>,
+        to: &str,
+    ) -> Result<Vec<CommitDelta>, LibraryError> {
+        self.git.changes_since(from, to).await
     }
 
     /// Current target of `refname` (e.g. `refs/heads/drua/<id>`).

@@ -83,6 +83,10 @@ impl Audit {
         Self::update_context(|ctx| Self::set_resource_id(ctx, "skill_id", skill_id));
     }
 
+    pub fn record_changeset_id(changeset_id: ChangesetId) {
+        Self::update_context(|ctx| Self::set_resource_id(ctx, "changeset_id", changeset_id));
+    }
+
     pub fn record_tool_invocation_id(id: impl Into<uuid::Uuid>) {
         Self::update_context(|ctx| Self::set_resource_id(ctx, "tool_invocation_id", id));
     }
