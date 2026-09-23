@@ -34,6 +34,10 @@ toolsets:
   code_assistant:
     db_path: ''
   compose:
+    max_script_file_bytes: 262144
+    max_script_total_bytes: 1048576
+    max_script_loads: 64
+    max_script_dependency_depth: 16
     max_tool_calls: 50
     max_tool_result_bytes: 33554432
     max_return_bytes: 16777216

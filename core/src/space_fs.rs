@@ -107,6 +107,28 @@ impl SpaceFs {
         }
     }
 
+    /// Read complete bytes through ordinary space resolution and authorization.
+    /// Non-space paths return `None`; missing space files return `PathNotFound`.
+    #[instrument(name = "library.space_fs.read_file_bytes", skip(self, sub))]
+    pub async fn read_file_bytes(
+        &self,
+        sub: &AuthSubject,
+        path: &str,
+    ) -> Result<Option<Vec<u8>>, ProjectError> {
+        let Some(resolved) = self.resolve(sub, path).await? else {
+            return Ok(None);
+        };
+        let bytes = self
+            .spaces
+            .read_file(&resolved.space.slug, &resolved.rel_path)
+            .await?
+            .ok_or_else(|| SpaceError::PathNotFound {
+                slug: resolved.space.slug.clone(),
+                path: resolved.rel_path,
+            })?;
+        Ok(Some(bytes))
+    }
+
     /// Pure peek — does `path` start with the `space:` prefix and have
     /// a non-empty slug? Useful for short-circuiting tool dispatch
     /// before any auth or IO.

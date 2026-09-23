@@ -27,6 +27,15 @@ pub struct ToolSetsConfig {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ComposeConfig {
+    #[serde(default = "default_max_script_file_bytes")]
+    pub max_script_file_bytes: usize,
+    #[serde(default = "default_max_script_total_bytes")]
+    pub max_script_total_bytes: usize,
+    #[serde(default = "default_max_script_loads")]
+    pub max_script_loads: usize,
+    #[serde(default = "default_max_script_dependency_depth")]
+    pub max_script_dependency_depth: usize,
+
     #[serde(default = "default_max_tool_calls")]
     pub max_tool_calls: usize,
     /// Cap on a single inner-tool result, in bytes.
@@ -55,6 +64,10 @@ pub struct ComposeConfig {
 impl Default for ComposeConfig {
     fn default() -> Self {
         Self {
+            max_script_file_bytes: default_max_script_file_bytes(),
+            max_script_total_bytes: default_max_script_total_bytes(),
+            max_script_loads: default_max_script_loads(),
+            max_script_dependency_depth: default_max_script_dependency_depth(),
             max_tool_calls: default_max_tool_calls(),
             max_tool_result_bytes: default_max_tool_result_bytes(),
             max_return_bytes: default_max_return_bytes(),
@@ -274,5 +287,38 @@ tunnel_log_tools:
             cfg.tunnel_log_tools.get("kubernetes").unwrap(),
             &["pods_log".to_string(), "nodes_log".to_string()]
         );
+    }
+}
+
+fn default_max_script_file_bytes() -> usize {
+    262144
+}
+fn default_max_script_total_bytes() -> usize {
+    1048576
+}
+fn default_max_script_loads() -> usize {
+    64
+}
+fn default_max_script_dependency_depth() -> usize {
+    16
+}
+
+#[cfg(test)]
+mod script_limit_tests {
+    use super::ComposeConfig;
+    #[test]
+    fn loader_defaults_preserve_existing_configs_and_allow_overrides() {
+        let config: ComposeConfig = serde_json::from_str(r#"{"timeout_ms":123}"#).unwrap();
+        assert_eq!(
+            (
+                config.max_script_file_bytes,
+                config.max_script_total_bytes,
+                config.max_script_loads,
+                config.max_script_dependency_depth
+            ),
+            (262144, 1048576, 64, 16)
+        );
+        let config: ComposeConfig = serde_json::from_str(r#"{"max_script_loads":2}"#).unwrap();
+        assert_eq!(config.max_script_loads, 2);
     }
 }

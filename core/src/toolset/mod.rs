@@ -209,13 +209,6 @@ impl ToolSets {
             Arc::clone(&top_level),
             tool_caching.clone(),
         ));
-        let compose = Arc::new(ComposeTool::new(
-            Arc::clone(&sets),
-            Arc::clone(&top_level),
-            audit.clone(),
-            tool_caching.clone(),
-            config.compose.clone(),
-        ));
         let compose_types = Arc::new(ComposeTypes::new(Arc::clone(&sets), Arc::clone(&top_level)));
         let whoami = Arc::new(WhoAmI::new());
 
@@ -227,7 +220,6 @@ impl ToolSets {
                 describe as Arc<dyn TopLevelTool>,
             );
             map.insert(call.name().to_string(), call as Arc<dyn TopLevelTool>);
-            map.insert(compose.name().to_string(), compose as Arc<dyn TopLevelTool>);
             map.insert(
                 compose_types.name().to_string(),
                 compose_types as Arc<dyn TopLevelTool>,
@@ -288,6 +280,18 @@ impl ToolSets {
                 "Failed to initialize MCP upstream"
             );
         }
+    }
+
+    /// Register compose once its space-read dependency is available.
+    pub fn register_compose(&self, config: ComposeConfig, space_fs: Arc<crate::space_fs::SpaceFs>) {
+        self.register_top_level(ComposeTool::new(
+            Arc::clone(&self.sets),
+            Arc::clone(&self.top_level),
+            self.audit.clone(),
+            self.tool_caching.clone(),
+            config,
+            space_fs,
+        ));
     }
 
     /// Uses interior mutability so tools can be registered after the
@@ -704,6 +708,17 @@ pub fn estimate_tokens(result: &CallToolResult) -> u64 {
 /// tests in sibling crates (e.g. tunnel HA tests in `core/tests/`) can
 /// build a bare `ToolSets` without standing up an `App`.
 impl ToolSets {
+    /// Standalone audit/dispatch tests do not construct the library services.
+    pub fn register_inline_compose_for_test(&self) {
+        self.register_top_level(ComposeTool::without_space_fs_for_test(
+            Arc::clone(&self.sets),
+            Arc::clone(&self.top_level),
+            self.audit.clone(),
+            self.tool_caching.clone(),
+            ComposeConfig::default(),
+        ));
+    }
+
     pub fn empty_for_test() -> Self {
         Self {
             sets: Arc::new(RwLock::new(Vec::new())),

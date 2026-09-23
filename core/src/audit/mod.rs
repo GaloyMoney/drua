@@ -165,6 +165,15 @@ impl Audit {
         });
     }
 
+    pub fn merge_metadata(value: serde_json::Value) {
+        Self::update_context(|ctx| {
+            let metadata = ctx.metadata.get_or_insert_with(|| serde_json::json!({}));
+            if let (Some(target), Some(extra)) = (metadata.as_object_mut(), value.as_object()) {
+                target.extend(extra.clone());
+            }
+        });
+    }
+
     pub fn record_metadata(value: serde_json::Value) {
         Self::update_context(|ctx| ctx.metadata = Some(value));
     }

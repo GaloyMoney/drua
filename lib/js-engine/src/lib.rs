@@ -2,7 +2,13 @@
 //! tool calls. Each execution gets a fresh runtime (no state carryover) with
 //! configurable resource limits and async tool dispatch via [`ToolDispatcher`].
 
+mod allocator;
 mod error;
+mod scripts;
+pub use scripts::{
+    ScriptAudit, ScriptLimits, ScriptSourceProvider, SharedScriptAudit, SourceIdentity,
+    LOAD_SCRIPT_DECLARATION,
+};
 
 pub use error::JsEngineError;
 
@@ -35,6 +41,7 @@ pub struct ExecutionResult {
 /// Creates a fresh `AsyncRuntime` + `AsyncContext` per execution with
 /// configurable memory, stack, and tool-call limits.
 pub struct JsEngine {
+    script_limits: ScriptLimits,
     memory_limit: usize,
     stack_limit: usize,
     max_tool_calls: usize,
@@ -60,6 +67,7 @@ impl Default for JsEngine {
 impl JsEngine {
     pub fn new() -> Self {
         Self {
+            script_limits: ScriptLimits::default(),
             memory_limit: 8 * 1024 * 1024,
             stack_limit: 512 * 1024,
             max_tool_calls: 50,
@@ -67,6 +75,11 @@ impl JsEngine {
             max_return_bytes: 16 * 1024 * 1024,
             max_console_bytes: 8 * 1024,
         }
+    }
+
+    pub fn with_script_limits(mut self, limits: ScriptLimits) -> Self {
+        self.script_limits = limits;
+        self
     }
 
     pub fn with_max_tool_calls(mut self, n: usize) -> Self {
@@ -108,6 +121,18 @@ impl JsEngine {
         dispatcher: Arc<dyn ToolDispatcher>,
         timeout: Duration,
     ) -> Result<ExecutionResult, JsEngineError> {
+        self.execute_with_sources(script, dispatcher, timeout, None, Arc::default())
+            .await
+    }
+
+    pub async fn execute_with_sources(
+        &self,
+        script: &str,
+        dispatcher: Arc<dyn ToolDispatcher>,
+        timeout: Duration,
+        provider: Option<Arc<dyn ScriptSourceProvider>>,
+        audit: SharedScriptAudit,
+    ) -> Result<ExecutionResult, JsEngineError> {
         let start = Instant::now();
         let max_tool_calls = self.max_tool_calls;
         let max_tool_result_bytes = self.max_tool_result_bytes;
@@ -121,98 +146,134 @@ impl JsEngine {
         let tool_call_count = Arc::new(AtomicUsize::new(0));
         let timed_out = Arc::new(AtomicBool::new(false));
 
-        let result = tokio::time::timeout(timeout, async {
-            let rt = AsyncRuntime::new().map_err(|e| JsEngineError::Runtime(e.to_string()))?;
-            rt.set_memory_limit(memory_limit).await;
-            rt.set_max_stack_size(stack_limit).await;
-            rt.set_gc_threshold(memory_limit / 2).await;
-
-            // Interrupt handler: fires periodically during bytecode execution.
-            // Returning true raises an uncatchable exception (defeats infinite loops).
-            let deadline = start + timeout;
-            let timed_out_flag = Arc::clone(&timed_out);
-            rt.set_interrupt_handler(Some(Box::new(move || {
-                if Instant::now() > deadline {
-                    timed_out_flag.store(true, Ordering::Relaxed);
-                    true
-                } else {
-                    false
-                }
-            })))
-            .await;
-
-            let ctx = AsyncContext::full(&rt)
-                .await
+        let memory_exhausted = Arc::new(AtomicBool::new(false));
+        let memory_flag = memory_exhausted.clone();
+        let stack_exhausted = Arc::new(AtomicBool::new(false));
+        let stack_flag = stack_exhausted.clone();
+        let bridge_memory = memory_exhausted.clone();
+        let bridge_stack = stack_exhausted.clone();
+        let execution_audit = audit.clone();
+        let result = tokio::time::timeout(
+            timeout,
+            allocator::track_stack(async {
+                let rt = AsyncRuntime::new_with_alloc(allocator::LimitedAllocator::new(
+                    memory_limit,
+                    memory_flag.clone(),
+                    stack_limit,
+                    stack_flag.clone(),
+                ))
                 .map_err(|e| JsEngineError::Runtime(e.to_string()))?;
+                rt.set_max_stack_size(stack_limit).await;
+                rt.set_gc_threshold(memory_limit / 2).await;
 
-            let script = script.to_string();
-            let console_buf_inner = Arc::clone(&console_buf);
-            let tool_call_count_inner = Arc::clone(&tool_call_count);
+                // Interrupt handler: fires periodically during bytecode execution.
+                // Returning true raises an uncatchable exception (defeats infinite loops).
+                let deadline = start + timeout;
+                let timed_out_flag = Arc::clone(&timed_out);
+                let termination = audit.clone();
+                rt.set_interrupt_handler(Some(Box::new(move || {
+                    if memory_flag.load(Ordering::Relaxed)
+                        || stack_flag.load(Ordering::Relaxed)
+                        || termination.lock().unwrap().termination.is_some()
+                    {
+                        true
+                    } else if Instant::now() > deadline {
+                        timed_out_flag.store(true, Ordering::Relaxed);
+                        true
+                    } else {
+                        false
+                    }
+                })))
+                .await;
 
-            let value_json: String = async_with!(ctx => |ctx| {
-                register_console(&ctx, Arc::clone(&console_buf_inner))
-                    .map_err(|e| JsEngineError::Runtime(format!("console registration: {e}")))?;
+                let ctx = AsyncContext::full(&rt)
+                    .await
+                    .map_err(|e| JsEngineError::Runtime(e.to_string()))?;
 
-                register_timers(&ctx)
-                    .map_err(|e| JsEngineError::Runtime(format!("timer registration: {e}")))?;
+                let script = script.to_string();
+                let console_buf_inner = Arc::clone(&console_buf);
+                let tool_call_count_inner = Arc::clone(&tool_call_count);
 
-                register_tool_bridge(
-                    &ctx,
-                    Arc::clone(&dispatcher),
-                    Arc::clone(&tool_call_count_inner),
-                    max_tool_calls,
-                    max_tool_result_bytes,
-                )
-                .map_err(|e| JsEngineError::Runtime(format!("tool bridge registration: {e}")))?;
+                let value_json: String = async_with!(ctx => |ctx| {
+                    register_console(&ctx, Arc::clone(&console_buf_inner))
+                        .map_err(|e| JsEngineError::Runtime(format!("console registration: {e}")))?;
 
-                let full_script = build_full_script(&script);
+                    register_timers(&ctx)
+                        .map_err(|e| JsEngineError::Runtime(format!("timer registration: {e}")))?;
 
-                let maybe_promise: rquickjs::promise::MaybePromise<'_> =
-                    match ctx.eval(full_script).catch(&ctx) {
-                        Ok(v) => v,
-                        Err(caught) => {
-                            let msg = format_caught_error(&caught);
-                            // Interrupt handler raises "interrupted" on timeout.
-                            if msg.contains("interrupted") {
-                                return Err(JsEngineError::Timeout(timeout));
+                    register_tool_bridge(
+                        &ctx,
+                        Arc::clone(&dispatcher),
+                        Arc::clone(&tool_call_count_inner),
+                        max_tool_calls,
+                        max_tool_result_bytes,
+                        execution_audit.clone(),
+                        [bridge_memory, bridge_stack],
+                    )
+                    .map_err(|e| JsEngineError::Runtime(format!("tool bridge registration: {e}")))?;
+
+                    scripts::register(&ctx, provider, self.script_limits.clone(), execution_audit)
+                        .map_err(|e| JsEngineError::Runtime(e.to_string()))?;
+                    let full_script = build_full_script(&script);
+
+                    let maybe_promise: rquickjs::promise::MaybePromise<'_> =
+                        match ctx.eval(full_script).catch(&ctx) {
+                            Ok(v) => v,
+                            Err(caught) => {
+                                let msg = format_caught_error(&caught);
+                                // Interrupt handler raises "interrupted" on timeout.
+                                if msg.contains("interrupted") {
+                                    return Err(JsEngineError::Timeout(timeout));
+                                }
+                                return Err(JsEngineError::ScriptSyntax(msg));
                             }
-                            return Err(JsEngineError::ScriptSyntax(msg));
-                        }
-                    };
+                        };
 
-                let final_val: rquickjs::Value<'_> =
-                    match maybe_promise.into_future().await.catch(&ctx) {
-                        Ok(v) => v,
-                        Err(caught) => {
-                            let msg = format_caught_error(&caught);
-                            if msg.contains("interrupted") {
-                                return Err(JsEngineError::Timeout(timeout));
+                    let final_val: rquickjs::Value<'_> =
+                        match maybe_promise.into_future().await.catch(&ctx) {
+                            Ok(v) => v,
+                            Err(caught) => {
+                                let msg = format_caught_error(&caught);
+                                if msg.contains("interrupted") {
+                                    return Err(JsEngineError::Timeout(timeout));
+                                }
+                                return Err(JsEngineError::ScriptRuntime(msg));
                             }
-                            return Err(JsEngineError::ScriptRuntime(msg));
-                        }
-                    };
+                        };
 
-                let json_stringify: Function = ctx
-                    .globals()
-                    .get::<_, Object>("JSON")
-                    .map_err(|e| JsEngineError::Runtime(format!("JSON global: {e}")))?
-                    .get("stringify")
-                    .map_err(|e| JsEngineError::Runtime(format!("JSON.stringify: {e}")))?;
+                    let json_stringify: Function = ctx
+                        .globals()
+                        .get::<_, Object>("JSON")
+                        .map_err(|e| JsEngineError::Runtime(format!("JSON global: {e}")))?
+                        .get("stringify")
+                        .map_err(|e| JsEngineError::Runtime(format!("JSON.stringify: {e}")))?;
 
-                let json_str: String = json_stringify
-                    .call((final_val,))
-                    .unwrap_or_else(|_| "null".to_string());
+                    let json_str: String = json_stringify
+                        .call((final_val,))
+                        .unwrap_or_else(|_| "null".to_string());
 
-                Ok(json_str)
-            })
-            .await?;
+                    Ok(json_str)
+                })
+                .await?;
 
-            rt.idle().await;
+                rt.idle().await;
 
-            Ok::<String, JsEngineError>(value_json)
-        })
+                Ok::<String, JsEngineError>(value_json)
+            }),
+        )
         .await;
 
+        if memory_exhausted.load(Ordering::Relaxed) {
+            return Err(JsEngineError::MemoryLimit);
+        }
+        if stack_exhausted.load(Ordering::Relaxed) {
+            return Err(JsEngineError::ScriptRuntime(
+                "stack_limit: script exceeded stack budget".into(),
+            ));
+        }
+        if let Some(error) = audit.lock().unwrap().termination.clone() {
+            return Err(JsEngineError::ScriptRuntime(error));
+        }
         let value_json = match result {
             Ok(inner) => inner?,
             Err(_elapsed) => return Err(JsEngineError::Timeout(timeout)),
@@ -486,15 +547,27 @@ fn register_tool_bridge(
     tool_call_count: Arc<AtomicUsize>,
     max_tool_calls: usize,
     max_tool_result_bytes: usize,
+    audit: SharedScriptAudit,
+    exhausted: [Arc<AtomicBool>; 2],
 ) -> Result<(), rquickjs::Error> {
     ctx.globals().set(
         "__call_tool_raw",
         Function::new(ctx.clone(), move |name: String, args_json: String| {
             let d = Arc::clone(&dispatcher);
             let tc = Arc::clone(&tool_call_count);
+            let audit = audit.clone();
+            let exhausted = exhausted.clone();
             Promised(async move {
+                if exhausted.iter().any(|flag| flag.load(Ordering::Relaxed)) {
+                    return encode_error("Memory or stack limit exceeded");
+                }
+                if let Some(error) = audit.lock().unwrap().termination.clone() {
+                    return encode_error(&error);
+                }
                 let count = tc.fetch_add(1, Ordering::Relaxed);
                 if count >= max_tool_calls {
+                    audit.lock().unwrap().termination =
+                        Some(format!("Tool call limit exceeded ({max_tool_calls} max)"));
                     return encode_error(&format!(
                         "Tool call limit exceeded ({max_tool_calls} max)"
                     ));
@@ -510,6 +583,8 @@ fn register_tool_bridge(
                         let result_json =
                             serde_json::to_string(&result).unwrap_or_else(|_| "null".into());
                         if result_json.len() > max_tool_result_bytes {
+                            audit.lock().unwrap().termination =
+                                Some("Tool result size limit exceeded".into());
                             return encode_error(&format!(
                                 "Tool result too large ({} bytes, max {max_tool_result_bytes}). \
                                  The tool returned more data than compose can hold in a single \
@@ -589,11 +664,13 @@ const require = __noNode("require");
 const module = {{ get exports() {{ return __noNode("module")(); }} }};
 const process = new Proxy({{}}, {{ get: (_, p) => __noNode("process." + String(p))() }});
 
+{loader}
 // ── user script (wrapped for top-level await + return) ──
 (async () => {{
 {user_script}
 }})()
-"#
+"#,
+        loader = scripts::BOOTSTRAP
     )
 }
 
@@ -1079,13 +1156,9 @@ mod tests {
                 timeout(),
             )
             .await
-            .unwrap();
+            .unwrap_err();
 
-        let arr = result.value.as_array().unwrap();
-        assert_eq!(arr[0], "ok");
-        assert_eq!(arr[1], "ok");
-        assert_eq!(arr[2], "ok");
-        assert!(arr[3].as_str().unwrap().contains("limit exceeded"));
+        assert!(result.to_string().contains("Tool call limit exceeded"));
     }
 
     #[tokio::test]
@@ -1229,3 +1302,6 @@ mod tests {
         assert_eq!(result.tool_calls_made, 3);
     }
 }
+
+#[cfg(test)]
+mod script_tests;

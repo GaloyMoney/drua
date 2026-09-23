@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::Duration;
 
+use drua_library::SpaceError;
 use drua_tool_caching::{
     extract_text, fetch_text_for_raw, tool_result_value, ToolCaching, ToolOutputShape,
 };
@@ -13,6 +14,8 @@ use serde::Deserialize;
 
 use crate::audit::{Audit, InteractionType};
 use crate::auth::AuthSubject;
+use crate::project::ProjectError;
+use crate::space_fs::SpaceFs;
 
 use super::super::config::ComposeConfig;
 use super::super::error::ToolSetsError;
@@ -30,10 +33,30 @@ pub struct ComposeTool {
     audit: Option<Arc<Audit>>,
     tool_caching: Option<Arc<ToolCaching>>,
     config: ComposeConfig,
+    // Absent only in standalone inline-compose test harnesses.
+    space_fs: Option<Arc<SpaceFs>>,
 }
 
 impl ComposeTool {
     pub fn new(
+        sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
+        top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
+        audit: Option<Arc<Audit>>,
+        tool_caching: Option<Arc<ToolCaching>>,
+        config: ComposeConfig,
+        space_fs: Arc<SpaceFs>,
+    ) -> Self {
+        Self {
+            sets,
+            top_level,
+            audit,
+            tool_caching,
+            config,
+            space_fs: Some(space_fs),
+        }
+    }
+
+    pub(crate) fn without_space_fs_for_test(
         sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
         top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
         audit: Option<Arc<Audit>>,
@@ -46,7 +69,36 @@ impl ComposeTool {
             audit,
             tool_caching,
             config,
+            space_fs: None,
         }
+    }
+}
+
+// Caller-bound adapter to ordinary authorized space reads.
+struct SpaceScriptProvider {
+    fs: Arc<SpaceFs>,
+    subject: AuthSubject,
+}
+
+#[async_trait::async_trait]
+impl js_engine::ScriptSourceProvider for SpaceScriptProvider {
+    async fn read(&self, path: &str) -> Result<Vec<u8>, String> {
+        self.fs
+            .read_file_bytes(&self.subject, path)
+            .await
+            .map_err(|error| match error {
+                ProjectError::Authorization(_)
+                | ProjectError::Space(SpaceError::NotMounted { .. }) => {
+                    "access_denied: space is not accessible".to_owned()
+                }
+                ProjectError::Space(
+                    SpaceError::PathNotFound { .. } | SpaceError::NotFound { .. },
+                ) => {
+                    format!("missing_file: {error}")
+                }
+                _ => format!("read_error: {error}"),
+            })?
+            .ok_or_else(|| "invalid_path: expected a space path".to_owned())
     }
 }
 
@@ -112,7 +164,11 @@ impl TopLevelTool for ComposeTool {
          Example:\n```js\nconst envs = await tools.honeycomb.list_environments({});\n\
          const issues = await tools.github.list_issues({ repo: 'org/repo', state: 'open' });\n\
          const stale = issues.filter(i => Date.now() - Date.parse(i.updated_at) > 7*86400*1000);\n\
-         return { envs, stale_issues: stale.map(i => i.number) };\n```"
+         return { envs, stale_issues: stale.map(i => i.number) };\n```\n\n\
+         Load reusable space helpers with `const helper = await loadScript(\"space:tools/helper.js\");` \
+         and call their exported functions with arguments. Files are async function bodies that \
+         explicitly return exports. Dependencies use the same loader and caller permissions. \
+         Initialization is cached for this invocation; keep it pure and put mutations in exported functions."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -170,16 +226,38 @@ impl TopLevelTool for ComposeTool {
         });
 
         let engine = js_engine::JsEngine::new()
+            .with_script_limits(js_engine::ScriptLimits {
+                max_file_bytes: self.config.max_script_file_bytes,
+                max_total_bytes: self.config.max_script_total_bytes,
+                max_loads: self.config.max_script_loads,
+                max_dependency_depth: self.config.max_script_dependency_depth,
+            })
             .with_max_tool_calls(self.config.max_tool_calls)
             .with_max_tool_result_bytes(self.config.max_tool_result_bytes)
             .with_max_return_bytes(self.config.max_return_bytes)
             .with_max_console_bytes(self.config.max_console_bytes)
             .with_memory_limit(self.config.memory_limit_bytes)
             .with_stack_limit(self.config.stack_limit_bytes);
+        let script_audit: js_engine::SharedScriptAudit = Arc::default();
         let result = engine
-            .execute(&script, dispatcher, timeout)
-            .await
-            .map_err(|e| ToolSetsError::Compose(e.to_string()))?;
+            .execute_with_sources(
+                &script,
+                dispatcher,
+                timeout,
+                self.space_fs.as_ref().map(|fs| {
+                    Arc::new(SpaceScriptProvider {
+                        fs: Arc::clone(fs),
+                        subject: subject.clone(),
+                    }) as Arc<dyn js_engine::ScriptSourceProvider>
+                }),
+                script_audit.clone(),
+            )
+            .await;
+        Audit::merge_metadata(serde_json::json!({ "script_execution": {
+            "loads": &*script_audit.lock().unwrap(),
+            "error": result.as_ref().err().map(ToString::to_string),
+        }}));
+        let result = result.map_err(|e| ToolSetsError::Compose(e.to_string()))?;
 
         let collected_sub_invocations = sub_invocations
             .lock()

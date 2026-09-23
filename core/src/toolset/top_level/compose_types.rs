@@ -191,7 +191,7 @@ impl TopLevelTool for ComposeTypes {
         }
 
         let out = ComposeTypesOutput {
-            declarations: dts,
+            declarations: format!("{}\n{dts}", js_engine::LOAD_SCRIPT_DECLARATION),
             tool_count,
             not_found,
         };
