@@ -1,9 +1,10 @@
 //! Execute JavaScript that chains multiple MCP tool calls in a single round trip.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, LazyLock, Mutex, RwLock};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
 use std::time::Duration;
 
+use drua_library::SpaceError;
 use drua_tool_caching::{
     extract_text, fetch_text_for_raw, tool_result_value, ToolCaching, ToolOutputShape,
 };
@@ -13,6 +14,8 @@ use serde::Deserialize;
 
 use crate::audit::{Audit, InteractionType};
 use crate::auth::AuthSubject;
+use crate::project::ProjectError;
+use crate::space_fs::SpaceFs;
 
 use super::super::config::ComposeConfig;
 use super::super::error::ToolSetsError;
@@ -30,24 +33,17 @@ pub struct ComposeTool {
     audit: Option<Arc<Audit>>,
     tool_caching: Option<Arc<ToolCaching>>,
     config: ComposeConfig,
-    script_provider: Arc<crate::toolset::script_source::ScriptProviderFactory>,
+    script_provider: Arc<ScriptProviderFactory>,
 }
 
 impl ComposeTool {
-    pub fn with_script_provider(
-        mut self,
-        provider: Arc<crate::toolset::script_source::ScriptProviderFactory>,
-    ) -> Self {
-        self.script_provider = provider;
-        self
-    }
-
     pub fn new(
         sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
         top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
         audit: Option<Arc<Audit>>,
         tool_caching: Option<Arc<ToolCaching>>,
         config: ComposeConfig,
+        script_provider: Arc<ScriptProviderFactory>,
     ) -> Self {
         Self {
             sets,
@@ -55,8 +51,58 @@ impl ComposeTool {
             audit,
             tool_caching,
             config,
-            script_provider: Arc::default(),
+            script_provider,
         }
+    }
+}
+
+// Caller-bound adapter to ordinary authorized space reads.
+struct SpaceScriptProvider {
+    fs: Arc<SpaceFs>,
+    subject: AuthSubject,
+}
+
+#[derive(Default)]
+pub struct ScriptProviderFactory(OnceLock<Arc<SpaceFs>>);
+
+impl ScriptProviderFactory {
+    pub fn initialize(&self, fs: Arc<SpaceFs>) {
+        assert!(
+            self.0.set(fs).is_ok(),
+            "script provider already initialized"
+        );
+    }
+
+    pub fn for_subject(
+        &self,
+        subject: &AuthSubject,
+    ) -> Option<Arc<dyn js_engine::ScriptSourceProvider>> {
+        Some(Arc::new(SpaceScriptProvider {
+            fs: self.0.get()?.clone(),
+            subject: subject.clone(),
+        }))
+    }
+}
+
+#[async_trait::async_trait]
+impl js_engine::ScriptSourceProvider for SpaceScriptProvider {
+    async fn read(&self, path: &str) -> Result<Vec<u8>, String> {
+        self.fs
+            .read_file(&self.subject, path)
+            .await
+            .map_err(|error| match error {
+                ProjectError::Authorization(_)
+                | ProjectError::Space(SpaceError::NotMounted { .. }) => {
+                    "access_denied: space is not accessible".to_owned()
+                }
+                ProjectError::Space(
+                    SpaceError::PathNotFound { .. } | SpaceError::NotFound { .. },
+                ) => {
+                    format!("missing_file: {error}")
+                }
+                _ => format!("read_error: {error}"),
+            })?
+            .ok_or_else(|| "invalid_path: expected a space path".to_owned())
     }
 }
 

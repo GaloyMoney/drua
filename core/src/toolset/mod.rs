@@ -3,7 +3,6 @@ mod config;
 mod dispatch;
 mod error;
 mod inspect;
-mod script_source;
 pub mod searchable;
 pub mod top_level;
 mod traits;
@@ -131,7 +130,7 @@ fn normalize_for_strict_in_place(value: &mut serde_json::Value) {
 }
 
 pub struct ToolSets {
-    pub script_provider: Arc<crate::toolset::script_source::ScriptProviderFactory>,
+    pub script_provider: Arc<top_level::ScriptProviderFactory>,
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
     top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
     /// `None` only in tests without a DB pool.
@@ -211,18 +210,15 @@ impl ToolSets {
             Arc::clone(&top_level),
             tool_caching.clone(),
         ));
-        let script_provider =
-            Arc::new(crate::toolset::script_source::ScriptProviderFactory::default());
-        let compose = Arc::new(
-            ComposeTool::new(
-                Arc::clone(&sets),
-                Arc::clone(&top_level),
-                audit.clone(),
-                tool_caching.clone(),
-                config.compose.clone(),
-            )
-            .with_script_provider(script_provider.clone()),
-        );
+        let script_provider = Arc::new(top_level::ScriptProviderFactory::default());
+        let compose = Arc::new(ComposeTool::new(
+            Arc::clone(&sets),
+            Arc::clone(&top_level),
+            audit.clone(),
+            tool_caching.clone(),
+            config.compose.clone(),
+            script_provider.clone(),
+        ));
         let compose_types = Arc::new(ComposeTypes::new(Arc::clone(&sets), Arc::clone(&top_level)));
         let whoami = Arc::new(WhoAmI::new());
 
