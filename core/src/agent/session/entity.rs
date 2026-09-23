@@ -1829,7 +1829,7 @@ mod tests {
         };
         let mut session = started_session(chain, BreakerConfig::default());
 
-        for i in 0..4 {
+        for i in 0..14 {
             let input = serde_json::json!({"path": format!("file_{i}.rs")});
             let result = drive_breaker_turn(&mut session, "read_file", input, "not found", true);
             assert!(
@@ -1838,12 +1838,12 @@ mod tests {
             );
             assert!(
                 session.last_chain_advance().is_none(),
-                "must not trip before the 5th consecutive error turn (turn {i})"
+                "must not trip before the 15th consecutive error turn (turn {i})"
             );
             advance_turn(&mut session);
         }
 
-        let input = serde_json::json!({"path": "file_4.rs"});
+        let input = serde_json::json!({"path": "file_14.rs"});
         let result = drive_breaker_turn(&mut session, "read_file", input, "not found", true);
         assert!(matches!(
             result,
@@ -1851,8 +1851,8 @@ mod tests {
         ));
         let (reason, ..) = session
             .last_chain_advance()
-            .expect("5th consecutive error turn should trip");
-        assert!(reason.contains('5'), "{reason}");
+            .expect("15th consecutive error turn should trip");
+        assert!(reason.contains("15 consecutive error turns"), "{reason}");
     }
 
     #[test]
@@ -1863,7 +1863,7 @@ mod tests {
         };
         let mut session = started_session(chain, BreakerConfig::default());
 
-        for i in 0..4 {
+        for i in 0..14 {
             let input = serde_json::json!({"path": format!("file_{i}.rs")});
             let result = drive_breaker_turn(&mut session, "read_file", input, "not found", true);
             assert!(matches!(
@@ -1886,7 +1886,7 @@ mod tests {
         ));
         advance_turn(&mut session);
 
-        for i in 4..8 {
+        for i in 14..28 {
             let input = serde_json::json!({"path": format!("file_{i}.rs")});
             let result = drive_breaker_turn(&mut session, "read_file", input, "not found", true);
             assert!(
