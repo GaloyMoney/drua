@@ -1,10 +1,10 @@
 use super::*;
 use std::sync::atomic::AtomicUsize;
+use std::sync::Mutex;
 
 struct Provider {
-    files: HashMap<String, String>,
+    files: Mutex<HashMap<String, Vec<u8>>>,
     reads: AtomicUsize,
-    checks: AtomicUsize,
     revoke_after: usize,
     delay: Duration,
 }
@@ -12,12 +12,13 @@ struct Provider {
 impl Provider {
     fn new(files: &[(&str, &str)]) -> Arc<Self> {
         Arc::new(Self {
-            files: files
-                .iter()
-                .map(|(p, s)| (format!("space:test/{p}.js"), s.to_string()))
-                .collect(),
+            files: Mutex::new(
+                files
+                    .iter()
+                    .map(|(p, s)| (format!("space:test/{p}.js"), s.as_bytes().to_vec()))
+                    .collect(),
+            ),
             reads: AtomicUsize::new(0),
-            checks: AtomicUsize::new(0),
             revoke_after: usize::MAX,
             delay: Duration::ZERO,
         })
@@ -26,29 +27,20 @@ impl Provider {
 
 #[async_trait::async_trait]
 impl ScriptSourceProvider for Provider {
-    async fn authorize(&self, path: &str) -> Result<(), String> {
-        if self.checks.fetch_add(1, Ordering::SeqCst) >= self.revoke_after {
+    async fn read(&self, path: &str) -> Result<Vec<u8>, String> {
+        if self.reads.fetch_add(1, Ordering::SeqCst) >= self.revoke_after {
             return Err("access_denied: revoked".into());
         }
         if !path.starts_with("space:test/") {
             return Err("access_denied".into());
         }
-        Ok(())
-    }
-    async fn read(&self, path: &str, _: usize) -> Result<ScriptSource, String> {
-        self.reads.fetch_add(1, Ordering::SeqCst);
         tokio::time::sleep(self.delay).await;
-        let text = self.files.get(path).ok_or("missing_file")?.clone();
-        Ok(ScriptSource {
-            identity: SourceIdentity {
-                path: path.to_owned(),
-                revision: "commit".into(),
-                blob_oid: "blob".into(),
-                sha256: "digest".into(),
-                byte_length: text.len(),
-            },
-            text,
-        })
+        self.files
+            .lock()
+            .unwrap()
+            .get(path)
+            .cloned()
+            .ok_or("missing_file".into())
     }
 }
 
@@ -106,7 +98,6 @@ async fn live_exports_dependencies_arguments_and_shared_initialization() {
             echoed: await again.echo({ text: "'\"雪; throw new Error('injected')" }) };
     "#, provider.clone()).await.unwrap();
     assert_eq!(provider.reads.load(Ordering::SeqCst), 3);
-    assert_eq!(provider.checks.load(Ordering::SeqCst), 5);
     assert_eq!(result.console_output, ["initialized"]);
     assert_eq!(result.value["same"], true);
     assert_eq!(result.value["locals"], serde_json::json!([1, 2, 7]));
@@ -132,6 +123,129 @@ async fn invocation_isolation_and_undefined_exports() {
         assert_eq!(result.value, serde_json::json!([1, true]));
     }
     assert_eq!(provider.reads.load(Ordering::SeqCst), 4);
+}
+
+#[tokio::test]
+async fn fresh_invocations_observe_changed_sources_and_retry_failures() {
+    let engine = JsEngine::new();
+    let provider = Provider::new(&[("a", "throw new Error('old source');")]);
+    let script = "return await loadScript('space:test/a.js');";
+    assert!(run(&engine, script, provider.clone())
+        .await
+        .unwrap_err()
+        .to_string()
+        .contains("old source"));
+    provider
+        .files
+        .lock()
+        .unwrap()
+        .insert("space:test/a.js".into(), b"return {version: 2};".to_vec());
+    assert_eq!(
+        run(&engine, script, provider.clone()).await.unwrap().value["version"],
+        2
+    );
+    assert_eq!(provider.reads.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn concurrent_cache_hits_share_one_read_and_live_object() {
+    let mut provider = Provider::new(&[("a", "console.log('once'); return {};")]);
+    Arc::get_mut(&mut provider).unwrap().delay = Duration::from_millis(10);
+    let result = run(&JsEngine::new(), "const [a,b] = await Promise.all([loadScript('space:test/a.js'),loadScript('space:test/a.js')]); a.live = 7; return [a === b, b.live];", provider.clone()).await.unwrap();
+    assert_eq!(result.value, serde_json::json!([true, 7]));
+    assert_eq!(result.console_output, ["once"]);
+    assert_eq!(provider.reads.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn invalid_paths_never_reach_the_provider() {
+    let provider = Provider::new(&[]);
+    for path in [
+        "file:/a.js",
+        "https://example/a.js",
+        "space:/a.js",
+        "space:Bad/a.js",
+        "space:-test/a.js",
+        "space:test-/a.js",
+        "space:te--st/a.js",
+        "space:test/../a.js",
+        "space:test/./a.js",
+        "space:test//a.js",
+        "space:test/a\\b.js",
+        "space:test/a\nb.js",
+        "space:test/",
+        "space:test/a.ts",
+    ] {
+        let script = format!(
+            "return await loadScript({});",
+            serde_json::to_string(path).unwrap()
+        );
+        assert!(
+            run(&JsEngine::new(), &script, provider.clone())
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("invalid_path"),
+            "{path}"
+        );
+    }
+    assert_eq!(provider.reads.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn loader_validates_utf8_and_audits_exact_source_bytes() {
+    let provider = Provider::new(&[("sub/雪 %20 #?", "return '雪';")]);
+    provider
+        .files
+        .lock()
+        .unwrap()
+        .insert("space:test/bad.js".into(), vec![0xff]);
+    let audit: SharedScriptAudit = Arc::default();
+    let result = JsEngine::new().execute_with_sources(
+        "try {await loadScript('space:test/bad.js')} catch(e) {console.log(String(e))} return await loadScript('space:test/sub/雪 %20 #?.js');",
+        Arc::new(Echo), Duration::from_secs(2), Some(provider), audit.clone()
+    ).await.unwrap();
+    assert_eq!(result.value, "雪");
+    assert!(result.console_output[0].contains("invalid_source"));
+    let audit = audit.lock().unwrap();
+    assert_eq!(audit.sources[0].identity.byte_length, 1);
+    assert!(!audit.sources[0].initialized);
+    assert!(audit.sources[0].error.as_ref().unwrap().contains("UTF-8"));
+    let source = &audit.sources[1];
+    assert_eq!(source.identity.byte_length, 13);
+    assert_eq!(
+        source.identity.sha256,
+        "facffa33d8bdfec35dd3ed9ef9cf4cfa8af6f24fd53403e59d4c98a9935065e8"
+    );
+    assert!(source.initialized);
+    let serialized = serde_json::to_value(&*audit).unwrap();
+    assert!(serialized["sources"][1].get("revision").is_none());
+    assert!(serialized["sources"][1].get("blob_oid").is_none());
+}
+
+#[tokio::test]
+async fn source_limits_count_bytes_and_unique_files() {
+    let source = "return '雪';";
+    let provider = Provider::new(&[("a", source), ("b", source)]);
+    let limits = ScriptLimits {
+        max_file_bytes: source.len(),
+        max_total_bytes: source.len(),
+        ..Default::default()
+    };
+    let result = run(
+        &JsEngine::new().with_script_limits(limits.clone()),
+        "await loadScript('space:test/a.js'); return await loadScript('space:test/a.js');",
+        provider.clone(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.value, "雪");
+    for (limits, script) in [
+        (ScriptLimits {max_file_bytes: source.len()-1, ..limits.clone()}, "return await loadScript('space:test/a.js');"),
+        (limits, "return await Promise.all([loadScript('space:test/a.js'),loadScript('space:test/b.js')]);"),
+    ] {
+        assert!(run(&JsEngine::new().with_script_limits(limits), script, provider.clone()).await.unwrap_err().to_string().contains("size_limit"));
+    }
 }
 
 #[tokio::test]
@@ -178,7 +292,6 @@ async fn initialization_failures_are_cached_and_audited() {
     let result = JsEngine::new().execute_with_sources("for (let i=0;i<2;i++) {try {await loadScript('space:test/a.js')} catch(e) {}} return 'caught';", Arc::new(Echo), Duration::from_secs(2), Some(provider.clone()), audit.clone()).await.unwrap();
     assert_eq!(result.value, "caught");
     assert_eq!(provider.reads.load(Ordering::SeqCst), 1);
-    assert_eq!(provider.checks.load(Ordering::SeqCst), 2);
     assert_eq!(result.console_output, ["once"]);
     let audit = audit.lock().unwrap();
     assert_eq!(audit.sources.len(), 1);
@@ -190,19 +303,29 @@ async fn initialization_failures_are_cached_and_audited() {
 }
 
 #[tokio::test]
-async fn cache_hits_check_revoked_permissions() {
-    let mut provider = Provider::new(&[("a", "return {};")]);
+async fn cache_hits_reuse_access_but_new_reads_check_permissions() {
+    let mut provider = Provider::new(&[("a", "return {};"), ("b", "return {};")]);
     Arc::get_mut(&mut provider).unwrap().revoke_after = 1;
+    let result = run(
+        &JsEngine::new(),
+        "const a = await loadScript('space:test/a.js'); const same = a === await loadScript('space:test/a.js'); let denied; try {await loadScript('space:test/b.js')} catch(e) {denied=String(e)} return {same,denied};",
+        provider.clone(),
+    ).await.unwrap();
+    assert_eq!(result.value["same"], true);
+    assert!(result.value["denied"]
+        .as_str()
+        .unwrap()
+        .contains("access_denied"));
+    assert_eq!(provider.reads.load(Ordering::SeqCst), 2);
     let error = run(
         &JsEngine::new(),
-        "await loadScript('space:test/a.js'); return await loadScript('space:test/a.js');",
+        "return await loadScript('space:test/a.js');",
         provider.clone(),
     )
     .await
-    .unwrap_err()
-    .to_string();
-    assert!(error.contains("access_denied"), "{error}");
-    assert_eq!(provider.reads.load(Ordering::SeqCst), 1);
+    .unwrap_err();
+    assert!(error.to_string().contains("access_denied"));
+    assert_eq!(provider.reads.load(Ordering::SeqCst), 3);
 }
 
 #[tokio::test]

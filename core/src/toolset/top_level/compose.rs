@@ -30,13 +30,13 @@ pub struct ComposeTool {
     audit: Option<Arc<Audit>>,
     tool_caching: Option<Arc<ToolCaching>>,
     config: ComposeConfig,
-    script_provider: Arc<crate::space_fs::ScriptProviderFactory>,
+    script_provider: Arc<crate::toolset::script_source::ScriptProviderFactory>,
 }
 
 impl ComposeTool {
     pub fn with_script_provider(
         mut self,
-        provider: Arc<crate::space_fs::ScriptProviderFactory>,
+        provider: Arc<crate::toolset::script_source::ScriptProviderFactory>,
     ) -> Self {
         self.script_provider = provider;
         self
@@ -105,15 +105,28 @@ impl TopLevelTool for ComposeTool {
     }
 
     fn description(&self) -> &str {
-        static DESCRIPTION: LazyLock<String> = LazyLock::new(|| {
-            format!(
-                "{}\n{}\n{}",
-                COMPOSE_DESCRIPTION,
-                js_engine::LOAD_SCRIPT_DOC,
-                js_engine::LOAD_SCRIPT_DECLARATION
-            )
-        });
-        &DESCRIPTION
+        "Execute JavaScript that composes multiple tool calls in a single round trip. \
+         The script has access to a `tools` namespace with nested server namespaces \
+         (e.g. `tools.honeycomb.list_environments({...})`). Flat prefixed names also work \
+         (e.g. `tools.honeycomb_list_environments({...})`). \
+         Use `return` for the final value. Top-level `await` and `Promise.all()` are supported. \
+         **Call `compose_types` first** to fetch exact tool signatures and parameter names \
+         — guessing leads to runtime errors that waste a round trip. \
+         **Reduce before you return.** The script reads full upstream payloads for free, \
+         but the value you `return` is elided against the same ~8 KB budget as any tool \
+         result — return the fields and rows you actually need, not whole responses, or \
+         the agent spends `tool_output_fetch` round trips reading back what the script \
+         already had in hand. \
+         Scope is plain JavaScript plus `tools`, `console`, and `setTimeout` — \
+         no Node.js builtins (`require`, `module`, `process`, `fs` are unavailable).\n\n\
+         Example:\n```js\nconst envs = await tools.honeycomb.list_environments({});\n\
+         const issues = await tools.github.list_issues({ repo: 'org/repo', state: 'open' });\n\
+         const stale = issues.filter(i => Date.now() - Date.parse(i.updated_at) > 7*86400*1000);\n\
+         return { envs, stale_issues: stale.map(i => i.number) };\n```\n\n\
+         Load reusable space helpers with `const helper = await loadScript(\"space:tools/helper.js\");` \
+         and call their exported functions with arguments. Files are async function bodies that \
+         explicitly return exports. Dependencies use the same loader and caller permissions. \
+         Initialization is cached for this invocation; keep it pure and put mutations in exported functions."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -1016,23 +1029,3 @@ mod tests {
         }
     }
 }
-
-const COMPOSE_DESCRIPTION: &str =
-    "Execute JavaScript that composes multiple tool calls in a single round trip. \
-         The script has access to a `tools` namespace with nested server namespaces \
-         (e.g. `tools.honeycomb.list_environments({...})`). Flat prefixed names also work \
-         (e.g. `tools.honeycomb_list_environments({...})`). \
-         Use `return` for the final value. Top-level `await` and `Promise.all()` are supported. \
-         **Call `compose_types` first** to fetch exact tool signatures and parameter names \
-         — guessing leads to runtime errors that waste a round trip. \
-         **Reduce before you return.** The script reads full upstream payloads for free, \
-         but the value you `return` is elided against the same ~8 KB budget as any tool \
-         result — return the fields and rows you actually need, not whole responses, or \
-         the agent spends `tool_output_fetch` round trips reading back what the script \
-         already had in hand. \
-         Scope is plain JavaScript plus `tools`, `console`, and `setTimeout` — \
-         no Node.js builtins (`require`, `module`, `process`, `fs` are unavailable).\n\n\
-         Example:\n```js\nconst envs = await tools.honeycomb.list_environments({});\n\
-         const issues = await tools.github.list_issues({ repo: 'org/repo', state: 'open' });\n\
-         const stale = issues.filter(i => Date.now() - Date.parse(i.updated_at) > 7*86400*1000);\n\
-         return { envs, stale_issues: stale.map(i => i.number) };\n```";

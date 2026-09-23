@@ -5,31 +5,49 @@ use std::time::Instant;
 
 use rquickjs::{prelude::Promised, CatchResultExt, Ctx, Exception, Function, Module, Value};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 pub const LOAD_SCRIPT_DECLARATION: &str =
     "declare function loadScript<T = unknown>(path: string): Promise<T>;";
-pub const LOAD_SCRIPT_DOC: &str = "Load authorized space:<slug>/<path>.js files with await loadScript(path). Files are async function bodies: return exports explicitly, then call their functions with arguments. Dependencies use the same loader and caller permissions. Initialization is cached per invocation; keep it pure and put mutations in exported functions.";
 
 #[derive(Clone, Debug, Serialize)]
 pub struct SourceIdentity {
     pub path: String,
-    pub revision: String,
-    pub blob_oid: String,
     pub sha256: String,
     pub byte_length: usize,
 }
 
-pub struct ScriptSource {
-    pub identity: SourceIdentity,
-    pub text: String,
-}
-
 #[async_trait::async_trait]
 pub trait ScriptSourceProvider: Send + Sync + 'static {
-    /// Validate the canonical address and check current access, including cache hits.
-    async fn authorize(&self, path: &str) -> Result<(), String>;
-    /// Read at one execution-local revision, enforcing max_bytes before copying the blob.
-    async fn read(&self, path: &str, max_bytes: usize) -> Result<ScriptSource, String>;
+    /// Read complete bytes through the caller's ordinary authorized file-read path.
+    /// Called only on cache misses. Source validation and budgets belong to the loader.
+    async fn read(&self, path: &str) -> Result<Vec<u8>, String>;
+}
+
+// Require one canonical cache key, using the space URI grammar. The authorized
+// facade still applies its ordinary path rules and permissions on each read.
+fn validate_path(path: &str) -> Result<(), String> {
+    let (slug, relative) = path
+        .strip_prefix("space:")
+        .and_then(|rest| rest.split_once('/'))
+        .ok_or("invalid_path: expected space:<slug>/<path>.js")?;
+    if slug.is_empty()
+        || slug.starts_with('-')
+        || slug.ends_with('-')
+        || slug.contains("--")
+        || !slug
+            .bytes()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+        || !relative.ends_with(".js")
+        || relative.chars().any(char::is_control)
+        || relative.contains('\\')
+        || relative
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return Err("invalid_path: expected canonical space:<slug>/<path>.js".into());
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -180,25 +198,16 @@ pub(crate) fn register(
     limits: ScriptLimits,
     audit: SharedScriptAudit,
 ) -> rquickjs::Result<()> {
-    let provider_check = provider.clone();
     let check_audit = audit.clone();
     let check_limits = limits.clone();
     ctx.globals().set(
         "__script_check",
         Function::new(ctx.clone(), move |ctx, parent, path| {
-            check(
-                ctx,
-                parent,
-                path,
-                provider_check.clone(),
-                check_audit.clone(),
-                check_limits.clone(),
-            )
+            check(ctx, parent, path, check_audit.clone(), check_limits.clone())
         })?,
     )?;
 
     let compile_audit = audit.clone();
-    let read_gate = Arc::new(tokio::sync::Mutex::new(()));
     ctx.globals().set(
         "__script_compile",
         Function::new(ctx.clone(), move |ctx, path| {
@@ -208,7 +217,6 @@ pub(crate) fn register(
                 provider.clone(),
                 limits.clone(),
                 compile_audit.clone(),
-                read_gate.clone(),
             )
         })?,
     )?;
@@ -236,24 +244,17 @@ fn check<'js>(
     ctx: Ctx<'js>,
     parent: String,
     path: String,
-    provider: Option<Arc<dyn ScriptSourceProvider>>,
     audit: SharedScriptAudit,
     limits: ScriptLimits,
-) -> Promised<impl Future<Output = rquickjs::Result<()>> + 'js> {
-    Promised(async move {
-        let result = async {
-            reserve_load(&audit, &limits)?;
-            provider
-                .ok_or("access_denied: script provider unavailable")?
-                .authorize(&path)
-                .await?;
-            reserve_dependency(&audit, &limits, &parent, &path)
-        }
-        .await;
-        result.map_err(|message| {
-            record_error(&audit, message.clone());
-            Exception::throw_message(&ctx, &message)
-        })
+) -> rquickjs::Result<()> {
+    let result = (|| {
+        reserve_load(&audit, &limits)?;
+        validate_path(&path)?;
+        reserve_dependency(&audit, &limits, &parent, &path)
+    })();
+    result.map_err(|message| {
+        record_error(&audit, message.clone());
+        Exception::throw_message(&ctx, &message)
     })
 }
 
@@ -263,25 +264,20 @@ fn compile<'js>(
     provider: Option<Arc<dyn ScriptSourceProvider>>,
     limits: ScriptLimits,
     audit: SharedScriptAudit,
-    read_gate: Arc<tokio::sync::Mutex<()>>,
 ) -> Promised<impl Future<Output = rquickjs::Result<Function<'js>>> + 'js> {
     Promised(async move {
         let start = Instant::now();
-        let read_guard = read_gate.lock().await;
-        let max_bytes = {
+        {
             let state = audit.lock().unwrap();
             if let Some(error) = &state.termination {
                 return Err(Exception::throw_message(&ctx, error));
             }
-            limits
-                .max_file_bytes
-                .min(limits.max_total_bytes.saturating_sub(state.bytes))
-        };
-        let source = provider
+        }
+        let bytes = provider
             .ok_or_else(|| {
                 Exception::throw_message(&ctx, "access_denied: script provider unavailable")
             })?
-            .read(&path, max_bytes)
+            .read(&path)
             .await
             .map_err(|message| {
                 record_error(&audit, format!("{path}: {message}"));
@@ -289,24 +285,38 @@ fn compile<'js>(
             })?;
         {
             let mut state = audit.lock().unwrap();
-            state.bytes = state.bytes.saturating_add(source.text.len());
+            if let Some(error) = &state.termination {
+                return Err(Exception::throw_message(&ctx, error));
+            }
+            // Storage has already allocated the bytes. Reserve the source budget
+            // atomically before UTF-8 conversion or QuickJS compilation.
+            state.bytes = state.bytes.saturating_add(bytes.len());
+            if bytes.len() > limits.max_file_bytes || state.bytes > limits.max_total_bytes {
+                let message = format!("size_limit: source budget exceeded at {path}");
+                state.termination = Some(message.clone());
+                state.errors.push(message.clone());
+                return Err(Exception::throw_message(&ctx, &message));
+            }
             state.sources.push(SourceAudit {
-                identity: source.identity,
+                identity: SourceIdentity {
+                    path: path.clone(),
+                    sha256: format!("{:x}", Sha256::digest(&bytes)),
+                    byte_length: bytes.len(),
+                },
                 duration_ms: start.elapsed().as_millis() as u64,
                 error: None,
                 initialized: false,
             });
-            if source.text.len() > limits.max_file_bytes || state.bytes > limits.max_total_bytes {
-                let message = format!("size_limit: source budget exceeded at {path}");
-                state.termination = Some(message.clone());
-                return Err(Exception::throw_message(&ctx, &message));
-            }
         }
-        drop(read_guard);
+        let source = String::from_utf8(bytes).map_err(|_| {
+            let message = format!("invalid_source: {path} is not UTF-8");
+            record_error(&audit, message.clone());
+            Exception::throw_message(&ctx, &message)
+        })?;
         // Prefix on the first line preserves original file line numbers.
         let wrapped = format!(
             "export default async function(tools, console, setTimeout, loadScript) {{{}\n}}",
-            source.text
+            source
         );
         let result = async {
             let module = Module::declare(ctx.clone(), path.clone(), wrapped)?;
@@ -334,7 +344,7 @@ const loadScript = ((check, compile, finish) => {
     const cache = new Map();
     const bound = parent => async path => {
         if (typeof path !== 'string') throw new TypeError('invalid_path: loadScript expects a string');
-        await check(parent, path);
+        check(parent, path);
         if (!cache.has(path)) {
             const started = Date.now();
             const initialization = (async () => {

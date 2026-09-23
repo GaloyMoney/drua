@@ -192,6 +192,34 @@ async fn setup(test_name: &str) -> (App, AuthSubject, AuthSubject) {
 
 struct CallerProbe;
 
+// Pause a real compose invocation while the test changes Git HEAD or mounts.
+struct Checkpoint(tokio::sync::mpsc::Sender<tokio::sync::oneshot::Sender<()>>);
+
+#[async_trait::async_trait]
+impl drua_core::toolset::TopLevelTool for Checkpoint {
+    fn name(&self) -> &str {
+        "checkpoint"
+    }
+    fn description(&self) -> &str {
+        "Wait for the integration test's external change."
+    }
+    fn input_schema(&self) -> &serde_json::Value {
+        static SCHEMA: std::sync::LazyLock<serde_json::Value> =
+            std::sync::LazyLock::new(|| serde_json::json!({"type":"object"}));
+        &SCHEMA
+    }
+    async fn call(
+        &self,
+        _: &AuthSubject,
+        _: Option<rmcp::model::JsonObject>,
+    ) -> Result<rmcp::model::CallToolResult, drua_core::toolset::ToolSetsError> {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        self.0.send(send).await.unwrap();
+        receive.await.unwrap();
+        Ok(rmcp::model::CallToolResult::success(Vec::new()))
+    }
+}
+
 #[async_trait::async_trait]
 impl drua_core::toolset::TopLevelTool for CallerProbe {
     fn name(&self) -> &str {
@@ -223,12 +251,14 @@ impl drua_core::toolset::TopLevelTool for CallerProbe {
 
 #[tokio::test]
 #[ignore = "requires isolated postgres + local library clone"]
-async fn scripts_authorize_hosted_external_and_dependencies_and_pin_git_snapshot() {
+async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
     use drua_core::auth::AuthScope;
     use drua_core::primitives::McpCredsId;
 
     let (app, user, agent) = setup("scripts").await;
     app.toolsets().register_top_level(CallerProbe);
+    let (checkpoints, mut changes) = tokio::sync::mpsc::channel(1);
+    app.toolsets().register_top_level(Checkpoint(checkpoints));
     let spaces = app.library().spaces();
     spaces
         .write_file(
@@ -292,6 +322,24 @@ async fn scripts_authorize_hosted_external_and_dependencies_and_pin_git_snapshot
         assert!(output.get("script_execution").is_none());
         assert!(!output.to_string().contains("relative:"));
         assert!(compose.description().contains("loadScript"));
+        let types = app
+            .toolsets()
+            .top_level_tool_arcs(subject)
+            .find(|t| t.name() == "compose_types")
+            .unwrap();
+        let declarations = types
+            .call(
+                subject,
+                serde_json::json!({"tool_names":["caller_probe"]})
+                    .as_object()
+                    .cloned(),
+            )
+            .await
+            .unwrap();
+        assert!(declarations.structured_content.unwrap()["declarations"]
+            .as_str()
+            .unwrap()
+            .contains(js_engine::LOAD_SCRIPT_DECLARATION));
         let caller = compose.call(subject, serde_json::json!({"script":"const helper = await loadScript('space:docs/caller.js'); return await helper.run();"}).as_object().cloned()).await.unwrap().structured_content.unwrap();
         let expected = if subject.project_id().is_some() {
             "agent"
@@ -311,34 +359,58 @@ async fn scripts_authorize_hosted_external_and_dependencies_and_pin_git_snapshot
     }
 
     let provider = app.toolsets().script_provider.for_subject(&agent).unwrap();
-    let first = provider.read("space:docs/helper.js", 10000).await.unwrap();
+    let compose = app
+        .toolsets()
+        .top_level_tool_arcs(&agent)
+        .find(|t| t.name() == "compose")
+        .unwrap();
+    let (result, ()) = tokio::join!(
+        compose.call(&agent, serde_json::json!({"script": "const first = await loadScript('space:docs/helper.js'); await tools.checkpoint({}); const again = await loadScript('space:docs/helper.js'); const fresh = await loadScript('space:docs/fresh.js'); return {same: first === again, old: again.relative('a','b'), fresh};"}).as_object().cloned()),
+        async {
+            let resume = changes.recv().await.unwrap();
+            for path in ["helper.js", "fresh.js"] {
+                spaces.write_file("docs", path, "return {version: 2};".into(), CommitAttribution::library_default()).await.unwrap();
+            }
+            resume.send(()).unwrap();
+        }
+    );
+    assert_eq!(
+        result.unwrap().structured_content.unwrap()["result"],
+        serde_json::json!({"same":true,"old":"ab","fresh":{"version":2}})
+    );
+    let next = compose
+        .call(
+            &agent,
+            serde_json::json!({"script":"return await loadScript('space:docs/helper.js');"})
+                .as_object()
+                .cloned(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        next.structured_content.unwrap()["result"],
+        serde_json::json!({"version":2})
+    );
+    // The adapter itself has no cache or snapshot; its ordinary reads see HEAD.
+    assert_eq!(
+        provider.read("space:docs/helper.js").await.unwrap(),
+        b"return {version: 2};"
+    );
+    assert!(provider
+        .read("space:docs/missing.js")
+        .await
+        .unwrap_err()
+        .contains("missing_file"));
     spaces
         .write_file(
             "docs",
-            "helper.js",
-            "return {version: 2};".into(),
+            "dir.js/child",
+            "child".into(),
             CommitAttribution::library_default(),
         )
         .await
         .unwrap();
-    let pinned = provider.read("space:docs/helper.js", 10000).await.unwrap();
-    assert_eq!(first.text, pinned.text);
-    assert_eq!(first.identity.revision, pinned.identity.revision);
-    let next = app
-        .toolsets()
-        .script_provider
-        .for_subject(&agent)
-        .unwrap()
-        .read("space:docs/helper.js", 10000)
-        .await
-        .unwrap();
-    assert_ne!(first.identity.revision, next.identity.revision);
-    assert_eq!(next.text, "return {version: 2};");
-    use sha2::{Digest, Sha256};
-    assert_eq!(
-        first.identity.sha256,
-        format!("{:x}", Sha256::digest(first.text.as_bytes()))
-    );
+    assert!(provider.read("space:docs/dir.js").await.is_err());
     spaces
         .write_file(
             "docs",
@@ -382,6 +454,17 @@ async fn scripts_authorize_hosted_external_and_dependencies_and_pin_git_snapshot
                 .unwrap()
                 .contains("attributed failure"));
             assert!(source.get("text").is_none());
+            use sha2::{Digest, Sha256};
+            assert_eq!(
+                source["sha256"],
+                format!(
+                    "{:x}",
+                    Sha256::digest(b"throw new Error('attributed failure');")
+                )
+            );
+            assert_eq!(source["byte_length"], 38);
+            assert!(source.get("revision").is_none());
+            assert!(source.get("blob_oid").is_none());
             assert!(parent.metadata.get("arguments").is_some());
             break;
         }
@@ -389,12 +472,33 @@ async fn scripts_authorize_hosted_external_and_dependencies_and_pin_git_snapshot
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
     let docs = spaces.maybe_find_by_slug("docs").await.unwrap().unwrap();
-    app.projects()
-        .unmount_space(&user, agent.project_id().unwrap(), docs.id)
+    let (result, ()) = tokio::join!(
+        compose.call(&agent, serde_json::json!({"script": "const helper = await loadScript('space:docs/helper.js'); await tools.checkpoint({}); const same = helper === await loadScript('space:docs/helper.js'); let denied; try {await loadScript('space:docs/caller.js')} catch(e) {denied = String(e)} return {same,denied};"}).as_object().cloned()),
+        async {
+            let resume = changes.recv().await.unwrap();
+            app.projects().unmount_space(&user, agent.project_id().unwrap(), docs.id).await.unwrap();
+            resume.send(()).unwrap();
+        }
+    );
+    let result = result.unwrap().structured_content.unwrap();
+    assert_eq!(result["result"]["same"], true);
+    assert!(result["result"]["denied"]
+        .as_str()
+        .unwrap()
+        .contains("access_denied"));
+    assert!(compose
+        .call(
+            &agent,
+            serde_json::json!({"script":"return await loadScript('space:docs/helper.js');"})
+                .as_object()
+                .cloned()
+        )
         .await
-        .unwrap();
+        .unwrap_err()
+        .to_string()
+        .contains("access_denied"));
     assert!(provider
-        .authorize("space:docs/helper.js")
+        .read("space:docs/helper.js")
         .await
         .unwrap_err()
         .contains("access_denied"));

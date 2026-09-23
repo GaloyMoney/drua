@@ -27,7 +27,7 @@ pub use space::{NewSpace, Space, SpaceError, SpaceEvent, Spaces, SPACE_DOC_TYPE}
 pub use synced::LibrarySynced;
 
 use self::git::GitEngine;
-pub use self::git::{BlobEntries, DirEntry, PathDates, PathDatesMap, ScriptBlob};
+pub use self::git::{BlobEntries, DirEntry, PathDates, PathDatesMap};
 use self::job::{
     CommitTick, ImporterRegistry, LibraryEmbedConfig, LibraryEmbedJobInitializer,
     LibrarySyncConfig, LibrarySyncJobInitializer, LibraryWriteConfig, LibraryWriteJobInitializer,

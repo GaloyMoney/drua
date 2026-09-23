@@ -1,5 +1,5 @@
 //! Compare a library's legacy and migrated preflight in QuickJS with local, read-only tool fixtures.
-use js_engine::{JsEngine, ScriptSource, ScriptSourceProvider, SourceIdentity, ToolDispatcher};
+use js_engine::{JsEngine, ScriptSourceProvider, ToolDispatcher};
 use serde_json::{json, Value};
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
@@ -21,24 +21,9 @@ impl Fixture {
 }
 #[async_trait::async_trait]
 impl ScriptSourceProvider for Fixture {
-    async fn authorize(&self, _: &str) -> Result<(), String> {
-        Ok(())
-    }
-    async fn read(&self, path: &str, max: usize) -> Result<ScriptSource, String> {
-        let text = self.text(path)?;
-        if text.len() > max {
-            return Err("size_limit".into());
-        }
-        Ok(ScriptSource {
-            identity: SourceIdentity {
-                path: path.into(),
-                revision: "local-fixture".into(),
-                blob_oid: String::new(),
-                sha256: String::new(),
-                byte_length: text.len(),
-            },
-            text,
-        })
+    async fn read(&self, path: &str) -> Result<Vec<u8>, String> {
+        let path = path.strip_prefix("space:").ok_or("invalid_path")?;
+        std::fs::read(self.root.join("spaces").join(path)).map_err(|e| e.to_string())
     }
 }
 #[async_trait::async_trait]

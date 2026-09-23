@@ -96,7 +96,7 @@ impl NewSpace {
 /// Slugs must be lowercase alphanumeric + `-`, with no leading/trailing
 /// `-` and no empty segments. This keeps `spaces/<slug>/` safe for
 /// filesystem and git refspecs.
-pub fn validate_slug(slug: &str) -> Result<(), SpaceError> {
+fn validate_slug(slug: &str) -> Result<(), SpaceError> {
     if slug.is_empty() || slug.starts_with('-') || slug.ends_with('-') || slug.contains("--") {
         return Err(SpaceError::InvalidSlug {
             slug: slug.to_string(),

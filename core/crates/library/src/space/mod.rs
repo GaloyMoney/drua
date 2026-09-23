@@ -1,4 +1,3 @@
-pub use entity::validate_slug;
 mod entity;
 pub mod error;
 pub(crate) mod repo;
@@ -253,19 +252,6 @@ impl Spaces {
         }
         let map = self.repo.find_all::<Space>(ids).await?;
         Ok(map.into_values().collect())
-    }
-
-    pub async fn read_script(
-        &self,
-        slug: &str,
-        rel_path: &str,
-        snapshot: Arc<std::sync::Mutex<Option<String>>>,
-        max_bytes: usize,
-    ) -> Result<crate::ScriptBlob, SpaceError> {
-        self.git
-            .read_script(&format!("spaces/{slug}/{rel_path}"), snapshot, max_bytes)
-            .await
-            .map_err(|e| SpaceError::Git(e.to_string()))
     }
 
     /// Reads a blob at `spaces/<slug>/<rel_path>` from HEAD's tree.
