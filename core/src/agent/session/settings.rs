@@ -98,7 +98,7 @@ impl Default for BreakerConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            consecutive_error_turns: 5,
+            consecutive_error_turns: 15,
             identical_failing_calls: 3,
             consecutive_max_tokens: 3,
             max_turns_per_prompt: 250,
