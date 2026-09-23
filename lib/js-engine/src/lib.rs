@@ -676,9 +676,7 @@ const process = new Proxy({{}}, {{ get: (_, p) => __noNode("process." + String(p
 
 fn format_caught_error(caught: &rquickjs::CaughtError<'_>) -> String {
     match caught {
-        rquickjs::CaughtError::Exception(exc) => {
-            format!("{exc}\n{}", exc.stack().unwrap_or_default())
-        }
+        rquickjs::CaughtError::Exception(exc) => format!("{exc}"),
         rquickjs::CaughtError::Value(val) => format!("Thrown value: {val:?}"),
         rquickjs::CaughtError::Error(e) => format!("{e}"),
     }
