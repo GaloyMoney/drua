@@ -1,0 +1,48 @@
+CREATE TABLE changesets (
+    id uuid NOT NULL,
+    project_id uuid NOT NULL,
+    status varchar NOT NULL,
+    agent_id uuid,
+    workflow_run_id uuid,
+    created_at timestamp with time zone NOT NULL,
+    deleted boolean DEFAULT false NOT NULL
+);
+
+ALTER TABLE ONLY changesets
+    ADD CONSTRAINT changesets_pkey PRIMARY KEY (id);
+
+ALTER TABLE ONLY changesets
+    ADD CONSTRAINT changesets_project_id_fkey FOREIGN KEY (project_id) REFERENCES projects(id);
+
+ALTER TABLE ONLY changesets
+    ADD CONSTRAINT changesets_agent_id_fkey FOREIGN KEY (agent_id) REFERENCES agents(id);
+
+ALTER TABLE ONLY changesets
+    ADD CONSTRAINT changesets_workflow_run_id_fkey FOREIGN KEY (workflow_run_id) REFERENCES workflow_runs(id);
+
+CREATE INDEX idx_changesets_project_id_created_at
+    ON changesets USING btree (project_id, created_at);
+
+CREATE INDEX idx_changesets_status
+    ON changesets USING btree (status);
+
+CREATE INDEX idx_changesets_agent_id
+    ON changesets USING btree (agent_id);
+
+CREATE INDEX idx_changesets_workflow_run_id
+    ON changesets USING btree (workflow_run_id);
+
+CREATE TABLE changeset_events (
+    id uuid NOT NULL,
+    sequence integer NOT NULL,
+    event_type character varying NOT NULL,
+    event jsonb NOT NULL,
+    context jsonb,
+    recorded_at timestamp with time zone NOT NULL
+);
+
+ALTER TABLE ONLY changeset_events
+    ADD CONSTRAINT changeset_events_id_sequence_key UNIQUE (id, sequence);
+
+ALTER TABLE ONLY changeset_events
+    ADD CONSTRAINT changeset_events_id_fkey FOREIGN KEY (id) REFERENCES changesets(id);

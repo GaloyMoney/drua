@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH updated AS (UPDATE changesets SET project_id = $2, status = $3 WHERE id = $1 RETURNING id) INSERT INTO changeset_events (id, recorded_at, sequence, event_type, event) SELECT updated.id, COALESCE($4, NOW()), ROW_NUMBER() OVER () + $5, unnested.event_type, unnested.event FROM updated CROSS JOIN UNNEST($6::TEXT[], $7::JSONB[]) AS unnested(event_type, event) RETURNING recorded_at",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "recorded_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid",
+        "Varchar",
+        "Timestamptz",
+        "Int8",
+        "TextArray",
+        "JsonbArray"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2b352aba8468a15853bb32f57e70e1a9f08c9cb418bd9b3be360f6f3c9624d2d"
+}
