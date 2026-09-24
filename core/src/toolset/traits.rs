@@ -68,6 +68,19 @@ pub trait TopLevelTool: Send + Sync {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError>;
+
+    /// Invoked when a compose script (agent-driven `compose` or a
+    /// `workflow:script_step`) calls the tool. Defaults to `call`.
+    /// Override when the MCP result carries model-only presentation —
+    /// e.g. line numbers — that a script must not receive: scripts are
+    /// data consumers, not a model reading a tool result.
+    async fn call_from_script(
+        &self,
+        subject: &AuthSubject,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        self.call(subject, arguments).await
+    }
 }
 
 impl From<&dyn TopLevelTool> for llm::prompt::Tool {

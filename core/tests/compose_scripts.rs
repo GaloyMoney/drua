@@ -498,6 +498,152 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
         .contains("access_denied"));
 }
 
+/// A compose script's `Read`/`Edit view` must return the file's exact
+/// bytes — CRLF, a blank line, a multibyte/emoji run and the trailing
+/// newline all intact — while the same tools called directly through MCP
+/// (outside a script) keep numbering. The fixture is deliberately not
+/// `"hello\n"`: a fixture with no CRLF, no multibyte char, no blank line
+/// and no absent-final-newline case would pass this test whether or not
+/// script reads actually preserved anything.
+#[tokio::test]
+#[ignore = "requires isolated postgres + local library clone"]
+async fn scripts_read_exact_text_while_mcp_read_stays_numbered() {
+    let (app, _user, agent) = setup("read-raw").await;
+
+    let path = "space:docs/raw-fixture.md";
+    let fixture = "# Raw\r\nUnicode: \u{1F41F} \u{2014} caf\u{E9}\r\n\r\nEnd\r\n";
+    let fixture_js = serde_json::to_string(fixture).expect("json-encode fixture");
+
+    let compose = app
+        .toolsets()
+        .top_level_tool_arcs(&agent)
+        .find(|t| t.name() == "compose")
+        .unwrap();
+
+    let script = format!(
+        r#"
+const path = {path_js};
+const text = {fixture_js};
+await tools.Edit({{command: 'create', path, file_text: text}});
+const whole = await tools.Read({{path}});
+const ranged = await tools.Read({{path, offset: 0, limit: 1}});
+const viewed = await tools.Edit({{command: 'view', path}});
+return {{
+  whole: whole.content,
+  ranged: ranged.content,
+  viewed: viewed.output,
+}};
+"#,
+        path_js = serde_json::to_string(path).unwrap(),
+    );
+
+    let output = compose
+        .call(
+            &agent,
+            serde_json::json!({"script": script}).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+    let result = output.structured_content.unwrap()["result"].clone();
+
+    assert_eq!(
+        result["whole"].as_str().unwrap(),
+        fixture,
+        "a compose script's Read must return the file's exact bytes"
+    );
+    assert_eq!(
+        result["ranged"].as_str().unwrap(),
+        "# Raw",
+        "a ranged compose Read is an unnumbered, `\\n`-joined slice"
+    );
+    assert_eq!(
+        result["viewed"].as_str().unwrap(),
+        fixture,
+        "a compose script's Edit view must be exact too"
+    );
+
+    // Same tool, same path, called directly through MCP (outside a
+    // script) — still line-numbered, unaffected by the script path.
+    let direct = app
+        .toolsets()
+        .call_top_level_tool(
+            &agent,
+            "Read",
+            serde_json::json!({"path": path}).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+    let direct_content = direct.structured_content.unwrap()["result"]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        direct_content.starts_with("     1\t# Raw"),
+        "{direct_content}"
+    );
+}
+
+/// R3.1: a compose script's `Read` is not subject to `SpaceFs`'s 1 MiB
+/// `MAX_VIEW_FILE_BYTES` cap — it's bounded only by
+/// `toolsets.compose.max_tool_result_bytes` (32 MiB default). The same
+/// file read directly through MCP (outside a script) still hits the
+/// model-facing cap.
+#[tokio::test]
+#[ignore = "requires isolated postgres + local library clone"]
+async fn scripts_read_lifts_the_view_cap_but_mcp_read_still_enforces_it() {
+    let (app, _user, agent) = setup("read-oversized").await;
+
+    // Comfortably over MAX_VIEW_FILE_BYTES (1_048_576) so the assertion
+    // survives any off-by-one at the boundary.
+    const FIXTURE_LEN: usize = 1_048_576 + 200_000;
+    let path = "space:docs/oversized.txt";
+
+    let compose = app
+        .toolsets()
+        .top_level_tool_arcs(&agent)
+        .find(|t| t.name() == "compose")
+        .unwrap();
+
+    // Built in JS (not embedded as a literal) so the script source itself
+    // stays tiny regardless of fixture size.
+    let script = format!(
+        r#"
+const path = {path_js};
+const text = "x".repeat({FIXTURE_LEN});
+await tools.Edit({{command: 'create', path, file_text: text}});
+const whole = await tools.Read({{path}});
+return {{ length: whole.content.length }};
+"#,
+        path_js = serde_json::to_string(path).unwrap(),
+    );
+
+    let output = compose
+        .call(
+            &agent,
+            serde_json::json!({"script": script}).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+    let result = output.structured_content.unwrap()["result"].clone();
+    assert_eq!(
+        result["length"].as_i64().unwrap(),
+        FIXTURE_LEN as i64,
+        "a compose script's Read must not be capped at MAX_VIEW_FILE_BYTES"
+    );
+
+    // Same tool, same path, called directly through MCP — still capped.
+    let direct = app
+        .toolsets()
+        .call_top_level_tool(
+            &agent,
+            "Read",
+            serde_json::json!({"path": path}).as_object().cloned(),
+        )
+        .await
+        .unwrap_err();
+    assert!(direct.to_string().contains("too large"), "{direct}");
+}
+
 #[tokio::test]
 #[ignore = "requires isolated postgres + local library clone"]
 async fn workflow_scripts_validate_execute_and_preserve_provenance() {

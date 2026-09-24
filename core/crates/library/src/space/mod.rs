@@ -15,6 +15,30 @@ use crate::SearchableFields;
 
 pub const SPACE_DOC_TYPE: DocType = DocType::new("space_file");
 
+/// Deny-list, not an allow-list: an unrecognised extension (or none at
+/// all) stays searchable, so no prose format is dropped by accident
+/// (e.g. regulatory-library's `meta.yml`, html and xml sources).
+const NON_SEARCHABLE_EXTENSIONS: &[&str] = &[
+    "json", "js", "mjs", "cjs", "ts", "py", "sh", "rs", "sql", "lock", "toml", "png", "jpg",
+    "jpeg", "gif", "svg", "emf", "zip", "gz",
+];
+const NON_SEARCHABLE_NAMES: &[&str] = &[".gitignore", ".gitattributes", ".gitkeep"];
+
+/// Whether a space-relative path should be indexed for full-text search
+/// and embedded. The file is always stored and readable through
+/// `SpaceFs`/`Read`/`Glob`/`LS` either way — this only gates the search
+/// row.
+fn is_searchable(rel: &str) -> bool {
+    let name = rel.rsplit('/').next().unwrap_or(rel);
+    if NON_SEARCHABLE_NAMES.contains(&name) {
+        return false;
+    }
+    match name.rsplit_once('.') {
+        Some((_, ext)) => !NON_SEARCHABLE_EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str()),
+        None => true,
+    }
+}
+
 /// UUID v5 namespace for deriving deterministic doc_ids from `<slug>/<rel_path>`.
 const SPACE_DOC_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
     0x4e, 0x97, 0x05, 0x53, 0x53, 0x46, 0x4d, 0x73, 0xa3, 0x9d, 0xa6, 0x4d, 0x6e, 0x39, 0x4d, 0x53,
@@ -405,9 +429,6 @@ impl LibraryImporter for Spaces {
         path: &str,
         content: &[u8],
     ) -> Result<Option<SearchableFields>, UpsertError> {
-        if path.ends_with("/.gitkeep") {
-            return Ok(None);
-        }
         let mut parts = path.splitn(3, '/');
         let _ = parts.next();
         let slug = parts
@@ -416,6 +437,10 @@ impl LibraryImporter for Spaces {
         let rel = parts
             .next()
             .ok_or_else(|| UpsertError::Parse(format!("bad space path: {path}")))?;
+
+        if !is_searchable(rel) {
+            return Ok(None);
+        }
 
         let space = match self
             .repo
@@ -477,5 +502,51 @@ impl LibraryImporter for Spaces {
             &SPACE_DOC_NAMESPACE,
             format!("{slug}/{rel}").as_bytes(),
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_searchable;
+
+    #[test]
+    fn json_is_not_searchable() {
+        assert!(!is_searchable("state.json"));
+    }
+
+    #[test]
+    fn extension_match_is_case_insensitive() {
+        assert!(!is_searchable("STATE.JSON"));
+    }
+
+    #[test]
+    fn yaml_short_extension_is_searchable() {
+        assert!(is_searchable("meta.yml"));
+    }
+
+    #[test]
+    fn markdown_is_searchable() {
+        assert!(is_searchable("README.md"));
+    }
+
+    #[test]
+    fn extensionless_file_is_searchable() {
+        assert!(is_searchable("notes"));
+    }
+
+    #[test]
+    fn gitattributes_is_not_searchable() {
+        assert!(!is_searchable(".gitattributes"));
+    }
+
+    #[test]
+    fn gitkeep_is_not_searchable() {
+        assert!(!is_searchable(".gitkeep"));
+    }
+
+    #[test]
+    fn deny_list_applies_at_any_depth() {
+        assert!(!is_searchable("runs/2026/state.json"));
+        assert!(is_searchable("runs/2026/notes.md"));
     }
 }
