@@ -186,6 +186,19 @@ impl Library {
         &self.search
     }
 
+    /// `None` when no GitHub App is configured (local dev, CI) —
+    /// `Changesets::submit` degrades to `ChangesetError::PrUnavailable`
+    /// rather than panicking or silently doing nothing.
+    pub fn github_app(&self) -> Option<&Arc<GitHubAppTokenProvider>> {
+        self.github_app.as_ref()
+    }
+
+    /// `(owner, repo)` when `repo_url` is a GitHub remote — see
+    /// [`LibraryConfig::github_coord`].
+    pub fn repo_coord(&self) -> Option<(String, String)> {
+        self.config.github_coord()
+    }
+
     /// Bare-clone path. Callers should prefer `read_blob_at_head`,
     /// `list_dir_at_head`, and `walk_blobs_at_head` over poking at the
     /// filesystem directly — bare clones don't materialise files.

@@ -3,6 +3,7 @@ use thiserror::Error;
 use crate::agent::error::AgentError;
 use crate::agent::repo::{AgentFindError, AgentModifyError};
 use crate::auth::error::AuthorizationError;
+use crate::github_app::GitHubAppError;
 use crate::primitives::ChangesetId;
 use crate::workflow::run::repo::{WorkflowRunFindError, WorkflowRunModifyError};
 
@@ -57,4 +58,22 @@ pub enum ChangesetError {
         id: ChangesetId,
         action: &'static str,
     },
+    #[error("ChangesetError - GitHubApp: {0}")]
+    GitHubApp(#[from] GitHubAppError),
+    /// `submit` on a changeset with no `CommitRecorded` events yet —
+    /// §7: "if commit_count == 0 → Empty".
+    #[error("ChangesetError - Empty: changeset {id} has no commits to submit")]
+    Empty { id: ChangesetId },
+    /// `submit`/`apply`/`rebase` found the changeset doesn't merge
+    /// cleanly onto `main`'s current tip; the git op is never
+    /// attempted (§7).
+    #[error("ChangesetError - Conflicts: changeset {id} does not merge cleanly: {paths:?}")]
+    Conflicts { id: ChangesetId, paths: Vec<String> },
+    /// `submit` when the library has no GitHub App configured (local
+    /// dev) or `repo_url` isn't a `github.com` remote — OQ-14's
+    /// default: error, not a silent degrade to `apply`.
+    #[error(
+        "ChangesetError - PrUnavailable: no GitHub App / GitHub remote configured for this library; use `apply` instead of `submit`"
+    )]
+    PrUnavailable,
 }

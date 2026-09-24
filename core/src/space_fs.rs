@@ -487,6 +487,7 @@ impl SpaceFs {
             return Ok(None);
         };
         Audit::record_action_if_unset("space.write_file");
+        Self::record_changeset_audit(&resolved.target);
         let attribution = self.users.commit_attribution().await;
         let oid = self
             .spaces
@@ -522,6 +523,7 @@ impl SpaceFs {
             return Ok(None);
         };
         Audit::record_action_if_unset("space.str_replace");
+        Self::record_changeset_audit(&resolved.target);
         let attribution = self.users.commit_attribution().await;
         let oid = self
             .spaces
@@ -554,6 +556,7 @@ impl SpaceFs {
             return Ok(None);
         };
         Audit::record_action_if_unset("space.insert");
+        Self::record_changeset_audit(&resolved.target);
         let attribution = self.users.commit_attribution().await;
         let oid = self
             .spaces
@@ -584,6 +587,7 @@ impl SpaceFs {
             return Ok(None);
         };
         Audit::record_action_if_unset("space.delete_file");
+        Self::record_changeset_audit(&resolved.target);
         let attribution = self.users.commit_attribution().await;
         let oid = self
             .spaces
@@ -656,6 +660,7 @@ impl SpaceFs {
         let to_rel = normalize_rel_path(to_ref.rel_path);
         Self::validate_rel_path(&to_rel)?;
         Audit::record_action_if_unset("space.move_file");
+        Self::record_changeset_audit(&from_resolved.target);
         let attribution = self.users.commit_attribution().await;
         let oid = self
             .spaces
@@ -756,6 +761,19 @@ impl SpaceFs {
             // an empty result is the honest answer there.
             None if resolved.rel_path.is_empty() => Ok(Vec::new()),
             None => Err(io_err(format!("no such file or directory: {}", resolved.rel_path)).into()),
+        }
+    }
+
+    /// Stamps `Audit::record_changeset_id` before `commit_attribution`
+    /// runs, when the target is a changeset — extends the commit's
+    /// trailer block with `Drua-Changeset` (`user/mod.rs`'s trailer
+    /// loop) for provenance through a squash-merge (§7, §10). Must run
+    /// before `commit_attribution`, not after — that's why this isn't
+    /// folded into `record_write`, which only sees the *result* of the
+    /// write.
+    fn record_changeset_audit(target: &Target) {
+        if let Target::Changeset { id, .. } = target {
+            Audit::record_changeset_id(*id);
         }
     }
 

@@ -314,6 +314,7 @@ impl App {
             &AgentRepo::new(pool),
             &WorkflowRunRepo::new(pool),
             &library,
+            &users,
         ));
 
         // Sandboxless read facade for `space:<slug>/...` paths. The

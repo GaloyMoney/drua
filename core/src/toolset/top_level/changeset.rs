@@ -46,6 +46,29 @@ enum ChangesetParams {
         #[serde(default)]
         reason: Option<String>,
     },
+    /// Opens a GitHub PR from the changeset's branch onto `main` for
+    /// human review. `id` defaults to the caller's bound changeset.
+    /// Errors (`PrUnavailable`) when the library has no GitHub App
+    /// configured — use `apply` instead.
+    Submit {
+        #[serde(default)]
+        id: Option<ChangesetId>,
+    },
+    /// Merges the changeset directly into `main`, bypassing GitHub
+    /// review. Requires `Update` on spaces (leads/admins, or an
+    /// explicitly `allow_apply` workflow). `id` defaults to the
+    /// caller's bound changeset.
+    Apply {
+        #[serde(default)]
+        id: Option<ChangesetId>,
+    },
+    /// Moves the changeset onto current `main`, squashing its commits.
+    /// `id` defaults to the caller's bound changeset. Conflicts are
+    /// reported without touching the branch.
+    Rebase {
+        #[serde(default)]
+        id: Option<ChangesetId>,
+    },
 }
 
 impl ChangesetParams {
@@ -57,6 +80,9 @@ impl ChangesetParams {
             Self::Bind { .. } => "bind",
             Self::Unbind => "unbind",
             Self::Discard { .. } => "discard",
+            Self::Submit { .. } => "submit",
+            Self::Apply { .. } => "apply",
+            Self::Rebase { .. } => "rebase",
         }
     }
 }
@@ -72,6 +98,8 @@ struct ChangesetSummary {
     base_oid: String,
     head_oid: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pr_number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pr_url: Option<String>,
 }
 
@@ -85,6 +113,7 @@ impl From<&Changeset> for ChangesetSummary {
             branch: cs.branch(),
             base_oid: cs.base_oid.clone(),
             head_oid: cs.head_oid.clone(),
+            pr_number: cs.pr_number,
             pr_url: cs.pr_url.clone(),
         }
     }
@@ -129,6 +158,8 @@ struct ChangesetOutput {
     conflicts: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     touched: Option<Vec<TouchedFileOut>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    merge_oid: Option<String>,
 }
 
 static CHANGESET_OUTPUT: LazyLock<OutputSchema<ChangesetOutput>> = LazyLock::new(OutputSchema::new);
@@ -139,7 +170,7 @@ static CHANGESET_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
         "properties": {
             "command": {
                 "type": "string",
-                "enum": ["open", "status", "list", "bind", "unbind", "discard"],
+                "enum": ["open", "status", "list", "bind", "unbind", "discard", "submit", "apply", "rebase"],
                 "description": "Which changeset operation to perform."
             },
             "title": {
@@ -152,7 +183,7 @@ static CHANGESET_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "id": {
                 "type": "string",
-                "description": "Changeset id (uuid). Required for bind; optional for status/discard (defaults to the caller's bound changeset)."
+                "description": "Changeset id (uuid). Required for bind; optional for status/discard/submit/apply/rebase (defaults to the caller's bound changeset)."
             },
             "status": {
                 "type": "string",
@@ -209,13 +240,14 @@ impl TopLevelTool for ChangesetTool {
          library repo) instead of writing `main` directly. `open` a \
          changeset, make edits with the normal file tools (Read, Edit, \
          LS, Glob, Grep — they read and write your changeset \
-         automatically once bound), then submit or apply it (see the \
-         `submit`/`apply` commands once available) for review or to \
-         land it. `status` shows commits, mergeability and touched \
+         automatically once bound), then `submit` to open a GitHub PR \
+         for human review, or `apply` (if permitted) to land it \
+         directly. `status` shows commits, mergeability and touched \
          files (`id` defaults to your bound changeset). `list` shows \
          every changeset in your project. `bind`/`unbind` join or \
          leave a changeset without closing it. `discard` closes a \
-         changeset without landing it."
+         changeset without landing it. `rebase` moves the changeset \
+         onto current `main` (squashing) after conflicts."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -287,6 +319,7 @@ impl TopLevelTool for ChangesetTool {
                         branch: Changeset::branch_for(view.id),
                         base_oid: view.base_oid.clone(),
                         head_oid: view.head_oid.clone(),
+                        pr_number: None,
                         pr_url: view.pr_url.clone(),
                     }),
                     commits: Some(view.commits),
@@ -340,6 +373,47 @@ impl TopLevelTool for ChangesetTool {
                 let text = format!("Changeset {} discarded.", cs.id);
                 let out = ChangesetOutput {
                     command: "discard".to_string(),
+                    changeset: Some(ChangesetSummary::from(&cs)),
+                    ..Default::default()
+                };
+                (text, out)
+            }
+            ChangesetParams::Submit { id } => {
+                let id = self.resolve_id(subject, id).await?;
+                let cs = self.changesets.submit(subject, id).await?;
+                let text = format!(
+                    "Changeset {} submitted.\n  PR: {}",
+                    cs.id,
+                    cs.pr_url.as_deref().unwrap_or("(unknown)"),
+                );
+                let out = ChangesetOutput {
+                    command: "submit".to_string(),
+                    changeset: Some(ChangesetSummary::from(&cs)),
+                    ..Default::default()
+                };
+                (text, out)
+            }
+            ChangesetParams::Apply { id } => {
+                let id = self.resolve_id(subject, id).await?;
+                let (cs, merge_oid) = self.changesets.apply(subject, id).await?;
+                let text = format!("Changeset {} applied as {merge_oid}.", cs.id);
+                let out = ChangesetOutput {
+                    command: "apply".to_string(),
+                    changeset: Some(ChangesetSummary::from(&cs)),
+                    merge_oid: Some(merge_oid),
+                    ..Default::default()
+                };
+                (text, out)
+            }
+            ChangesetParams::Rebase { id } => {
+                let id = self.resolve_id(subject, id).await?;
+                let cs = self.changesets.rebase(subject, id).await?;
+                let text = format!(
+                    "Changeset {} rebased.\n  base: {}\n  head: {}",
+                    cs.id, cs.base_oid, cs.head_oid,
+                );
+                let out = ChangesetOutput {
+                    command: "rebase".to_string(),
                     changeset: Some(ChangesetSummary::from(&cs)),
                     ..Default::default()
                 };
@@ -403,7 +477,9 @@ mod tests {
             .expect("command.enum")
             .as_array()
             .expect("array");
-        for cmd in ["open", "status", "list", "bind", "unbind", "discard"] {
+        for cmd in [
+            "open", "status", "list", "bind", "unbind", "discard", "submit", "apply", "rebase",
+        ] {
             assert!(
                 cmd_enum.iter().any(|v| v == cmd),
                 "schema missing command {cmd}"
