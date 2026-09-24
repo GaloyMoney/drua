@@ -41,21 +41,6 @@ mod liberal {
             Some(StringOrInt::Str(s)) => s.parse().map(Some).map_err(serde::de::Error::custom),
         }
     }
-
-    pub(crate) fn deserialize_bool<'de, D: serde::Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<bool, D::Error> {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum BoolOrString {
-            Bool(bool),
-            Str(String),
-        }
-        match BoolOrString::deserialize(deserializer)? {
-            BoolOrString::Bool(v) => Ok(v),
-            BoolOrString::Str(s) => s.parse().map_err(serde::de::Error::custom),
-        }
-    }
 }
 
 /// Actionable denial for sandbox-mutating tools — a bare "Unauthorized"

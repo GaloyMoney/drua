@@ -689,7 +689,7 @@ async fn run_top_level_call(
     });
 
     let result = tool
-        .call(subject, inner_args)
+        .call_from_script(subject, inner_args)
         .await
         .map_err(|e| e.to_string())?;
     if result.is_error == Some(true) {

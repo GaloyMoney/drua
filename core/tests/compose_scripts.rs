@@ -498,17 +498,19 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
         .contains("access_denied"));
 }
 
-/// `Read({raw:true})` must return the file's exact bytes — CRLF, a blank
-/// line, a multibyte/emoji run and the trailing newline all intact —
-/// while a plain `Read` keeps numbering the same file. The fixture is
-/// deliberately not `"hello\n"`: a fixture with no CRLF, no multibyte
-/// char, no blank line and no absent-final-newline case would pass this
-/// test whether or not raw mode actually preserved anything.
+/// A compose script's `Read`/`Edit view` must return the file's exact
+/// bytes — CRLF, a blank line, a multibyte/emoji run and the trailing
+/// newline all intact — while the same tools called directly through MCP
+/// (outside a script) keep numbering. The fixture is deliberately not
+/// `"hello\n"`: a fixture with no CRLF, no multibyte char, no blank line
+/// and no absent-final-newline case would pass this test whether or not
+/// script reads actually preserved anything.
 #[tokio::test]
 #[ignore = "requires isolated postgres + local library clone"]
-async fn read_raw_returns_exact_bytes_while_plain_read_stays_numbered() {
+async fn scripts_read_exact_text_while_mcp_read_stays_numbered() {
     let (app, _user, agent) = setup("read-raw").await;
 
+    let path = "space:docs/raw-fixture.md";
     let fixture = "# Raw\r\nUnicode: \u{1F41F} \u{2014} caf\u{E9}\r\n\r\nEnd\r\n";
     let fixture_js = serde_json::to_string(fixture).expect("json-encode fixture");
 
@@ -520,30 +522,19 @@ async fn read_raw_returns_exact_bytes_while_plain_read_stays_numbered() {
 
     let script = format!(
         r#"
-const path = 'space:docs/raw-fixture.md';
+const path = {path_js};
 const text = {fixture_js};
 await tools.Edit({{command: 'create', path, file_text: text}});
-const raw = await tools.Read({{path, raw: true}});
-const numbered = await tools.Read({{path}});
-let dirError = null;
-try {{
-  await tools.Read({{path: 'space:docs', raw: true}});
-}} catch (e) {{
-  dirError = e.message || String(e);
-}}
-let rangeError = null;
-try {{
-  await tools.Read({{path, raw: true, offset: 0}});
-}} catch (e) {{
-  rangeError = e.message || String(e);
-}}
+const whole = await tools.Read({{path}});
+const ranged = await tools.Read({{path, offset: 0, limit: 1}});
+const viewed = await tools.Edit({{command: 'view', path}});
 return {{
-  rawContent: raw.content,
-  numberedStartsRight: numbered.content.startsWith('     1\t# Raw'),
-  dirError,
-  rangeError,
+  whole: whole.content,
+  ranged: ranged.content,
+  viewed: viewed.output,
 }};
-"#
+"#,
+        path_js = serde_json::to_string(path).unwrap(),
     );
 
     let output = compose
@@ -556,24 +547,39 @@ return {{
     let result = output.structured_content.unwrap()["result"].clone();
 
     assert_eq!(
-        result["rawContent"].as_str().unwrap(),
+        result["whole"].as_str().unwrap(),
         fixture,
-        "raw read must return the file's exact bytes"
+        "a compose script's Read must return the file's exact bytes"
     );
-    assert_eq!(result["numberedStartsRight"], true);
-    assert!(
-        result["dirError"]
-            .as_str()
-            .unwrap()
-            .contains("raw reads require a file path"),
-        "{result}"
+    assert_eq!(
+        result["ranged"].as_str().unwrap(),
+        "# Raw",
+        "a ranged compose Read is an unnumbered, `\\n`-joined slice"
     );
+    assert_eq!(
+        result["viewed"].as_str().unwrap(),
+        fixture,
+        "a compose script's Edit view must be exact too"
+    );
+
+    // Same tool, same path, called directly through MCP (outside a
+    // script) — still line-numbered, unaffected by the script path.
+    let direct = app
+        .toolsets()
+        .call_top_level_tool(
+            &agent,
+            "Read",
+            serde_json::json!({"path": path}).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+    let direct_content = direct.structured_content.unwrap()["result"]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert!(
-        result["rangeError"]
-            .as_str()
-            .unwrap()
-            .contains("raw reads return the whole file; omit offset/limit"),
-        "{result}"
+        direct_content.starts_with("     1\t# Raw"),
+        "{direct_content}"
     );
 }
 

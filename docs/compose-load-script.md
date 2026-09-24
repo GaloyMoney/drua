@@ -59,6 +59,13 @@ Bash, submit_output, mount management, and agent/skill/sandbox management remain
 hidden. Tool steps retain their existing admin subject. Compose remains
 non-composable, and its public input and agent limits are unchanged.
 
+`tools.Read` and `tools.Edit`'s `view` command return a file's exact text
+inside a script — no line-number prefixes — while the same tools called
+directly by a model through MCP still return numbered lines; only the
+caller changes, not the schema. A whole-file read is byte-exact (CRLF, BOM,
+and a missing trailing newline all preserved); a ranged read (`offset`/
+`limit`) is an unnumbered, `\n`-joined line slice, not byte-exact.
+
 Configure script ceilings under `toolsets.compose.script_step` (see the
 generated default config): `max_tool_calls: 2000`, `timeout_ms: 1800000`.
 A step's `max_tool_calls` may lower the ceiling; higher values are rejected at

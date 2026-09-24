@@ -13,8 +13,11 @@
 //! - `view` is read-only → executable with either `SandboxUse` *or*
 //!   `SandboxRead`.
 //! - `create` / `str_replace` / `insert` mutate state → require
-//!   `SandboxUse`. Enforced inside [`TextEditor::call`] after parsing
+//!   `SandboxUse`. Enforced inside [`TextEditor::edit`] after parsing
 //!   the command.
+//!
+//! `view`'s result is line-numbered for a model (`call`) and exact text
+//! for a compose script (`call_from_script`); see [`render_view`].
 
 use std::sync::{Arc, LazyLock};
 
@@ -42,50 +45,16 @@ impl TextEditor {
             space_fs,
         }
     }
-}
 
-static TEXT_EDITOR_OUTPUT: LazyLock<OutputSchema<TextOutput>> = LazyLock::new(OutputSchema::new);
-static TEXT_EDITOR_SCHEMA: LazyLock<serde_json::Value> =
-    LazyLock::new(schema_for::<TextEditorInput>);
-
-#[async_trait::async_trait]
-impl TopLevelTool for TextEditor {
-    fn name(&self) -> &str {
-        "Edit"
-    }
-
-    fn description(&self) -> &str {
-        "Anthropic-compatible text editor. Commands: `view` (read file or list \
-         directory), `create` (write a new file), `str_replace` (replace a \
-         unique substring), `insert` (insert text at a line). Accepts both \
-         in-sandbox absolute paths and `space:<slug>/...` paths from mounted \
-         spaces — writes to spaces commit to the upstream library. \
-         Notes for `str_replace`: `old_str` must match the file byte-for-byte \
-         AND appear exactly once. If you don't already have the file content \
-         in context, `view` it first — guessing the surrounding text will \
-         fail. Notes for `create`: the path must point at a file, not a \
-         directory; to add a folder, create a file inside it (e.g. \
-         `<dir>/README.md`)."
-    }
-
-    fn input_schema(&self) -> &serde_json::Value {
-        &TEXT_EDITOR_SCHEMA
-    }
-
-    fn inner_output_schema(&self) -> Option<&serde_json::Value> {
-        Some(TEXT_EDITOR_OUTPUT.schema())
-    }
-
-    fn is_visible(&self, subject: &AuthSubject) -> bool {
-        subject.can_use_agent_file_tools()
-    }
-
-    async fn call(
+    /// Shared body for `call`/`call_from_script`; `number` numbers a
+    /// `view`'s result for a model, or leaves it exact for a script (the
+    /// mutating commands are unaffected either way).
+    async fn edit(
         &self,
         subject: &AuthSubject,
-        arguments: Option<JsonObject>,
+        input: TextEditorInput,
+        number: bool,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let input: TextEditorInput = parse_params(arguments)?;
         Audit::record_action("text_editor");
 
         let is_mutating = input.is_mutating();
@@ -98,18 +67,10 @@ impl TopLevelTool for TextEditor {
             let space_result: Option<String> = match action {
                 TextEditorAction::View { path, view_range } => {
                     let range = view_range.map(|[s, e]| (s, e));
-                    let number_range = view_range.map(|[s, e]| {
-                        let start = s.max(1) as usize;
-                        let end = if e == -1 { usize::MAX } else { e as usize };
-                        (start, end)
-                    });
                     self.space_fs
                         .view_file(subject, &path, range)
                         .await?
-                        .map(|view| match view {
-                            FileView::File(text) => sandbox::number_lines(&text, number_range),
-                            FileView::Dir(entries) => entries.join("\n"),
-                        })
+                        .map(|view| render_view(view, number, view_range))
                 }
                 TextEditorAction::Create { path, file_text } => self
                     .space_fs
@@ -176,7 +137,7 @@ impl TopLevelTool for TextEditor {
 
         match client.execute_text_editor(&input).await {
             Ok(resp) => {
-                let formatted = if is_view && !resp.is_error {
+                let formatted = if is_view && !resp.is_error && number {
                     sandbox::number_lines(&resp.output, view_range)
                 } else {
                     resp.output
@@ -194,5 +155,78 @@ impl TopLevelTool for TextEditor {
                 "sandbox /execute call failed: {e}"
             ))])),
         }
+    }
+}
+
+/// A `space:` `view`'s file/dir result, presented for a model
+/// (`number: true`, line-numbered) or a compose script (`number: false`,
+/// exact text). Directory listings are the same either way.
+fn render_view(view: FileView, number: bool, view_range: Option<[i64; 2]>) -> String {
+    match view {
+        FileView::File(text) if number => {
+            let number_range = view_range.map(|[s, e]| {
+                let start = s.max(1) as usize;
+                let end = if e == -1 { usize::MAX } else { e as usize };
+                (start, end)
+            });
+            sandbox::number_lines(&text, number_range)
+        }
+        FileView::File(text) => text,
+        FileView::Dir(entries) => entries.join("\n"),
+    }
+}
+
+static TEXT_EDITOR_OUTPUT: LazyLock<OutputSchema<TextOutput>> = LazyLock::new(OutputSchema::new);
+static TEXT_EDITOR_SCHEMA: LazyLock<serde_json::Value> =
+    LazyLock::new(schema_for::<TextEditorInput>);
+
+#[async_trait::async_trait]
+impl TopLevelTool for TextEditor {
+    fn name(&self) -> &str {
+        "Edit"
+    }
+
+    fn description(&self) -> &str {
+        "Anthropic-compatible text editor. Commands: `view` (read file or list \
+         directory), `create` (write a new file), `str_replace` (replace a \
+         unique substring), `insert` (insert text at a line). Accepts both \
+         in-sandbox absolute paths and `space:<slug>/...` paths from mounted \
+         spaces — writes to spaces commit to the upstream library. \
+         Notes for `str_replace`: `old_str` must match the file byte-for-byte \
+         AND appear exactly once. If you don't already have the file content \
+         in context, `view` it first — guessing the surrounding text will \
+         fail. Notes for `create`: the path must point at a file, not a \
+         directory; to add a folder, create a file inside it (e.g. \
+         `<dir>/README.md`)."
+    }
+
+    fn input_schema(&self) -> &serde_json::Value {
+        &TEXT_EDITOR_SCHEMA
+    }
+
+    fn inner_output_schema(&self) -> Option<&serde_json::Value> {
+        Some(TEXT_EDITOR_OUTPUT.schema())
+    }
+
+    fn is_visible(&self, subject: &AuthSubject) -> bool {
+        subject.can_use_agent_file_tools()
+    }
+
+    async fn call(
+        &self,
+        subject: &AuthSubject,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        let input: TextEditorInput = parse_params(arguments)?;
+        self.edit(subject, input, true).await
+    }
+
+    async fn call_from_script(
+        &self,
+        subject: &AuthSubject,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        let input: TextEditorInput = parse_params(arguments)?;
+        self.edit(subject, input, false).await
     }
 }
