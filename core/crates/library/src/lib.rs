@@ -20,7 +20,7 @@ pub use config::LibraryConfig;
 pub use error::LibraryError;
 pub use github_app::GitHubAppTokenProvider;
 pub use importer::{DocType, GitFileHash, LibraryImporter, UpsertError};
-pub use job::{LivenessRef, WriteOp};
+pub use job::{HeadAdvancedHook, LivenessRef, WriteOp};
 pub use primitives::SpaceId;
 pub use search::{SearchHit, SearchStore, SearchableFields};
 pub use space::{NewSpace, Space, SpaceError, SpaceEvent, Spaces, SPACE_DOC_TYPE};
@@ -31,8 +31,9 @@ pub use self::git::{
     BatchRmwFn, BlobEntries, CommitDelta, DeltaKind, DirEntry, PathDates, PathDatesMap,
 };
 use self::job::{
-    CommitTick, ImporterRegistry, LibraryEmbedConfig, LibraryEmbedJobInitializer,
-    LibrarySyncConfig, LibrarySyncJobInitializer, LibraryWriteConfig, LibraryWriteJobInitializer,
+    CommitTick, HeadAdvancedHooks, ImporterRegistry, LibraryEmbedConfig,
+    LibraryEmbedJobInitializer, LibrarySyncConfig, LibrarySyncJobInitializer, LibraryWriteConfig,
+    LibraryWriteJobInitializer,
 };
 use self::synced::{HookEntry, LibrarySyncHook};
 
@@ -47,6 +48,7 @@ pub struct Library {
     search: SearchStore,
     spaces: Spaces,
     importers: ImporterRegistry,
+    head_advanced_hooks: HeadAdvancedHooks,
     write_spawner: ::job::JobSpawner<LibraryWriteConfig>,
     embed_spawner: ::job::JobSpawner<LibraryEmbedConfig>,
     /// Fetcher task handle is wrapped in `Arc` so the `Library` itself
@@ -104,12 +106,15 @@ impl Library {
             git.commit_notify(),
         );
 
+        let head_advanced_hooks: HeadAdvancedHooks = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+
         let spawner = jobs.add_resident_initializer(LibrarySyncJobInitializer::new(
             tick_rx,
             Arc::clone(&git),
             search.clone(),
             Arc::clone(&importers),
             embed_spawner.clone(),
+            Arc::clone(&head_advanced_hooks),
         ));
         spawner.spawn(LibrarySyncConfig::default()).await?;
 
@@ -126,6 +131,7 @@ impl Library {
             search,
             spaces,
             importers,
+            head_advanced_hooks,
             write_spawner,
             embed_spawner,
             _fetcher: Arc::new(fetcher),
@@ -142,6 +148,14 @@ impl Library {
     /// ordering.
     pub async fn register_importer(&self, importer: Arc<dyn LibraryImporter>) {
         self.importers.write().await.insert(0, importer);
+    }
+
+    /// Registers a callback fired with the new head oid after each
+    /// successfully-processed sync tick (handoff §11). Post-init only,
+    /// same pattern as `register_importer` — the hook list is shared
+    /// with the already-spawned sync job via the same `Arc<RwLock<_>>`.
+    pub async fn on_head_advanced(&self, hook: HeadAdvancedHook) {
+        self.head_advanced_hooks.write().await.push(hook);
     }
 
     fn spawn_fetcher(

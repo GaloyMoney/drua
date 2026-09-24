@@ -317,6 +317,22 @@ impl App {
             &users,
         ));
 
+        // §11: sweeps Open/Submitted changesets for merges, abandoned
+        // PRs, and external pushes after every sync tick.
+        {
+            let changesets = Arc::clone(&changesets);
+            library
+                .on_head_advanced(Arc::new(move |head: String| {
+                    let changesets = Arc::clone(&changesets);
+                    Box::pin(async move {
+                        if let Err(e) = changesets.observe_main(&head).await {
+                            tracing::warn!(error = %e, %head, "changeset.observe_main failed");
+                        }
+                    })
+                }))
+                .await;
+        }
+
         // Sandboxless read facade for `space:<slug>/...` paths. The
         // five read tools branch on the `space:` prefix and dispatch
         // through here when present; otherwise they fall through to

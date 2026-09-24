@@ -632,6 +632,120 @@ impl Changesets {
         }
     }
 
+    /// Called by `Library::on_head_advanced` after each processed sync
+    /// tick (§11). No auth — internal plumbing driven by the git fetch
+    /// loop, never a subject action. Sweeps every `Open`/`Submitted`
+    /// changeset across every project (sync isn't project-scoped) for:
+    /// merged (`head_oid` now an ancestor of `main`) → `Merged`;
+    /// `Submitted` with its ref gone on origin (only possible once
+    /// `fetch_origin`'s prune is on — PR 1) and not merged →
+    /// `Abandoned`; ref present but its tip has moved past `head_oid`
+    /// (a human pushed directly) → recorded as an `external` commit
+    /// (OQ-4's default). Per-changeset failures are logged and
+    /// swallowed — one bad ref must not block observing the rest.
+    #[instrument(name = "domain.changeset.observe_main", skip(self))]
+    pub(crate) async fn observe_main(&self, main_oid: &str) -> Result<(), ChangesetError> {
+        for status in [ChangesetStatus::Open, ChangesetStatus::Submitted] {
+            let mut after = None;
+            loop {
+                let page = self
+                    .repo
+                    .list_for_status_by_created_at(
+                        status,
+                        es_entity::PaginatedQueryArgs { first: 200, after },
+                        es_entity::ListDirection::Ascending,
+                    )
+                    .await?;
+                for cs in &page.entities {
+                    if let Err(e) = self.observe_one(cs, main_oid, status).await {
+                        tracing::warn!(
+                            error = %e,
+                            changeset_id = %cs.id,
+                            "observe_main: failed to observe changeset; will retry on the next tick"
+                        );
+                    }
+                }
+                if !page.has_next_page {
+                    break;
+                }
+                after = page.end_cursor;
+            }
+        }
+        Ok(())
+    }
+
+    async fn observe_one(
+        &self,
+        cs: &Changeset,
+        main_oid: &str,
+        status: ChangesetStatus,
+    ) -> Result<(), ChangesetError> {
+        if let Some(base) = self.library.merge_base(main_oid, &cs.head_oid).await? {
+            if base == cs.head_oid {
+                self.mark_merged_in_op(cs.id, main_oid).await?;
+                return Ok(());
+            }
+        }
+
+        let ref_oid = self.library.resolve_ref(&cs.git_ref()).await?;
+        if status == ChangesetStatus::Submitted && ref_oid.is_none() {
+            self.mark_abandoned_in_op(cs.id).await?;
+            return Ok(());
+        }
+
+        if let Some(tip) = ref_oid {
+            if tip != cs.head_oid {
+                self.record_commit(cs.id, tip, "external", "").await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn mark_merged_in_op(
+        &self,
+        id: ChangesetId,
+        merge_oid: &str,
+    ) -> Result<(), ChangesetError> {
+        let mut op = self.repo.begin_op().await?;
+        let mut cs = self.repo.find_by_id_in_op(&mut op, id).await?;
+        let bound = cs.bound_actors.clone();
+        if cs.mark_merged(merge_oid.to_string())?.did_execute() {
+            self.repo.update_in_op(&mut op, &mut cs).await?;
+        }
+        for actor in bound {
+            self.unbind_actor_entity_in_op(&mut op, actor, id).await?;
+        }
+        op.commit().await?;
+
+        if let Err(e) = self.library.delete_ref(&cs.git_ref(), true).await {
+            tracing::warn!(
+                error = %e,
+                changeset_id = %id,
+                "observe_main: delete_ref after merge failed (best effort; branch may already be gone)"
+            );
+        }
+        Audit::record_action_if_unset("changeset.observe_merged");
+        Audit::record_changeset_id(id);
+        Ok(())
+    }
+
+    async fn mark_abandoned_in_op(&self, id: ChangesetId) -> Result<(), ChangesetError> {
+        let mut op = self.repo.begin_op().await?;
+        let mut cs = self.repo.find_by_id_in_op(&mut op, id).await?;
+        let bound = cs.bound_actors.clone();
+        if cs.mark_abandoned()?.did_execute() {
+            self.repo.update_in_op(&mut op, &mut cs).await?;
+        }
+        for actor in bound {
+            self.unbind_actor_entity_in_op(&mut op, actor, id).await?;
+        }
+        op.commit().await?;
+
+        Audit::record_action_if_unset("changeset.observe_abandoned");
+        Audit::record_changeset_id(id);
+        Ok(())
+    }
+
     /// Same-project check backing every read/write access to an
     /// already-resolved changeset (`status`, `bind`, `discard`,
     /// `find_for_target`). Deliberately membership-based rather than a
