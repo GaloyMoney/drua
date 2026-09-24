@@ -31,9 +31,11 @@ pub use llm::{ModelChain, ModelSpec, ReasoningEffort};
 
 use std::sync::Arc;
 
+use agent::repo::AgentRepo;
 use agent::Agents;
 use audit::Audit;
 use auth::{AuthResource, AuthSubject, AuthVerb};
+use changeset::Changesets;
 use code_assistant::CodeAssistant;
 use git_proxy::GitProxies;
 use github_app::GitHubAppTokenProvider;
@@ -53,6 +55,7 @@ use toolset::{
 };
 use tracing::instrument;
 use user::Users;
+use workflow::run::repo::WorkflowRunRepo;
 use workflow::Workflows;
 
 #[derive(Clone)]
@@ -73,6 +76,7 @@ pub struct App {
     git_proxies: Arc<GitProxies>,
     tunnel: Arc<tunnel::TunnelService>,
     library: drua_library::Library,
+    changesets: Arc<Changesets>,
     spaces: Arc<AuthedSpaces>,
     search: Arc<AuthedSearch>,
     notes: Arc<Notes>,
@@ -300,6 +304,17 @@ impl App {
             context_generation.clone(),
         ));
 
+        // Owns the `Changeset` entity/branch lifecycle. Built from fresh
+        // repo handles (cheap — both just wrap `pool`) rather than
+        // `Agents`/`Workflows`' own repos, avoiding a service-on-service
+        // dependency cycle (§7 of the handoff).
+        let changesets = Arc::new(Changesets::new(
+            pool,
+            &AgentRepo::new(pool),
+            &WorkflowRunRepo::new(pool),
+            &library,
+        ));
+
         // Sandboxless read facade for `space:<slug>/...` paths. The
         // five read tools branch on the `space:` prefix and dispatch
         // through here when present; otherwise they fall through to
@@ -308,6 +323,7 @@ impl App {
             Arc::new(library.spaces().clone()),
             Arc::clone(&projects),
             Arc::clone(&users),
+            Arc::clone(&changesets),
         ));
         toolsets.register_top_level(TextEditor::new(
             Arc::clone(&sandboxes),
@@ -415,6 +431,7 @@ impl App {
             git_proxies,
             tunnel,
             library,
+            changesets,
             spaces,
             search,
             notes,
@@ -493,6 +510,10 @@ impl App {
 
     pub fn library(&self) -> &drua_library::Library {
         &self.library
+    }
+
+    pub fn changesets(&self) -> &Changesets {
+        &self.changesets
     }
 
     pub fn spaces(&self) -> &AuthedSpaces {

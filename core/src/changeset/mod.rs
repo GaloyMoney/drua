@@ -192,15 +192,29 @@ impl Changesets {
         }
     }
 
+    /// Resolves `id` for `SpaceFs`'s target resolution (both the
+    /// explicit `@id` override and a stale-bind safety check): applies
+    /// the same-project rule (`check_same_project`) but — unlike
+    /// `status`/`bind`/`discard` — does not require `Open`. Reads of a
+    /// `Submitted` (or even landed) changeset via `@id` stay legible to
+    /// reviewers; `SpaceFs` itself rejects a *write* to a non-`Open`
+    /// target with `SpaceError::ChangesetNotOpen`.
+    #[instrument(name = "domain.changeset.find_for_target", skip(self, sub))]
+    pub(crate) async fn find_for_target(
+        &self,
+        sub: &AuthSubject,
+        id: ChangesetId,
+    ) -> Result<Changeset, ChangesetError> {
+        let cs = self.repo.find_by_id(id).await?;
+        self.check_same_project(sub, &cs)?;
+        Ok(cs)
+    }
+
     /// Repairs a missing local ref (ephemeral-clone pod restart, or a
     /// prune race on a never-pushed branch — see `fetch_origin`'s prune
     /// comment) by recreating it from the entity's `head_oid`. Internal:
     /// callers resolve a changeset's tip through this, never by reading
     /// `resolve_ref` directly.
-    ///
-    /// `SpaceFs` (PR 3 of this handoff's sequencing) is this method's
-    /// first caller; `#[allow(dead_code)]` until it lands.
-    #[allow(dead_code)]
     pub(crate) async fn ensure_ref(&self, cs: &Changeset) -> Result<String, ChangesetError> {
         if let Some(tip) = self.library.resolve_ref(&cs.git_ref()).await? {
             return Ok(tip);
@@ -211,8 +225,6 @@ impl Changesets {
 
     /// Called by `SpaceFs` after a successful write to a changeset
     /// target. No auth — internal plumbing, not a subject-facing verb.
-    /// Same PR-3 caveat as `ensure_ref`.
-    #[allow(dead_code)]
     pub(crate) async fn record_commit(
         &self,
         id: ChangesetId,

@@ -24,6 +24,8 @@ use drua_library::{BlobEntries, PathDates, PathDatesMap, Space, SpaceError, Spac
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
+use crate::changeset::{Changeset, ChangesetError, ChangesetStatus, Changesets};
+use crate::primitives::ChangesetId;
 use crate::project::{ProjectError, Projects};
 use crate::user::Users;
 
@@ -50,22 +52,34 @@ pub struct DetailedEntry {
     pub dates: Option<PathDates>,
 }
 
-/// Parsed view of a `space:<slug>` or `space:<slug>/<rel>` path.
+/// Parsed view of a `space:<slug>`, `space:<slug>/<rel>`, or
+/// `space:<slug>@<changeset-id>/<rel>` path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SpaceRef<'a> {
     slug: &'a str,
     /// Empty for the space root (`space:<slug>` or `space:<slug>/`).
     rel_path: &'a str,
+    /// Explicit `@<changeset-id>` override (§6.4). Slugs can't contain
+    /// `@` (`validate_slug`), so splitting on the first one is
+    /// unambiguous.
+    changeset_id: Option<ChangesetId>,
 }
 
-/// Returns `Some(SpaceRef)` iff `path` starts with the `space:` prefix
-/// and has a non-empty slug. Anything else returns `None` so callers
-/// can fall through to the existing sandbox dispatch.
+/// Returns `Some(SpaceRef)` iff `path` starts with the `space:` prefix,
+/// has a non-empty slug, and — when an `@<id>` suffix is present —
+/// that id parses as a `ChangesetId`. Anything else returns `None` so
+/// callers can fall through to the existing sandbox dispatch (or, for
+/// a `space:`-prefixed path that just fails to parse, a `BadRequest`
+/// raised by the caller).
 fn parse_space_path(path: &str) -> Option<SpaceRef<'_>> {
     let rest = path.strip_prefix("space:")?;
-    let (slug, rel) = match rest.split_once('/') {
-        Some((slug, rel)) => (slug, rel),
+    let (slug_part, rel) = match rest.split_once('/') {
+        Some((slug_part, rel)) => (slug_part, rel),
         None => (rest, ""),
+    };
+    let (slug, changeset_id) = match slug_part.split_once('@') {
+        Some((slug, raw_id)) => (slug, Some(raw_id.parse::<ChangesetId>().ok()?)),
+        None => (slug_part, None),
     };
     if slug.is_empty() {
         return None;
@@ -73,6 +87,7 @@ fn parse_space_path(path: &str) -> Option<SpaceRef<'_>> {
     Some(SpaceRef {
         slug,
         rel_path: rel,
+        changeset_id,
     })
 }
 
@@ -84,11 +99,54 @@ fn is_bare_space_path(path: &str) -> bool {
     rest.trim_matches('/').is_empty()
 }
 
+/// What a `space:` call resolves to (§2.1) — `main` directly, or the tip
+/// of an in-flight changeset branch. Reads and writes route through
+/// `Spaces`'s `at`/`target_ref` parameters accordingly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    Main,
+    Changeset {
+        id: ChangesetId,
+        /// Current branch tip, from `Changesets::ensure_ref` — may be
+        /// ahead of the entity's last-observed `head_oid` (e.g. a human
+        /// push landed on the branch since).
+        tip: String,
+        status: ChangesetStatus,
+    },
+}
+
+impl Target {
+    fn git_ref(&self) -> Option<String> {
+        match self {
+            Target::Main => None,
+            Target::Changeset { id, .. } => Some(Changeset::git_ref_for(*id)),
+        }
+    }
+
+    fn at(&self) -> Option<&str> {
+        match self {
+            Target::Main => None,
+            Target::Changeset { tip, .. } => Some(tip.as_str()),
+        }
+    }
+}
+
+/// Whether a `resolve` call is a read or a write — a write additionally
+/// requires a `Target::Changeset` to be `Open` (§2.2: "only `Open`
+/// accepts writes"). Read/write *authorization* (`Propose` vs `Update`)
+/// lands in PR 4 of this handoff's sequencing; unrelated to this check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Intent {
+    Read,
+    Write,
+}
+
 /// Auth-gated, resolved view of a `space:<slug>/<rel>` path.
 struct Resolved {
     space: Space,
     /// Owned so the bundle outlives the input `&str`.
     rel_path: String,
+    target: Target,
 }
 
 #[derive(Clone)]
@@ -96,14 +154,21 @@ pub struct SpaceFs {
     spaces: Arc<Spaces>,
     projects: Arc<Projects>,
     users: Arc<Users>,
+    changesets: Arc<Changesets>,
 }
 
 impl SpaceFs {
-    pub fn new(spaces: Arc<Spaces>, projects: Arc<Projects>, users: Arc<Users>) -> Self {
+    pub fn new(
+        spaces: Arc<Spaces>,
+        projects: Arc<Projects>,
+        users: Arc<Users>,
+        changesets: Arc<Changesets>,
+    ) -> Self {
         Self {
             spaces,
             projects,
             users,
+            changesets,
         }
     }
 
@@ -115,12 +180,16 @@ impl SpaceFs {
         sub: &AuthSubject,
         path: &str,
     ) -> Result<Option<Vec<u8>>, ProjectError> {
-        let Some(resolved) = self.resolve(sub, path).await? else {
+        let Some(resolved) = self.resolve(sub, path, Intent::Read).await? else {
             return Ok(None);
         };
         let bytes = self
             .spaces
-            .read_file(&resolved.space.slug, &resolved.rel_path)
+            .read_file(
+                &resolved.space.slug,
+                &resolved.rel_path,
+                resolved.target.at(),
+            )
             .await?
             .ok_or_else(|| SpaceError::PathNotFound {
                 slug: resolved.space.slug.clone(),
@@ -141,17 +210,22 @@ impl SpaceFs {
     }
 
     /// `Ok(None)` for non-`space:` paths (caller falls through to sandbox).
-    /// `space:`-prefixed paths that don't parse return `BadRequest`, so malformed input never masquerades as an auth denial.
+    /// `space:`-prefixed paths that don't parse return `BadRequest`, so
+    /// malformed input never masquerades as an auth denial. Error
+    /// precedence: bad URI → not found → not mounted → (PR 4:
+    /// `ChangesetRequired`/`Unauthorized`) — the mount gate
+    /// (`space_for_subject`) always runs before target resolution.
     async fn resolve(
         &self,
         sub: &AuthSubject,
         path: &str,
+        intent: Intent,
     ) -> Result<Option<Resolved>, ProjectError> {
         let Some(sref) = parse_space_path(path) else {
             if path.starts_with("space:") {
                 return Err(SpaceError::BadRequest {
                     reason: format!(
-                        "'{path}' is not a valid space URI; expected 'space:<slug>' or 'space:<slug>/<rel>'"
+                        "'{path}' is not a valid space URI; expected 'space:<slug>', 'space:<slug>/<rel>', or 'space:<slug>@<changeset-id>/<rel>'"
                     ),
                 }
                 .into());
@@ -161,7 +235,60 @@ impl SpaceFs {
         let space = self.projects.space_for_subject(sub, sref.slug).await?;
         let rel_path = normalize_rel_path(sref.rel_path);
         Self::validate_rel_path(&rel_path)?;
-        Ok(Some(Resolved { space, rel_path }))
+        let target = self.resolve_target(sub, sref.changeset_id, intent).await?;
+        Ok(Some(Resolved {
+            space,
+            rel_path,
+            target,
+        }))
+    }
+
+    /// §2.1 target resolution: an explicit `@<id>` override, else the
+    /// subject's bound changeset (`Changesets::active_for_subject`),
+    /// else `main`. A `Write` intent additionally requires a resolved
+    /// `Target::Changeset` to be `Open` (§2.2) — a stale bind (the
+    /// changeset was submitted/applied/discarded through another path)
+    /// surfaces as `ChangesetNotOpen` instead of silently writing
+    /// somewhere the caller didn't ask for.
+    async fn resolve_target(
+        &self,
+        sub: &AuthSubject,
+        explicit: Option<ChangesetId>,
+        intent: Intent,
+    ) -> Result<Target, ProjectError> {
+        let cs = match explicit {
+            Some(id) => Some(
+                self.changesets
+                    .find_for_target(sub, id)
+                    .await
+                    .map_err(map_changeset_err)?,
+            ),
+            None => self
+                .changesets
+                .active_for_subject(sub)
+                .await
+                .map_err(map_changeset_err)?,
+        };
+        let Some(cs) = cs else {
+            return Ok(Target::Main);
+        };
+        if intent == Intent::Write && !cs.is_open() {
+            return Err(SpaceError::ChangesetNotOpen {
+                id: cs.id.to_string(),
+                status: format!("{:?}", cs.status),
+            }
+            .into());
+        }
+        let tip = self
+            .changesets
+            .ensure_ref(&cs)
+            .await
+            .map_err(map_changeset_err)?;
+        Ok(Target::Changeset {
+            id: cs.id,
+            tip,
+            status: cs.status,
+        })
     }
 
     /// Slugs of every space the subject can address — admins see all
@@ -211,15 +338,16 @@ impl SpaceFs {
         view_range: Option<(i64, i64)>,
         cap: Option<usize>,
     ) -> Result<Option<FileView>, ProjectError> {
-        let Some(resolved) = self.resolve(sub, path).await? else {
+        let Some(resolved) = self.resolve(sub, path, Intent::Read).await? else {
             return Ok(None);
         };
+        let at = resolved.target.at();
 
         // Try as a directory first; if it's a tree, list it. If not a
         // tree, fall through to a blob read.
         if let Some(entries) = self
             .spaces
-            .list_dir(&resolved.space.slug, &resolved.rel_path)
+            .list_dir(&resolved.space.slug, &resolved.rel_path, at)
             .await
             .map_err(|e| -> ProjectError { e.into() })?
         {
@@ -228,7 +356,7 @@ impl SpaceFs {
 
         let bytes = self
             .spaces
-            .read_file(&resolved.space.slug, &resolved.rel_path)
+            .read_file(&resolved.space.slug, &resolved.rel_path, at)
             .await
             .map_err(|e| -> ProjectError { e.into() })?
             .ok_or_else(|| io_err(format!("no such file: {}", resolved.rel_path)))?;
@@ -247,12 +375,16 @@ impl SpaceFs {
         if is_bare_space_path(path) {
             return Ok(Some(self.list_mounted_spaces(sub).await?));
         }
-        let Some(resolved) = self.resolve(sub, path).await? else {
+        let Some(resolved) = self.resolve(sub, path, Intent::Read).await? else {
             return Ok(None);
         };
         let entries = self
             .spaces
-            .list_dir(&resolved.space.slug, &resolved.rel_path)
+            .list_dir(
+                &resolved.space.slug,
+                &resolved.rel_path,
+                resolved.target.at(),
+            )
             .await
             .map_err(|e| -> ProjectError { e.into() })?
             .unwrap_or_default();
@@ -277,12 +409,16 @@ impl SpaceFs {
                     .collect(),
             ));
         }
-        let Some(resolved) = self.resolve(sub, path).await? else {
+        let Some(resolved) = self.resolve(sub, path, Intent::Read).await? else {
             return Ok(None);
         };
         let entries = self
             .spaces
-            .list_dir(&resolved.space.slug, &resolved.rel_path)
+            .list_dir(
+                &resolved.space.slug,
+                &resolved.rel_path,
+                resolved.target.at(),
+            )
             .await
             .map_err(|e| -> ProjectError { e.into() })?
             .unwrap_or_default();
@@ -313,20 +449,24 @@ impl SpaceFs {
         path: &str,
         content: String,
     ) -> Result<Option<()>, ProjectError> {
-        let Some(resolved) = self.resolve(sub, path).await? else {
+        let Some(resolved) = self.resolve(sub, path, Intent::Write).await? else {
             return Ok(None);
         };
         Audit::record_action_if_unset("space.write_file");
         let attribution = self.users.commit_attribution().await;
-        self.spaces
+        let oid = self
+            .spaces
             .write_file(
                 &resolved.space.slug,
                 &resolved.rel_path,
                 content,
                 attribution,
+                resolved.target.git_ref().as_deref(),
             )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
+        self.record_write(&resolved.target, oid, "write_file", &resolved.rel_path)
+            .await?;
         Ok(Some(()))
     }
 
@@ -344,21 +484,25 @@ impl SpaceFs {
         old_str: String,
         new_str: String,
     ) -> Result<Option<()>, ProjectError> {
-        let Some(resolved) = self.resolve(sub, path).await? else {
+        let Some(resolved) = self.resolve(sub, path, Intent::Write).await? else {
             return Ok(None);
         };
         Audit::record_action_if_unset("space.str_replace");
         let attribution = self.users.commit_attribution().await;
-        self.spaces
+        let oid = self
+            .spaces
             .str_replace(
                 &resolved.space.slug,
                 &resolved.rel_path,
                 old_str,
                 new_str,
                 attribution,
+                resolved.target.git_ref().as_deref(),
             )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
+        self.record_write(&resolved.target, oid, "str_replace", &resolved.rel_path)
+            .await?;
         Ok(Some(()))
     }
 
@@ -372,21 +516,25 @@ impl SpaceFs {
         line_number: usize,
         text: String,
     ) -> Result<Option<()>, ProjectError> {
-        let Some(resolved) = self.resolve(sub, path).await? else {
+        let Some(resolved) = self.resolve(sub, path, Intent::Write).await? else {
             return Ok(None);
         };
         Audit::record_action_if_unset("space.insert");
         let attribution = self.users.commit_attribution().await;
-        self.spaces
+        let oid = self
+            .spaces
             .insert(
                 &resolved.space.slug,
                 &resolved.rel_path,
                 line_number,
                 text,
                 attribution,
+                resolved.target.git_ref().as_deref(),
             )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
+        self.record_write(&resolved.target, oid, "insert", &resolved.rel_path)
+            .await?;
         Ok(Some(()))
     }
 
@@ -398,15 +546,23 @@ impl SpaceFs {
         sub: &AuthSubject,
         path: &str,
     ) -> Result<Option<()>, ProjectError> {
-        let Some(resolved) = self.resolve(sub, path).await? else {
+        let Some(resolved) = self.resolve(sub, path, Intent::Write).await? else {
             return Ok(None);
         };
         Audit::record_action_if_unset("space.delete_file");
         let attribution = self.users.commit_attribution().await;
-        self.spaces
-            .delete_file(&resolved.space.slug, &resolved.rel_path, attribution)
+        let oid = self
+            .spaces
+            .delete_file(
+                &resolved.space.slug,
+                &resolved.rel_path,
+                attribution,
+                resolved.target.git_ref().as_deref(),
+            )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
+        self.record_write(&resolved.target, oid, "delete_file", &resolved.rel_path)
+            .await?;
         Ok(Some(()))
     }
 
@@ -437,7 +593,20 @@ impl SpaceFs {
             }
             .into());
         }
-        let Some(from_resolved) = self.resolve(sub, from).await? else {
+        // An explicit `@<changeset-id>` on one side and not the other is
+        // ambiguous — which target does the move belong to? — rather
+        // than silently picking one.
+        if let (Some(from_sref), Some(to_sref)) = (parse_space_path(from), parse_space_path(to)) {
+            if from_sref.changeset_id.is_some() != to_sref.changeset_id.is_some() {
+                return Err(SpaceError::BadRequest {
+                    reason: format!(
+                        "'{from}' -> '{to}': an explicit '@<changeset-id>' must appear on both sides of a move, or neither"
+                    ),
+                }
+                .into());
+            }
+        }
+        let Some(from_resolved) = self.resolve(sub, from, Intent::Write).await? else {
             return Ok(None);
         };
         let Some(to_ref) = parse_space_path(to) else {
@@ -454,15 +623,19 @@ impl SpaceFs {
         Self::validate_rel_path(&to_rel)?;
         Audit::record_action_if_unset("space.move_file");
         let attribution = self.users.commit_attribution().await;
-        self.spaces
+        let oid = self
+            .spaces
             .move_file(
                 &from_resolved.space.slug,
                 &from_resolved.rel_path,
                 &to_rel,
                 attribution,
+                from_resolved.target.git_ref().as_deref(),
             )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
+        self.record_write(&from_resolved.target, oid, "move_file", &to_rel)
+            .await?;
         Ok(Some(()))
     }
 
@@ -478,7 +651,7 @@ impl SpaceFs {
         path: &str,
         pattern: &str,
     ) -> Result<Option<Vec<String>>, ProjectError> {
-        let Some(resolved) = self.resolve(sub, path).await? else {
+        let Some(resolved) = self.resolve(sub, path, Intent::Read).await? else {
             return Ok(None);
         };
         let blobs = self.walk_search_root(&resolved).await?;
@@ -495,7 +668,7 @@ impl SpaceFs {
         path: &str,
         pattern: &str,
     ) -> Result<Option<Vec<DetailedEntry>>, ProjectError> {
-        let Some(resolved) = self.resolve(sub, path).await? else {
+        let Some(resolved) = self.resolve(sub, path, Intent::Read).await? else {
             return Ok(None);
         };
         let blobs = self.walk_search_root(&resolved).await?;
@@ -522,7 +695,7 @@ impl SpaceFs {
         path: &str,
         args: &sandbox::GrepInput,
     ) -> Result<Option<String>, ProjectError> {
-        let Some(resolved) = self.resolve(sub, path).await? else {
+        let Some(resolved) = self.resolve(sub, path, Intent::Read).await? else {
             return Ok(None);
         };
         let blobs = self.walk_search_root(&resolved).await?;
@@ -536,7 +709,11 @@ impl SpaceFs {
     async fn walk_search_root(&self, resolved: &Resolved) -> Result<BlobEntries, ProjectError> {
         match self
             .spaces
-            .walk(&resolved.space.slug, &resolved.rel_path)
+            .walk(
+                &resolved.space.slug,
+                &resolved.rel_path,
+                resolved.target.at(),
+            )
             .await
             .map_err(|e| -> ProjectError { e.into() })?
         {
@@ -546,6 +723,29 @@ impl SpaceFs {
             None if resolved.rel_path.is_empty() => Ok(Vec::new()),
             None => Err(io_err(format!("no such file or directory: {}", resolved.rel_path)).into()),
         }
+    }
+
+    /// After a write lands on a `Target::Changeset`, records it on the
+    /// entity (`Changesets::record_commit`) so `status`'s commit count
+    /// and history stay accurate. No-op for `Target::Main` or a
+    /// no-op write (`oid: None` — the tree was unchanged).
+    async fn record_write(
+        &self,
+        target: &Target,
+        oid: Option<String>,
+        action: &str,
+        path: &str,
+    ) -> Result<(), ProjectError> {
+        let Target::Changeset { id, .. } = target else {
+            return Ok(());
+        };
+        let Some(head_oid) = oid else {
+            return Ok(());
+        };
+        self.changesets
+            .record_commit(*id, head_oid, action, path)
+            .await
+            .map_err(map_changeset_err)
     }
 
     /// Rejects path-traversal, absolute paths, NUL bytes, and leading `/`.
@@ -733,6 +933,22 @@ fn io_err(msg: String) -> SpaceError {
     SpaceError::Io(msg)
 }
 
+/// Remaps a `Changesets` service failure reached through target
+/// resolution into the model-facing `SpaceError` family where one
+/// exists (`Foreign`), and into `ProjectError::Changeset` otherwise —
+/// `UnsupportedActor`/`MainUnborn`/etc. aren't expected on this path
+/// (every subject reaching `SpaceFs` is a real actor and `main` is
+/// never unborn once a space exists), but a type-safe fallback beats a
+/// panic if one somehow surfaces.
+fn map_changeset_err(e: ChangesetError) -> ProjectError {
+    match e {
+        ChangesetError::Foreign { id } => {
+            SpaceError::ChangesetForeign { id: id.to_string() }.into()
+        }
+        other => ProjectError::Changeset(other),
+    }
+}
+
 /// Enforces `cap` (when set) and decodes to UTF-8 — the single place
 /// every read path applies the cap and conversion, so they can't drift
 /// apart. `cap: None` lifts the check entirely.
@@ -847,6 +1063,71 @@ mod tests {
     fn parse_rejects_empty_slug() {
         assert!(parse_space_path("space:").is_none());
         assert!(parse_space_path("space:/foo").is_none());
+    }
+
+    #[test]
+    fn parse_with_changeset() {
+        let id = ChangesetId::new();
+        let with_rel = format!("space:oncall@{id}/runbooks/foo.md");
+        let r = parse_space_path(&with_rel).unwrap();
+        assert_eq!(r.slug, "oncall");
+        assert_eq!(r.rel_path, "runbooks/foo.md");
+        assert_eq!(r.changeset_id, Some(id));
+
+        let root_only = format!("space:oncall@{id}");
+        let root = parse_space_path(&root_only).unwrap();
+        assert_eq!(root.slug, "oncall");
+        assert_eq!(root.rel_path, "");
+        assert_eq!(root.changeset_id, Some(id));
+    }
+
+    #[test]
+    fn parse_without_changeset_leaves_it_none() {
+        let r = parse_space_path("space:oncall/foo.md").unwrap();
+        assert_eq!(r.changeset_id, None);
+    }
+
+    #[test]
+    fn parse_rejects_bad_changeset_id() {
+        assert!(parse_space_path("space:oncall@not-a-uuid/foo.md").is_none());
+        assert!(parse_space_path("space:oncall@/foo.md").is_none());
+    }
+
+    #[test]
+    fn target_main_has_no_git_ref_or_at() {
+        assert_eq!(Target::Main.git_ref(), None);
+        assert_eq!(Target::Main.at(), None);
+    }
+
+    #[test]
+    fn target_changeset_names_its_branch_ref_and_tip() {
+        let id = ChangesetId::new();
+        let target = Target::Changeset {
+            id,
+            tip: "deadbeef".to_string(),
+            status: ChangesetStatus::Open,
+        };
+        assert_eq!(target.git_ref(), Some(format!("refs/heads/drua/{id}")));
+        assert_eq!(target.at(), Some("deadbeef"));
+    }
+
+    #[test]
+    fn map_changeset_err_translates_foreign_into_space_error() {
+        let id = ChangesetId::new();
+        let mapped = map_changeset_err(ChangesetError::Foreign { id });
+        assert!(matches!(
+            mapped,
+            ProjectError::Space(SpaceError::ChangesetForeign { id: ref s }) if *s == id.to_string()
+        ));
+    }
+
+    #[test]
+    fn map_changeset_err_falls_back_to_project_changeset_variant() {
+        let mapped = map_changeset_err(ChangesetError::UnsupportedActor);
+        assert!(matches!(
+            mapped,
+            ProjectError::Changeset(ChangesetError::UnsupportedActor)
+        ));
     }
 
     #[test]

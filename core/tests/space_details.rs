@@ -198,6 +198,7 @@ async fn setup(test_name: &str) -> (App, AuthSubject, AuthSubject) {
             "a.md",
             "hello\n".into(),
             CommitAttribution::library_default(),
+            None,
         )
         .await
         .expect("write a.md");

@@ -138,12 +138,23 @@ pub struct Changeset {
 }
 
 impl Changeset {
+    /// Branch name for `id`, without needing a hydrated entity — lets
+    /// `SpaceFs` name a changeset's ref from just the id it parsed out
+    /// of a `space:<slug>@<id>/<rel>` path.
+    pub fn branch_for(id: ChangesetId) -> String {
+        format!("drua/{id}")
+    }
+
+    pub fn git_ref_for(id: ChangesetId) -> String {
+        format!("refs/heads/{}", Self::branch_for(id))
+    }
+
     pub fn branch(&self) -> String {
-        format!("drua/{}", self.id)
+        Self::branch_for(self.id)
     }
 
     pub fn git_ref(&self) -> String {
-        format!("refs/heads/{}", self.branch())
+        Self::git_ref_for(self.id)
     }
 
     pub fn is_open(&self) -> bool {

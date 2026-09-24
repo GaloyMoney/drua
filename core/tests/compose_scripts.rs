@@ -180,6 +180,7 @@ async fn setup(test_name: &str) -> (App, AuthSubject, AuthSubject) {
             "a.md",
             "hello\n".into(),
             CommitAttribution::library_default(),
+            None,
         )
         .await
         .expect("write a.md");
@@ -266,6 +267,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "helper.js",
             "return {relative: (a,b) => a + b};".into(),
             CommitAttribution::library_default(),
+            None,
         )
         .await
         .unwrap();
@@ -281,6 +283,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "helper.js",
             "return 7;".into(),
             CommitAttribution::library_default(),
+            None,
         )
         .await
         .unwrap();
@@ -290,6 +293,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "dependency.js",
             "return await loadScript('space:private/helper.js');".into(),
             CommitAttribution::library_default(),
+            None,
         )
         .await
         .unwrap();
@@ -300,6 +304,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "caller.js",
             "return {run: async () => await tools.caller_probe({})};".into(),
             CommitAttribution::library_default(),
+            None,
         )
         .await
         .unwrap();
@@ -368,7 +373,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
         async {
             let resume = changes.recv().await.unwrap();
             for path in ["helper.js", "fresh.js"] {
-                spaces.write_file("docs", path, "return {version: 2};".into(), CommitAttribution::library_default()).await.unwrap();
+                spaces.write_file("docs", path, "return {version: 2};".into(), CommitAttribution::library_default(), None).await.unwrap();
             }
             resume.send(()).unwrap();
         }
@@ -396,6 +401,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "dir.js/child",
             "child".into(),
             CommitAttribution::library_default(),
+            None,
         )
         .await
         .unwrap();
@@ -416,6 +422,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "failure.js",
             "throw new Error('attributed failure');".into(),
             CommitAttribution::library_default(),
+            None,
         )
         .await
         .unwrap();
@@ -772,6 +779,7 @@ async fn workflow_scripts_validate_execute_and_preserve_provenance() {
         Arc::new(app.library().spaces().clone()),
         Arc::new(app.projects().clone()),
         users,
+        Arc::new(app.changesets().clone()),
     ));
     let audit = Arc::new(Audit::new(&pool));
     let toolsets = Arc::new(
@@ -832,6 +840,7 @@ return {
             "tasks.js",
             source.into(),
             CommitAttribution::library_default(),
+            None,
         )
         .await
         .unwrap();
@@ -851,6 +860,7 @@ return {
             "private.js",
             "return {};".into(),
             CommitAttribution::library_default(),
+            None,
         )
         .await
         .unwrap();

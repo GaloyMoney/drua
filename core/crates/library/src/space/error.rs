@@ -45,6 +45,17 @@ pub enum SpaceError {
     /// the caller knows about no longer points anywhere.
     #[error("SpaceError - PathNotFound: {path:?} does not exist at HEAD in space {slug:?}")]
     PathNotFound { slug: String, path: String },
+    /// Model-facing: the subject may only write inside a changeset.
+    /// The message names the exact tool command so an agent can act on
+    /// it without a second round-trip.
+    #[error(
+        "SpaceError - ChangesetRequired: direct edits to space {slug:?} are not permitted for this subject; open a changeset first (`changeset open {{title}}`) and retry"
+    )]
+    ChangesetRequired { slug: String },
+    #[error("SpaceError - ChangesetNotOpen: changeset {id} is {status}; only open changesets accept edits")]
+    ChangesetNotOpen { id: String, status: String },
+    #[error("SpaceError - ChangesetForeign: changeset {id} belongs to another project")]
+    ChangesetForeign { id: String },
 }
 
 impl From<derive_builder::UninitializedFieldError> for SpaceError {

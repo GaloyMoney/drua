@@ -79,6 +79,7 @@ async fn write_on_one_replica_is_visible_on_peer_without_ticker() {
             "doc.md",
             "alpha bravo\n".into(),
             CommitAttribution::library_default(),
+            None,
         )
         .await
         .expect("write");
