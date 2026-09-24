@@ -47,6 +47,26 @@ pub enum AgentEvent {
         /// variant size bounded — `RootSchema` is ~300 bytes.
         #[serde(default)]
         output_schema: Option<Box<OutputSchema>>,
+        /// Exact step name this agent was spawned for (`AgentStep::name`).
+        /// `None` for non-workflow agents and for workflow agents created
+        /// before this field existed ("legacy" — `use_skill` refuses to
+        /// reload workflow-templated skills for those rather than
+        /// returning unresolved `${{ … }}` text).
+        #[serde(default)]
+        workflow_step: Option<String>,
+        /// The skill name assigned to this step (`AgentStep::skill`) —
+        /// the skill `use_skill` replays verbatim (from the session's
+        /// first `user_input_added` event) when re-invoked with no new
+        /// arguments, instead of re-rendering against whatever the
+        /// library skill looks like now.
+        #[serde(default)]
+        assigned_skill: Option<String>,
+        /// Hash of the raw skill body fetched at step-agent creation —
+        /// observability only (lets an operator tell whether a later
+        /// library edit changed the skill this run started with); not
+        /// consulted by the reload logic itself.
+        #[serde(default)]
+        assigned_skill_revision: Option<String>,
     },
     /// Effective delta only (no-ops filtered out before firing).
     AuthScopesUpdated {
@@ -89,6 +109,17 @@ pub struct Agent {
     /// agents.
     #[builder(default)]
     pub output_schema: Option<OutputSchema>,
+    /// Exact step name this agent was spawned for. See
+    /// `AgentEvent::Initialized`'s field doc for why this (and the two
+    /// fields below) are separate from `workflow_id`/`workflow_run_id`.
+    #[builder(default)]
+    pub workflow_step: Option<String>,
+    /// The skill name assigned to this step.
+    #[builder(default)]
+    pub assigned_skill: Option<String>,
+    /// Hash of the raw skill body at step-agent creation (observability only).
+    #[builder(default)]
+    pub assigned_skill_revision: Option<String>,
     events: EntityEvents<AgentEvent>,
 }
 
@@ -232,6 +263,9 @@ impl TryFromEvents<AgentEvent> for Agent {
                     workflow_id,
                     workflow_run_id,
                     output_schema,
+                    workflow_step,
+                    assigned_skill,
+                    assigned_skill_revision,
                 } => {
                     builder = builder
                         .id(*id)
@@ -241,7 +275,10 @@ impl TryFromEvents<AgentEvent> for Agent {
                         .project_name(project_name.clone())
                         .workflow_id(*workflow_id)
                         .workflow_run_id(*workflow_run_id)
-                        .output_schema(output_schema.as_deref().cloned());
+                        .output_schema(output_schema.as_deref().cloned())
+                        .workflow_step(workflow_step.clone())
+                        .assigned_skill(assigned_skill.clone())
+                        .assigned_skill_revision(assigned_skill_revision.clone());
                     scopes = authz_scopes.iter().cloned().collect();
                 }
                 AgentEvent::AuthScopesUpdated { added, removed } => {
@@ -288,6 +325,12 @@ pub struct NewAgent {
     pub(super) workflow_run_id: Option<WorkflowRunId>,
     #[builder(default)]
     pub(super) output_schema: Option<OutputSchema>,
+    #[builder(default, setter(into, strip_option))]
+    pub(super) workflow_step: Option<String>,
+    #[builder(default, setter(into, strip_option))]
+    pub(super) assigned_skill: Option<String>,
+    #[builder(default, setter(into, strip_option))]
+    pub(super) assigned_skill_revision: Option<String>,
 }
 
 impl NewAgent {
@@ -310,6 +353,9 @@ impl IntoEvents<AgentEvent> for NewAgent {
                 workflow_id: self.workflow_id,
                 workflow_run_id: self.workflow_run_id,
                 output_schema: self.output_schema.map(Box::new),
+                workflow_step: self.workflow_step,
+                assigned_skill: self.assigned_skill,
+                assigned_skill_revision: self.assigned_skill_revision,
             }],
         )
     }
@@ -354,6 +400,47 @@ mod tests {
         let agent = build(Some(wf), Some(run));
         assert_eq!(agent.workflow_id, Some(wf));
         assert_eq!(agent.workflow_run_id, Some(run));
+    }
+
+    /// `workflow_step`/`assigned_skill`/`assigned_skill_revision` round-trip
+    /// through the event stream exactly like `workflow_id`/`workflow_run_id`
+    /// — `use_skill`'s reload logic reads these back off the hydrated
+    /// entity, never off a caller-supplied value.
+    #[test]
+    fn workflow_step_invocation_fields_round_trip_through_events() {
+        let new = NewAgent::builder()
+            .id(AgentId::new())
+            .project_id(ProjectId::new())
+            .agent_role(AgentRole::WorkflowStepAgent)
+            .name("workflow-abc123-vet")
+            .authz_scopes(Vec::new())
+            .project_name("project")
+            .workflow_id(WorkflowDefinitionId::new())
+            .workflow_run_id(WorkflowRunId::new())
+            .workflow_step("vet")
+            .assigned_skill("vetting-combined")
+            .assigned_skill_revision("deadbeef")
+            .build()
+            .unwrap();
+        let agent = Agent::try_from_events(new.into_events()).unwrap();
+        assert_eq!(agent.workflow_step.as_deref(), Some("vet"));
+        assert_eq!(agent.assigned_skill.as_deref(), Some("vetting-combined"));
+        assert_eq!(agent.assigned_skill_revision.as_deref(), Some("deadbeef"));
+    }
+
+    /// A workflow agent hydrated from an event stream predating this
+    /// tracking (`#[serde(default)]` on the new `Initialized` fields)
+    /// comes back with `None` for all three — the "legacy" case
+    /// `Agents::workflow_context` must distinguish from a fully
+    /// recoverable invocation.
+    #[test]
+    fn workflow_agent_without_step_fields_hydrates_as_legacy() {
+        let wf = WorkflowDefinitionId::new();
+        let run = WorkflowRunId::new();
+        let agent = build(Some(wf), Some(run));
+        assert!(agent.workflow_step.is_none());
+        assert!(agent.assigned_skill.is_none());
+        assert!(agent.assigned_skill_revision.is_none());
     }
 
     #[test]

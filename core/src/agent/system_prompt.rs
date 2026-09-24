@@ -113,6 +113,15 @@ const WORKFLOW_AGENT_ROLE_HEADER: &str = "\
 You are a workflow step agent. Focus on completing the specific step \
 you have been given.
 
+<assigned_skill_already_invoked>
+Your assigned skill for this step has already been invoked — its fully \
+resolved instructions (with this run's trigger and prior step outputs \
+already filled in) are the first message in this conversation. Calling \
+`use_skill` again for that same skill with no new arguments is safe but \
+unnecessary: it replays those exact instructions rather than reloading \
+anything new. Invoking a different skill remains supported.
+</assigned_skill_already_invoked>
+
 <default_to_action>
 Implement changes rather than only suggesting them. Use tools to \
 discover missing details instead of asking for clarification.
@@ -290,5 +299,31 @@ mod tests {
         assert!(role_text.contains("success"));
         assert!(role_text.contains("output"));
         assert!(role_text.contains("reason"));
+    }
+
+    /// Acceptance test 9 (handoff: preserve workflow template context
+    /// when use_skill reloads a skill) — the workflow role guidance
+    /// must tell the step agent its assigned skill is already invoked,
+    /// so a repeat `use_skill` call reads as safe-but-unnecessary
+    /// rather than something it's expected to do. submit_output stays
+    /// mandatory regardless.
+    #[test]
+    fn workflow_role_header_states_assigned_skill_already_invoked() {
+        use crate::workflow::default_output_schema;
+        let toolsets = toolsets_for_test();
+        let subject = AuthSubject::Anonymous;
+        let schema = default_output_schema();
+        let blocks = system_blocks_for_role(
+            AgentRole::WorkflowStepAgent,
+            &toolsets,
+            &subject,
+            "test-project",
+            Some(&schema),
+        );
+        let role_text = blocks[3].text();
+        assert!(role_text.contains("already been invoked"));
+        assert!(role_text.contains("use_skill"));
+        assert!(role_text.contains("finish_with_submit_output"));
+        assert!(role_text.contains("submit_output"));
     }
 }

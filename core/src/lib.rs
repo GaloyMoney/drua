@@ -52,7 +52,7 @@ use toolset::{
 };
 use tracing::instrument;
 use user::Users;
-use workflow::Workflows;
+use workflow::{WorkflowRunRepo, Workflows};
 
 #[derive(Clone)]
 pub struct App {
@@ -327,7 +327,11 @@ impl App {
         ));
         toolsets.register_top_level(ProjectSandbox::new(Arc::clone(&sandboxes)));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&projects)));
-        toolsets.register_top_level(UseSkillTool::new(Arc::clone(&skills)));
+        toolsets.register_top_level(UseSkillTool::new(
+            Arc::clone(&skills),
+            Arc::clone(&agents),
+            WorkflowRunRepo::new(pool),
+        ));
         toolsets.register_top_level(SkillTool::new(Arc::clone(&skills), Arc::clone(&projects)));
         toolsets.register_top_level(WorkflowTool::new(
             Arc::clone(&workflows),

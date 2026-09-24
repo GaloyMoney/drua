@@ -190,6 +190,41 @@ impl TemplateContext<'_> {
     }
 }
 
+/// Two-pass render shared by workflow step-agent startup
+/// (`Executor::execute_step`'s initial prompt) and workflow-context-aware
+/// `use_skill` reload: pass 1 resolves the skill author's `${{ … }}`
+/// against `ctx` (`substitute_in_string`); pass 2 substitutes
+/// `$ARGUMENTS`/`$0..$N` against the caller-supplied `arguments`
+/// (`SkillBody::interpolate`). ORDER MATTERS for security — pass 2's
+/// replacement text (the trigger/step data `ctx` already spliced in, or
+/// `arguments` itself) is never re-scanned for `${{ … }}`, so a literal
+/// template ref smuggled through either can't leak another step's
+/// output. See the module docs and
+/// `substitute_does_not_re_evaluate_literals_from_resolved_values`.
+///
+/// This is the primitive both render paths share; `execute_step` also
+/// appends `TRIGGER_CONTEXT`/`RUN_CONTEXT` blocks and has its own
+/// `$ARGUMENTS`-vs-append branch specific to the initial full prompt,
+/// which this function intentionally does not reproduce — an
+/// in-workflow `use_skill` invocation of a helper skill shouldn't grow
+/// those blocks unasked.
+pub fn render_workflow_skill(
+    raw_body: &str,
+    ctx: &TemplateContext<'_>,
+    arguments: Option<&str>,
+) -> Result<String, TemplateError> {
+    let templated = ctx.substitute_in_string(raw_body)?;
+    Ok(crate::skill::SkillBody::new(templated).interpolate(arguments))
+}
+
+/// Cheap check for whether `s` still needs workflow template
+/// resolution — used to tell a legacy workflow agent (no recoverable
+/// invocation context) that a skill it's asking to reload can't be
+/// served safely, rather than handing back unresolved `${{ … }}` text.
+pub(crate) fn contains_template_ref(s: &str) -> bool {
+    s.contains(OPEN)
+}
+
 /// Extended context for evaluating wait step `resume_condition` and
 /// `extract` expressions. Adds a `resume_payload` root variable bound
 /// to the inbound webhook body that matched the wait step.
@@ -916,6 +951,84 @@ mod tests {
         // text. `hunter2` does NOT appear.
         assert!(out.contains("${{ steps.victim.outputs.secret }}"));
         assert!(!out.contains("hunter2"));
+    }
+
+    #[test]
+    fn render_workflow_skill_resolves_cel_then_arguments_in_order() {
+        let trigger = json!({ "pack": "evidence-pack-contents" });
+        let steps = HashMap::new();
+        let ctx = TemplateContext {
+            trigger: &trigger,
+            steps: &steps,
+            run: &Value::Null,
+        };
+        let raw = "Evidence: ${{ trigger.payload.pack }}\n\nUse $ARGUMENTS.";
+        let out = render_workflow_skill(raw, &ctx, Some("staging")).unwrap();
+        assert_eq!(out, "Evidence: evidence-pack-contents\n\nUse staging.");
+    }
+
+    /// Pass 2 (`$ARGUMENTS`) must never re-trigger pass 1 (`${{ … }}`)
+    /// even when the caller-supplied `arguments` string itself looks
+    /// like a template ref — mirrors
+    /// `substitute_does_not_re_evaluate_literals_from_resolved_values`
+    /// but for the shared renderer's own argument-substitution layer.
+    #[test]
+    fn render_workflow_skill_does_not_re_evaluate_arguments_containing_template_syntax() {
+        let trigger = json!({});
+        let mut steps = HashMap::new();
+        steps.insert("victim".into(), json!({ "secret": "hunter2" }));
+        let ctx = TemplateContext {
+            trigger: &trigger,
+            steps: &steps,
+            run: &Value::Null,
+        };
+        let raw = "Body: $ARGUMENTS";
+        let malicious_args = "${{ steps.victim.outputs.secret }}";
+        let out = render_workflow_skill(raw, &ctx, Some(malicious_args)).unwrap();
+        assert!(out.contains("${{ steps.victim.outputs.secret }}"));
+        assert!(!out.contains("hunter2"));
+    }
+
+    /// A skill whose author never wrote `${{ … }}` at all is
+    /// byte-identical through the shared renderer with no arguments —
+    /// same contract `Skills::interpolate_skill` already gives
+    /// ordinary (non-workflow) skills.
+    #[test]
+    fn render_workflow_skill_is_noop_for_plain_body_and_no_arguments() {
+        let trigger = json!({});
+        let steps = HashMap::new();
+        let ctx = TemplateContext {
+            trigger: &trigger,
+            steps: &steps,
+            run: &Value::Null,
+        };
+        let raw = "Just do the thing.";
+        assert_eq!(render_workflow_skill(raw, &ctx, None).unwrap(), raw);
+    }
+
+    /// An invalid reference (here, an unterminated `${{ … }}`) must
+    /// surface as an `Err` the caller can turn into an explicit tool
+    /// error — never silently swallowed into `null`/empty text the
+    /// way a merely-absent field resolves.
+    #[test]
+    fn render_workflow_skill_propagates_invalid_reference_as_error() {
+        let trigger = json!({});
+        let steps = HashMap::new();
+        let ctx = TemplateContext {
+            trigger: &trigger,
+            steps: &steps,
+            run: &Value::Null,
+        };
+        let raw = "build ${{ trigger.x is unterminated";
+        let err = render_workflow_skill(raw, &ctx, None).unwrap_err();
+        assert!(matches!(err, TemplateError::Unterminated(_)));
+    }
+
+    #[test]
+    fn contains_template_ref_detects_open_delimiter_only() {
+        assert!(contains_template_ref("has ${{ trigger.x }} in it"));
+        assert!(!contains_template_ref("plain text, no templates"));
+        assert!(!contains_template_ref("$ARGUMENTS and $0 stay unmatched"));
     }
 
     /// `"${{ x }} suffix }}"` ends with `}}` and has no second

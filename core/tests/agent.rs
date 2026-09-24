@@ -1267,6 +1267,9 @@ async fn detach_conflicting_writer_skips_workflow_owned_writer_from_other_workfl
             Some((sandbox_id, SandboxAgentMode::Write)),
             None,
             drua_core::workflow::default_output_schema(),
+            "step",
+            "step-skill",
+            "rev",
         )
         .await
         .expect("create workflow agent");
@@ -1333,6 +1336,9 @@ async fn detach_conflicting_writer_steals_from_same_workflow_writer() {
             Some((sandbox_id, SandboxAgentMode::Write)),
             None,
             drua_core::workflow::default_output_schema(),
+            "step",
+            "step-skill",
+            "rev",
         )
         .await
         .expect("create workflow agent");
@@ -1409,6 +1415,9 @@ async fn list_for_project_returns_lead_past_100_workflow_agents() {
                 None,
                 None,
                 drua_core::workflow::default_output_schema(),
+                "step",
+                "step-skill",
+                "rev",
             )
             .await
             .expect("create workflow agent");
@@ -1444,6 +1453,9 @@ async fn update_session_chain_rejects_workflow_agents() {
             None,
             None,
             drua_core::workflow::default_output_schema(),
+            "step",
+            "step-skill",
+            "rev",
         )
         .await
         .expect("create workflow agent");
@@ -1475,6 +1487,9 @@ async fn delete_rejects_workflow_agents() {
             None,
             None,
             drua_core::workflow::default_output_schema(),
+            "step",
+            "step-skill",
+            "rev",
         )
         .await
         .expect("create workflow agent");

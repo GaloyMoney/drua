@@ -401,6 +401,16 @@ impl Sessions {
         Ok(session.submitted_output().cloned())
     }
 
+    /// See `AgentSession::first_user_input_text`.
+    #[instrument(name = "domain.agent_session.first_user_input", skip(self))]
+    pub async fn first_user_input(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Option<String>, AgentSessionError> {
+        let session = self.repo.find_by_agent_id(agent_id).await?;
+        Ok(session.first_user_input_text().map(str::to_string))
+    }
+
     /// Reads the `stop_reason` of the agent's most recent assistant
     /// turn, across every thread. Workflow executor consumes this to
     /// decide whether a closed turn without `submit_output` was a

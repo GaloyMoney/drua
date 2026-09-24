@@ -551,6 +551,17 @@ impl AgentSession {
         })
     }
 
+    /// The verbatim text of the very first `UserInputAdded` event —
+    /// the initial prompt this agent's session ever received. Workflow
+    /// step agents use this to replay their assigned skill's original
+    /// expansion instead of re-rendering it.
+    pub fn first_user_input_text(&self) -> Option<&str> {
+        self.events.iter_all().find_map(|e| match e {
+            AgentSessionEvent::UserInputAdded { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+    }
+
     /// The `stop_reason` of the newest `AssistantResponseReceived`
     /// event, on ANY thread — not just the current main thread. A
     /// breaker chain-advance spawns a context-refreshed thread, so
