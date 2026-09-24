@@ -2,6 +2,7 @@ use thiserror::Error;
 
 use crate::agent::error::AgentError;
 use crate::agent::repo::{AgentFindError, AgentModifyError};
+use crate::auth::error::AuthorizationError;
 use crate::primitives::ChangesetId;
 use crate::workflow::run::repo::{WorkflowRunFindError, WorkflowRunModifyError};
 
@@ -47,4 +48,13 @@ pub enum ChangesetError {
     MainUnborn,
     #[error("ChangesetError - Foreign: changeset {id} belongs to another project")]
     Foreign { id: ChangesetId },
+    #[error("ChangesetError - Authorization: {0}")]
+    Authorization(#[from] AuthorizationError),
+    /// Role-based checks that don't reduce to a single `AuthVerb` (e.g.
+    /// `discard`'s "bound actor, or a lead/admin" rule — §7, OQ-1).
+    #[error("ChangesetError - Forbidden: subject may not {action} changeset {id}")]
+    Forbidden {
+        id: ChangesetId,
+        action: &'static str,
+    },
 }

@@ -38,15 +38,24 @@ impl AuthScope {
 
             AuthScope::ProjectAdmin(project) => {
                 // Spaces are library-wide; project admins manage the
-                // *collection* (`Create`/`Read on Space(None)`) but
-                // do NOT have blanket authority over specific spaces —
-                // visibility there is decided by `Project.mounted_spaces`.
+                // *collection* (`Create`/`Read`/`Propose` on
+                // `Space(None)`) but have no blanket authority over
+                // OTHER project-scoped resources — that's the `in_ws`
+                // fallthrough below. A specific space is the one
+                // exception: leads may write `main` directly
+                // (`Update`) or stage (`Propose`) regardless of mount
+                // visibility, which is a project-membership concern,
+                // not an authorization one.
                 if matches!(
                     (verb, resource),
                     (AuthVerb::Create, AuthResource::Space(None))
                         | (AuthVerb::Read, AuthResource::Space(None))
+                        | (AuthVerb::Propose, AuthResource::Space(None))
                 ) {
                     return true;
+                }
+                if let AuthResource::Space(Some(_)) = resource {
+                    return matches!(verb, AuthVerb::Update | AuthVerb::Propose);
                 }
                 resource
                     .project_id()
@@ -54,7 +63,21 @@ impl AuthScope {
             }
 
             // Limited set within project; expand as new tools need it.
+            // `Space` is handled first and unconditionally — it's
+            // library-wide (`AuthResource::project_id()` is always
+            // `None` for it), so the `in_ws` check below would always
+            // reject it.
             AuthScope::ProjectMember(project) => {
+                if let AuthResource::Space(_) = resource {
+                    // §4.2 OQ-2 (default: option a) — members stage,
+                    // they don't write `main` directly. This is what
+                    // keeps a workflow step agent's *combined* scopes
+                    // (`ProjectMember` + `WorkflowStepAgent`, both
+                    // `Propose`-only) from ever summing to `Update` via
+                    // `AuthSubject::can`'s any-scope-permits semantics —
+                    // see `scope_tests::workflow_step_agent_combined_scopes_cannot_write_main`.
+                    return verb == AuthVerb::Propose;
+                }
                 let in_ws = resource
                     .project_id()
                     .is_some_and(|res_ws| res_ws == *project);
@@ -90,7 +113,17 @@ impl AuthScope {
                     )
             }
 
-            AuthScope::WorkflowStepAgent | AuthScope::WorkflowScript => false,
+            // Both markers grant only `Propose` on `Space` — a step
+            // agent or a script step may stage edits through a
+            // changeset, never write `main` directly, regardless of
+            // what its OTHER carried scopes (typically `ProjectMember`,
+            // itself `Propose`-only) would otherwise sum to.
+            AuthScope::WorkflowStepAgent | AuthScope::WorkflowScript => {
+                matches!(
+                    (verb, resource),
+                    (AuthVerb::Propose, AuthResource::Space(_))
+                )
+            }
 
             AuthScope::External(name) => {
                 matches!(resource, AuthResource::External(res_name) if res_name == name)
@@ -344,23 +377,135 @@ mod tests {
         assert_eq!(parsed, AuthScope::Admin);
     }
 
-    /// Project admins may create and list library-wide spaces, but
-    /// have NO blanket authority over specific spaces — visibility on
-    /// `Space(Some(_))` is decided by `Project.mounted_spaces`, not
-    /// the scope layer.
+    /// Project admins may create and list library-wide spaces
+    /// (`Space(None)`), and — unlike a member — may write `main`
+    /// directly (`Update`) or stage (`Propose`) on any specific space
+    /// (`Space(Some(_))`); *mount* visibility there is still decided
+    /// separately by `Project.mounted_spaces` (`SpaceFs`'s mount gate
+    /// runs first). `Read` on a specific space and `Delete` on the
+    /// collection stay ungranted — nothing needs them through this
+    /// layer today.
     #[test]
-    fn project_admin_space_authz_is_collection_only() {
+    fn project_admin_space_authz() {
         use crate::primitives::SpaceId;
         let s = AuthScope::ProjectAdmin(test_project_id());
 
         assert!(s.permits(AuthVerb::Create, &AuthResource::Space(None)));
         assert!(s.permits(AuthVerb::Read, &AuthResource::Space(None)));
+        assert!(s.permits(AuthVerb::Propose, &AuthResource::Space(None)));
 
         let space_id = SpaceId::new();
         assert!(!s.permits(AuthVerb::Read, &AuthResource::Space(Some(space_id))));
-        assert!(!s.permits(AuthVerb::Update, &AuthResource::Space(Some(space_id))));
+        assert!(s.permits(AuthVerb::Update, &AuthResource::Space(Some(space_id))));
+        assert!(s.permits(AuthVerb::Propose, &AuthResource::Space(Some(space_id))));
         assert!(!s.permits(AuthVerb::Update, &AuthResource::Space(None)));
         assert!(!s.permits(AuthVerb::Delete, &AuthResource::Space(None)));
+    }
+
+    /// §4.2 OQ-2 (default: option a) — a plain project member stages,
+    /// it never writes `main` directly, on any specific space or the
+    /// collection.
+    #[test]
+    fn project_member_space_authz_is_propose_only() {
+        use crate::primitives::SpaceId;
+        let project = test_project_id();
+        let s = AuthScope::ProjectMember(project);
+        let space_id = SpaceId::new();
+
+        assert!(s.permits(AuthVerb::Propose, &AuthResource::Space(Some(space_id))));
+        assert!(s.permits(AuthVerb::Propose, &AuthResource::Space(None)));
+        assert!(!s.permits(AuthVerb::Update, &AuthResource::Space(Some(space_id))));
+        assert!(!s.permits(AuthVerb::Update, &AuthResource::Space(None)));
+        assert!(!s.permits(AuthVerb::Read, &AuthResource::Space(Some(space_id))));
+        assert!(!s.permits(AuthVerb::Create, &AuthResource::Space(None)));
+    }
+
+    /// §4.2 — the `WorkflowStepAgent`/`WorkflowScript` markers grant
+    /// `Propose` on `Space` and nothing else; they carry no project
+    /// scoping of their own (that's `ProjectMember`'s job).
+    #[test]
+    fn workflow_markers_grant_propose_on_space_only() {
+        use crate::primitives::SpaceId;
+        let space_id = SpaceId::new();
+        for marker in [AuthScope::WorkflowStepAgent, AuthScope::WorkflowScript] {
+            assert!(
+                marker.permits(AuthVerb::Propose, &AuthResource::Space(Some(space_id))),
+                "{marker} should permit Propose on a specific space"
+            );
+            assert!(
+                marker.permits(AuthVerb::Propose, &AuthResource::Space(None)),
+                "{marker} should permit Propose on the space collection"
+            );
+            assert!(
+                !marker.permits(AuthVerb::Update, &AuthResource::Space(Some(space_id))),
+                "{marker} must never permit Update on a specific space"
+            );
+            assert!(
+                !marker.permits(
+                    AuthVerb::Read,
+                    &AuthResource::Project(Some(test_project_id()))
+                ),
+                "{marker} should not reach into unrelated project resources"
+            );
+        }
+    }
+
+    /// THE any-scope-permits trap this handoff exists to close: a real
+    /// workflow step agent's subject carries BOTH `ProjectMember(p)`
+    /// (from `AgentRole::WorkflowStepAgent` — see `agent/mod.rs`'s
+    /// `role_scopes`) AND the `WorkflowStepAgent` marker. `AuthSubject::can`
+    /// is any-scope-permits, so if EITHER scope granted `Update` on a
+    /// specific space, the combination would let a step agent write
+    /// `main` directly. Both scopes are `Propose`-only on `Space`
+    /// (§4.2), so the combination stays `Propose`-only too — this is
+    /// the property that actually matters, not either scope alone.
+    #[test]
+    fn workflow_step_agent_combined_scopes_cannot_write_main() {
+        use crate::auth::AuthSubject;
+        use crate::primitives::{AgentId, SpaceId};
+        let project = test_project_id();
+        let space_id = SpaceId::new();
+        let sub = AuthSubject::Agent(
+            project,
+            AgentId::new(),
+            vec![
+                AuthScope::ProjectMember(project),
+                AuthScope::WorkflowStepAgent,
+            ],
+        );
+
+        assert!(
+            sub.can(AuthVerb::Propose, AuthResource::Space(Some(space_id)))
+                .is_ok(),
+            "a step agent must be able to stage edits through a changeset"
+        );
+        assert!(
+            sub.can(AuthVerb::Update, AuthResource::Space(Some(space_id)))
+                .is_err(),
+            "a step agent must NEVER be able to write main directly, \
+             even though it carries ProjectMember + WorkflowStepAgent"
+        );
+    }
+
+    /// Contrast case: a project lead (`ProjectAdmin`, no `ProjectMember`
+    /// or workflow marker) DOES get `Update` — confirming the denial
+    /// above is `WorkflowStepAgent`-specific, not a blanket bug that
+    /// would also break legitimate direct writes.
+    #[test]
+    fn project_lead_alone_can_write_main() {
+        use crate::auth::AuthSubject;
+        use crate::primitives::{AgentId, SpaceId};
+        let project = test_project_id();
+        let space_id = SpaceId::new();
+        let sub = AuthSubject::Agent(
+            project,
+            AgentId::new(),
+            vec![AuthScope::ProjectAdmin(project)],
+        );
+
+        assert!(sub
+            .can(AuthVerb::Update, AuthResource::Space(Some(space_id)))
+            .is_ok());
     }
 
     /// Vec<AuthScope> serializes the same as the old Vec<String>.

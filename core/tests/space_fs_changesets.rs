@@ -201,7 +201,17 @@ async fn project_with_space(
         )
         .await
         .expect("seed main");
-    AuthSubject::Agent(project.id, project.lead_agent_id, Vec::new())
+    // `create` already persisted a real `Agent` row for the lead
+    // (`bind_actor_entity_in_op` needs a live row to bind onto) — reuse
+    // its id, but build the subject with a plain `ProjectMember` scope
+    // (§4.2 OQ-2: `Propose`-only) rather than `ProjectAdmin`, so these
+    // tests exercise the same path a real chat/task agent takes:
+    // staging through a changeset, not writing `main` directly.
+    AuthSubject::Agent(
+        project.id,
+        project.lead_agent_id,
+        vec![drua_core::auth::AuthScope::ProjectMember(project.id)],
+    )
 }
 
 #[tokio::test]

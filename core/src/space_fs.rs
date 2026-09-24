@@ -23,7 +23,7 @@ use tracing::instrument;
 use drua_library::{BlobEntries, PathDates, PathDatesMap, Space, SpaceError, Spaces};
 
 use crate::audit::Audit;
-use crate::auth::AuthSubject;
+use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::changeset::{Changeset, ChangesetError, ChangesetStatus, Changesets};
 use crate::primitives::ChangesetId;
 use crate::project::{ProjectError, Projects};
@@ -212,9 +212,9 @@ impl SpaceFs {
     /// `Ok(None)` for non-`space:` paths (caller falls through to sandbox).
     /// `space:`-prefixed paths that don't parse return `BadRequest`, so
     /// malformed input never masquerades as an auth denial. Error
-    /// precedence: bad URI → not found → not mounted → (PR 4:
-    /// `ChangesetRequired`/`Unauthorized`) — the mount gate
-    /// (`space_for_subject`) always runs before target resolution.
+    /// precedence: bad URI → not found → not mounted → `ChangesetRequired`/
+    /// `Unauthorized` — the mount gate (`space_for_subject`) always runs
+    /// before target resolution's write gate.
     async fn resolve(
         &self,
         sub: &AuthSubject,
@@ -235,7 +235,9 @@ impl SpaceFs {
         let space = self.projects.space_for_subject(sub, sref.slug).await?;
         let rel_path = normalize_rel_path(sref.rel_path);
         Self::validate_rel_path(&rel_path)?;
-        let target = self.resolve_target(sub, sref.changeset_id, intent).await?;
+        let target = self
+            .resolve_target(sub, &space, sref.changeset_id, intent)
+            .await?;
         Ok(Some(Resolved {
             space,
             rel_path,
@@ -245,14 +247,17 @@ impl SpaceFs {
 
     /// §2.1 target resolution: an explicit `@<id>` override, else the
     /// subject's bound changeset (`Changesets::active_for_subject`),
-    /// else `main`. A `Write` intent additionally requires a resolved
-    /// `Target::Changeset` to be `Open` (§2.2) — a stale bind (the
-    /// changeset was submitted/applied/discarded through another path)
-    /// surfaces as `ChangesetNotOpen` instead of silently writing
-    /// somewhere the caller didn't ask for.
+    /// else `main`. §2.1's write gate: a `Write` intent against
+    /// `Target::Changeset` requires `Propose` on `Space(Some(space.id))`
+    /// (checked before the `Open` check — an unauthorized subject
+    /// shouldn't learn a changeset's status); against `Target::Main` it
+    /// requires `Update`, and — only on denial — a second check for
+    /// `Propose` decides between `ChangesetRequired` (the subject stages
+    /// elsewhere) and `Unauthorized` (it can't write `space` at all).
     async fn resolve_target(
         &self,
         sub: &AuthSubject,
+        space: &Space,
         explicit: Option<ChangesetId>,
         intent: Intent,
     ) -> Result<Target, ProjectError> {
@@ -270,14 +275,20 @@ impl SpaceFs {
                 .map_err(map_changeset_err)?,
         };
         let Some(cs) = cs else {
+            if intent == Intent::Write {
+                self.gate_main_write(sub, space)?;
+            }
             return Ok(Target::Main);
         };
-        if intent == Intent::Write && !cs.is_open() {
-            return Err(SpaceError::ChangesetNotOpen {
-                id: cs.id.to_string(),
-                status: format!("{:?}", cs.status),
+        if intent == Intent::Write {
+            sub.can(AuthVerb::Propose, AuthResource::Space(Some(space.id)))?;
+            if !cs.is_open() {
+                return Err(SpaceError::ChangesetNotOpen {
+                    id: cs.id.to_string(),
+                    status: format!("{:?}", cs.status),
+                }
+                .into());
             }
-            .into());
         }
         let tip = self
             .changesets
@@ -289,6 +300,29 @@ impl SpaceFs {
             tip,
             status: cs.status,
         })
+    }
+
+    /// `Target::Main` write gate: `Update` on `Space(Some(space.id))`,
+    /// or — for a subject that can only `Propose` — the model-facing
+    /// `ChangesetRequired` instead of a bare `Unauthorized`, so it
+    /// learns to open a changeset rather than retrying the same write.
+    fn gate_main_write(&self, sub: &AuthSubject, space: &Space) -> Result<(), ProjectError> {
+        match sub.can(AuthVerb::Update, AuthResource::Space(Some(space.id))) {
+            Ok(()) => Ok(()),
+            Err(update_err) => {
+                if sub
+                    .can(AuthVerb::Propose, AuthResource::Space(Some(space.id)))
+                    .is_ok()
+                {
+                    Err(SpaceError::ChangesetRequired {
+                        slug: space.slug.clone(),
+                    }
+                    .into())
+                } else {
+                    Err(update_err.into())
+                }
+            }
+        }
     }
 
     /// Slugs of every space the subject can address — admins see all

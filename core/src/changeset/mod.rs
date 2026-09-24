@@ -10,7 +10,7 @@ use repo::ChangesetRepo;
 
 use crate::agent::repo::AgentRepo;
 use crate::audit::Audit;
-use crate::auth::AuthSubject;
+use crate::auth::{AuthResource, AuthScope, AuthSubject, AuthVerb};
 use crate::primitives::*;
 use crate::workflow::run::repo::WorkflowRunRepo;
 
@@ -104,10 +104,10 @@ impl Changesets {
     /// on first use, matching the "recreate on demand" contract the
     /// design already requires for an ephemeral-clone pod restart.
     ///
-    /// **Note**: does not yet check `Propose` (`AuthVerb::Propose` isn't
-    /// defined until PR 4 of this handoff's sequencing — see the PR
-    /// description). No tool calls this method yet, so nothing
-    /// unauthenticated is reachable through it today.
+    /// OQ-5 default: checked here (collection-level — "may propose at
+    /// all in this project") as well as per-file at every `SpaceFs`
+    /// write, so an unauthorized subject fails fast rather than after
+    /// pinning `base_oid` and creating a branch.
     #[instrument(name = "domain.changeset.open", skip(self, sub))]
     pub async fn open(
         &self,
@@ -115,6 +115,7 @@ impl Changesets {
         title: String,
         description: Option<String>,
     ) -> Result<Changeset, ChangesetError> {
+        sub.can(AuthVerb::Propose, AuthResource::Space(None))?;
         let project_id = sub.project_id().ok_or(ChangesetError::NoProject)?;
         let opened_by = actor_for_subject(sub)?;
         let base_oid = self
@@ -283,10 +284,10 @@ impl Changesets {
         })
     }
 
-    /// Joins an existing `Open` changeset. `Propose`-gated once PR 4
-    /// lands (see the note on `open`).
+    /// Joins an existing `Open` changeset.
     #[instrument(name = "domain.changeset.bind", skip(self, sub))]
     pub async fn bind(&self, sub: &AuthSubject, id: ChangesetId) -> Result<(), ChangesetError> {
+        sub.can(AuthVerb::Propose, AuthResource::Space(None))?;
         let actor = actor_for_subject(sub)?;
         let mut op = self.repo.begin_op().await?;
         let mut cs = self.repo.find_by_id_in_op(&mut op, id).await?;
@@ -347,6 +348,7 @@ impl Changesets {
         let mut op = self.repo.begin_op().await?;
         let mut cs = self.repo.find_by_id_in_op(&mut op, id).await?;
         self.check_same_project(sub, &cs)?;
+        self.check_discard_authority(sub, &cs)?;
 
         let bound = cs.bound_actors.clone();
         if cs.discard(reason)?.did_execute() {
@@ -370,18 +372,52 @@ impl Changesets {
         Ok(cs)
     }
 
-    /// Same-project check for read/write access. Provisional: until PR 4
-    /// wires `AuthVerb::Propose`/`Update` into this service, a subject
-    /// with no project context (`User`, `ExportedAgent`, `Anonymous`) is
-    /// waved through rather than rejected — no tool exposes any of these
-    /// methods yet, so this is not reachable unauthenticated today. PR 4
-    /// must replace this with a real `sub.can(...)` gate.
+    /// Same-project check backing every read/write access to an
+    /// already-resolved changeset (`status`, `bind`, `discard`,
+    /// `find_for_target`). Deliberately membership-based rather than a
+    /// `sub.can(Read, Space(None))` scope check — the latter would deny
+    /// a plain `ProjectMember` its own project's changesets, since
+    /// `Space(None)` grants stay "as today" (§4.2) for that scope.
+    ///
+    /// A subject with no project context (`User`, `ExportedAgent`,
+    /// `Anonymous`) is waved through rather than rejected here — safe
+    /// because every real caller reaches this only after
+    /// `Projects::space_for_subject`'s mount gate, which already
+    /// requires `sub.project_id().is_some()` for anyone but an admin
+    /// (`User`s are the one case that's genuinely omnipotent).
     fn check_same_project(&self, sub: &AuthSubject, cs: &Changeset) -> Result<(), ChangesetError> {
         match sub.project_id() {
             Some(pid) if pid == cs.project_id => Ok(()),
             Some(_) => Err(ChangesetError::Foreign { id: cs.id }),
             None => Ok(()),
         }
+    }
+
+    /// §7/OQ-1's `discard` rule: an `Open` changeset's own bound actor
+    /// may discard it; a `Submitted` one (closing its PR) — or an
+    /// abandoned `Open` one nobody is bound to anymore — needs a lead
+    /// or admin. `has_scope` treats `User` subjects as having every
+    /// scope, so this also covers "Users are omnipotent" without a
+    /// separate branch.
+    fn check_discard_authority(
+        &self,
+        sub: &AuthSubject,
+        cs: &Changeset,
+    ) -> Result<(), ChangesetError> {
+        if sub.is_admin() || sub.has_scope(&AuthScope::ProjectAdmin(cs.project_id)) {
+            return Ok(());
+        }
+        if cs.status == ChangesetStatus::Open {
+            if let Ok(actor) = actor_for_subject(sub) {
+                if cs.bound_actors.contains(&actor) {
+                    return Ok(());
+                }
+            }
+        }
+        Err(ChangesetError::Forbidden {
+            id: cs.id,
+            action: "discard",
+        })
     }
 
     async fn bind_actor_entity_in_op(
