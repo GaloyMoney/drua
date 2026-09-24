@@ -279,36 +279,11 @@ impl App {
         toolsets.register_top_level(ProjectAgent::new(Arc::clone(&agents)));
         toolsets.register_top_level(SubmitOutputTool::new(Arc::clone(&agents)));
 
-        let workflows = Arc::new(Workflows::init(
-            pool,
-            library.clone(),
-            Arc::clone(&skills),
-            Arc::clone(&agents),
-            Arc::clone(&sandboxes),
-            Arc::clone(&users),
-            Arc::clone(&toolsets),
-            compose_config.script_step,
-            &mut jobs,
-        ));
-
-        let projects = Arc::new(Projects::new(
-            pool,
-            Arc::clone(&agents),
-            Arc::clone(&sandboxes),
-            Arc::clone(&skills),
-            Arc::clone(&notes),
-            project_secrets.clone(),
-            Arc::clone(&workflows),
-            library.clone(),
-            (*spaces).clone(),
-            Arc::clone(&users),
-            context_generation.clone(),
-        ));
-
         // Owns the `Changeset` entity/branch lifecycle. Built from fresh
         // repo handles (cheap — both just wrap `pool`) rather than
         // `Agents`/`Workflows`' own repos, avoiding a service-on-service
-        // dependency cycle (§7 of the handoff).
+        // dependency cycle (§7 of the handoff). Built before `Workflows`
+        // so the executor (PR 8) can open/close a run's changeset.
         let changesets = Arc::new(Changesets::new(
             pool,
             &AgentRepo::new(pool),
@@ -332,6 +307,33 @@ impl App {
                 }))
                 .await;
         }
+
+        let workflows = Arc::new(Workflows::init(
+            pool,
+            library.clone(),
+            Arc::clone(&skills),
+            Arc::clone(&agents),
+            Arc::clone(&sandboxes),
+            Arc::clone(&users),
+            Arc::clone(&toolsets),
+            compose_config.script_step,
+            Arc::clone(&changesets),
+            &mut jobs,
+        ));
+
+        let projects = Arc::new(Projects::new(
+            pool,
+            Arc::clone(&agents),
+            Arc::clone(&sandboxes),
+            Arc::clone(&skills),
+            Arc::clone(&notes),
+            project_secrets.clone(),
+            Arc::clone(&workflows),
+            library.clone(),
+            (*spaces).clone(),
+            Arc::clone(&users),
+            context_generation.clone(),
+        ));
 
         // Sandboxless read facade for `space:<slug>/...` paths. The
         // five read tools branch on the `space:` prefix and dispatch

@@ -1389,6 +1389,7 @@ impl AdminToolSet {
                         steps,
                         sandboxes,
                         params.model_chain,
+                        None,
                     )
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
@@ -1492,6 +1493,7 @@ impl AdminToolSet {
                         steps,
                         sandboxes,
                         model_chain,
+                        None,
                     )
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;

@@ -31,7 +31,8 @@ use yaml::canonical_workflow_path;
 pub const WORKFLOW_DOC_TYPE: drua_library::DocType = drua_library::DocType::new("workflow");
 
 pub use definition::{
-    default_output_schema, parse_cron_schedule, parse_timezone, OutputSchema, OutputSchemaError,
+    default_output_schema, parse_cron_schedule, parse_timezone, ChangesetExit,
+    ChangesetFailureExit, OutputSchema, OutputSchemaError, WorkflowChangesetDecl,
     WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger,
 };
 pub use entity::*;
@@ -251,6 +252,7 @@ impl Workflows {
         users: Arc<Users>,
         toolsets: Arc<ToolSets>,
         script_step_limits: crate::toolset::ScriptStepLimits,
+        changesets: Arc<crate::changeset::Changesets>,
         jobs: &mut ::job::Jobs,
     ) -> Self {
         let execute_run_spawner = jobs.add_initializer(ExecuteRunJobInitializer::new(
@@ -260,6 +262,7 @@ impl Workflows {
             Arc::clone(&skills),
             Arc::clone(&sandboxes),
             Arc::clone(&toolsets),
+            Arc::clone(&changesets),
         ));
         let cron_spawner = jobs.add_initializer(TriggerCronJobInitializer::new(
             WorkflowDefinitionRepo::new_without_library(pool),
@@ -309,6 +312,7 @@ impl Workflows {
             steps,
             sandboxes,
             model_chain,
+            changeset,
             original_path,
             rendered,
             ..
@@ -369,6 +373,7 @@ impl Workflows {
                     Some(steps),
                     Some(sandboxes),
                     Some(model_chain.clone()),
+                    Some(changeset.clone()),
                     file_hash,
                 )
                 .did_execute()
@@ -409,6 +414,9 @@ impl Workflows {
         }
         if let Some(desc) = description {
             builder = builder.description(desc);
+        }
+        if let Some(cs) = changeset {
+            builder = builder.changeset(cs);
         }
         builder = builder.original_path(original_path);
         let new = builder
@@ -692,6 +700,7 @@ impl Workflows {
         steps: Vec<WorkflowStepDef>,
         sandboxes: Vec<WorkflowSandboxDecl>,
         model_chain: Option<llm::ModelChain>,
+        changeset: Option<WorkflowChangesetDecl>,
     ) -> Result<WorkflowDefinition, WorkflowError> {
         sub.can(AuthVerb::Create, AuthResource::Workflow(project_id, None))?;
 
@@ -732,6 +741,9 @@ impl Workflows {
         if let Some(desc) = description {
             builder = builder.description(desc);
         }
+        if let Some(cs) = changeset {
+            builder = builder.changeset(cs);
+        }
         let new = builder
             .build()
             .map_err(|e| WorkflowError::BuildEntity(e.to_string()))?;
@@ -758,6 +770,7 @@ impl Workflows {
         steps: Option<Vec<WorkflowStepDef>>,
         sandboxes: Option<Vec<WorkflowSandboxDecl>>,
         model_chain: Option<Option<llm::ModelChain>>,
+        changeset: Option<Option<WorkflowChangesetDecl>>,
     ) -> Result<WorkflowDefinition, WorkflowError> {
         let mut definition = self.repo.find_by_id(id).await?;
         sub.can(
@@ -790,7 +803,15 @@ impl Workflows {
         // duplicates the chain.
         let was_cron = matches!(definition.trigger, WorkflowTrigger::Cron { .. });
         if definition
-            .update_content(name, description, trigger, steps, sandboxes, model_chain)
+            .update_content(
+                name,
+                description,
+                trigger,
+                steps,
+                sandboxes,
+                model_chain,
+                changeset,
+            )
             .did_execute()
         {
             let mut op = self.repo.begin_op().await?;

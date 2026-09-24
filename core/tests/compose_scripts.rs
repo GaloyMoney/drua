@@ -737,6 +737,7 @@ async fn workflow_scripts_validate_execute_and_preserve_provenance() {
                 vec![serde_json::from_value(value).unwrap()],
                 vec![],
                 None,
+                None,
             )
             .await;
         assert!(result.is_err(), "accepted invalid step {patch}");
@@ -753,6 +754,7 @@ async fn workflow_scripts_validate_execute_and_preserve_provenance() {
             vec![serde_json::from_value(base.clone()).unwrap()],
             vec![],
             None,
+            None,
         )
         .await
         .unwrap();
@@ -768,6 +770,7 @@ async fn workflow_scripts_validate_execute_and_preserve_provenance() {
             None,
             None,
             Some(vec![invalid_update]),
+            None,
             None,
             None
         )
@@ -814,6 +817,7 @@ async fn workflow_scripts_validate_execute_and_preserve_provenance() {
         skills.clone(),
         sandboxes,
         toolsets,
+        Some(Arc::new(app.changesets().clone())),
     );
 
     let source = r#"

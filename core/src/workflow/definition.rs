@@ -480,6 +480,55 @@ impl WorkflowSandboxDecl {
     }
 }
 
+/// `changeset:` top-level workflow declaration (staged-changesets
+/// handoff §9.1). The executor opens a changeset at run start,
+/// step agents inherit it via `Agent.workflow_run_id` →
+/// `WorkflowRun.changeset` (§2.1's resolution rule; no per-agent
+/// bind needed), and lands/discards it at run end per `on_success`/
+/// `on_failure`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowChangesetDecl {
+    /// CEL-substituted (`${{ trigger... }}`, etc.) at run start.
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub on_success: ChangesetExit,
+    #[serde(default)]
+    pub on_failure: ChangesetFailureExit,
+    /// OQ-11's narrowing: `on_success: apply` is only honoured when
+    /// this is also `true`. Without it, an `apply`-declared workflow
+    /// falls back to `submit` at run end rather than silently landing
+    /// on `main` — see `ChangesetExit::Apply`'s doc.
+    #[serde(default)]
+    pub allow_apply: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangesetExit {
+    /// Opens a GitHub PR. The default — every agent write stays reviewable.
+    #[default]
+    Submit,
+    /// Merges directly into `main`. OQ-11: the executor's own
+    /// `ProjectAdmin` scope grants `Update` (§4.2's matrix), which
+    /// would let this land on `main` for *any* workflow — narrowed by
+    /// requiring `allow_apply: true` alongside it (checked in
+    /// `executor.rs`, not the auth layer; see PR 4's own OQ-11 note).
+    Apply,
+    /// Leaves the changeset `Open`, unbound, for a human or a later
+    /// run to pick up.
+    Keep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangesetFailureExit {
+    #[default]
+    Discard,
+    Keep,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

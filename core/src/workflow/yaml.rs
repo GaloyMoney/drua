@@ -16,7 +16,9 @@ fn default_output_schema_boxed() -> Box<OutputSchema> {
 use crate::skill::file::slugify;
 use crate::skill::name_from_filename;
 
-use super::definition::{WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger};
+use super::definition::{
+    WorkflowChangesetDecl, WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger,
+};
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
 struct WorkflowYaml {
@@ -30,6 +32,8 @@ struct WorkflowYaml {
     model_chain: Option<ModelChain>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     sandboxes: Vec<WorkflowSandboxYaml>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    changeset: Option<WorkflowChangesetDecl>,
     steps: Vec<WorkflowStepYaml>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     created: String,
@@ -432,6 +436,7 @@ pub fn render_workflow_yaml(
     steps: &[WorkflowStepDef],
     sandboxes: &[WorkflowSandboxDecl],
     model_chain: Option<&ModelChain>,
+    changeset: Option<&WorkflowChangesetDecl>,
     created_at: &str,
     updated_at: &str,
 ) -> String {
@@ -445,6 +450,7 @@ pub fn render_workflow_yaml(
             .iter()
             .map(WorkflowSandboxYaml::from_runtime)
             .collect(),
+        changeset: changeset.cloned(),
         steps: steps.iter().map(WorkflowStepYaml::from_runtime).collect(),
         created: created_at.to_string(),
         updated: updated_at.to_string(),
@@ -464,6 +470,7 @@ pub struct ParsedWorkflow {
     pub steps: Vec<WorkflowStepDef>,
     pub sandboxes: Vec<WorkflowSandboxDecl>,
     pub model_chain: Option<ModelChain>,
+    pub changeset: Option<WorkflowChangesetDecl>,
     pub created_at: String,
     pub updated_at: String,
     pub original_path: String,
@@ -528,6 +535,7 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
 
     let description = yaml.description;
     let model_chain = yaml.model_chain;
+    let changeset = yaml.changeset;
 
     let rendered = render_workflow_yaml(
         workflow_id,
@@ -537,6 +545,7 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
         &steps,
         &sandboxes,
         model_chain.as_ref(),
+        changeset.as_ref(),
         &yaml.created,
         &yaml.updated,
     );
@@ -553,6 +562,7 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
         steps,
         sandboxes,
         model_chain,
+        changeset,
         created_at: yaml.created,
         updated_at: yaml.updated,
         original_path: path.to_string(),
@@ -624,6 +634,7 @@ mod tests {
             &sample_steps(),
             sandboxes,
             None,
+            None,
             "2026-04-29T00:00:00Z",
             "2026-04-29T00:00:00Z",
         )
@@ -692,6 +703,62 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn workflow_yaml_roundtrip_preserves_changeset_block() {
+        let id = WorkflowDefinitionId::new();
+        let decl = WorkflowChangesetDecl {
+            title: "curate(${{ trigger.payload.space }}): file and relink".to_string(),
+            description: Some("auto-curation pass".to_string()),
+            on_success: super::super::definition::ChangesetExit::Apply,
+            on_failure: super::super::definition::ChangesetFailureExit::Keep,
+            allow_apply: true,
+        };
+        let content = render_workflow_yaml(
+            id,
+            "curate-dev-spaces",
+            None,
+            &WorkflowTrigger::Manual { condition: None },
+            &sample_steps(),
+            &[],
+            None,
+            Some(&decl),
+            "2026-09-24T00:00:00Z",
+            "2026-09-24T00:00:00Z",
+        );
+        assert!(content.contains("changeset:"));
+        assert!(content.contains("allow_apply: true"));
+
+        let path = canonical_workflow_path("curate-dev-spaces", None);
+        let parsed = parse_workflow_yaml(&content, &path).expect("parses");
+        let parsed_decl = parsed.changeset.expect("changeset round-trips");
+        assert_eq!(parsed_decl.title, decl.title);
+        assert_eq!(parsed_decl.description, decl.description);
+        assert_eq!(parsed_decl.on_success, decl.on_success);
+        assert_eq!(parsed_decl.on_failure, decl.on_failure);
+        assert!(parsed_decl.allow_apply);
+    }
+
+    #[test]
+    fn workflow_yaml_omits_changeset_block_when_absent() {
+        let id = WorkflowDefinitionId::new();
+        let content = render_workflow_yaml(
+            id,
+            "no-changeset",
+            None,
+            &WorkflowTrigger::Manual { condition: None },
+            &sample_steps(),
+            &[],
+            None,
+            None,
+            "2026-09-24T00:00:00Z",
+            "2026-09-24T00:00:00Z",
+        );
+        assert!(!content.contains("changeset:"));
+        let path = canonical_workflow_path("no-changeset", None);
+        let parsed = parse_workflow_yaml(&content, &path).expect("parses");
+        assert!(parsed.changeset.is_none());
     }
 
     #[test]
@@ -817,6 +884,7 @@ steps:
             &WorkflowTrigger::Manual { condition: None },
             &steps,
             &[],
+            None,
             None,
             "2026-05-06T00:00:00Z",
             "2026-05-06T00:00:00Z",
