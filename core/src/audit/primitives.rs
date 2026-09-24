@@ -60,9 +60,6 @@ pub struct AuditContextData {
     pub acting_user_id: Option<UserId>,
     pub acting_agent_id: Option<AgentId>,
     pub on_behalf_of_user_id: Option<UserId>,
-    /// First-class column (not part of `resource_ids`) so the
-    /// persistence guard, `subject_kind` and `AuditLogQuery` filters
-    /// don't have to string-parse a JSONB field for every workflow row.
     pub workflow_run_id: Option<WorkflowRunId>,
     #[serde(default)]
     pub resource_ids: serde_json::Map<String, serde_json::Value>,
@@ -100,9 +97,6 @@ pub struct AuditEntry {
     pub acting_user_id: Option<UserId>,
     pub acting_agent_id: Option<AgentId>,
     pub on_behalf_of_user_id: Option<UserId>,
-    /// `None` for entries recorded before this column was introduced
-    /// (they still carry `resource_ids.workflow_run_id` for the
-    /// backfilled rows; see the `2026-09-24` migration).
     pub workflow_run_id: Option<WorkflowRunId>,
     pub resource_ids: serde_json::Value,
     /// `None` for entries recorded before this column was introduced.
