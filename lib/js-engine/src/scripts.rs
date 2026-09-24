@@ -26,7 +26,7 @@ pub trait ScriptSourceProvider: Send + Sync + 'static {
 
 // Require one canonical cache key, using the space URI grammar. The authorized
 // facade still applies its ordinary path rules and permissions on each read.
-fn validate_path(path: &str) -> Result<(), String> {
+pub fn validate_script_path(path: &str) -> Result<(), String> {
     let (slug, relative) = path
         .strip_prefix("space:")
         .and_then(|rest| rest.split_once('/'))
@@ -249,7 +249,7 @@ fn check<'js>(
 ) -> rquickjs::Result<()> {
     let result = (|| {
         reserve_load(&audit, &limits)?;
-        validate_path(&path)?;
+        validate_script_path(&path)?;
         reserve_dependency(&audit, &limits, &parent, &path)
     })();
     result.map_err(|message| {

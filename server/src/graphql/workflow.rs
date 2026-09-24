@@ -154,6 +154,10 @@ pub struct WorkflowStep {
     step_type: WorkflowStepType,
     skill: Option<String>,
     tool: Option<String>,
+    script: Option<String>,
+    entry: Option<String>,
+    args: Option<JsonValue>,
+    max_tool_calls: Option<i32>,
     sandbox: Option<String>,
     sandbox_mode: Option<SandboxAttachmentMode>,
     timeout_seconds: Option<i32>,
@@ -182,6 +186,10 @@ impl From<&DomainWorkflowStepDef> for WorkflowStep {
                 ..
             } => Self {
                 name: name.clone(),
+                script: None,
+                entry: None,
+                args: None,
+                max_tool_calls: None,
                 step_type: WorkflowStepType::AgentStep,
                 skill: Some(skill.clone()),
                 tool: None,
@@ -204,6 +212,10 @@ impl From<&DomainWorkflowStepDef> for WorkflowStep {
                 ..
             } => Self {
                 name: name.clone(),
+                script: None,
+                entry: None,
+                args: None,
+                max_tool_calls: None,
                 step_type: WorkflowStepType::ToolStep,
                 skill: None,
                 tool: Some(tool.clone()),
@@ -212,6 +224,35 @@ impl From<&DomainWorkflowStepDef> for WorkflowStep {
                 timeout_seconds: timeout_seconds.map(|s| s.min(i32::MAX as u64) as i32),
                 condition: condition.clone(),
                 output_schema: None,
+                outputs: None,
+                provider: None,
+                resume_condition: None,
+            },
+            DomainWorkflowStepDef::ScriptStep {
+                name,
+                script,
+                entry,
+                args,
+                timeout_seconds,
+                max_tool_calls,
+                output_schema,
+                condition,
+            } => Self {
+                name: name.clone(),
+                step_type: WorkflowStepType::ScriptStep,
+                script: Some(script.clone()),
+                entry: Some(entry.clone().unwrap_or_else(|| "run".into())),
+                args: Some(args.clone().into()),
+                max_tool_calls: max_tool_calls.map(|n| n.min(i32::MAX as usize) as i32),
+                skill: None,
+                tool: None,
+                sandbox: None,
+                sandbox_mode: None,
+                timeout_seconds: timeout_seconds.map(|n| n.min(i32::MAX as u64) as i32),
+                condition: condition.clone(),
+                output_schema: serde_json::to_value(output_schema.root_schema())
+                    .ok()
+                    .map(Into::into),
                 outputs: None,
                 provider: None,
                 resume_condition: None,
@@ -225,6 +266,10 @@ impl From<&DomainWorkflowStepDef> for WorkflowStep {
                 ..
             } => Self {
                 name: name.clone(),
+                script: None,
+                entry: None,
+                args: None,
+                max_tool_calls: None,
                 step_type: WorkflowStepType::Wait,
                 skill: None,
                 tool: None,
@@ -243,6 +288,7 @@ impl From<&DomainWorkflowStepDef> for WorkflowStep {
 
 #[derive(Enum, Clone, Copy, PartialEq, Eq)]
 pub enum WorkflowStepType {
+    ScriptStep,
     AgentStep,
     ToolStep,
     Wait,

@@ -219,7 +219,7 @@ mod read;
 mod sandbox;
 mod skill;
 mod spaces;
-mod submit_output;
+pub(crate) mod submit_output;
 mod text_editor;
 mod tool_output_fetch;
 mod use_skill;

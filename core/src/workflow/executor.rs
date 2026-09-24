@@ -3,6 +3,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use es_entity::context::{EventContext, WithEventContext};
+use tracing::Instrument;
+
 use crate::agent::session::message::{StopReason, SUBMIT_OUTPUT_TOOL_NAME};
 use crate::agent::{Agent, Agents};
 use crate::auth::AuthSubject;
@@ -139,7 +142,7 @@ impl Executor {
         });
 
         // Stamp every audit row recorded during this run so they can be
-        // queried by `resource_ids->>'workflow_run_id'`.
+        // queried by the `workflow_run_id` column.
         crate::audit::Audit::record_project_id(project_id);
         crate::audit::Audit::record_workflow_id(workflow_id);
         crate::audit::Audit::record_workflow_run_id(run_id);
@@ -184,6 +187,7 @@ impl Executor {
 
         for step in &steps {
             let step_name = step.name().to_string();
+            crate::audit::Audit::record_workflow_step(&step_name);
 
             if run.step_already_terminal(&step_name) {
                 continue;
@@ -255,6 +259,7 @@ impl Executor {
             }
 
             let step_outputs = collect_step_outputs(&run.step_results);
+            let step_context = EventContext::current().data();
             let outcome = self
                 .execute_step(
                     project_id,
@@ -269,6 +274,8 @@ impl Executor {
                     &mut borrowed_preexisting,
                     &definition,
                 )
+                .with_event_context(step_context)
+                .instrument(tracing::info_span!("core.workflow.step", step = %step_name))
                 .await;
 
             match outcome {
@@ -644,6 +651,73 @@ impl Executor {
 
                 result
             }
+            WorkflowStepDef::ScriptStep {
+                name,
+                script,
+                entry,
+                args,
+                timeout_seconds,
+                max_tool_calls,
+                output_schema,
+                ..
+            } => {
+                let mut run_context = run_context.clone();
+                run_context["step"] = serde_json::json!(name);
+                let args = TemplateContext {
+                    trigger: trigger_context,
+                    steps: step_outputs,
+                    run: &run_context,
+                }
+                .substitute(args)
+                .map_err(|e| WorkflowError::StepErrored {
+                    step: name.clone(),
+                    reason: e.to_string(),
+                })?;
+                let source = script_step_source(
+                    script,
+                    entry.as_deref().unwrap_or("run"),
+                    &args,
+                    &run_context,
+                );
+                // `timeout_seconds` unset falls back to the same
+                // `DEFAULT_TOOL_STEP_TIMEOUT_SECS` a `tool_step` uses;
+                // `for_script` clamps whatever we pass to the configured
+                // `script_step` ceiling, so no separate clamp is needed
+                // here.
+                let timeout_ms = timeout_seconds
+                    .unwrap_or(DEFAULT_TOOL_STEP_TIMEOUT_SECS)
+                    .saturating_mul(1000);
+                let subject = AuthSubject::workflow_script(project_id, workflow_id, run_id);
+                let envelope = dispatch_step(
+                    name,
+                    "compose",
+                    None,
+                    self.toolsets.call_compose_for_workflow(
+                        &subject,
+                        source,
+                        *max_tool_calls,
+                        Some(timeout_ms),
+                    ),
+                    "",
+                    true,
+                )
+                .await?;
+                let output =
+                    envelope
+                        .get("result")
+                        .cloned()
+                        .ok_or_else(|| WorkflowError::StepErrored {
+                            step: name.clone(),
+                            reason: "compose returned no result".into(),
+                        })?;
+                output_schema
+                    .validate(&output)
+                    .map_err(|e| WorkflowError::StepErrored {
+                        step: name.clone(),
+                        reason: e.to_string(),
+                    })?;
+                Ok(output)
+            }
             WorkflowStepDef::ToolStep {
                 name,
                 tool,
@@ -901,39 +975,15 @@ impl Executor {
         let call = self
             .toolsets
             .call_top_level_tool(&subject, tool_name, arguments);
-        let result = match tokio::time::timeout(timeout, call).await {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => {
-                return Err(WorkflowError::ToolDispatch(format!(
-                    "tool '{tool_name}': {e}{}",
-                    diagnose()
-                )));
-            }
-            Err(_) => {
-                return Err(WorkflowError::StepErrored {
-                    step: step_name.to_string(),
-                    reason: format!("tool '{tool_name}' timed out after {}s", timeout.as_secs()),
-                })
-            }
-        };
-
-        if result.is_error.unwrap_or(false) {
-            let detail = first_text_content(&result)
-                .unwrap_or_else(|| "tool returned is_error: true with no text content".to_string());
-            return Err(WorkflowError::StepErrored {
-                step: step_name.to_string(),
-                reason: format!("tool '{tool_name}' failed: {detail}{}", diagnose()),
-            });
-        }
-
-        result
-            .structured_content
-            .ok_or_else(|| WorkflowError::StepErrored {
-                step: step_name.to_string(),
-                reason: format!(
-                    "tool '{tool_name}' returned no structured_content; tool_step requires it"
-                ),
-            })
+        dispatch_step(
+            step_name,
+            tool_name,
+            Some(timeout),
+            call,
+            &diagnose(),
+            false,
+        )
+        .await
     }
 
     async fn detach_step_sandbox(&self, sandbox_id: SandboxId, agent_id: AgentId) {
@@ -955,5 +1005,187 @@ impl Executor {
         if let Err(e) = op.commit().await {
             tracing::warn!(error = %e, "step cleanup: detach commit failed");
         }
+    }
+}
+
+fn script_step_source(
+    script: &str,
+    entry: &str,
+    args: &serde_json::Value,
+    run: &serde_json::Value,
+) -> String {
+    fn literal(value: &impl serde::Serialize) -> String {
+        serde_json::to_string(value)
+            .expect("JSON literal serialization")
+            .replace('\u{2028}', "\\u2028")
+            .replace('\u{2029}', "\\u2029")
+    }
+    let script = literal(&script);
+    let entry = literal(&entry);
+    let args = literal(args);
+    let run = literal(run);
+    format!(
+        r#"const __mod = await loadScript({script});
+const __entry = {entry};
+const __fn = __mod == null ? undefined : __mod[__entry];
+if (typeof __fn !== "function") {{
+    throw new Error(`script_step: ${{__entry}} is not an exported function of ${{{script}}}`);
+}}
+return await __fn({args}, {run});"#
+    )
+}
+
+/// `timeout` is `None` for a script step: the compose engine already
+/// wraps the whole script execution in its own `tokio::time::timeout`
+/// (scoped by `ComposeTool::for_script`'s effective `timeout_ms`) plus
+/// an interrupt handler, so a second, outer timeout here is redundant
+/// belt-and-braces for a future that only ever resolves through the
+/// engine. `tool_step` dispatch always passes `Some` and is unchanged.
+async fn dispatch_step(
+    step: &str,
+    tool: &str,
+    timeout: Option<Duration>,
+    call: impl std::future::Future<
+        Output = Result<rmcp::model::CallToolResult, crate::toolset::ToolSetsError>,
+    >,
+    diagnostics: &str,
+    script: bool,
+) -> Result<serde_json::Value, WorkflowError> {
+    let error = |reason: String| WorkflowError::StepErrored {
+        step: step.to_string(),
+        reason: if script {
+            format!("{reason}; side effects may have occurred")
+        } else {
+            reason
+        },
+    };
+    let dispatch_result = match timeout {
+        Some(timeout) => match tokio::time::timeout(timeout, call).await {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                return Err(error(format!(
+                    "tool '{tool}' timed out after {}ms",
+                    timeout.as_millis()
+                )))
+            }
+        },
+        None => call.await,
+    };
+    let result = match dispatch_result {
+        Ok(result) => result,
+        Err(e) if !script => {
+            return Err(WorkflowError::ToolDispatch(format!(
+                "tool '{tool}': {e}{diagnostics}"
+            )))
+        }
+        Err(e) => return Err(error(format!("tool '{tool}': {e}{diagnostics}"))),
+    };
+    if result.is_error.unwrap_or(false) {
+        let detail = first_text_content(&result)
+            .unwrap_or_else(|| "tool returned is_error: true with no text content".into());
+        return Err(error(format!(
+            "tool '{tool}' failed: {detail}{diagnostics}"
+        )));
+    }
+    result.structured_content.ok_or_else(|| {
+        error(format!(
+            "tool '{tool}' returned no structured_content; tool_step requires it"
+        ))
+    })
+}
+
+#[cfg(test)]
+mod script_step_tests {
+    use super::*;
+
+    struct NoTools;
+    #[async_trait::async_trait]
+    impl js_engine::ToolDispatcher for NoTools {
+        async fn call_tool(
+            &self,
+            _: &str,
+            _: serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            panic!("injected code must never call a tool");
+        }
+    }
+    struct Source;
+    #[async_trait::async_trait]
+    impl js_engine::ScriptSourceProvider for Source {
+        async fn read(&self, _: &str) -> Result<Vec<u8>, String> {
+            Ok(b"return {run: (args, run) => ({args, run})};".to_vec())
+        }
+    }
+
+    #[tokio::test]
+    async fn script_step_json_literals_preserve_typed_args_and_injection_payloads() {
+        let hostile =
+            "\" ` ${{ trigger.bad }} </script> \u{2028}\u{2029}\n); await tools.injected({}); //";
+        let prior = serde_json::json!({"success":true,"plan":{"text": hostile,"count":3}});
+        let outputs = HashMap::from([("plan".into(), prior.clone())]);
+        let run = serde_json::json!({"id":"run-id","date":"2026-09-23","started_at":"2026-09-23T00:00:00Z","step":"inventory"});
+        let trigger = serde_json::json!({"text": hostile});
+        let args = TemplateContext { trigger: &trigger, steps: &outputs, run: &run }
+            .substitute(&serde_json::json!({"plan":"${{ steps.plan.outputs }}","text":"${{ trigger.payload.text }}","step":"${{ run.step }}"})).unwrap();
+        let source = script_step_source("space:docs/test.js", "run", &args, &run);
+        assert!(!source.contains('\u{2028}'));
+        assert!(!source.contains('\u{2029}'));
+        let output = js_engine::JsEngine::new()
+            .execute_with_sources(
+                &source,
+                Arc::new(NoTools),
+                Duration::from_secs(2),
+                Some(Arc::new(Source)),
+                Arc::default(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output.value["args"]["plan"], prior);
+        assert_eq!(output.value["args"]["text"], hostile);
+        assert_eq!(output.value["args"]["step"], "inventory");
+        assert_eq!(output.value["run"], run);
+    }
+
+    /// `dispatch_step`'s own `Some(timeout)` branch, used by `tool_step`
+    /// dispatch (script steps pass `None` and rely on the compose
+    /// engine's internal timeout instead — see `dispatch_step`'s doc
+    /// comment).
+    #[tokio::test]
+    async fn dispatch_step_bounds_a_call_that_does_not_resolve() {
+        let error = dispatch_step(
+            "slow",
+            "compose",
+            Some(Duration::from_millis(1)),
+            std::future::pending(),
+            "",
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(error, WorkflowError::StepErrored { .. }));
+        assert!(error.to_string().contains("timed out"));
+        assert!(error.to_string().contains("side effects may have occurred"));
+    }
+
+    /// `None` skips the outer bound entirely — the future must resolve
+    /// (or hang) on its own. Proves `dispatch_step` doesn't silently
+    /// impose a default when no timeout is given.
+    #[tokio::test]
+    async fn dispatch_step_without_timeout_awaits_the_call_directly() {
+        let result = dispatch_step(
+            "no-timeout",
+            "compose",
+            None,
+            async {
+                let mut ctr = rmcp::model::CallToolResult::success(Vec::new());
+                ctr.structured_content = Some(serde_json::json!({"success": true}));
+                Ok(ctr)
+            },
+            "",
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, serde_json::json!({"success": true}));
     }
 }

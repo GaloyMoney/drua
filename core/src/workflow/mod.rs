@@ -227,6 +227,11 @@ pub struct Workflows {
     library: drua_library::Library,
     agents: Arc<Agents>,
     sandboxes: Arc<Sandboxes>,
+    /// `script_step` tool-call/timeout ceiling, mirrored from
+    /// `ComposeConfig.script_step` at init. Held here (rather than read
+    /// from `ToolSets` per validation) so `validate_steps` doesn't
+    /// depend on the compose tool being registered.
+    script_step_limits: crate::toolset::ScriptStepLimits,
     execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
     cron_spawner: ::job::JobSpawner<TriggerCronConfig>,
 }
@@ -245,6 +250,7 @@ impl Workflows {
         sandboxes: Arc<Sandboxes>,
         users: Arc<Users>,
         toolsets: Arc<ToolSets>,
+        script_step_limits: crate::toolset::ScriptStepLimits,
         jobs: &mut ::job::Jobs,
     ) -> Self {
         let execute_run_spawner = jobs.add_initializer(ExecuteRunJobInitializer::new(
@@ -269,6 +275,7 @@ impl Workflows {
             library,
             agents,
             sandboxes,
+            script_step_limits,
             execute_run_spawner,
             cron_spawner,
         }
@@ -563,6 +570,33 @@ impl Workflows {
                             ))
                         })?;
                         reject_forward_step_refs(name, &r, &seen_step_names)?;
+                    }
+                }
+                WorkflowStepDef::ScriptStep {
+                    name,
+                    script,
+                    entry,
+                    args,
+                    max_tool_calls,
+                    ..
+                } => {
+                    js_engine::validate_script_path(script).map_err(|e| {
+                        WorkflowError::InvalidStep(format!("script_step '{name}': {e}"))
+                    })?;
+                    if !is_cel_identifier(entry.as_deref().unwrap_or("run")) {
+                        return Err(WorkflowError::InvalidStep(format!(
+                            "script_step '{name}': entry must be an identifier"
+                        )));
+                    }
+                    let ceiling = self.script_step_limits.max_tool_calls;
+                    if max_tool_calls.is_some_and(|limit| limit > ceiling) {
+                        return Err(WorkflowError::InvalidStep(format!("script_step '{name}': max_tool_calls exceeds configured ceiling {ceiling}")));
+                    }
+                    let refs = template::extract_refs_in_value(args).map_err(|e| {
+                        WorkflowError::InvalidTemplateRef(format!("script_step '{name}': {e}"))
+                    })?;
+                    for r in &refs {
+                        validate_ref_against_prior_steps(name, r, &seen_step_names)?;
                     }
                 }
                 WorkflowStepDef::ToolStep {

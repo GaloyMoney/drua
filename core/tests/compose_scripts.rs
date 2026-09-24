@@ -497,3 +497,482 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
         .to_string()
         .contains("access_denied"));
 }
+
+#[tokio::test]
+#[ignore = "requires isolated postgres + local library clone"]
+async fn workflow_scripts_validate_execute_and_preserve_provenance() {
+    use drua_core::agent::Agents;
+    use drua_core::audit::{Audit, AuditLogQuery};
+    use drua_core::primitives::{ContextGeneration, WorkflowDefinitionId, WorkflowRunId};
+    use drua_core::toolset::{
+        ComposeConfig, SubmitOutputTool, TextEditor, ToolSets, ToolSetsConfig,
+    };
+    use drua_core::workflow::executor::Executor;
+    use drua_core::workflow::repo::WorkflowDefinitionRepo;
+    use drua_core::workflow::run::NewWorkflowRun;
+    use drua_core::workflow::{
+        WorkflowRunRepo, WorkflowRunState, WorkflowStepDef, WorkflowTrigger,
+    };
+    use es_entity::context::WithEventContext;
+    use serde_json::json;
+    use std::sync::{atomic::AtomicBool, Arc};
+    use std::time::Duration;
+
+    let (app, user, agent) = setup("workflow-scripts").await;
+    let pool = pool().await;
+    let project = agent.project_id().unwrap();
+    let script_subject =
+        AuthSubject::workflow_script(project, WorkflowDefinitionId::new(), WorkflowRunId::new());
+    let visible: Vec<_> = app
+        .toolsets()
+        .top_level_tool_arcs(&script_subject)
+        .map(|t| t.name().to_owned())
+        .collect();
+    for name in ["Read", "LS", "Glob", "Grep", "Edit", "Move", "Delete"] {
+        assert!(
+            visible.iter().any(|n| n == name),
+            "missing {name}: {visible:?}"
+        );
+    }
+    for name in [
+        "Bash",
+        "submit_output",
+        "spaces",
+        "skill",
+        "sandbox",
+        "agent",
+    ] {
+        assert!(!visible.iter().any(|n| n == name), "unexpected {name}");
+    }
+    assert!(!app
+        .toolsets()
+        .top_level_tool_arcs(&script_subject)
+        .find(|t| t.name() == "compose")
+        .unwrap()
+        .composable());
+    let admin_subject =
+        AuthSubject::workflow_executor(project, WorkflowDefinitionId::new(), WorkflowRunId::new());
+    assert!(admin_subject.is_project_admin());
+    assert!(!admin_subject.can_use_agent_file_tools());
+
+    let base = json!({"type":"script_step","name":"inventory","script":"space:docs/tasks.js"});
+    for patch in [
+        json!({"script":"tasks.js"}),
+        json!({"script":"space:docs/tasks.md"}),
+        json!({"script":"space:docs/../tasks.js"}),
+        json!({"entry":"bad-entry"}),
+        json!({"entry":"1run"}),
+        json!({"name":"bad-name"}),
+        json!({"args":"${{ steps.later.outputs }}"}),
+        json!({"args":"${{ unknown.value }}"}),
+        json!({"max_tool_calls":2001}),
+    ] {
+        let mut value = base.clone();
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(patch.as_object().unwrap().clone());
+        let result = app
+            .workflows()
+            .create(
+                &user,
+                project,
+                "proj-workflow-scripts",
+                "invalid".into(),
+                None,
+                WorkflowTrigger::Manual { condition: None },
+                vec![serde_json::from_value(value).unwrap()],
+                vec![],
+                None,
+            )
+            .await;
+        assert!(result.is_err(), "accepted invalid step {patch}");
+    }
+    let valid = app
+        .workflows()
+        .create(
+            &user,
+            project,
+            "proj-workflow-scripts",
+            "valid".into(),
+            None,
+            WorkflowTrigger::Manual { condition: None },
+            vec![serde_json::from_value(base.clone()).unwrap()],
+            vec![],
+            None,
+        )
+        .await
+        .unwrap();
+    let invalid_update = serde_json::from_value(json!({"type":"script_step","name":"inventory","script":"space:docs/tasks.js","max_tool_calls":2001})).unwrap();
+    // Create-time validation does not read the script: tasks.js does not exist yet.
+    assert_eq!(valid.steps[0].name(), "inventory");
+    assert!(app
+        .workflows()
+        .update(
+            &user,
+            valid.id,
+            None,
+            None,
+            None,
+            Some(vec![invalid_update]),
+            None,
+            None
+        )
+        .await
+        .is_err());
+
+    let users = Arc::new(drua_core::user::Users::new(&pool));
+    let fs = Arc::new(drua_core::space_fs::SpaceFs::new(
+        Arc::new(app.library().spaces().clone()),
+        Arc::new(app.projects().clone()),
+        users,
+    ));
+    let audit = Arc::new(Audit::new(&pool));
+    let toolsets = Arc::new(
+        ToolSets::init(ToolSetsConfig::default(), Some(audit.clone()), None, None)
+            .await
+            .unwrap(),
+    );
+    let sandboxes = Arc::new(app.sandboxes().clone());
+    let skills = Arc::new(app.skills().clone());
+    toolsets.register_compose(ComposeConfig::default(), fs.clone());
+    toolsets.register_top_level(TextEditor::new(sandboxes.clone(), fs.clone()));
+    toolsets.register_top_level(drua_core::toolset::Read::new(sandboxes.clone(), fs));
+    let (prompt_tx, mut prompts) = tokio::sync::mpsc::channel(8);
+    let agents = Arc::new(Agents::new(
+        &pool,
+        agents_config_for_tests(),
+        toolsets.clone(),
+        prompt_tx,
+        sandboxes.clone(),
+        skills.clone(),
+        None,
+        ContextGeneration::new(),
+        Arc::new(drua_core::library::SpaceMounts::empty()),
+    ));
+    toolsets.register_top_level(SubmitOutputTool::new(agents.clone()));
+    let definitions = WorkflowDefinitionRepo::new_without_library(&pool);
+    let runs = WorkflowRunRepo::new(&pool);
+    let executor = Executor::new(
+        runs.clone(),
+        definitions.clone(),
+        agents,
+        skills.clone(),
+        sandboxes,
+        toolsets,
+    );
+
+    let source = r#"
+return {
+  run: async (args, run) => {
+    const path = `space:docs/runs/${run.id}/inventory.json`;
+    await tools.Edit({command: 'create', path, file_text: JSON.stringify({args, run})});
+    await tools.Read({path});
+    return {success: true, output: path, args, run};
+  },
+  failed: () => ({success: false, output: 'declined', reason: 'test'}),
+  missing: () => ({success: true}),
+  throwing: () => { throw new Error('intentional failure'); },
+  many: async () => { for(let i=0;i<100;i++) await tools.Read({path:'space:docs/a.md'}); return {success:true,output:'done'}; },
+  slow: async () => { await new Promise(resolve => setTimeout(resolve, 2000)); return {success:true,output:'late'}; },
+  unmounted: async () => await loadScript('space:unmounted/private.js'),
+  echo: args => ({success:true,output:'echo',args})
+};
+"#;
+    app.library()
+        .spaces()
+        .write_file(
+            "docs",
+            "tasks.js",
+            source.into(),
+            CommitAttribution::library_default(),
+        )
+        .await
+        .unwrap();
+    let other = app
+        .projects()
+        .create(&user, "other-script-project", None)
+        .await
+        .unwrap();
+    app.projects()
+        .create_and_mount_space(&user, other.id, "unmounted", None)
+        .await
+        .unwrap();
+    app.library()
+        .spaces()
+        .write_file(
+            "unmounted",
+            "private.js",
+            "return {};".into(),
+            CommitAttribution::library_default(),
+        )
+        .await
+        .unwrap();
+
+    async fn seed(
+        definitions: &WorkflowDefinitionRepo,
+        runs: &WorkflowRunRepo,
+        project: drua_core::primitives::ProjectId,
+        steps: Vec<WorkflowStepDef>,
+    ) -> WorkflowRunId {
+        let new = drua_core::workflow::NewWorkflowDefinition::builder()
+            .project_id(project)
+            .name(format!("script-{}", uuid::Uuid::new_v4()))
+            .trigger(WorkflowTrigger::Manual { condition: None })
+            .steps(steps.clone())
+            .build()
+            .unwrap();
+        let mut op = definitions.begin_op().await.unwrap();
+        let definition = definitions.create_in_op(&mut op, new).await.unwrap();
+        op.commit().await.unwrap();
+        runs.create(
+            NewWorkflowRun::builder()
+                .definition_id(definition.id)
+                .project_id(project)
+                .steps_snapshot(steps)
+                .trigger_context(json!({"count":3}))
+                .build()
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .id
+    }
+    let step = |entry: &str, extra: serde_json::Value| -> WorkflowStepDef {
+        let mut value = base.clone();
+        value["entry"] = json!(entry);
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        serde_json::from_value(value).unwrap()
+    };
+    for (entry, extra, expected) in [
+        ("absent", json!({}), "not an exported function"),
+        ("throwing", json!({}), "space:docs/tasks.js:"),
+        ("missing", json!({}), "missing required field `output`"),
+        ("many", json!({"max_tool_calls":2}), "tool call"),
+        (
+            "slow",
+            json!({"timeout_seconds":1}),
+            "side effects may have occurred",
+        ),
+        ("unmounted", json!({}), "access_denied"),
+    ] {
+        let run_id = seed(&definitions, &runs, project, vec![step(entry, extra)]).await;
+        executor
+            .run(run_id, Arc::new(AtomicBool::new(false)))
+            .with_event_context(serde_json::from_value(json!({})).unwrap())
+            .await
+            .unwrap();
+        let run = runs.find_by_id(run_id).await.unwrap();
+        assert_eq!(run.state, WorkflowRunState::Errored, "{entry}");
+        let error = run.step_results[0].error.as_ref().unwrap();
+        assert!(error.to_lowercase().contains(expected), "{entry}: {error}");
+        if entry == "many" || entry == "slow" {
+            assert!(error.contains("side effects may have occurred"));
+        }
+        assert!(prompts.try_recv().is_err(), "script requested a model turn");
+    }
+    let run_id = seed(
+        &definitions,
+        &runs,
+        project,
+        vec![
+            step("failed", json!({})),
+            step(
+                "echo",
+                json!({"name":"skipped","condition":"steps.inventory.outputs.success"}),
+            ),
+        ],
+    )
+    .await;
+    executor
+        .run(run_id, Arc::new(AtomicBool::new(false)))
+        .with_event_context(serde_json::from_value(json!({})).unwrap())
+        .await
+        .unwrap();
+    let run = runs.find_by_id(run_id).await.unwrap();
+    assert_eq!(run.state, WorkflowRunState::Failed);
+    assert_eq!(
+        run.step_results[0].output.as_ref().unwrap()["success"],
+        false
+    );
+    assert!(run.step_results[0].error.is_none());
+    assert!(run.step_results[1].skipped.is_some());
+
+    // A script exceeding the MCP compose default of 50 calls uses its own limits.
+    let run_id = seed(&definitions, &runs, project, vec![step("many", json!({"max_tool_calls":110})), step("echo", json!({"name":"echo","args":{"plan":"${{ steps.inventory.outputs }}","step":"${{ run.step }}"}}))]).await;
+    executor
+        .run(run_id, Arc::new(AtomicBool::new(false)))
+        .with_event_context(serde_json::from_value(json!({})).unwrap())
+        .await
+        .unwrap();
+    let run = runs.find_by_id(run_id).await.unwrap();
+    assert_eq!(
+        run.state,
+        WorkflowRunState::Succeeded,
+        "{:?}",
+        run.step_results
+    );
+    assert_eq!(
+        run.step_results[1].output.as_ref().unwrap()["args"]["plan"],
+        json!({"success":true,"output":"done"})
+    );
+    assert_eq!(
+        run.step_results[1].output.as_ref().unwrap()["args"]["step"],
+        "echo"
+    );
+    assert!(prompts.try_recv().is_err());
+
+    skills
+        .create(
+            &user,
+            project,
+            "proj-workflow-scripts",
+            "consume-inventory".into(),
+            "Read inventory".into(),
+            "Read this output: ${{ steps.inventory.outputs }}".into(),
+        )
+        .await
+        .unwrap();
+    let agent_step: WorkflowStepDef = serde_json::from_value(
+        json!({"type":"agent_step","name":"judge","skill":"consume-inventory"}),
+    )
+    .unwrap();
+    let run_id = seed(
+        &definitions,
+        &runs,
+        project,
+        vec![
+            step(
+                "run",
+                json!({"args":{"count":"${{ trigger.payload.count }}","step":"${{ run.step }}"}}),
+            ),
+            agent_step,
+        ],
+    )
+    .await;
+    let execute = executor
+        .run(run_id, Arc::new(AtomicBool::new(false)))
+        .with_event_context(serde_json::from_value(json!({})).unwrap());
+    let respond = async {
+        let request = tokio::time::timeout(Duration::from_secs(20), prompts.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let text = format!("{:?}", request.prompt);
+        assert!(text.contains("inventory.json"), "{text}");
+        let file = app
+            .library()
+            .read_blob_at_head(&format!("spaces/docs/runs/{run_id}/inventory.json"))
+            .await
+            .unwrap()
+            .unwrap();
+        let written: serde_json::Value = serde_json::from_slice(&file).unwrap();
+        assert_eq!(written["args"]["count"], 3);
+        assert_eq!(written["args"]["step"], "inventory");
+        assert_eq!(written["run"]["step"], "inventory");
+        request
+            .response_channel
+            .send(Ok(llm::PromptResult::Complete(llm::PromptResponse {
+                content: vec![llm::prompt::AssistantBlock::ToolUse {
+                    id: "submit".into(),
+                    name: "submit_output".into(),
+                    input: json!({"success":true,"output":"reviewed"}),
+                }],
+                usage: Default::default(),
+                stop_reason: Some(llm::response::StopReason::ToolUse),
+                model_used: None,
+            })))
+            .unwrap();
+    };
+    let (result, ()) = tokio::join!(execute, respond);
+    result.unwrap();
+    assert!(prompts.try_recv().is_err(), "unexpected extra model turn");
+    let run = runs.find_by_id(run_id).await.unwrap();
+    assert_eq!(
+        run.state,
+        WorkflowRunState::Succeeded,
+        "{:?}",
+        run.step_results
+    );
+    assert!(run.step_results[0]
+        .output
+        .as_ref()
+        .unwrap()
+        .get("tool_calls")
+        .is_none());
+    let agent_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM agents WHERE workflow_run_id=$1")
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(agent_count, 1, "only the agent step creates an agent");
+    let query = AuditLogQuery {
+        workflow_run_id: Some(run_id),
+        workflow_step: Some("inventory".into()),
+        limit: 100,
+        ..Default::default()
+    };
+    let entries = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let entries = audit.find(&query).await.unwrap();
+            if entries.len() >= 3 {
+                break entries;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(entries.iter().any(|e| e.action == "compose"));
+    assert!(entries
+        .iter()
+        .any(|e| e.entrypoint.as_deref() == Some("compose > mcp: Edit")));
+    assert!(entries
+        .iter()
+        .any(|e| e.entrypoint.as_deref() == Some("compose > mcp: Read")));
+    for entry in &entries {
+        assert!(entry.acting_agent_id.is_none());
+        assert!(entry.acting_user_id.is_none());
+        assert_eq!(entry.workflow_run_id, Some(run_id));
+    }
+    let log = app
+        .toolsets()
+        .call_top_level_tool(
+            &admin_subject,
+            "log",
+            json!({"workflow_run_id":run_id,"workflow_step":"inventory"})
+                .as_object()
+                .cloned(),
+        )
+        .await
+        .unwrap();
+    assert!(!log.is_error.unwrap_or(false));
+    assert!(serde_json::to_string(&log)
+        .unwrap()
+        .contains(&run_id.to_string()));
+    let git_log = Command::new("git")
+        .args([
+            "log",
+            "--format=%B",
+            "--",
+            &format!("spaces/docs/runs/{run_id}/inventory.json"),
+        ])
+        .current_dir(app.library().repo_path())
+        .output()
+        .unwrap();
+    let trailers = String::from_utf8(git_log.stdout).unwrap();
+    for trailer in [
+        format!("Drua-Workflow-Run: {run_id}"),
+        "Drua-Workflow-Step: inventory".into(),
+        "Drua-Subject-Type: workflow_agent".into(),
+    ] {
+        assert!(trailers.contains(&trailer), "{trailers}");
+    }
+    assert!(!trailers.contains("Drua-Acting-Agent"));
+    assert!(!trailers.contains("Co-Authored-By"));
+    app.shutdown().await;
+}

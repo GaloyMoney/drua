@@ -93,91 +93,14 @@ impl TopLevelTool for SubmitOutputTool {
 
         let args_value = serde_json::Value::Object(arguments.unwrap_or_default());
 
-        if let Err(msg) = validate_against_schema(&schema, &args_value) {
+        if let Err(e) = schema.validate(&args_value) {
             return Ok(CallToolResult::error(vec![Content::text(format!(
-                "submit_output args failed schema validation: {msg}"
+                "submit_output args failed schema validation: {e}"
             ))]));
         }
 
         let mut result = CallToolResult::success(vec![Content::text("output recorded")]);
         result.structured_content = Some(args_value);
         Ok(result)
-    }
-}
-
-/// Defence-in-depth check on top of provider-side `strict: true`.
-/// Confirms the value is an object and has every key listed in
-/// `schema.required`. Type/enum/nested validation is the model's job
-/// (strict mode); this catches degraded providers that ignore strict.
-fn validate_against_schema(
-    schema: &crate::workflow::OutputSchema,
-    value: &serde_json::Value,
-) -> Result<(), String> {
-    let obj = value
-        .as_object()
-        .ok_or_else(|| "expected JSON object".to_string())?;
-    let root = schema.root_schema();
-    if let Some(object) = root.schema.object.as_ref() {
-        for required in &object.required {
-            if !obj.contains_key(required) {
-                return Err(format!("missing required field `{required}`"));
-            }
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::workflow::OutputSchema;
-    use schemars::schema::RootSchema;
-
-    fn schema(json: serde_json::Value) -> OutputSchema {
-        let root: RootSchema = serde_json::from_value(json).unwrap();
-        OutputSchema::new(root).unwrap()
-    }
-
-    #[test]
-    fn validates_object_with_required_fields() {
-        let s = schema(serde_json::json!({
-            "type": "object",
-            "required": ["a", "b"],
-            "properties": {
-                "a": { "type": "string" },
-                "b": { "type": "boolean" }
-            }
-        }));
-        let value = serde_json::json!({ "a": "hi", "b": true, "success": true });
-        validate_against_schema(&s, &value).unwrap();
-    }
-
-    #[test]
-    fn rejects_non_object_value() {
-        let s = schema(serde_json::json!({ "type": "object" }));
-        let err = validate_against_schema(&s, &serde_json::json!("oops")).unwrap_err();
-        assert!(err.contains("expected JSON object"));
-    }
-
-    #[test]
-    fn reports_missing_required_field() {
-        let s = schema(serde_json::json!({
-            "type": "object",
-            "required": ["a", "b"],
-        }));
-        let err = validate_against_schema(&s, &serde_json::json!({ "a": "only" })).unwrap_err();
-        assert!(err.contains("missing required field"));
-        assert!(err.contains('b'));
-    }
-
-    #[test]
-    fn minimal_schema_still_requires_success() {
-        let s = schema(serde_json::json!({ "type": "object" }));
-        let err = validate_against_schema(&s, &serde_json::json!({})).unwrap_err();
-        assert!(
-            err.contains("success"),
-            "success is always injected as required"
-        );
-        validate_against_schema(&s, &serde_json::json!({ "success": true })).unwrap();
     }
 }

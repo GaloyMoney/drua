@@ -29,6 +29,9 @@ struct AuditLogParams {
     #[schemars(with = "Option<uuid::Uuid>")]
     agent_id: Option<AgentId>,
     #[schemars(with = "Option<uuid::Uuid>")]
+    workflow_run_id: Option<crate::primitives::WorkflowRunId>,
+    workflow_step: Option<String>,
+    #[schemars(with = "Option<uuid::Uuid>")]
     sandbox_id: Option<SandboxId>,
     #[serde(
         default = "default_limit",
@@ -64,6 +67,8 @@ impl AuditLogParams {
             outcome,
             acting_user_id: self.user_id,
             acting_agent_id: self.agent_id,
+            workflow_run_id: self.workflow_run_id,
+            workflow_step: self.workflow_step,
             sandbox_id: self.sandbox_id,
             error,
             ..Default::default()
@@ -112,6 +117,8 @@ struct AuditEntryOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     on_behalf_of_user_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    workflow_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     resource_ids: Option<serde_json::Value>,
 }
 
@@ -136,6 +143,7 @@ impl From<&AuditEntry> for AuditEntryOutput {
             acting_user_id: e.acting_user_id.map(|id| id.to_string()),
             acting_agent_id: e.acting_agent_id.map(|id| id.to_string()),
             on_behalf_of_user_id: e.on_behalf_of_user_id.map(|id| id.to_string()),
+            workflow_run_id: e.workflow_run_id.map(|id| id.to_string()),
             resource_ids,
         }
     }

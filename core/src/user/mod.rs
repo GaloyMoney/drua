@@ -125,7 +125,7 @@ impl Users {
         for (audit_key, trailer_key) in [
             ("project_id", "Drua-Project"),
             ("workflow_id", "Drua-Workflow-Definition"),
-            ("workflow_run_id", "Drua-Workflow-Run"),
+            ("workflow_step", "Drua-Workflow-Step"),
             ("agent_id", "Drua-Agent"),
             ("sandbox_id", "Drua-Sandbox"),
             ("space_id", "Drua-Space"),
@@ -133,6 +133,10 @@ impl Users {
             if let Some(value) = ctx.resource_ids.get(audit_key).and_then(|v| v.as_str()) {
                 attribution.add_trailer(trailer_key, value);
             }
+        }
+
+        if let Some(run_id) = ctx.workflow_run_id {
+            attribution.add_trailer("Drua-Workflow-Run", run_id.to_string());
         }
 
         if let Some(agent_id) = ctx.acting_agent_id {
@@ -151,7 +155,7 @@ impl Users {
 }
 
 fn subject_kind(ctx: &AuditContextData) -> CommitSubjectKind {
-    if ctx.resource_ids.contains_key("workflow_run_id") {
+    if ctx.workflow_run_id.is_some() {
         return CommitSubjectKind::WorkflowAgent;
     }
     match (

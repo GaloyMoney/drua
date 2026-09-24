@@ -26,6 +26,7 @@ pub enum AuthScope {
     /// synthesised `submit_output` tool's visibility — only workflow
     /// agents are expected to terminate via `submit_output`.
     WorkflowStepAgent,
+    WorkflowScript,
     /// Grants access only to [`AuthResource::External`] resources whose name matches.
     External(String),
 }
@@ -89,7 +90,7 @@ impl AuthScope {
                     )
             }
 
-            AuthScope::WorkflowStepAgent => false,
+            AuthScope::WorkflowStepAgent | AuthScope::WorkflowScript => false,
 
             AuthScope::External(name) => {
                 matches!(resource, AuthResource::External(res_name) if res_name == name)
@@ -107,6 +108,7 @@ impl fmt::Display for AuthScope {
             AuthScope::SandboxUse(id) => write!(f, "sandbox:{id}:use"),
             AuthScope::SandboxRead(id) => write!(f, "sandbox:{id}:read"),
             AuthScope::WorkflowStepAgent => f.write_str("workflow:step_agent"),
+            AuthScope::WorkflowScript => f.write_str("workflow:script"),
             AuthScope::External(s) => f.write_str(s),
         }
     }
@@ -118,6 +120,9 @@ impl FromStr for AuthScope {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s == "admin" {
             return Ok(AuthScope::Admin);
+        }
+        if s == "workflow:script" {
+            return Ok(AuthScope::WorkflowScript);
         }
         if s == "workflow:step_agent" {
             return Ok(AuthScope::WorkflowStepAgent);
@@ -204,6 +209,7 @@ mod tests {
             AuthScope::SandboxUse(sb_id),
             AuthScope::SandboxRead(sb_id),
             AuthScope::WorkflowStepAgent,
+            AuthScope::WorkflowScript,
             AuthScope::External("custom:thing".to_owned()),
         ];
 

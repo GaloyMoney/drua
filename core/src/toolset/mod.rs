@@ -130,6 +130,7 @@ fn normalize_for_strict_in_place(value: &mut serde_json::Value) {
 }
 
 pub struct ToolSets {
+    compose: RwLock<Option<Arc<ComposeTool>>>,
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
     top_level: Arc<RwLock<HashMap<String, Arc<dyn TopLevelTool>>>>,
     /// `None` only in tests without a DB pool.
@@ -232,6 +233,7 @@ impl ToolSets {
         }
 
         Ok(Self {
+            compose: RwLock::new(None),
             sets,
             top_level,
             audit,
@@ -284,7 +286,7 @@ impl ToolSets {
 
     /// Register compose once its space-read dependency is available.
     pub fn register_compose(&self, config: ComposeConfig, space_fs: Arc<crate::space_fs::SpaceFs>) {
-        self.register_top_level(ComposeTool::new(
+        let compose = Arc::new(ComposeTool::new(
             Arc::clone(&self.sets),
             Arc::clone(&self.top_level),
             self.audit.clone(),
@@ -292,6 +294,34 @@ impl ToolSets {
             config,
             space_fs,
         ));
+        self.top_level
+            .write()
+            .expect("top_level lock poisoned")
+            .insert("compose".into(), compose.clone());
+        *self.compose.write().expect("compose lock poisoned") = Some(compose);
+    }
+
+    /// Dispatch `compose` for a `script_step`, scoped by `for_script`'s
+    /// per-call overrides. `max_tool_calls`/`timeout_ms` are `None` when
+    /// the step didn't specify one, in which case `for_script` falls
+    /// back to the `script_step` config ceiling.
+    pub(crate) async fn call_compose_for_workflow(
+        &self,
+        subject: &AuthSubject,
+        script: String,
+        max_tool_calls: Option<usize>,
+        timeout_ms: Option<u64>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        let tool = self
+            .compose
+            .read()
+            .expect("compose lock poisoned")
+            .as_ref()
+            .map(|tool| Arc::new(tool.for_script(max_tool_calls, timeout_ms)))
+            .ok_or_else(|| ToolSetsError::ToolNotFound("compose".into()))?;
+        let arguments = JsonObject::from_iter([("script".into(), script.into())]);
+        self.call_top_level_instance(subject, tool, Some(arguments))
+            .await
     }
 
     /// Uses interior mutability so tools can be registered after the
@@ -585,8 +615,6 @@ impl ToolSets {
         name: &str,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        use es_entity::context::{EventContext, WithEventContext};
-
         let tool = {
             let map = self.top_level.read().expect("top_level lock poisoned");
             Arc::clone(
@@ -595,6 +623,18 @@ impl ToolSets {
             )
         };
 
+        self.call_top_level_instance(subject, tool, arguments).await
+    }
+
+    async fn call_top_level_instance(
+        &self,
+        subject: &AuthSubject,
+        tool: Arc<dyn TopLevelTool>,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        use es_entity::context::{EventContext, WithEventContext};
+        let name = tool.name().to_owned();
+        let name = name.as_str();
         let seed = {
             let ctx = EventContext::current();
             ctx.data()
@@ -721,6 +761,7 @@ impl ToolSets {
 
     pub fn empty_for_test() -> Self {
         Self {
+            compose: RwLock::new(None),
             sets: Arc::new(RwLock::new(Vec::new())),
             top_level: Arc::new(RwLock::new(HashMap::new())),
             audit: None,

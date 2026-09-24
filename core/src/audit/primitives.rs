@@ -60,6 +60,7 @@ pub struct AuditContextData {
     pub acting_user_id: Option<UserId>,
     pub acting_agent_id: Option<AgentId>,
     pub on_behalf_of_user_id: Option<UserId>,
+    pub workflow_run_id: Option<WorkflowRunId>,
     #[serde(default)]
     pub resource_ids: serde_json::Map<String, serde_json::Value>,
     pub entrypoint: Option<String>,
@@ -71,9 +72,11 @@ pub struct AuditContextData {
     pub metadata: Option<serde_json::Value>,
 }
 
-/// Unset fields are excluded from the WHERE clause; strings use `ILIKE`.
+/// Unset fields are excluded; entrypoint/action/outcome use ILIKE, resource filters use equality.
 #[derive(Debug, Clone, Default)]
 pub struct AuditLogQuery {
+    pub workflow_run_id: Option<WorkflowRunId>,
+    pub workflow_step: Option<String>,
     pub project_id: Option<ProjectId>,
     pub acting_user_id: Option<UserId>,
     pub acting_agent_id: Option<AgentId>,
@@ -94,6 +97,7 @@ pub struct AuditEntry {
     pub acting_user_id: Option<UserId>,
     pub acting_agent_id: Option<AgentId>,
     pub on_behalf_of_user_id: Option<UserId>,
+    pub workflow_run_id: Option<WorkflowRunId>,
     pub resource_ids: serde_json::Value,
     /// `None` for entries recorded before this column was introduced.
     pub entrypoint: Option<String>,

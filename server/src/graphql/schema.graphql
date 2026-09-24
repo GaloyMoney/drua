@@ -846,7 +846,10 @@ enum WorkflowSandboxKind {
 }
 
 type WorkflowStep {
+	args: Json
 	condition: String
+	entry: String
+	maxToolCalls: Int
 	name: String!
 	outputSchema: Json
 	"""
@@ -864,6 +867,7 @@ type WorkflowStep {
 	resumeCondition: String
 	sandbox: String
 	sandboxMode: SandboxAttachmentMode
+	script: String
 	skill: String
 	stepType: WorkflowStepType!
 	timeoutSeconds: Int
@@ -890,6 +894,7 @@ enum WorkflowStepState {
 
 enum WorkflowStepType {
 	AGENT_STEP
+	SCRIPT_STEP
 	TOOL_STEP
 	WAIT
 }

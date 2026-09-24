@@ -34,6 +34,9 @@ toolsets:
   code_assistant:
     db_path: ''
   compose:
+    script_step:
+      max_tool_calls: 2000
+      timeout_ms: 1800000
     max_script_file_bytes: 262144
     max_script_total_bytes: 1048576
     max_script_loads: 64
