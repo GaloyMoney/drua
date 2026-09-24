@@ -242,6 +242,38 @@ impl Changesets {
         Ok(())
     }
 
+    /// Changesets for `sub`'s own project, newest first, optionally
+    /// filtered to one `status`. §8.1's `changeset list` command.
+    #[instrument(name = "domain.changeset.list", skip(self, sub))]
+    pub async fn list(
+        &self,
+        sub: &AuthSubject,
+        status: Option<ChangesetStatus>,
+    ) -> Result<Vec<Changeset>, ChangesetError> {
+        let project_id = sub.project_id().ok_or(ChangesetError::NoProject)?;
+        let mut out = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self
+                .repo
+                .list_for_project_id_by_created_at(
+                    project_id,
+                    es_entity::PaginatedQueryArgs { first: 200, after },
+                    es_entity::ListDirection::Descending,
+                )
+                .await?;
+            out.extend(page.entities);
+            if !page.has_next_page {
+                break;
+            }
+            after = page.end_cursor;
+        }
+        if let Some(status) = status {
+            out.retain(|cs| cs.status == status);
+        }
+        Ok(out)
+    }
+
     /// Read gate: any subject in the same project (or without a project
     /// context — see the caveat on `check_same_project`) may read
     /// status; write verbs aren't involved.

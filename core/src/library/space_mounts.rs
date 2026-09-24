@@ -100,31 +100,47 @@ impl SpaceMounts {
 
     /// Rendered `<spaces>...</spaces>` system-prompt block for an agent
     /// in `project_id`. `Ok(None)` when no spaces are mounted.
+    /// `can_write_main` — subject-aware per the staged-changesets
+    /// handoff §8.3: `true` (a lead's `ProjectAdmin` scope) keeps
+    /// today's "writes commit automatically" line and offers staging
+    /// as an option; `false` (`Propose`-only — ordinary task/step
+    /// agents) flips the wording so it doesn't promise a write mode
+    /// the subject doesn't have.
     #[instrument(name = "library.space_mounts.spaces_block_for_project", skip(self))]
     pub async fn spaces_block_for_project(
         &self,
         project_id: ProjectId,
+        can_write_main: bool,
     ) -> Result<Option<String>, SpaceMountsError> {
         let spaces = self.spaces_for_project(project_id).await?;
-        Ok(render_spaces_block(&spaces))
+        Ok(render_spaces_block(&spaces, can_write_main))
     }
 }
 
-fn render_spaces_block(spaces: &[Space]) -> Option<String> {
+fn render_spaces_block(spaces: &[Space], can_write_main: bool) -> Option<String> {
     if spaces.is_empty() {
         return None;
     }
     let total = spaces.len();
 
-    let header = "<spaces>\n\
+    let write_line = if can_write_main {
+        "Writes commit to the upstream library automatically, or stage \
+         them with the `changeset` tool for review.\n"
+    } else {
+        "Writes to these spaces must be staged: open a changeset with \
+         the `changeset` tool before editing; the file tools then read \
+         and write your changeset automatically.\n"
+    };
+    let header = format!(
+        "<spaces>\n\
          This project has the following knowledge spaces mounted — \
          collaborative folders backed by a shared library. Use the \
          file tools (Read, LS, Glob, Grep, Edit, Move, Delete) with \
          paths prefixed `space:<slug>/` to read or write their \
-         contents. Writes commit to the upstream library automatically; \
-         no sandbox attachment is required.\n";
+         contents. {write_line}"
+    );
 
-    let mut buf = String::from(header);
+    let mut buf = header;
     for s in spaces.iter().take(SPACES_BLOCK_LIMIT) {
         match s.description.as_deref() {
             Some(d) if !d.is_empty() => {

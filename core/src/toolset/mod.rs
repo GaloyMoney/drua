@@ -13,10 +13,10 @@ pub use config::*;
 pub use error::*;
 pub use searchable::*;
 pub use top_level::{
-    Bash, CallCatalogTool, ComposeTool, ComposeTypes, Delete, DescribeCatalogTool, GlobTool, Grep,
-    Ls, MoveFile, NotesTool, ProjectAgent, ProjectLog, ProjectSandbox, Read, SearchCatalog,
-    SkillTool, SpacesTool, SubmitOutputTool, TextEditor, ToolOutputFetch, UseSkillTool, WhoAmI,
-    WorkflowTool,
+    Bash, CallCatalogTool, ChangesetTool, ComposeTool, ComposeTypes, Delete, DescribeCatalogTool,
+    GlobTool, Grep, Ls, MoveFile, NotesTool, ProjectAgent, ProjectLog, ProjectSandbox, Read,
+    SearchCatalog, SkillTool, SpacesTool, SubmitOutputTool, TextEditor, ToolOutputFetch,
+    UseSkillTool, WhoAmI, WorkflowTool,
 };
 pub use traits::*;
 pub use tunnel::*;

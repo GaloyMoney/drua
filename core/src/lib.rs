@@ -49,9 +49,10 @@ use prompt_executor::PromptExecutor;
 use sandbox::Sandboxes;
 use skill::Skills;
 use toolset::{
-    AdminToolSet, Bash, CodeAssistantToolSet, Delete, GlobTool, Grep, LibraryToolSet, Ls, MoveFile,
-    NotesTool, ProjectAgent, ProjectLog, ProjectSandbox, Read, SkillTool, SpacesTool,
-    SubmitOutputTool, TextEditor, ToolSets, ToolSetsError, UseSkillTool, WorkflowTool,
+    AdminToolSet, Bash, ChangesetTool, CodeAssistantToolSet, Delete, GlobTool, Grep,
+    LibraryToolSet, Ls, MoveFile, NotesTool, ProjectAgent, ProjectLog, ProjectSandbox, Read,
+    SkillTool, SpacesTool, SubmitOutputTool, TextEditor, ToolSets, ToolSetsError, UseSkillTool,
+    WorkflowTool,
 };
 use tracing::instrument;
 use user::Users;
@@ -342,6 +343,7 @@ impl App {
             Arc::clone(&space_fs),
             Arc::clone(&search),
         ));
+        toolsets.register_top_level(ChangesetTool::new(Arc::clone(&changesets)));
         toolsets.register_top_level(ProjectSandbox::new(Arc::clone(&sandboxes)));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&projects)));
         toolsets.register_top_level(UseSkillTool::new(Arc::clone(&skills)));

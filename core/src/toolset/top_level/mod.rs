@@ -206,6 +206,7 @@ pub(super) fn render_detailed(
 mod agent;
 mod bash;
 mod catalog;
+mod changeset;
 mod compose;
 mod compose_types;
 mod delete;
@@ -229,6 +230,7 @@ mod workflow;
 pub use agent::ProjectAgent;
 pub use bash::Bash;
 pub use catalog::{CallCatalogTool, DescribeCatalogTool, SearchCatalog};
+pub use changeset::ChangesetTool;
 pub use compose::ComposeTool;
 pub use compose_types::ComposeTypes;
 pub use delete::Delete;
