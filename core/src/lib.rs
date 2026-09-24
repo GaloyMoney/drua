@@ -281,6 +281,7 @@ impl App {
             Arc::clone(&sandboxes),
             Arc::clone(&users),
             Arc::clone(&toolsets),
+            compose_config.script_step,
             &mut jobs,
         ));
 

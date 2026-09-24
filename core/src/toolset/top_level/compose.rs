@@ -39,16 +39,22 @@ pub struct ComposeTool {
 }
 
 impl ComposeTool {
-    pub(crate) fn script_step_limits(&self) -> super::super::ScriptStepLimits {
-        self.config.script_step
-    }
-
-    pub(crate) fn with_limits(&self, limits: super::super::ScriptStepLimits) -> Self {
+    /// Instance scoped to a `script_step` dispatch: `max_tool_calls` and
+    /// `timeout_ms` are overridden up to (never beyond) the
+    /// `script_step` config ceiling; `None` uses the ceiling itself.
+    /// Every other config field (memory/stack/console/return limits,
+    /// loader budgets) is unchanged — those aren't per-step overridable.
+    pub(crate) fn for_script(
+        &self,
+        max_tool_calls: Option<usize>,
+        timeout_ms: Option<u64>,
+    ) -> Self {
+        let ceiling = self.config.script_step;
         let mut tool = self.clone();
-        tool.config.max_tool_calls = limits
-            .max_tool_calls
-            .min(self.config.script_step.max_tool_calls);
-        tool.config.timeout_ms = limits.timeout_ms.min(self.config.script_step.timeout_ms);
+        tool.config.max_tool_calls =
+            max_tool_calls.map_or(ceiling.max_tool_calls, |v| v.min(ceiling.max_tool_calls));
+        tool.config.timeout_ms =
+            timeout_ms.map_or(ceiling.timeout_ms, |v| v.min(ceiling.timeout_ms));
         tool
     }
 
@@ -847,6 +853,52 @@ fn with_hint(tool_name: &str, raw: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_tool(script_step: super::super::super::ScriptStepLimits) -> ComposeTool {
+        ComposeTool::without_space_fs_for_test(
+            Arc::new(RwLock::new(Vec::new())),
+            Arc::new(RwLock::new(HashMap::new())),
+            None,
+            None,
+            ComposeConfig {
+                script_step,
+                ..ComposeConfig::default()
+            },
+        )
+    }
+
+    #[test]
+    fn for_script_falls_back_to_ceiling_when_unset() {
+        let ceiling = super::super::super::ScriptStepLimits {
+            max_tool_calls: 2000,
+            timeout_ms: 1_800_000,
+        };
+        let scoped = test_tool(ceiling).for_script(None, None);
+        assert_eq!(scoped.config.max_tool_calls, ceiling.max_tool_calls);
+        assert_eq!(scoped.config.timeout_ms, ceiling.timeout_ms);
+    }
+
+    #[test]
+    fn for_script_keeps_an_override_under_the_ceiling() {
+        let ceiling = super::super::super::ScriptStepLimits {
+            max_tool_calls: 2000,
+            timeout_ms: 1_800_000,
+        };
+        let scoped = test_tool(ceiling).for_script(Some(10), Some(5_000));
+        assert_eq!(scoped.config.max_tool_calls, 10);
+        assert_eq!(scoped.config.timeout_ms, 5_000);
+    }
+
+    #[test]
+    fn for_script_clamps_an_override_above_the_ceiling() {
+        let ceiling = super::super::super::ScriptStepLimits {
+            max_tool_calls: 2000,
+            timeout_ms: 1_800_000,
+        };
+        let scoped = test_tool(ceiling).for_script(Some(999_999), Some(999_999_999));
+        assert_eq!(scoped.config.max_tool_calls, ceiling.max_tool_calls);
+        assert_eq!(scoped.config.timeout_ms, ceiling.timeout_ms);
+    }
 
     #[test]
     fn with_hint_appends_compose_types_suggestion() {

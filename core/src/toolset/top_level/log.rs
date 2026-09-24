@@ -117,6 +117,8 @@ struct AuditEntryOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     on_behalf_of_user_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    workflow_run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     resource_ids: Option<serde_json::Value>,
 }
 
@@ -141,6 +143,7 @@ impl From<&AuditEntry> for AuditEntryOutput {
             acting_user_id: e.acting_user_id.map(|id| id.to_string()),
             acting_agent_id: e.acting_agent_id.map(|id| id.to_string()),
             on_behalf_of_user_id: e.on_behalf_of_user_id.map(|id| id.to_string()),
+            workflow_run_id: e.workflow_run_id.map(|id| id.to_string()),
             resource_ids,
         }
     }

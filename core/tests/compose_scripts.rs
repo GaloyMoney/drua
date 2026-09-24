@@ -937,6 +937,7 @@ return {
     for entry in &entries {
         assert!(entry.acting_agent_id.is_none());
         assert!(entry.acting_user_id.is_none());
+        assert_eq!(entry.workflow_run_id, Some(run_id));
     }
     let log = app
         .toolsets()

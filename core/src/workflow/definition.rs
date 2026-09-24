@@ -30,6 +30,18 @@ pub enum OutputSchemaError {
     NotObjectRoot,
 }
 
+/// Defence-in-depth check on top of provider-side `strict: true`.
+/// Type/enum/nested validation is the model's job (strict mode); this
+/// catches degraded providers that ignore strict, and non-model
+/// producers (`script_step`) that have no strict-mode guarantee at all.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum OutputValidationError {
+    #[error("expected JSON object")]
+    NotObject,
+    #[error("missing required field `{0}`")]
+    MissingRequired(String),
+}
+
 impl OutputSchema {
     pub fn new(mut schema: RootSchema) -> Result<Self, OutputSchemaError> {
         match &schema.schema.instance_type {
@@ -75,6 +87,72 @@ impl OutputSchema {
 
     pub fn root_schema(&self) -> &RootSchema {
         &self.0
+    }
+
+    /// Confirms `value` is a JSON object and has every key listed in
+    /// `schema.required`.
+    pub fn validate(&self, value: &serde_json::Value) -> Result<(), OutputValidationError> {
+        let obj = value.as_object().ok_or(OutputValidationError::NotObject)?;
+        if let Some(object) = self.0.schema.object.as_ref() {
+            for required in &object.required {
+                if !obj.contains_key(required) {
+                    return Err(OutputValidationError::MissingRequired(required.clone()));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod output_schema_validation_tests {
+    use super::*;
+
+    fn schema(json: serde_json::Value) -> OutputSchema {
+        let root: RootSchema = serde_json::from_value(json).unwrap();
+        OutputSchema::new(root).unwrap()
+    }
+
+    #[test]
+    fn validates_object_with_required_fields() {
+        let s = schema(serde_json::json!({
+            "type": "object",
+            "required": ["a", "b"],
+            "properties": {
+                "a": { "type": "string" },
+                "b": { "type": "boolean" }
+            }
+        }));
+        let value = serde_json::json!({ "a": "hi", "b": true, "success": true });
+        s.validate(&value).unwrap();
+    }
+
+    #[test]
+    fn rejects_non_object_value() {
+        let s = schema(serde_json::json!({ "type": "object" }));
+        let err = s.validate(&serde_json::json!("oops")).unwrap_err();
+        assert_eq!(err, OutputValidationError::NotObject);
+    }
+
+    #[test]
+    fn reports_missing_required_field() {
+        let s = schema(serde_json::json!({
+            "type": "object",
+            "required": ["a", "b"],
+        }));
+        let err = s.validate(&serde_json::json!({ "a": "only" })).unwrap_err();
+        assert_eq!(err, OutputValidationError::MissingRequired("b".to_string()));
+    }
+
+    #[test]
+    fn minimal_schema_still_requires_success() {
+        let s = schema(serde_json::json!({ "type": "object" }));
+        let err = s.validate(&serde_json::json!({})).unwrap_err();
+        assert_eq!(
+            err,
+            OutputValidationError::MissingRequired("success".to_string())
+        );
+        s.validate(&serde_json::json!({ "success": true })).unwrap();
     }
 }
 

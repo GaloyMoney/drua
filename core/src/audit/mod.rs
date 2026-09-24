@@ -64,7 +64,7 @@ impl Audit {
                 ctx.on_behalf_of_user_id = None;
                 Self::set_resource_id(ctx, "project_id", *project_id);
                 Self::set_resource_id(ctx, "workflow_id", *definition_id);
-                Self::set_resource_id(ctx, "workflow_run_id", *run_id);
+                ctx.workflow_run_id = Some(*run_id);
             }
             AuthSubject::Anonymous => {}
         });
@@ -139,7 +139,7 @@ impl Audit {
     }
 
     pub fn record_workflow_run_id(workflow_run_id: WorkflowRunId) {
-        Self::update_context(|ctx| Self::set_resource_id(ctx, "workflow_run_id", workflow_run_id));
+        Self::update_context(|ctx| ctx.workflow_run_id = Some(workflow_run_id));
     }
 
     pub fn record_outcome(outcome: InteractionOutcome) {
@@ -212,7 +212,7 @@ impl Audit {
         };
         if ctx_data.acting_user_id.is_none()
             && ctx_data.acting_agent_id.is_none()
-            && !ctx_data.resource_ids.contains_key("workflow_run_id")
+            && ctx_data.workflow_run_id.is_none()
         {
             return;
         }
@@ -233,6 +233,7 @@ impl Audit {
                 acting_user_id AS "acting_user_id: UserId",
                 acting_agent_id AS "acting_agent_id: AgentId",
                 on_behalf_of_user_id AS "on_behalf_of_user_id: UserId",
+                workflow_run_id AS "workflow_run_id: WorkflowRunId",
                 resource_ids AS "resource_ids: serde_json::Value",
                 entrypoint,
                 interaction_type,
@@ -268,7 +269,7 @@ impl Audit {
         let outcome = query.outcome.as_deref();
         let error = query.error;
         let limit = query.limit;
-        let workflow_run_id = query.workflow_run_id.map(|id| id.to_string());
+        let workflow_run_id = query.workflow_run_id.map(uuid::Uuid::from);
         let workflow_step = query.workflow_step.as_deref();
 
         let rows = sqlx::query_as!(
@@ -278,6 +279,7 @@ impl Audit {
                 acting_user_id AS "acting_user_id: UserId",
                 acting_agent_id AS "acting_agent_id: AgentId",
                 on_behalf_of_user_id AS "on_behalf_of_user_id: UserId",
+                workflow_run_id AS "workflow_run_id: WorkflowRunId",
                 resource_ids AS "resource_ids: serde_json::Value",
                 entrypoint,
                 interaction_type,
@@ -299,7 +301,7 @@ impl Audit {
               AND ($7::text IS NULL OR action ILIKE $7)
               AND ($8::text IS NULL OR outcome ILIKE $8)
               AND ($9::bool IS NULL OR error = $9)
-              AND ($11::text IS NULL OR resource_ids->>'workflow_run_id' = $11)
+              AND ($11::uuid IS NULL OR workflow_run_id = $11)
               AND ($12::text IS NULL OR resource_ids->>'workflow_step' = $12)
             ORDER BY id DESC
             LIMIT $10"#,
@@ -313,7 +315,7 @@ impl Audit {
             outcome,
             error,
             limit,
-            workflow_run_id.as_deref(),
+            workflow_run_id,
             workflow_step,
         )
         .fetch_all(&self.pool)
@@ -330,6 +332,7 @@ impl Audit {
         let acting_user_id = ctx.acting_user_id.map(uuid::Uuid::from);
         let acting_agent_id = ctx.acting_agent_id.map(uuid::Uuid::from);
         let on_behalf_of = ctx.on_behalf_of_user_id.map(uuid::Uuid::from);
+        let workflow_run_id = ctx.workflow_run_id.map(uuid::Uuid::from);
         let resource_ids = serde_json::Value::Object(ctx.resource_ids.clone());
         let entrypoint = ctx.entrypoint.clone();
         let itype = ctx
@@ -352,15 +355,16 @@ impl Audit {
         let row = sqlx::query_as!(
             AuditEntry,
             r#"INSERT INTO audit_entries
-                (acting_user_id, acting_agent_id, on_behalf_of_user_id,
+                (acting_user_id, acting_agent_id, on_behalf_of_user_id, workflow_run_id,
                  resource_ids, entrypoint, interaction_type, action, metadata,
                  outcome, error, error_message, duration_ms, tokens_returned)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             RETURNING
                 id AS "id: AuditEntryId",
                 acting_user_id AS "acting_user_id: UserId",
                 acting_agent_id AS "acting_agent_id: AgentId",
                 on_behalf_of_user_id AS "on_behalf_of_user_id: UserId",
+                workflow_run_id AS "workflow_run_id: WorkflowRunId",
                 resource_ids AS "resource_ids: serde_json::Value",
                 entrypoint,
                 interaction_type,
@@ -375,6 +379,7 @@ impl Audit {
             acting_user_id,
             acting_agent_id,
             on_behalf_of,
+            workflow_run_id,
             resource_ids,
             entrypoint,
             itype,

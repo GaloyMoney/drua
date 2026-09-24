@@ -12,7 +12,6 @@ pub(crate) mod wrap;
 pub use config::*;
 pub use error::*;
 pub use searchable::*;
-pub(crate) use top_level::submit_output::validate_against_schema;
 pub use top_level::{
     Bash, CallCatalogTool, ComposeTool, ComposeTypes, Delete, DescribeCatalogTool, GlobTool, Grep,
     Ls, MoveFile, NotesTool, ProjectAgent, ProjectLog, ProjectSandbox, Read, SearchCatalog,
@@ -302,27 +301,23 @@ impl ToolSets {
         *self.compose.write().expect("compose lock poisoned") = Some(compose);
     }
 
-    pub fn script_step_limits(&self) -> ScriptStepLimits {
-        self.compose
-            .read()
-            .expect("compose lock poisoned")
-            .as_ref()
-            .map(|tool| tool.script_step_limits())
-            .unwrap_or_default()
-    }
-
+    /// Dispatch `compose` for a `script_step`, scoped by `for_script`'s
+    /// per-call overrides. `max_tool_calls`/`timeout_ms` are `None` when
+    /// the step didn't specify one, in which case `for_script` falls
+    /// back to the `script_step` config ceiling.
     pub(crate) async fn call_compose_for_workflow(
         &self,
         subject: &AuthSubject,
         script: String,
-        limits: ScriptStepLimits,
+        max_tool_calls: Option<usize>,
+        timeout_ms: Option<u64>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let tool = self
             .compose
             .read()
             .expect("compose lock poisoned")
             .as_ref()
-            .map(|tool| Arc::new(tool.with_limits(limits)))
+            .map(|tool| Arc::new(tool.for_script(max_tool_calls, timeout_ms)))
             .ok_or_else(|| ToolSetsError::ToolNotFound("compose".into()))?;
         let arguments = JsonObject::from_iter([("script".into(), script.into())]);
         self.call_top_level_instance(subject, tool, Some(arguments))

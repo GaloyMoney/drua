@@ -142,7 +142,7 @@ impl Executor {
         });
 
         // Stamp every audit row recorded during this run so they can be
-        // queried by `resource_ids->>'workflow_run_id'`.
+        // queried by the `workflow_run_id` column.
         crate::audit::Audit::record_project_id(project_id);
         crate::audit::Audit::record_workflow_id(workflow_id);
         crate::audit::Audit::record_workflow_run_id(run_id);
@@ -679,21 +679,25 @@ impl Executor {
                     &args,
                     &run_context,
                 );
-                let mut limits = self.toolsets.script_step_limits();
-                limits.max_tool_calls = max_tool_calls
-                    .unwrap_or(limits.max_tool_calls)
-                    .min(limits.max_tool_calls);
-                limits.timeout_ms = timeout_seconds
+                // `timeout_seconds` unset falls back to the same
+                // `DEFAULT_TOOL_STEP_TIMEOUT_SECS` a `tool_step` uses;
+                // `for_script` clamps whatever we pass to the configured
+                // `script_step` ceiling, so no separate clamp is needed
+                // here.
+                let timeout_ms = timeout_seconds
                     .unwrap_or(DEFAULT_TOOL_STEP_TIMEOUT_SECS)
-                    .saturating_mul(1000)
-                    .min(limits.timeout_ms);
+                    .saturating_mul(1000);
                 let subject = AuthSubject::workflow_script(project_id, workflow_id, run_id);
                 let envelope = dispatch_step(
                     name,
                     "compose",
-                    Duration::from_millis(limits.timeout_ms),
-                    self.toolsets
-                        .call_compose_for_workflow(&subject, source, limits),
+                    None,
+                    self.toolsets.call_compose_for_workflow(
+                        &subject,
+                        source,
+                        *max_tool_calls,
+                        Some(timeout_ms),
+                    ),
                     "",
                     true,
                 )
@@ -706,12 +710,12 @@ impl Executor {
                             step: name.clone(),
                             reason: "compose returned no result".into(),
                         })?;
-                crate::toolset::validate_against_schema(output_schema, &output).map_err(
-                    |reason| WorkflowError::StepErrored {
+                output_schema
+                    .validate(&output)
+                    .map_err(|e| WorkflowError::StepErrored {
                         step: name.clone(),
-                        reason,
-                    },
-                )?;
+                        reason: e.to_string(),
+                    })?;
                 Ok(output)
             }
             WorkflowStepDef::ToolStep {
@@ -971,7 +975,15 @@ impl Executor {
         let call = self
             .toolsets
             .call_top_level_tool(&subject, tool_name, arguments);
-        dispatch_step(step_name, tool_name, timeout, call, &diagnose(), false).await
+        dispatch_step(
+            step_name,
+            tool_name,
+            Some(timeout),
+            call,
+            &diagnose(),
+            false,
+        )
+        .await
     }
 
     async fn detach_step_sandbox(&self, sandbox_id: SandboxId, agent_id: AgentId) {
@@ -1023,10 +1035,16 @@ return await __fn({args}, {run});"#
     )
 }
 
+/// `timeout` is `None` for a script step: the compose engine already
+/// wraps the whole script execution in its own `tokio::time::timeout`
+/// (scoped by `ComposeTool::for_script`'s effective `timeout_ms`) plus
+/// an interrupt handler, so a second, outer timeout here is redundant
+/// belt-and-braces for a future that only ever resolves through the
+/// engine. `tool_step` dispatch always passes `Some` and is unchanged.
 async fn dispatch_step(
     step: &str,
     tool: &str,
-    timeout: Duration,
+    timeout: Option<Duration>,
     call: impl std::future::Future<
         Output = Result<rmcp::model::CallToolResult, crate::toolset::ToolSetsError>,
     >,
@@ -1041,20 +1059,26 @@ async fn dispatch_step(
             reason
         },
     };
-    let result = match tokio::time::timeout(timeout, call).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(e)) if !script => {
+    let dispatch_result = match timeout {
+        Some(timeout) => match tokio::time::timeout(timeout, call).await {
+            Ok(outcome) => outcome,
+            Err(_) => {
+                return Err(error(format!(
+                    "tool '{tool}' timed out after {}ms",
+                    timeout.as_millis()
+                )))
+            }
+        },
+        None => call.await,
+    };
+    let result = match dispatch_result {
+        Ok(result) => result,
+        Err(e) if !script => {
             return Err(WorkflowError::ToolDispatch(format!(
                 "tool '{tool}': {e}{diagnostics}"
             )))
         }
-        Ok(Err(e)) => return Err(error(format!("tool '{tool}': {e}{diagnostics}"))),
-        Err(_) => {
-            return Err(error(format!(
-                "tool '{tool}' timed out after {}ms",
-                timeout.as_millis()
-            )))
-        }
+        Err(e) => return Err(error(format!("tool '{tool}': {e}{diagnostics}"))),
     };
     if result.is_error.unwrap_or(false) {
         let detail = first_text_content(&result)
@@ -1122,12 +1146,16 @@ mod script_step_tests {
         assert_eq!(output.value["run"], run);
     }
 
+    /// `dispatch_step`'s own `Some(timeout)` branch, used by `tool_step`
+    /// dispatch (script steps pass `None` and rely on the compose
+    /// engine's internal timeout instead — see `dispatch_step`'s doc
+    /// comment).
     #[tokio::test]
-    async fn executor_timeout_bounds_a_dispatch_that_does_not_abort() {
+    async fn dispatch_step_bounds_a_call_that_does_not_resolve() {
         let error = dispatch_step(
             "slow",
             "compose",
-            Duration::from_millis(1),
+            Some(Duration::from_millis(1)),
             std::future::pending(),
             "",
             true,
@@ -1137,5 +1165,27 @@ mod script_step_tests {
         assert!(matches!(error, WorkflowError::StepErrored { .. }));
         assert!(error.to_string().contains("timed out"));
         assert!(error.to_string().contains("side effects may have occurred"));
+    }
+
+    /// `None` skips the outer bound entirely — the future must resolve
+    /// (or hang) on its own. Proves `dispatch_step` doesn't silently
+    /// impose a default when no timeout is given.
+    #[tokio::test]
+    async fn dispatch_step_without_timeout_awaits_the_call_directly() {
+        let result = dispatch_step(
+            "no-timeout",
+            "compose",
+            None,
+            async {
+                let mut ctr = rmcp::model::CallToolResult::success(Vec::new());
+                ctr.structured_content = Some(serde_json::json!({"success": true}));
+                Ok(ctr)
+            },
+            "",
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, serde_json::json!({"success": true}));
     }
 }
