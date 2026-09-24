@@ -116,10 +116,13 @@ you have been given.
 <assigned_skill_already_invoked>
 Your assigned skill for this step has already been invoked — its fully \
 resolved instructions (with this run's trigger and prior step outputs \
-already filled in) are the first message in this conversation. Calling \
-`use_skill` again for that same skill with no new arguments is safe but \
-unnecessary: it replays those exact instructions rather than reloading \
-anything new. Invoking a different skill remains supported.
+already filled in) are the first message in this conversation. Do NOT \
+call `use_skill` again for that same skill: reloading it does not \
+replay those resolved instructions and can return unresolved \
+placeholder text instead of the real values. If you need to recall \
+what you were asked to do, re-read the first message in this \
+conversation rather than reloading the skill. Invoking a *different* \
+skill via `use_skill` remains supported.
 </assigned_skill_already_invoked>
 
 <default_to_action>
@@ -301,14 +304,13 @@ mod tests {
         assert!(role_text.contains("reason"));
     }
 
-    /// Acceptance test 9 (handoff: preserve workflow template context
-    /// when use_skill reloads a skill) — the workflow role guidance
-    /// must tell the step agent its assigned skill is already invoked,
-    /// so a repeat `use_skill` call reads as safe-but-unnecessary
-    /// rather than something it's expected to do. submit_output stays
-    /// mandatory regardless.
+    /// `use_skill(invoke, name: "<assigned skill>")` reloads the raw
+    /// skill body without workflow context — the workflow role
+    /// guidance must actively discourage that repeat call (not merely
+    /// note it's unnecessary) rather than let the model stumble into
+    /// it. `finish_with_submit_output` guidance stays present too.
     #[test]
-    fn workflow_role_header_states_assigned_skill_already_invoked() {
+    fn workflow_role_header_discourages_reinvoking_the_assigned_skill() {
         use crate::workflow::default_output_schema;
         let toolsets = toolsets_for_test();
         let subject = AuthSubject::Anonymous;
@@ -322,6 +324,7 @@ mod tests {
         );
         let role_text = blocks[3].text();
         assert!(role_text.contains("already been invoked"));
+        assert!(role_text.contains("Do NOT"));
         assert!(role_text.contains("use_skill"));
         assert!(role_text.contains("finish_with_submit_output"));
         assert!(role_text.contains("submit_output"));

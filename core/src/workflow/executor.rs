@@ -19,7 +19,7 @@ use crate::toolset::ToolSets;
 use super::definition::{WorkflowSandboxDecl, WorkflowStepDef};
 use super::error::WorkflowError;
 use super::repo::WorkflowDefinitionRepo;
-use super::run::WorkflowRunRepo;
+use super::run::{StepResult, WorkflowRunRepo};
 use super::template::{
     format_template_diagnostics, template_diagnostics, ConditionOutcome, TemplateContext,
 };
@@ -31,6 +31,32 @@ const SANDBOX_READY_TIMEOUT: Duration = Duration::from_secs(180);
 /// Default per-`ToolStep` dispatch timeout when the step doesn't
 /// specify one. Same shape as the agent step's idle timeout default.
 const DEFAULT_TOOL_STEP_TIMEOUT_SECS: u64 = 300;
+
+/// Build the `steps` slice of the template context from the run's
+/// recorded step results. Completed steps surface their structured
+/// `output`; skipped / errored / pending steps surface as
+/// `Value::Null`. Including the latter keeps CEL from raising
+/// `NoSuchKey` when a downstream `${{ steps.<skipped>.outputs.X }}`
+/// or `condition: steps.<skipped>.outputs.X` refers to a step that
+/// didn't produce one — the access becomes `null.outputs.X` which
+/// CEL coerces to `false` per the same quirk documented at
+/// `template::TemplateContext::build_cel_context`. Net effect: the
+/// "downstream null-coalesce" contract documented in memo
+/// `019e06a1` falls out for free.
+fn collect_step_outputs(results: &[StepResult]) -> HashMap<String, serde_json::Value> {
+    let mut out = HashMap::with_capacity(results.len());
+    for r in results {
+        match &r.output {
+            Some(value) => {
+                out.insert(r.name.clone(), value.clone());
+            }
+            None => {
+                out.insert(r.name.clone(), serde_json::Value::Null);
+            }
+        }
+    }
+    out
+}
 
 fn first_text_content(result: &rmcp::model::CallToolResult) -> Option<String> {
     result.content.iter().find_map(|c| match &c.raw {
@@ -109,7 +135,11 @@ impl Executor {
         let workflow_id = run.definition_id;
         let trigger_context = run.trigger_context.clone();
         let steps = run.steps_snapshot.clone();
-        let run_context = run.base_run_context();
+        let run_context = serde_json::json!({
+            "id": run_id.to_string(),
+            "started_at": run.started_at().to_rfc3339(),
+            "date": run.started_at().format("%Y-%m-%d").to_string(),
+        });
 
         // Stamp every audit row recorded during this run so they can be
         // queried by the `workflow_run_id` column.
@@ -174,7 +204,7 @@ impl Executor {
             // validation guarantees the body compiles, so an `Err`
             // here is a CEL runtime error (type mismatch, etc.).
             if let Some(body) = step.condition() {
-                let step_outputs = run.step_outputs_snapshot();
+                let step_outputs = collect_step_outputs(&run.step_results);
                 let ctx = TemplateContext {
                     trigger: &trigger_context,
                     steps: &step_outputs,
@@ -228,7 +258,7 @@ impl Executor {
                 self.runs.update(&mut run).await?;
             }
 
-            let step_outputs = run.step_outputs_snapshot();
+            let step_outputs = collect_step_outputs(&run.step_results);
             let step_context = EventContext::current().data();
             let outcome = self
                 .execute_step(
@@ -522,11 +552,6 @@ impl Executor {
                     .map_err(|e| WorkflowError::Skill(e.to_string()))?
                     .ok_or_else(|| WorkflowError::SkillNotFound(skill.clone()))?
                     .into();
-                // Observability only — lets an operator tell whether a
-                // later library edit changed the skill this run started
-                // with. Not consulted by the reload logic itself, which
-                // replays the persisted initial prompt verbatim.
-                let raw_body_revision = drua_library::GitFileHash::new(&raw_body).to_string();
                 let template_ctx = TemplateContext {
                     trigger: trigger_context,
                     steps: step_outputs,
@@ -587,9 +612,6 @@ impl Executor {
                             attach_sandbox,
                             chain_override,
                             output_schema.as_ref().clone(),
-                            name.clone(),
-                            skill.clone(),
-                            raw_body_revision,
                         )
                         .await?;
                     (agent, detached_agents)

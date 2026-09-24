@@ -85,38 +85,6 @@ impl CachedAgentContext {
     }
 }
 
-/// Trusted association between a workflow-step agent and the skill it
-/// was spawned to run, resolved from the authenticated agent's own
-/// persisted state (see [`Agents::workflow_context`]) — never from
-/// caller-supplied tool arguments.
-#[derive(Debug, Clone)]
-pub struct WorkflowStepInvocation {
-    pub agent_id: AgentId,
-    pub project_id: ProjectId,
-    pub sandbox_id: Option<SandboxId>,
-    pub workflow_id: WorkflowDefinitionId,
-    pub workflow_run_id: WorkflowRunId,
-    pub step_name: String,
-    pub assigned_skill: String,
-}
-
-/// Result of [`Agents::workflow_context`] — distinguishes an ordinary
-/// (non-workflow) agent from a workflow step agent whose invocation
-/// association is or isn't recoverable, so `use_skill` can tell "no
-/// context to trust" apart from "not a workflow agent at all".
-#[derive(Debug, Clone)]
-pub enum AgentWorkflowContext {
-    /// Not a workflow-step agent.
-    None,
-    /// A workflow-step agent created before `workflow_step` /
-    /// `assigned_skill` were tracked (or otherwise missing them) — a
-    /// skill that needs workflow templates must not be reloaded as if
-    /// resolved.
-    Legacy,
-    /// Full trusted association.
-    Invocation(WorkflowStepInvocation),
-}
-
 #[derive(Clone)]
 pub struct Agents {
     repo: AgentRepo,
@@ -289,9 +257,6 @@ impl Agents {
                 None,
                 None,
                 None,
-                None,
-                None,
-                None,
             )
             .await?;
         op.commit().await?;
@@ -328,9 +293,6 @@ impl Agents {
                 None,
                 chain_override,
                 None,
-                None,
-                None,
-                None,
             )
             .await?;
         op.commit().await?;
@@ -341,13 +303,6 @@ impl Agents {
     /// is what excludes the agent from [`Self::list_for_project`].
     /// `output_schema` is persisted on the agent entity; the
     /// `submit_output` tool reads it at call time to validate args.
-    ///
-    /// `step_name` / `assigned_skill` / `assigned_skill_revision` are the
-    /// trusted workflow-skill-invocation association — `use_skill` resolves
-    /// it back from the authenticated agent's own persisted row (never from
-    /// caller-supplied tool arguments) so re-invoking the assigned skill mid
-    /// step replays the exact snapshot rendered here rather than the
-    /// unresolved raw body.
     #[allow(clippy::too_many_arguments)]
     #[instrument(name = "domain.agent.create_for_workflow_run_in_op", skip(self, op))]
     pub async fn create_for_workflow_run_in_op(
@@ -360,9 +315,6 @@ impl Agents {
         attach_sandbox: Option<(SandboxId, SandboxAgentMode)>,
         chain_override: Option<llm::ModelChain>,
         output_schema: crate::workflow::OutputSchema,
-        step_name: impl Into<String> + std::fmt::Debug,
-        assigned_skill: impl Into<String> + std::fmt::Debug,
-        assigned_skill_revision: impl Into<String> + std::fmt::Debug,
     ) -> Result<Agent, AgentError> {
         Audit::record_action_if_unset("agent.create_for_workflow_run");
         Audit::record_project_id(project_id);
@@ -383,9 +335,6 @@ impl Agents {
             Some(workflow_run_id),
             chain_override,
             Some(output_schema),
-            Some(step_name.into()),
-            Some(assigned_skill.into()),
-            Some(assigned_skill_revision.into()),
         )
         .await
     }
@@ -434,9 +383,6 @@ impl Agents {
             None,
             None,
             None,
-            None,
-            None,
-            None,
         )
         .await
     }
@@ -456,9 +402,6 @@ impl Agents {
         workflow_run_id: Option<WorkflowRunId>,
         chain_override: Option<llm::ModelChain>,
         output_schema: Option<crate::workflow::OutputSchema>,
-        workflow_step: Option<String>,
-        assigned_skill: Option<String>,
-        assigned_skill_revision: Option<String>,
     ) -> Result<Agent, AgentError> {
         let role_config = self
             .config
@@ -483,15 +426,6 @@ impl Agents {
         }
         if let Some(run_id) = workflow_run_id {
             new_agent_builder.workflow_run_id(run_id);
-        }
-        if let Some(step) = workflow_step {
-            new_agent_builder.workflow_step(step);
-        }
-        if let Some(skill) = assigned_skill {
-            new_agent_builder.assigned_skill(skill);
-        }
-        if let Some(revision) = assigned_skill_revision {
-            new_agent_builder.assigned_skill_revision(revision);
         }
         let new_agent = new_agent_builder.build().expect("NewAgent build");
 
@@ -674,51 +608,6 @@ impl Agents {
     ) -> Result<Option<crate::workflow::OutputSchema>, AgentError> {
         let agent = self.repo.find_by_id(agent_id).await?;
         Ok(agent.output_schema.clone())
-    }
-
-    /// Resolves `agent_id`'s trusted workflow-skill-invocation
-    /// association, read entirely from the authenticated agent's own
-    /// persisted row — never from caller-supplied tool arguments, so a
-    /// forged `run_id`/`project_id` on a tool call can't select another
-    /// run's context. `agent_id` itself must come from
-    /// `AuthSubject::acting_agent_id()`, which is only ever populated
-    /// server-side from a real persisted [`Agent`] (see
-    /// `Agent::auth_subject`/`auth_subject_for_user`).
-    #[instrument(name = "domain.agent.workflow_context", skip(self))]
-    pub async fn workflow_context(
-        &self,
-        agent_id: AgentId,
-    ) -> Result<AgentWorkflowContext, AgentError> {
-        let agent = self.repo.find_by_id(agent_id).await?;
-        let (Some(workflow_id), Some(workflow_run_id)) = (agent.workflow_id, agent.workflow_run_id)
-        else {
-            return Ok(AgentWorkflowContext::None);
-        };
-        let (Some(step_name), Some(assigned_skill)) =
-            (agent.workflow_step.clone(), agent.assigned_skill.clone())
-        else {
-            return Ok(AgentWorkflowContext::Legacy);
-        };
-        Ok(AgentWorkflowContext::Invocation(WorkflowStepInvocation {
-            agent_id: agent.id,
-            project_id: agent.project_id,
-            sandbox_id: agent.attached_sandbox_id(),
-            workflow_id,
-            workflow_run_id,
-            step_name,
-            assigned_skill,
-        }))
-    }
-
-    /// Verbatim text of the agent's very first `user_input_added`
-    /// session event — the initial rendered prompt a workflow step
-    /// agent was created with. `use_skill` replays this instead of
-    /// re-rendering when the assigned skill is re-invoked with no new
-    /// arguments, so a mid-run library edit can't change what the
-    /// agent sees.
-    #[instrument(name = "domain.agent.first_user_input", skip(self))]
-    pub async fn first_user_input(&self, agent_id: AgentId) -> Result<Option<String>, AgentError> {
-        Ok(self.sessions.first_user_input(agent_id).await?)
     }
 
     /// Reads the agent's session for a persisted `OutputSubmitted`

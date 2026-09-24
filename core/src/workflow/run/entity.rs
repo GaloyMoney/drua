@@ -198,38 +198,6 @@ impl WorkflowRun {
             .expect("entity_first_persisted_at not found")
     }
 
-    /// The `run` namespace bound in `TemplateContext` for this run —
-    /// the same three fields `Executor::run` computes at run start.
-    /// Exposed as a method (rather than inlined at each call site) so
-    /// step-start rendering and a later context-aware skill reload
-    /// bind `run.*` identically.
-    pub fn base_run_context(&self) -> serde_json::Value {
-        serde_json::json!({
-            "id": self.id.to_string(),
-            "started_at": self.started_at().to_rfc3339(),
-            "date": self.started_at().format("%Y-%m-%d").to_string(),
-        })
-    }
-
-    /// Builds the `steps` namespace of `TemplateContext` from this
-    /// run's currently-recorded step results. Completed steps surface
-    /// their structured `output`; skipped / errored / pending steps
-    /// (including the step whose own agent is calling this, before it
-    /// completes) surface as `Value::Null` — see
-    /// `crate::workflow::template::TemplateContext::build_cel_context`'s
-    /// doc for why that keeps a guarded `has(steps.x.outputs.y)` from
-    /// raising `NoSuchKey`.
-    pub fn step_outputs_snapshot(&self) -> std::collections::HashMap<String, serde_json::Value> {
-        let mut out = std::collections::HashMap::with_capacity(self.step_results.len());
-        for r in &self.step_results {
-            out.insert(
-                r.name.clone(),
-                r.output.clone().unwrap_or(serde_json::Value::Null),
-            );
-        }
-        out
-    }
-
     fn any_step_errored(&self) -> bool {
         self.step_results.iter().any(|r| r.error.is_some())
     }
