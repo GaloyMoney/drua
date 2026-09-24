@@ -583,6 +583,67 @@ return {{
     );
 }
 
+/// R3.1: a compose script's `Read` is not subject to `SpaceFs`'s 1 MiB
+/// `MAX_VIEW_FILE_BYTES` cap — it's bounded only by
+/// `toolsets.compose.max_tool_result_bytes` (32 MiB default). The same
+/// file read directly through MCP (outside a script) still hits the
+/// model-facing cap.
+#[tokio::test]
+#[ignore = "requires isolated postgres + local library clone"]
+async fn scripts_read_lifts_the_view_cap_but_mcp_read_still_enforces_it() {
+    let (app, _user, agent) = setup("read-oversized").await;
+
+    // Comfortably over MAX_VIEW_FILE_BYTES (1_048_576) so the assertion
+    // survives any off-by-one at the boundary.
+    const FIXTURE_LEN: usize = 1_048_576 + 200_000;
+    let path = "space:docs/oversized.txt";
+
+    let compose = app
+        .toolsets()
+        .top_level_tool_arcs(&agent)
+        .find(|t| t.name() == "compose")
+        .unwrap();
+
+    // Built in JS (not embedded as a literal) so the script source itself
+    // stays tiny regardless of fixture size.
+    let script = format!(
+        r#"
+const path = {path_js};
+const text = "x".repeat({FIXTURE_LEN});
+await tools.Edit({{command: 'create', path, file_text: text}});
+const whole = await tools.Read({{path}});
+return {{ length: whole.content.length }};
+"#,
+        path_js = serde_json::to_string(path).unwrap(),
+    );
+
+    let output = compose
+        .call(
+            &agent,
+            serde_json::json!({"script": script}).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+    let result = output.structured_content.unwrap()["result"].clone();
+    assert_eq!(
+        result["length"].as_i64().unwrap(),
+        FIXTURE_LEN as i64,
+        "a compose script's Read must not be capped at MAX_VIEW_FILE_BYTES"
+    );
+
+    // Same tool, same path, called directly through MCP — still capped.
+    let direct = app
+        .toolsets()
+        .call_top_level_tool(
+            &agent,
+            "Read",
+            serde_json::json!({"path": path}).as_object().cloned(),
+        )
+        .await
+        .unwrap_err();
+    assert!(direct.to_string().contains("too large"), "{direct}");
+}
+
 #[tokio::test]
 #[ignore = "requires isolated postgres + local library clone"]
 async fn workflow_scripts_validate_execute_and_preserve_provenance() {

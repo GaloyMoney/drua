@@ -91,3 +91,94 @@ async fn space_file_imports_into_search_store() {
         tokio::time::sleep(Duration::from_millis(150)).await;
     }
 }
+
+/// R3.2: a `.json` space file is stored and readable but never indexed
+/// for search, while a `.md` file with the same distinctive term is. The
+/// `.md` file is checked first so a real indexing failure can't hide
+/// behind "the sync just hasn't run yet" for the `.json` file.
+#[tokio::test]
+#[ignore = "requires postgres + writes to tests/.library; run with --ignored"]
+async fn non_prose_files_are_not_indexed_for_search() {
+    let fixture = TestRepo::init(&[("README.md", "initial\n")]);
+    let data_dir = library_data_dir("non_prose_files_are_not_indexed_for_search");
+
+    let pool = pool().await;
+    reset_library_db_state(&pool).await;
+
+    let embedder = Arc::new(code_assistant_core::embedder::Embedder::new().expect("embedder"));
+
+    let job_config = job::JobSvcConfig::builder()
+        .pool(pool.clone())
+        .build()
+        .expect("job config");
+    let mut jobs = job::Jobs::init(job_config).await.expect("jobs init");
+
+    let config = LibraryConfig {
+        data_dir: data_dir.to_string_lossy().to_string(),
+        repo_url: fixture.path().to_string_lossy().to_string(),
+        fetch_interval_ms: FETCH_INTERVAL_MS,
+    };
+
+    let library = Library::init(&pool, &config, embedder, &mut jobs, None)
+        .await
+        .expect("library init");
+
+    jobs.start_poll().await.expect("start poll");
+
+    let slug = format!("curation-{}", uuid::Uuid::new_v4().simple());
+    library
+        .spaces()
+        .create(
+            slug.clone(),
+            Some("curation shard".into()),
+            CommitAttribution::library_default(),
+        )
+        .await
+        .expect("create space");
+
+    fixture.commit(
+        &[
+            (
+                &format!("spaces/{slug}/notes.md"),
+                "quixotic zebra narrative\n",
+            ),
+            (
+                &format!("spaces/{slug}/state.json"),
+                r#"{"note": "quixotic zebra narrative"}"#,
+            ),
+        ],
+        "add curation shard files",
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let hits = library
+            .search()
+            .search("quixotic", None, &[], &[], &[], 10)
+            .await
+            .expect("search");
+        if hits.iter().any(|h| {
+            h.fields.scope_slug.as_deref() == Some(slug.as_str())
+                && h.fields.path.as_deref() == Some("notes.md")
+        }) {
+            break;
+        }
+        if Instant::now() >= deadline {
+            panic!("notes.md not found in search store within timeout");
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+
+    let hits = library
+        .search()
+        .search("quixotic", None, &[], &[], &[], 10)
+        .await
+        .expect("search");
+    assert!(
+        !hits.iter().any(|h| {
+            h.fields.scope_slug.as_deref() == Some(slug.as_str())
+                && h.fields.path.as_deref() == Some("state.json")
+        }),
+        "state.json must not be indexed: {hits:?}"
+    );
+}

@@ -17,7 +17,9 @@
 //!   the command.
 //!
 //! `view`'s result is line-numbered for a model (`call`) and exact text
-//! for a compose script (`call_from_script`); see [`render_view`].
+//! for a compose script (`call_from_script`); see [`render_view`]. A
+//! `space:` `view` from a script also lifts `SpaceFs`'s
+//! `MAX_VIEW_FILE_BYTES` cap — see `SpaceFs::view_file_with_cap`.
 
 use std::sync::{Arc, LazyLock};
 
@@ -46,14 +48,15 @@ impl TextEditor {
         }
     }
 
-    /// Shared body for `call`/`call_from_script`; `number` numbers a
-    /// `view`'s result for a model, or leaves it exact for a script (the
-    /// mutating commands are unaffected either way).
+    /// Shared body for `call`/`call_from_script`. `for_model` is one
+    /// decision made twice for a `view`: line-numbered + capped at
+    /// `MAX_VIEW_FILE_BYTES` for a model, exact text + uncapped for a
+    /// script. The mutating commands are unaffected either way.
     async fn edit(
         &self,
         subject: &AuthSubject,
         input: TextEditorInput,
-        number: bool,
+        for_model: bool,
     ) -> Result<CallToolResult, ToolSetsError> {
         Audit::record_action("text_editor");
 
@@ -67,10 +70,14 @@ impl TextEditor {
             let space_result: Option<String> = match action {
                 TextEditorAction::View { path, view_range } => {
                     let range = view_range.map(|[s, e]| (s, e));
-                    self.space_fs
-                        .view_file(subject, &path, range)
-                        .await?
-                        .map(|view| render_view(view, number, view_range))
+                    let viewed = if for_model {
+                        self.space_fs.view_file(subject, &path, range).await?
+                    } else {
+                        self.space_fs
+                            .view_file_with_cap(subject, &path, range, None)
+                            .await?
+                    };
+                    viewed.map(|view| render_view(view, for_model, view_range))
                 }
                 TextEditorAction::Create { path, file_text } => self
                     .space_fs
@@ -137,7 +144,7 @@ impl TextEditor {
 
         match client.execute_text_editor(&input).await {
             Ok(resp) => {
-                let formatted = if is_view && !resp.is_error && number {
+                let formatted = if is_view && !resp.is_error && for_model {
                     sandbox::number_lines(&resp.output, view_range)
                 } else {
                     resp.output

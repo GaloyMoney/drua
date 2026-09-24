@@ -13,6 +13,11 @@
 //! `workflow:script_step`) returns the exact text instead: byte-exact for
 //! whole-file reads, `\n`-joined line slices for ranged reads (see
 //! `space_fs::apply_view_range`).
+//!
+//! The same split gates `SpaceFs`'s `MAX_VIEW_FILE_BYTES` cap: a model
+//! read stays capped at 1 MiB, a script read is uncapped (bounded only
+//! by `toolsets.compose.max_tool_result_bytes`) — see
+//! `SpaceFs::view_file_with_cap`.
 
 use std::sync::{Arc, LazyLock};
 
@@ -51,24 +56,31 @@ impl Read {
         }
     }
 
-    /// Shared body for `call`/`call_from_script`; `number` picks the
-    /// presentation (line-numbered for a model, exact text for a script).
+    /// Shared body for `call`/`call_from_script`. `for_model` is one
+    /// decision made twice: line-numbered + capped at
+    /// `MAX_VIEW_FILE_BYTES` for a model, exact text + uncapped (bounded
+    /// only by `toolsets.compose.max_tool_result_bytes`) for a script.
     async fn read(
         &self,
         subject: &AuthSubject,
         params: ReadParams,
-        number: bool,
+        for_model: bool,
     ) -> Result<CallToolResult, ToolSetsError> {
         Audit::record_action("read");
 
         let view_range = view_range_from_offset_limit(params.offset, params.limit);
-        let space_view = self
-            .space_fs
-            .view_file(subject, &params.path, view_range)
-            .await?;
+        let space_view = if for_model {
+            self.space_fs
+                .view_file(subject, &params.path, view_range)
+                .await?
+        } else {
+            self.space_fs
+                .view_file_with_cap(subject, &params.path, view_range, None)
+                .await?
+        };
 
         if let Some(view) = space_view {
-            let content = render_file_view(view, number, view_range);
+            let content = render_file_view(view, for_model, view_range);
             let out = ContentOutput {
                 content: content.clone(),
             };
@@ -101,7 +113,7 @@ impl Read {
 
         match client.execute(&req).await {
             Ok(resp) => {
-                let content = if resp.is_error || !number {
+                let content = if resp.is_error || !for_model {
                     resp.output
                 } else {
                     sandbox::number_lines(&resp.output, numbering_range(view_range))
@@ -136,7 +148,8 @@ impl TopLevelTool for Read {
          or a `space:<slug>/...` path that reads from the project's mounted spaces. \
          Inside compose scripts the result is the exact file text without line \
          numbers (whole-file reads are byte-exact; ranged reads are `\\n`-joined \
-         line slices)."
+         line slices), and a `space:` read is not subject to the 1 MiB cap this \
+         tool otherwise applies."
     }
 
     fn input_schema(&self) -> &serde_json::Value {

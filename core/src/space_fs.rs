@@ -186,12 +186,30 @@ impl SpaceFs {
     /// View a file (or list a directory) under a `space:` path. Reads
     /// go through `Spaces::read_file` / `Spaces::list_dir` — straight
     /// from the bare clone via libgit2, no on-disk materialisation.
+    /// Applies the model-facing `MAX_VIEW_FILE_BYTES` cap; use
+    /// [`Self::view_file_with_cap`] to lift it.
     #[instrument(name = "library.space_fs.view_file", skip(self, sub))]
     pub async fn view_file(
         &self,
         sub: &AuthSubject,
         path: &str,
         view_range: Option<(i64, i64)>,
+    ) -> Result<Option<FileView>, ProjectError> {
+        self.view_file_with_cap(sub, path, view_range, Some(MAX_VIEW_FILE_BYTES))
+            .await
+    }
+
+    /// `view_file` with an explicit byte cap. `cap: None` lifts
+    /// `MAX_VIEW_FILE_BYTES` entirely — for a compose script, which has
+    /// its own, larger guard (`toolsets.compose.max_tool_result_bytes`)
+    /// instead of the model-facing one.
+    #[instrument(name = "library.space_fs.view_file_with_cap", skip(self, sub))]
+    pub async fn view_file_with_cap(
+        &self,
+        sub: &AuthSubject,
+        path: &str,
+        view_range: Option<(i64, i64)>,
+        cap: Option<usize>,
     ) -> Result<Option<FileView>, ProjectError> {
         let Some(resolved) = self.resolve(sub, path).await? else {
             return Ok(None);
@@ -214,7 +232,7 @@ impl SpaceFs {
             .await
             .map_err(|e| -> ProjectError { e.into() })?
             .ok_or_else(|| io_err(format!("no such file: {}", resolved.rel_path)))?;
-        let content = text_from_bytes(bytes)?;
+        let content = text_from_bytes(bytes, cap)?;
         Ok(Some(FileView::File(apply_view_range(&content, view_range))))
     }
 
@@ -715,17 +733,18 @@ fn io_err(msg: String) -> SpaceError {
     SpaceError::Io(msg)
 }
 
-/// Enforces `MAX_VIEW_FILE_BYTES` and decodes to UTF-8 — the single place
-/// both `view_file` and raw reads apply the cap and conversion, so the two
-/// paths can't drift apart.
-pub fn text_from_bytes(bytes: Vec<u8>) -> Result<String, ProjectError> {
-    if bytes.len() > MAX_VIEW_FILE_BYTES {
-        return Err(io_err(format!(
-            "file too large ({} bytes > {} cap); use `grep` to extract a slice",
-            bytes.len(),
-            MAX_VIEW_FILE_BYTES
-        ))
-        .into());
+/// Enforces `cap` (when set) and decodes to UTF-8 — the single place
+/// every read path applies the cap and conversion, so they can't drift
+/// apart. `cap: None` lifts the check entirely.
+pub fn text_from_bytes(bytes: Vec<u8>, cap: Option<usize>) -> Result<String, ProjectError> {
+    if let Some(cap) = cap {
+        if bytes.len() > cap {
+            return Err(io_err(format!(
+                "file too large ({} bytes > {cap} cap); use `grep` to extract a slice",
+                bytes.len()
+            ))
+            .into());
+        }
     }
     String::from_utf8(bytes).map_err(|e| io_err(format!("non-utf8: {e}")).into())
 }
@@ -1038,13 +1057,13 @@ mod tests {
 
     #[test]
     fn text_from_bytes_preserves_crlf() {
-        let out = text_from_bytes(b"a\r\nb".to_vec()).unwrap();
+        let out = text_from_bytes(b"a\r\nb".to_vec(), Some(MAX_VIEW_FILE_BYTES)).unwrap();
         assert_eq!(out, "a\r\nb");
     }
 
     #[test]
     fn text_from_bytes_preserves_missing_final_newline() {
-        let out = text_from_bytes(b"a\nb".to_vec()).unwrap();
+        let out = text_from_bytes(b"a\nb".to_vec(), Some(MAX_VIEW_FILE_BYTES)).unwrap();
         assert_eq!(out, "a\nb");
         assert!(!out.ends_with('\n'));
     }
@@ -1052,13 +1071,24 @@ mod tests {
     #[test]
     fn text_from_bytes_rejects_over_cap() {
         let bytes = vec![b'a'; MAX_VIEW_FILE_BYTES + 1];
-        let err = text_from_bytes(bytes).unwrap_err().to_string();
+        let err = text_from_bytes(bytes, Some(MAX_VIEW_FILE_BYTES))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("too large"), "got: {err}");
     }
 
     #[test]
+    fn text_from_bytes_no_cap_allows_oversized() {
+        let bytes = vec![b'a'; MAX_VIEW_FILE_BYTES + 1];
+        let out = text_from_bytes(bytes, None).unwrap();
+        assert_eq!(out.len(), MAX_VIEW_FILE_BYTES + 1);
+    }
+
+    #[test]
     fn text_from_bytes_rejects_invalid_utf8() {
-        let err = text_from_bytes(vec![0xff, 0xfe]).unwrap_err().to_string();
+        let err = text_from_bytes(vec![0xff, 0xfe], Some(MAX_VIEW_FILE_BYTES))
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("non-utf8"), "got: {err}");
     }
 }

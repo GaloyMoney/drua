@@ -66,6 +66,10 @@ caller changes, not the schema. A whole-file read is byte-exact (CRLF, BOM,
 and a missing trailing newline all preserved); a ranged read (`offset`/
 `limit`) is an unnumbered, `\n`-joined line slice, not byte-exact.
 
+A `space:` read from a script is also not subject to the `Read`/`Edit view`
+1 MiB cap that applies to a model reading through MCP; script reads are
+bounded only by `toolsets.compose.max_tool_result_bytes`.
+
 Configure script ceilings under `toolsets.compose.script_step` (see the
 generated default config): `max_tool_calls: 2000`, `timeout_ms: 1800000`.
 A step's `max_tool_calls` may lower the ceiling; higher values are rejected at
