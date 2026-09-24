@@ -113,6 +113,18 @@ const WORKFLOW_AGENT_ROLE_HEADER: &str = "\
 You are a workflow step agent. Focus on completing the specific step \
 you have been given.
 
+<assigned_skill_already_invoked>
+Your assigned skill for this step has already been invoked — its fully \
+resolved instructions (with this run's trigger and prior step outputs \
+already filled in) are the first message in this conversation. Do NOT \
+call `use_skill` again for that same skill: reloading it does not \
+replay those resolved instructions and can return unresolved \
+placeholder text instead of the real values. If you need to recall \
+what you were asked to do, re-read the first message in this \
+conversation rather than reloading the skill. Invoking a *different* \
+skill via `use_skill` remains supported.
+</assigned_skill_already_invoked>
+
 <default_to_action>
 Implement changes rather than only suggesting them. Use tools to \
 discover missing details instead of asking for clarification.
@@ -290,5 +302,31 @@ mod tests {
         assert!(role_text.contains("success"));
         assert!(role_text.contains("output"));
         assert!(role_text.contains("reason"));
+    }
+
+    /// `use_skill(invoke, name: "<assigned skill>")` reloads the raw
+    /// skill body without workflow context — the workflow role
+    /// guidance must actively discourage that repeat call (not merely
+    /// note it's unnecessary) rather than let the model stumble into
+    /// it. `finish_with_submit_output` guidance stays present too.
+    #[test]
+    fn workflow_role_header_discourages_reinvoking_the_assigned_skill() {
+        use crate::workflow::default_output_schema;
+        let toolsets = toolsets_for_test();
+        let subject = AuthSubject::Anonymous;
+        let schema = default_output_schema();
+        let blocks = system_blocks_for_role(
+            AgentRole::WorkflowStepAgent,
+            &toolsets,
+            &subject,
+            "test-project",
+            Some(&schema),
+        );
+        let role_text = blocks[3].text();
+        assert!(role_text.contains("already been invoked"));
+        assert!(role_text.contains("Do NOT"));
+        assert!(role_text.contains("use_skill"));
+        assert!(role_text.contains("finish_with_submit_output"));
+        assert!(role_text.contains("submit_output"));
     }
 }
