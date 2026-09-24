@@ -214,15 +214,7 @@ impl SpaceFs {
             .await
             .map_err(|e| -> ProjectError { e.into() })?
             .ok_or_else(|| io_err(format!("no such file: {}", resolved.rel_path)))?;
-        if bytes.len() > MAX_VIEW_FILE_BYTES {
-            return Err(io_err(format!(
-                "file too large ({} bytes > {} cap); use `grep` to extract a slice",
-                bytes.len(),
-                MAX_VIEW_FILE_BYTES
-            ))
-            .into());
-        }
-        let content = String::from_utf8(bytes).map_err(|e| io_err(format!("non-utf8: {e}")))?;
+        let content = text_from_bytes(bytes)?;
         Ok(Some(FileView::File(apply_view_range(&content, view_range))))
     }
 
@@ -723,6 +715,21 @@ fn io_err(msg: String) -> SpaceError {
     SpaceError::Io(msg)
 }
 
+/// Enforces `MAX_VIEW_FILE_BYTES` and decodes to UTF-8 — the single place
+/// both `view_file` and raw reads apply the cap and conversion, so the two
+/// paths can't drift apart.
+pub fn text_from_bytes(bytes: Vec<u8>) -> Result<String, ProjectError> {
+    if bytes.len() > MAX_VIEW_FILE_BYTES {
+        return Err(io_err(format!(
+            "file too large ({} bytes > {} cap); use `grep` to extract a slice",
+            bytes.len(),
+            MAX_VIEW_FILE_BYTES
+        ))
+        .into());
+    }
+    String::from_utf8(bytes).map_err(|e| io_err(format!("non-utf8: {e}")).into())
+}
+
 /// Translate a glob pattern (`*`, `**`, `?`) into a regex anchored at
 /// both ends. Single `*` matches a single path segment (no `/`); `**`
 /// matches zero or more segments.
@@ -1027,5 +1034,31 @@ mod tests {
         let entries = vec!["research/a.md".to_string()];
         let out = join_dates(entries, Some(&map), |entry| entry.to_string());
         assert_eq!(out[0].dates, Some(dated(200)));
+    }
+
+    #[test]
+    fn text_from_bytes_preserves_crlf() {
+        let out = text_from_bytes(b"a\r\nb".to_vec()).unwrap();
+        assert_eq!(out, "a\r\nb");
+    }
+
+    #[test]
+    fn text_from_bytes_preserves_missing_final_newline() {
+        let out = text_from_bytes(b"a\nb".to_vec()).unwrap();
+        assert_eq!(out, "a\nb");
+        assert!(!out.ends_with('\n'));
+    }
+
+    #[test]
+    fn text_from_bytes_rejects_over_cap() {
+        let bytes = vec![b'a'; MAX_VIEW_FILE_BYTES + 1];
+        let err = text_from_bytes(bytes).unwrap_err().to_string();
+        assert!(err.contains("too large"), "got: {err}");
+    }
+
+    #[test]
+    fn text_from_bytes_rejects_invalid_utf8() {
+        let err = text_from_bytes(vec![0xff, 0xfe]).unwrap_err().to_string();
+        assert!(err.contains("non-utf8"), "got: {err}");
     }
 }

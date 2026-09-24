@@ -29,6 +29,9 @@ struct ReadParams {
     offset: Option<i64>,
     #[serde(default, deserialize_with = "super::liberal::deserialize_option_i64")]
     limit: Option<i64>,
+    /// Exact file text, no line numbers. Whole file only.
+    #[serde(default, deserialize_with = "super::liberal::deserialize_bool")]
+    raw: bool,
 }
 
 pub struct Read {
@@ -56,7 +59,8 @@ impl TopLevelTool for Read {
 
     fn description(&self) -> &str {
         "Read a file with optional line range. Accepts either an in-sandbox path \
-         or a `space:<slug>/...` path that reads from the project's mounted spaces."
+         or a `space:<slug>/...` path that reads from the project's mounted spaces. \
+         Pass raw: true to get the exact file text with no line numbers (whole file only)."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -79,6 +83,8 @@ impl TopLevelTool for Read {
         let params: ReadParams = parse_params(arguments)?;
         Audit::record_action("read");
 
+        validate_raw_range(params.raw, params.offset, params.limit)?;
+
         let view_range = view_range_from_offset_limit(params.offset, params.limit);
         let space_view = self
             .space_fs
@@ -88,12 +94,21 @@ impl TopLevelTool for Read {
         if let Some(view) = space_view {
             let content = match view {
                 FileView::File(text) => {
-                    let range = view_range.map(|(s, e)| {
-                        let start = s.max(1) as usize;
-                        let end = if e == -1 { usize::MAX } else { e as usize };
-                        (start, end)
-                    });
-                    sandbox::number_lines(&text, range)
+                    if params.raw {
+                        text
+                    } else {
+                        let range = view_range.map(|(s, e)| {
+                            let start = s.max(1) as usize;
+                            let end = if e == -1 { usize::MAX } else { e as usize };
+                            (start, end)
+                        });
+                        sandbox::number_lines(&text, range)
+                    }
+                }
+                FileView::Dir(_) if params.raw => {
+                    return Err(ToolSetsError::InvalidArgument(
+                        "raw reads require a file path".into(),
+                    ));
                 }
                 FileView::Dir(entries) => entries.join("\n"),
             };
@@ -129,7 +144,7 @@ impl TopLevelTool for Read {
 
         match client.execute(&req).await {
             Ok(resp) => {
-                let content = if resp.is_error {
+                let content = if resp.is_error || params.raw {
                     resp.output
                 } else {
                     let range = view_range.map(|(s, e)| {
@@ -167,4 +182,95 @@ fn view_range_from_offset_limit(offset: Option<i64>, limit: Option<i64>) -> Opti
         None => -1,
     };
     Some((start, end))
+}
+
+/// `raw: true` returns the whole file verbatim, so it can't be combined
+/// with a line range — there's no CRLF/final-newline convention for a
+/// ranged raw read.
+fn validate_raw_range(
+    raw: bool,
+    offset: Option<i64>,
+    limit: Option<i64>,
+) -> Result<(), ToolSetsError> {
+    if raw && (offset.is_some() || limit.is_some()) {
+        return Err(ToolSetsError::InvalidArgument(
+            "raw reads return the whole file; omit offset/limit".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn raw_with_offset_is_rejected() {
+        let err = validate_raw_range(true, Some(0), None).unwrap_err();
+        assert!(matches!(err, ToolSetsError::InvalidArgument(_)));
+        assert_eq!(
+            err.to_string(),
+            "ToolSetsError - InvalidArgument: raw reads return the whole file; omit offset/limit"
+        );
+    }
+
+    #[test]
+    fn raw_with_limit_is_rejected() {
+        assert!(validate_raw_range(true, None, Some(10)).is_err());
+    }
+
+    #[test]
+    fn raw_without_range_is_accepted() {
+        assert!(validate_raw_range(true, None, None).is_ok());
+    }
+
+    #[test]
+    fn non_raw_with_range_is_accepted() {
+        assert!(validate_raw_range(false, Some(0), Some(10)).is_ok());
+    }
+
+    #[test]
+    fn raw_defaults_to_false() {
+        let params: ReadParams = serde_json::from_value(serde_json::json!({
+            "path": "space:demo/foo.md",
+        }))
+        .unwrap();
+        assert!(!params.raw);
+    }
+
+    #[test]
+    fn raw_accepts_json_bool() {
+        let params: ReadParams = serde_json::from_value(serde_json::json!({
+            "path": "space:demo/foo.md",
+            "raw": true,
+        }))
+        .unwrap();
+        assert!(params.raw);
+    }
+
+    #[test]
+    fn raw_accepts_string_bool_liberal_deserializer() {
+        let params: ReadParams = serde_json::from_value(serde_json::json!({
+            "path": "space:demo/foo.md",
+            "raw": "true",
+        }))
+        .unwrap();
+        assert!(params.raw);
+    }
+
+    #[test]
+    fn schema_exposes_raw_as_optional_boolean() {
+        let raw_schema = READ_SCHEMA["properties"]["raw"]
+            .as_object()
+            .expect("raw schema should be present");
+        assert_eq!(raw_schema["type"], "boolean");
+        assert!(
+            !READ_SCHEMA["required"]
+                .as_array()
+                .expect("required array should be present")
+                .iter()
+                .any(|v| v == "raw"),
+            "raw should not be required"
+        );
+    }
 }

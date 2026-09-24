@@ -498,6 +498,85 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
         .contains("access_denied"));
 }
 
+/// `Read({raw:true})` must return the file's exact bytes — CRLF, a blank
+/// line, a multibyte/emoji run and the trailing newline all intact —
+/// while a plain `Read` keeps numbering the same file. The fixture is
+/// deliberately not `"hello\n"`: a fixture with no CRLF, no multibyte
+/// char, no blank line and no absent-final-newline case would pass this
+/// test whether or not raw mode actually preserved anything.
+#[tokio::test]
+#[ignore = "requires isolated postgres + local library clone"]
+async fn read_raw_returns_exact_bytes_while_plain_read_stays_numbered() {
+    let (app, _user, agent) = setup("read-raw").await;
+
+    let fixture = "# Raw\r\nUnicode: \u{1F41F} \u{2014} caf\u{E9}\r\n\r\nEnd\r\n";
+    let fixture_js = serde_json::to_string(fixture).expect("json-encode fixture");
+
+    let compose = app
+        .toolsets()
+        .top_level_tool_arcs(&agent)
+        .find(|t| t.name() == "compose")
+        .unwrap();
+
+    let script = format!(
+        r#"
+const path = 'space:docs/raw-fixture.md';
+const text = {fixture_js};
+await tools.Edit({{command: 'create', path, file_text: text}});
+const raw = await tools.Read({{path, raw: true}});
+const numbered = await tools.Read({{path}});
+let dirError = null;
+try {{
+  await tools.Read({{path: 'space:docs', raw: true}});
+}} catch (e) {{
+  dirError = e.message || String(e);
+}}
+let rangeError = null;
+try {{
+  await tools.Read({{path, raw: true, offset: 0}});
+}} catch (e) {{
+  rangeError = e.message || String(e);
+}}
+return {{
+  rawContent: raw.content,
+  numberedStartsRight: numbered.content.startsWith('     1\t# Raw'),
+  dirError,
+  rangeError,
+}};
+"#
+    );
+
+    let output = compose
+        .call(
+            &agent,
+            serde_json::json!({"script": script}).as_object().cloned(),
+        )
+        .await
+        .unwrap();
+    let result = output.structured_content.unwrap()["result"].clone();
+
+    assert_eq!(
+        result["rawContent"].as_str().unwrap(),
+        fixture,
+        "raw read must return the file's exact bytes"
+    );
+    assert_eq!(result["numberedStartsRight"], true);
+    assert!(
+        result["dirError"]
+            .as_str()
+            .unwrap()
+            .contains("raw reads require a file path"),
+        "{result}"
+    );
+    assert!(
+        result["rangeError"]
+            .as_str()
+            .unwrap()
+            .contains("raw reads return the whole file; omit offset/limit"),
+        "{result}"
+    );
+}
+
 #[tokio::test]
 #[ignore = "requires isolated postgres + local library clone"]
 async fn workflow_scripts_validate_execute_and_preserve_provenance() {
