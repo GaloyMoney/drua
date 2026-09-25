@@ -52,27 +52,50 @@ pub struct DetailedEntry {
     pub dates: Option<PathDates>,
 }
 
-/// Parsed view of a `space:<slug>`, `space:<slug>/<rel>`, or
-/// `space:<slug>@<changeset-id>/<rel>` path.
+/// Which of the two path schemes (D9) a [`SpaceRef`] was parsed from.
+/// `space:` resolves by authority (§3 rule 3); `draft:` always targets
+/// the caller's own draft, for anyone who holds `Propose`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpaceScheme {
+    Space,
+    Draft,
+}
+
+impl SpaceScheme {
+    fn prefix(self) -> &'static str {
+        match self {
+            SpaceScheme::Space => "space",
+            SpaceScheme::Draft => "draft",
+        }
+    }
+}
+
+/// Parsed view of a `space:<slug>`, `space:<slug>/<rel>`,
+/// `space:<slug>@<changeset-id>/<rel>`, or `draft:<slug>/<rel>` path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SpaceRef<'a> {
+    scheme: SpaceScheme,
     slug: &'a str,
     /// Empty for the space root (`space:<slug>` or `space:<slug>/`).
     rel_path: &'a str,
-    /// Explicit `@<changeset-id>` override (§6.4). Slugs can't contain
-    /// `@` (`validate_slug`), so splitting on the first one is
-    /// unambiguous.
+    /// Explicit `@<changeset-id>` override (§6.4) — `space:` only;
+    /// `draft:` never carries one (D9). Slugs can't contain `@`
+    /// (`validate_slug`), so splitting on the first one is unambiguous.
     changeset_id: Option<ChangesetId>,
 }
 
-/// Returns `Some(SpaceRef)` iff `path` starts with the `space:` prefix,
-/// has a non-empty slug, and — when an `@<id>` suffix is present —
-/// that id parses as a `ChangesetId`. Anything else returns `None` so
-/// callers can fall through to the existing sandbox dispatch (or, for
-/// a `space:`-prefixed path that just fails to parse, a `BadRequest`
-/// raised by the caller).
+/// Returns `Some(SpaceRef)` iff `path` starts with the `space:` or
+/// `draft:` prefix, has a non-empty slug, and — when an `@<id>` suffix
+/// is present — that id parses as a `ChangesetId`. Anything else
+/// returns `None` so callers can fall through to the existing sandbox
+/// dispatch (or, for a `space:`/`draft:`-prefixed path that just fails
+/// to parse, a `BadRequest` raised by the caller).
 fn parse_space_path(path: &str) -> Option<SpaceRef<'_>> {
-    let rest = path.strip_prefix("space:")?;
+    let (scheme, rest) = if let Some(rest) = path.strip_prefix("draft:") {
+        (SpaceScheme::Draft, rest)
+    } else {
+        (SpaceScheme::Space, path.strip_prefix("space:")?)
+    };
     let (slug_part, rel) = match rest.split_once('/') {
         Some((slug_part, rel)) => (slug_part, rel),
         None => (rest, ""),
@@ -85,15 +108,22 @@ fn parse_space_path(path: &str) -> Option<SpaceRef<'_>> {
         return None;
     }
     Some(SpaceRef {
+        scheme,
         slug,
         rel_path: rel,
         changeset_id,
     })
 }
 
-/// True for slugless space URIs (`space:`, `space:/`, etc.); routed to `list_mounted_spaces` for runtime discovery.
+/// True for slugless space URIs (`space:`, `space:/`, `draft:`, etc.);
+/// routed to `list_mounted_spaces` for runtime discovery. `draft:`
+/// alone is accepted for symmetry, even though it has nothing extra to
+/// list beyond what `space:` already shows.
 fn is_bare_space_path(path: &str) -> bool {
-    let Some(rest) = path.strip_prefix("space:") else {
+    let rest = path
+        .strip_prefix("space:")
+        .or_else(|| path.strip_prefix("draft:"));
+    let Some(rest) = rest else {
         return false;
     };
     rest.trim_matches('/').is_empty()
@@ -112,6 +142,10 @@ pub enum Target {
         /// push landed on the branch since).
         tip: String,
         status: ChangesetStatus,
+        /// `title` and `touched` are carried along purely for the D10
+        /// stamp — never used for git addressing.
+        title: String,
+        touched: usize,
     },
 }
 
@@ -141,12 +175,17 @@ enum Intent {
     Write,
 }
 
-/// Auth-gated, resolved view of a `space:<slug>/<rel>` path.
+/// Auth-gated, resolved view of a `space:<slug>/<rel>` or
+/// `draft:<slug>/<rel>` path.
 struct Resolved {
     space: Space,
     /// Owned so the bundle outlives the input `&str`.
     rel_path: String,
     target: Target,
+    /// D10: the stamp line for this resolution, computed once here so
+    /// every caller (14 different file ops) gets it for free instead
+    /// of re-deriving it from `target`.
+    stamp: String,
 }
 
 #[derive(Clone)]
@@ -198,23 +237,47 @@ impl SpaceFs {
         Ok(Some(bytes))
     }
 
-    /// Pure peek — does `path` start with the `space:` prefix and have
-    /// a non-empty slug? Useful for short-circuiting tool dispatch
-    /// before any auth or IO.
+    /// D10: the stamp line for `path`, resolved exactly as the paired
+    /// read/write call would (`write` must match — a stamp fetched with
+    /// the wrong intent could show `main` for what's about to become a
+    /// lazily-created draft, or vice versa). Safe to call before or
+    /// after the paired op: `resolve` is idempotent per actor
+    /// (`Changesets::draft_for` returns the existing draft on a second
+    /// call), so this never creates a second draft or disagrees with
+    /// what the paired call resolved to — it costs one extra mount +
+    /// draft lookup, not a second write. `Ok(None)` for a non-
+    /// `space:`/`draft:` path, so callers can no-op the model-facing
+    /// prefix without a second branch.
+    pub async fn resolved_stamp(
+        &self,
+        sub: &AuthSubject,
+        path: &str,
+        write: bool,
+    ) -> Result<Option<String>, ProjectError> {
+        let intent = if write { Intent::Write } else { Intent::Read };
+        Ok(self.resolve(sub, path, intent).await?.map(|r| r.stamp))
+    }
+
+    /// Pure peek — does `path` start with the `space:` or `draft:`
+    /// prefix and have a non-empty slug? Useful for short-circuiting
+    /// tool dispatch before any auth or IO.
     pub fn is_space_path(path: &str) -> bool {
-        let Some(rest) = path.strip_prefix("space:") else {
+        let rest = path
+            .strip_prefix("space:")
+            .or_else(|| path.strip_prefix("draft:"));
+        let Some(rest) = rest else {
             return false;
         };
         let slug = rest.split_once('/').map_or(rest, |(s, _)| s);
         !slug.is_empty()
     }
 
-    /// `Ok(None)` for non-`space:` paths (caller falls through to sandbox).
-    /// `space:`-prefixed paths that don't parse return `BadRequest`, so
-    /// malformed input never masquerades as an auth denial. Error
-    /// precedence: bad URI → not found → not mounted → `ChangesetRequired`/
-    /// `Unauthorized` — the mount gate (`space_for_subject`) always runs
-    /// before target resolution's write gate.
+    /// `Ok(None)` for non-`space:`/`draft:` paths (caller falls through
+    /// to sandbox). A `space:`/`draft:`-prefixed path that doesn't parse
+    /// returns `BadRequest`, so malformed input never masquerades as an
+    /// auth denial. Error precedence: bad URI → not found → not mounted
+    /// → `Unauthorized` — the mount gate (`space_for_subject`) always
+    /// runs before target resolution's write gate.
     async fn resolve(
         &self,
         sub: &AuthSubject,
@@ -222,74 +285,111 @@ impl SpaceFs {
         intent: Intent,
     ) -> Result<Option<Resolved>, ProjectError> {
         let Some(sref) = parse_space_path(path) else {
-            if path.starts_with("space:") {
+            if path.starts_with("space:") || path.starts_with("draft:") {
                 return Err(SpaceError::BadRequest {
                     reason: format!(
-                        "'{path}' is not a valid space URI; expected 'space:<slug>', 'space:<slug>/<rel>', or 'space:<slug>@<changeset-id>/<rel>'"
+                        "'{path}' is not a valid space URI; expected 'space:<slug>', 'space:<slug>/<rel>', 'space:<slug>@<changeset-id>/<rel>', or 'draft:<slug>/<rel>'"
                     ),
                 }
                 .into());
             }
             return Ok(None);
         };
+        if let (SpaceScheme::Draft, Some(id)) = (sref.scheme, sref.changeset_id) {
+            return Err(SpaceError::BadRequest {
+                reason: format!(
+                    "'{path}' is not valid — 'draft:' always targets your own draft and never takes an '@<changeset-id>' override; use 'space:{}@{id}/...' to read a specific changeset",
+                    sref.slug,
+                ),
+            }
+            .into());
+        }
         let space = self.projects.space_for_subject(sub, sref.slug).await?;
         let rel_path = normalize_rel_path(sref.rel_path);
         Self::validate_rel_path(&rel_path)?;
-        let target = self
-            .resolve_target(sub, &space, sref.changeset_id, intent)
-            .await?;
+        let target = self.resolve_target(sub, &space, &sref, intent).await?;
+        let stamp = stamp(sref.scheme, &space.slug, &target);
         Ok(Some(Resolved {
             space,
             rel_path,
             target,
+            stamp,
         }))
     }
 
-    /// §2.1 target resolution: an explicit `@<id>` override, else the
-    /// subject's bound changeset (`Changesets::active_for_subject`),
-    /// else `main`. §2.1's write gate: a `Write` intent against
-    /// `Target::Changeset` requires `Propose` on `Space(Some(space.id))`
-    /// (checked before the `Open` check — an unauthorized subject
-    /// shouldn't learn a changeset's status); against `Target::Main` it
-    /// requires `Update`, and — only on denial — a second check for
-    /// `Propose` decides between `ChangesetRequired` (the subject stages
-    /// elsewhere) and `Unauthorized` (it can't write `space` at all).
+    /// §3's resolution rule, replacing rev1 §2.1:
+    ///
+    /// 1. `space:<slug>@<id>` — the explicit target (§6.4). Writes
+    ///    require `Propose` (checked before the `Open` check — an
+    ///    unauthorized subject shouldn't learn a changeset's status)
+    ///    and an `Open` changeset.
+    /// 2. `draft:<slug>` — always `sub`'s own draft: `Propose` required;
+    ///    a write lazily creates it (`Changesets::draft_for`); a read
+    ///    with none open overlays nothing and falls back to `Main`
+    ///    (there's nothing to differ from yet).
+    /// 3. `space:<slug>` — authority-resolved: `Update` → `Main`; else
+    ///    `Propose` → the caller's draft (same lazy-on-write, `Main`-
+    ///    on-read-with-none-open rule as `draft:`); else `Unauthorized`.
     async fn resolve_target(
         &self,
         sub: &AuthSubject,
         space: &Space,
-        explicit: Option<ChangesetId>,
+        sref: &SpaceRef<'_>,
         intent: Intent,
     ) -> Result<Target, ProjectError> {
-        let cs = match explicit {
-            Some(id) => Some(
+        if let Some(id) = sref.changeset_id {
+            let cs = self
+                .changesets
+                .find_for_target(sub, id)
+                .await
+                .map_err(map_changeset_err)?;
+            if intent == Intent::Write {
+                sub.can(AuthVerb::Propose, AuthResource::Space(Some(space.id)))?;
+                if !cs.is_open() {
+                    return Err(SpaceError::ChangesetNotOpen {
+                        id: cs.id.to_string(),
+                        status: format!("{:?}", cs.status),
+                    }
+                    .into());
+                }
+            }
+            return self.changeset_target(cs).await;
+        }
+
+        if sref.scheme == SpaceScheme::Space
+            && sub
+                .can(AuthVerb::Update, AuthResource::Space(Some(space.id)))
+                .is_ok()
+        {
+            return Ok(Target::Main);
+        }
+        sub.can(AuthVerb::Propose, AuthResource::Space(Some(space.id)))?;
+
+        let cs = if intent == Intent::Write {
+            Some(
                 self.changesets
-                    .find_for_target(sub, id)
+                    .draft_for(sub, None, None, Some(sref.rel_path))
                     .await
                     .map_err(map_changeset_err)?,
-            ),
-            None => self
-                .changesets
-                .active_for_subject(sub)
+            )
+        } else {
+            self.changesets
+                .open_draft_for(sub)
                 .await
-                .map_err(map_changeset_err)?,
+                .map_err(map_changeset_err)?
         };
-        let Some(cs) = cs else {
-            if intent == Intent::Write {
-                self.gate_main_write(sub, space)?;
-            }
-            return Ok(Target::Main);
-        };
-        if intent == Intent::Write {
-            sub.can(AuthVerb::Propose, AuthResource::Space(Some(space.id)))?;
-            if !cs.is_open() {
-                return Err(SpaceError::ChangesetNotOpen {
-                    id: cs.id.to_string(),
-                    status: format!("{:?}", cs.status),
-                }
-                .into());
-            }
+        match cs {
+            Some(cs) => self.changeset_target(cs).await,
+            None => Ok(Target::Main),
         }
+    }
+
+    /// `touched` (D10's `<n> files`) is computed here, once, right
+    /// where the hydrated entity is already in hand — never re-fetched
+    /// downstream just to render a stamp. Best-effort: a `touched_count`
+    /// failure degrades to `0` rather than failing the whole op.
+    async fn changeset_target(&self, cs: Changeset) -> Result<Target, ProjectError> {
+        let touched = self.changesets.touched_count(&cs).await.unwrap_or(0);
         let tip = self
             .changesets
             .ensure_ref(&cs)
@@ -299,30 +399,9 @@ impl SpaceFs {
             id: cs.id,
             tip,
             status: cs.status,
+            title: cs.title,
+            touched,
         })
-    }
-
-    /// `Target::Main` write gate: `Update` on `Space(Some(space.id))`,
-    /// or — for a subject that can only `Propose` — the model-facing
-    /// `ChangesetRequired` instead of a bare `Unauthorized`, so it
-    /// learns to open a changeset rather than retrying the same write.
-    fn gate_main_write(&self, sub: &AuthSubject, space: &Space) -> Result<(), ProjectError> {
-        match sub.can(AuthVerb::Update, AuthResource::Space(Some(space.id))) {
-            Ok(()) => Ok(()),
-            Err(update_err) => {
-                if sub
-                    .can(AuthVerb::Propose, AuthResource::Space(Some(space.id)))
-                    .is_ok()
-                {
-                    Err(SpaceError::ChangesetRequired {
-                        slug: space.slug.clone(),
-                    }
-                    .into())
-                } else {
-                    Err(update_err.into())
-                }
-            }
-        }
     }
 
     /// Slugs of every space the subject can address — admins see all
@@ -631,14 +710,24 @@ impl SpaceFs {
             }
             .into());
         }
-        // An explicit `@<changeset-id>` on one side and not the other is
-        // ambiguous — which target does the move belong to? — rather
-        // than silently picking one.
+        // An explicit `@<changeset-id>` on one side and not the other,
+        // or a `space:`/`draft:` scheme mismatch, is ambiguous — which
+        // target does the move belong to? — rather than silently
+        // picking one (§5.1: the two schemes can resolve to different
+        // targets for the same slug).
         if let (Some(from_sref), Some(to_sref)) = (parse_space_path(from), parse_space_path(to)) {
             if from_sref.changeset_id.is_some() != to_sref.changeset_id.is_some() {
                 return Err(SpaceError::BadRequest {
                     reason: format!(
                         "'{from}' -> '{to}': an explicit '@<changeset-id>' must appear on both sides of a move, or neither"
+                    ),
+                }
+                .into());
+            }
+            if from_sref.scheme != to_sref.scheme {
+                return Err(SpaceError::BadRequest {
+                    reason: format!(
+                        "'{from}' -> '{to}': both sides of a move must use the same scheme ('space:' or 'draft:')"
                     ),
                 }
                 .into());
@@ -981,6 +1070,42 @@ fn join_dates(
         .collect()
 }
 
+/// First 8 characters of a `ChangesetId`'s string form — D10's stamp
+/// format everywhere it names an id.
+fn short_id(id: ChangesetId) -> String {
+    id.to_string().chars().take(8).collect()
+}
+
+/// D10: the stamp line prepended to every `space:`/`draft:` file-tool
+/// result — see §5.3's exact formats. `prefix` is whichever scheme the
+/// caller actually typed (`space:` or `draft:`); the two can resolve
+/// to the same `Target::Changeset`, and the stamp should say what was
+/// asked for, not just what it means.
+fn stamp(scheme: SpaceScheme, slug: &str, target: &Target) -> String {
+    let prefix = scheme.prefix();
+    match target {
+        Target::Main => format!("[{prefix}:{slug} · main]"),
+        // Reached only via the explicit `space:<slug>@<id>` form —
+        // `draft:` and authority-resolved `space:` paths never point
+        // at a non-`Open` changeset.
+        Target::Changeset {
+            id, status, title, ..
+        } if scheme == SpaceScheme::Space && *status != ChangesetStatus::Open => {
+            format!(
+                "[space:{slug}@{} · changeset \"{title}\" · {status:?}]",
+                short_id(*id)
+            )
+        }
+        Target::Changeset {
+            id, title, touched, ..
+        } => format!(
+            "[{prefix}:{slug} · draft {} \"{title}\" · {touched} file{}]",
+            short_id(*id),
+            if *touched == 1 { "" } else { "s" }
+        ),
+    }
+}
+
 fn io_err(msg: String) -> SpaceError {
     SpaceError::Io(msg)
 }
@@ -1158,6 +1283,8 @@ mod tests {
             id,
             tip: "deadbeef".to_string(),
             status: ChangesetStatus::Open,
+            title: "a draft".to_string(),
+            touched: 1,
         };
         assert_eq!(target.git_ref(), Some(format!("refs/heads/drua/{id}")));
         assert_eq!(target.at(), Some("deadbeef"));

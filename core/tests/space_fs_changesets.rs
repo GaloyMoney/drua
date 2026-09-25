@@ -201,16 +201,68 @@ async fn project_with_space(
         )
         .await
         .expect("seed main");
-    // `create` already persisted a real `Agent` row for the lead
-    // (`bind_actor_entity_in_op` needs a live row to bind onto) — reuse
-    // its id, but build the subject with a plain `ProjectMember` scope
-    // (§4.2 OQ-2: `Propose`-only) rather than `ProjectAdmin`, so these
-    // tests exercise the same path a real chat/task agent takes:
-    // staging through a changeset, not writing `main` directly.
+    // `create` already persisted a real `Agent` row for the lead —
+    // reuse its id, but build the subject with a plain `ProjectMember`
+    // scope (§4.2 OQ-2: `Propose`-only) rather than `ProjectAdmin`, so
+    // these tests exercise the same path a real chat/task agent takes:
+    // staging through a draft, not writing `main` directly.
     AuthSubject::Agent(
         project.id,
         project.lead_agent_id,
         vec![drua_core::auth::AuthScope::ProjectMember(project.id)],
+    )
+}
+
+/// Same as `project_with_space`, but also returns the real lead
+/// subject (`ProjectAdmin` — `Update` on spaces) alongside a
+/// `ProjectMember`-scoped one, for tests exercising rev2 §2's
+/// authority-resolved context table on both sides at once.
+async fn project_with_space_and_lead(
+    app: &App,
+    user: &AuthSubject,
+    project_name: &str,
+    slug: &str,
+) -> (AuthSubject, AuthSubject) {
+    let project = app
+        .projects()
+        .create(user, project_name.to_string(), None)
+        .await
+        .expect("create project");
+    let space = app
+        .projects()
+        .create_and_mount_space(user, project.id, slug, None)
+        .await
+        .expect("create+mount space");
+    app.library()
+        .spaces()
+        .write_file(
+            &space.slug,
+            "a.md",
+            "main content\n".into(),
+            CommitAttribution::library_default(),
+            None,
+        )
+        .await
+        .expect("seed main");
+    let member = AuthSubject::Agent(
+        project.id,
+        project.lead_agent_id,
+        vec![drua_core::auth::AuthScope::ProjectMember(project.id)],
+    );
+    let lead = AuthSubject::Agent(
+        project.id,
+        project.lead_agent_id,
+        vec![drua_core::auth::AuthScope::ProjectAdmin(project.id)],
+    );
+    (member, lead)
+}
+
+fn space_fs(app: &App) -> drua_core::space_fs::SpaceFs {
+    drua_core::space_fs::SpaceFs::new(
+        Arc::new(app.library().spaces().clone()),
+        Arc::new(app.projects().clone()),
+        Arc::new(app.users().clone()),
+        Arc::new(app.changesets().clone()),
     )
 }
 
@@ -222,7 +274,7 @@ async fn bound_write_lands_on_changeset_branch_and_leaves_main_untouched() {
 
     let cs = app
         .changesets()
-        .open(&agent, "add a paragraph".into(), None)
+        .draft_for(&agent, Some("add a paragraph".into()), None, None)
         .await
         .expect("open changeset");
 
@@ -271,10 +323,22 @@ async fn explicit_read_of_foreign_project_changeset_is_rejected() {
     let (app, user) = setup("foreign_changeset").await;
     let owner = project_with_space(&app, &user, "proj-owner", "docs").await;
     let outsider = project_with_space(&app, &user, "proj-outsider", "notes").await;
+    // The mount gate (`Projects::space_for_subject`) runs before the
+    // changeset-ownership check — mount "docs" on the outsider's
+    // project too, so this test exercises `ChangesetForeign` and not
+    // just `NotMounted`.
+    app.projects()
+        .mount_space(
+            &user,
+            outsider.project_id().expect("outsider has a project"),
+            "docs",
+        )
+        .await
+        .expect("mount docs onto the outsider's project");
 
     let cs = app
         .changesets()
-        .open(&owner, "owner's work".into(), None)
+        .draft_for(&owner, Some("owner's work".into()), None, None)
         .await
         .expect("open changeset");
 
@@ -306,7 +370,7 @@ async fn move_with_changeset_annotation_on_only_one_side_is_bad_request() {
 
     let cs = app
         .changesets()
-        .open(&agent, "moving things".into(), None)
+        .draft_for(&agent, Some("moving things".into()), None, None)
         .await
         .expect("open changeset");
 
@@ -336,7 +400,7 @@ async fn write_against_a_discarded_changeset_is_rejected() {
 
     let cs = app
         .changesets()
-        .open(&agent, "will be discarded".into(), None)
+        .draft_for(&agent, Some("will be discarded".into()), None, None)
         .await
         .expect("open changeset");
     app.changesets()
@@ -363,4 +427,217 @@ async fn write_against_a_discarded_changeset_is_rejected() {
         ),
         "expected ChangesetNotOpen, got: {err}"
     );
+}
+
+/// rev2 §2/§3: a `Propose`-only member's plain `space:` write creates
+/// a draft lazily (no `open`/`bind` needed) and leaves `main`
+/// untouched; a lead landing it via `apply` is what finally updates
+/// `main`.
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn member_lazy_draft_write_leaves_main_untouched_until_a_lead_lands_it() {
+    let (app, user) = setup("member_lazy_draft").await;
+    let (member, lead) = project_with_space_and_lead(&app, &user, "proj-lazy", "docs").await;
+    let fs = space_fs(&app);
+
+    fs.write_file(&member, "space:docs/a.md", "member edit\n".into())
+        .await
+        .expect("write_file dispatch")
+        .expect("space path");
+
+    let main = app
+        .library()
+        .spaces()
+        .read_file("docs", "a.md", None)
+        .await
+        .expect("read main")
+        .expect("a.md exists on main");
+    assert_eq!(main, b"main content\n", "main must stay untouched");
+
+    let draft = app
+        .changesets()
+        .open_draft_for(&member)
+        .await
+        .expect("open_draft_for")
+        .expect("a draft was lazily created");
+    assert_eq!(draft.commit_count(), 1);
+
+    app.changesets()
+        .apply(&lead, draft.id)
+        .await
+        .expect("lead lands the draft");
+
+    let landed = app
+        .library()
+        .spaces()
+        .read_file("docs", "a.md", None)
+        .await
+        .expect("read main")
+        .expect("a.md exists on main");
+    assert_eq!(landed, b"member edit\n");
+}
+
+/// rev2 D9/D14: `draft:` always stages, even for a lead who could
+/// write `main` directly via `space:` — the whole point of the scheme
+/// is an edit-time choice that doesn't depend on authority.
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn draft_scheme_stages_even_for_a_lead() {
+    let (app, user) = setup("draft_scheme_lead").await;
+    let (_, lead) = project_with_space_and_lead(&app, &user, "proj-lead-draft", "docs").await;
+    let fs = space_fs(&app);
+
+    fs.write_file(&lead, "draft:docs/a.md", "lead's staged edit\n".into())
+        .await
+        .expect("write_file dispatch")
+        .expect("space path");
+
+    let main = app
+        .library()
+        .spaces()
+        .read_file("docs", "a.md", None)
+        .await
+        .expect("read main")
+        .expect("a.md exists on main");
+    assert_eq!(main, b"main content\n", "draft: must never touch main");
+
+    let draft = app
+        .changesets()
+        .open_draft_for(&lead)
+        .await
+        .expect("open_draft_for")
+        .expect("draft: created a draft");
+    assert_eq!(draft.commit_count(), 1);
+}
+
+/// rev2 §3 rule 3: a read against `space:` with no open draft yet has
+/// nothing to overlay, so it falls back to `main` rather than erroring
+/// or inventing a draft.
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn space_read_with_no_open_draft_falls_back_to_main() {
+    let (app, user) = setup("read_no_draft").await;
+    let agent = project_with_space(&app, &user, "proj-read-fallback", "docs").await;
+    let fs = space_fs(&app);
+
+    let view = fs
+        .view_file(&agent, "space:docs/a.md", None)
+        .await
+        .expect("view_file dispatch")
+        .expect("space path");
+    let text = match view {
+        drua_core::space_fs::FileView::File(t) => t,
+        drua_core::space_fs::FileView::Dir(_) => panic!("expected a file"),
+    };
+    assert_eq!(text, "main content\n");
+
+    assert!(
+        app.changesets()
+            .open_draft_for(&agent)
+            .await
+            .expect("open_draft_for")
+            .is_none(),
+        "a read must never lazily create a draft"
+    );
+}
+
+/// D10's exact stamp formats (§5.3), for the three shapes reachable
+/// without a GitHub App configured: authority `main`, an
+/// authority/`draft:`-resolved draft, and the explicit `@<id>` form
+/// (exercised here still `Open`, since `status` transitions need a
+/// GitHub App this test fixture doesn't configure).
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn stamp_formats_match_the_documented_forms() {
+    let (app, user) = setup("stamp_formats").await;
+    let (member, lead) = project_with_space_and_lead(&app, &user, "proj-stamp", "docs").await;
+    let fs = space_fs(&app);
+
+    let lead_stamp = fs
+        .resolved_stamp(&lead, "space:docs/a.md", false)
+        .await
+        .expect("resolved_stamp")
+        .expect("space path");
+    assert_eq!(lead_stamp, "[space:docs · main]");
+
+    fs.write_file(&member, "space:docs/a.md", "staged\n".into())
+        .await
+        .expect("write_file dispatch")
+        .expect("space path");
+    let draft = app
+        .changesets()
+        .open_draft_for(&member)
+        .await
+        .expect("open_draft_for")
+        .expect("a draft exists");
+    let short_id: String = draft.id.to_string().chars().take(8).collect();
+
+    let member_stamp = fs
+        .resolved_stamp(&member, "space:docs/a.md", false)
+        .await
+        .expect("resolved_stamp")
+        .expect("space path");
+    assert_eq!(
+        member_stamp,
+        format!(
+            "[space:docs · draft {short_id} \"{}\" · 1 file]",
+            draft.title
+        )
+    );
+
+    let draft_scheme_stamp = fs
+        .resolved_stamp(&member, "draft:docs/a.md", false)
+        .await
+        .expect("resolved_stamp")
+        .expect("space path");
+    assert_eq!(
+        draft_scheme_stamp,
+        format!(
+            "[draft:docs · draft {short_id} \"{}\" · 1 file]",
+            draft.title
+        )
+    );
+
+    let explicit_path = format!("space:docs@{}/a.md", draft.id);
+    let explicit_stamp = fs
+        .resolved_stamp(&lead, &explicit_path, false)
+        .await
+        .expect("resolved_stamp")
+        .expect("space path");
+    // `Open` via the explicit form still renders the draft-shaped
+    // stamp (only a non-`Open` status switches to the "changeset"
+    // form) — same id/title/count as the authority-resolved one above,
+    // just under the `@<id>` scheme text.
+    assert_eq!(
+        explicit_stamp,
+        format!(
+            "[space:docs · draft {short_id} \"{}\" · 1 file]",
+            draft.title
+        )
+    );
+}
+
+/// rev2 D4: two concurrent first-writes from the same actor must not
+/// create two `Open` drafts — the partial unique index on
+/// `opened_by_actor` and `draft_for`'s catch-and-re-read make this
+/// safe without a lock.
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn concurrent_draft_for_calls_yield_one_changeset() {
+    let (app, user) = setup("concurrent_draft_for").await;
+    let agent = project_with_space(&app, &user, "proj-concurrent", "docs").await;
+
+    let (a, b) = tokio::join!(
+        app.changesets().draft_for(&agent, None, None, Some("a.md")),
+        app.changesets().draft_for(&agent, None, None, Some("a.md")),
+    );
+    let (a, b) = (a.expect("draft_for a"), b.expect("draft_for b"));
+    assert_eq!(a.id, b.id, "both calls must resolve to the same draft");
+
+    let all = app
+        .changesets()
+        .list(&agent, Some(drua_core::changeset::ChangesetStatus::Open))
+        .await
+        .expect("list");
+    assert_eq!(all.len(), 1, "exactly one Open changeset for this actor");
 }
