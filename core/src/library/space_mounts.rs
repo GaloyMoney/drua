@@ -34,6 +34,19 @@ pub enum SpaceMountsError {
 /// truncation footer; agents enumerate the rest via the `spaces` tool.
 const SPACES_BLOCK_LIMIT: usize = 20;
 
+/// rev3 §6.3: the one sentence describing `space:`/`draft:` write mode
+/// for every subject — `render_spaces_block`'s `write_line` and
+/// `whoami`'s `space_write_mode_note` both render this verbatim. There
+/// is no longer a mode to branch on: `space:` fails closed (D15)
+/// rather than resolving differently by authority.
+pub const SPACE_WRITE_MODE_SENTENCE: &str =
+    "Reads of space:<slug>/ paths see the published library. Writes go to \
+     draft:<slug>/ — your unpublished draft, started on first write or with \
+     `spaces start-draft` — and are published with `spaces publish-draft` \
+     (landed directly if you hold write authority, otherwise as a GitHub PR). \
+     Direct writes to space:<slug>/ are accepted only with write authority \
+     and no open draft.\n";
+
 #[derive(Clone)]
 pub struct SpaceMounts {
     /// `None` in test contexts (`empty()`) where no library is wired up.
@@ -99,40 +112,27 @@ impl SpaceMounts {
     }
 
     /// Rendered `<spaces>...</spaces>` system-prompt block for an agent
-    /// in `project_id`. `Ok(None)` when no spaces are mounted.
-    /// `can_write_main` — subject-aware per rev2 §6.3 (amending the
-    /// handoff's §8.3): `true` (a lead's `ProjectAdmin` scope) keeps
-    /// direct `space:` writes and offers `draft:` to stage instead;
-    /// `false` (`Propose`-only — ordinary task/step agents) says
-    /// `space:` itself stages, so it doesn't promise a write mode the
-    /// subject doesn't have. Neither line mentions "changeset" or an
-    /// "open"/"bind" step — rev2 D2/D4 removed both.
+    /// in `project_id`. `Ok(None)` when no spaces are mounted. rev3
+    /// §6.3: one sentence for every subject — there is no longer a
+    /// write mode to describe (`space:` fails closed per D15 rather
+    /// than resolving differently by authority).
     #[instrument(name = "library.space_mounts.spaces_block_for_project", skip(self))]
     pub async fn spaces_block_for_project(
         &self,
         project_id: ProjectId,
-        can_write_main: bool,
     ) -> Result<Option<String>, SpaceMountsError> {
         let spaces = self.spaces_for_project(project_id).await?;
-        Ok(render_spaces_block(&spaces, can_write_main))
+        Ok(render_spaces_block(&spaces))
     }
 }
 
-fn render_spaces_block(spaces: &[Space], can_write_main: bool) -> Option<String> {
+fn render_spaces_block(spaces: &[Space]) -> Option<String> {
     if spaces.is_empty() {
         return None;
     }
     let total = spaces.len();
 
-    let write_line = if can_write_main {
-        "Edits to space:<slug>/ paths save straight to the library. Use \
-         draft:<slug>/ paths instead to stage them; `spaces publish` \
-         then lands the draft on main.\n"
-    } else {
-        "Edits to space:<slug>/ paths save to your unpublished draft, \
-         never straight to the library. `spaces publish` sends the \
-         draft for review as a GitHub PR.\n"
-    };
+    let write_line = SPACE_WRITE_MODE_SENTENCE;
     let header = format!(
         "<spaces>\n\
          This project has the following knowledge spaces mounted — \

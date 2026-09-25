@@ -50,11 +50,12 @@ impl TopLevelTool for MoveFile {
     }
 
     fn description(&self) -> &str {
-        "Rename a file. Accepts in-sandbox absolute paths or \
-         `space:<slug>/...` paths from mounted spaces. Both `from` and \
-         `to` must be in the same realm (same space, or both in-sandbox); \
-         cross-space moves are not supported. Errors if the destination \
-         already exists."
+        "Rename a file. Accepts in-sandbox absolute paths, `space:<slug>/...` \
+         paths (the published library), or `draft:<slug>/...` paths (your \
+         unpublished draft). Both `from` and `to` must be in the same realm \
+         (same space and scheme, or both in-sandbox); cross-space moves and \
+         moves between `space:` and `draft:` of the same slug are not \
+         supported. Errors if the destination already exists."
     }
 
     fn input_schema(&self) -> &serde_json::Value {

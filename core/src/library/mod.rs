@@ -2,7 +2,7 @@ mod error;
 mod space_mounts;
 
 pub use error::LibraryError;
-pub use space_mounts::{SpaceMounts, SpaceMountsError};
+pub use space_mounts::{SpaceMounts, SpaceMountsError, SPACE_WRITE_MODE_SENTENCE};
 
 pub use drua_library::{
     DirEntry, DocType, GitFileHash, NewSpace, SearchHit, SearchableFields, Space, SpaceError,

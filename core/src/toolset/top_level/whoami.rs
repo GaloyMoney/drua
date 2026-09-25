@@ -2,7 +2,8 @@ use std::sync::LazyLock;
 
 use rmcp::model::{CallToolResult, Content, JsonObject};
 
-use crate::auth::{AuthResource, AuthSubject, AuthVerb};
+use crate::auth::AuthSubject;
+use crate::library::SPACE_WRITE_MODE_SENTENCE;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
@@ -56,24 +57,16 @@ struct WhoAmIOutput {
 static WHOAMI_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<WhoAmIOutput>);
 
-/// rev2 §6.3: an external MCP agent doesn't see the in-session
-/// `<spaces>` prompt block (that's rendered only for `Agent` sessions,
-/// `Agents::cached_dynamic_blocks`) — `whoami` is the one place it
-/// learns its `space:`/`draft:` write mode, since it's credential-wide
-/// rather than tied to any one project's mount list.
-fn space_write_mode_note(subject: &AuthSubject) -> String {
-    if subject
-        .can(AuthVerb::Update, AuthResource::Space(None))
-        .is_ok()
-    {
-        "Edits to space:<slug>/ paths save straight to the library. Use draft:<slug>/ \
-         paths instead to stage them; `spaces publish` then lands the draft on main."
-            .to_string()
-    } else {
-        "Edits to space:<slug>/ paths save to your unpublished draft, never straight \
-         to the library. `spaces publish` sends the draft for review as a GitHub PR."
-            .to_string()
-    }
+/// rev2 §6.3 (rev3-amended): an external MCP agent doesn't see the
+/// in-session `<spaces>` prompt block (that's rendered only for
+/// `Agent` sessions, `Agents::cached_dynamic_blocks`) — `whoami` is
+/// the one place it learns its `space:`/`draft:` write mode, since
+/// it's credential-wide rather than tied to any one project's mount
+/// list. rev3: one sentence for every subject — `space:` fails closed
+/// (D15) rather than resolving differently by authority, so there's no
+/// longer a mode to branch on here.
+fn space_write_mode_note(_subject: &AuthSubject) -> String {
+    SPACE_WRITE_MODE_SENTENCE.trim().to_string()
 }
 
 #[async_trait::async_trait]

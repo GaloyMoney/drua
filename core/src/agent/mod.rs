@@ -200,12 +200,9 @@ impl Agents {
                     .map(|text| session::message::SystemBlock::Skills { text })
             }
         };
-        let can_write_main = agent
-            .auth_subject()
-            .has_scope(&AuthScope::ProjectAdmin(project_id));
         let spaces_block = self
             .space_mounts
-            .spaces_block_for_project(project_id, can_write_main)
+            .spaces_block_for_project(project_id)
             .await
             .ok()
             .flatten()
@@ -507,11 +504,8 @@ impl Agents {
             });
         }
 
-        let can_write_main = agent_subject.has_scope(&AuthScope::ProjectAdmin(project_id));
-        if let Ok(Some(spaces_content)) = self
-            .space_mounts
-            .spaces_block_for_project(project_id, can_write_main)
-            .await
+        if let Ok(Some(spaces_content)) =
+            self.space_mounts.spaces_block_for_project(project_id).await
         {
             system_blocks.push(session::message::SystemBlock::Spaces {
                 text: spaces_content,

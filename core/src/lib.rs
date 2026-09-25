@@ -389,6 +389,7 @@ impl App {
             Arc::clone(&workflows),
             Arc::clone(&skills),
             Arc::clone(&notes),
+            Arc::clone(&changesets),
         ));
 
         // Compose is constructed with its complete dependencies after the other
