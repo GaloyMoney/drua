@@ -142,10 +142,16 @@ pub enum Target {
         /// push landed on the branch since).
         tip: String,
         status: ChangesetStatus,
-        /// `title` and `touched` are carried along purely for the D10
-        /// stamp — never used for git addressing.
+        /// `title`, `touched`, and `just_started` are carried along
+        /// purely for the D10/D19 stamp — never used for git
+        /// addressing.
         title: String,
         touched: usize,
+        /// rev3 §5.3: true only for the `draft:` write that just
+        /// lazily created the draft — renders "started" instead of the
+        /// touched-file count, so the caller's very first write gets
+        /// explicit first-write feedback.
+        just_started: bool,
     },
 }
 
@@ -308,7 +314,10 @@ impl SpaceFs {
         let rel_path = normalize_rel_path(sref.rel_path);
         Self::validate_rel_path(&rel_path)?;
         let target = self.resolve_target(sub, &space, &sref, intent).await?;
-        let stamp = stamp(sref.scheme, &space.slug, &target);
+        let differs = self
+            .differs_note(sub, &sref, &rel_path, &target, intent)
+            .await;
+        let stamp = stamp(sref.scheme, &space.slug, &target, differs.as_deref());
         Ok(Some(Resolved {
             space,
             rel_path,
@@ -317,7 +326,7 @@ impl SpaceFs {
         }))
     }
 
-    /// §3's resolution rule, replacing rev1 §2.1:
+    /// §3's resolution rule, rev3-amended:
     ///
     /// 1. `space:<slug>@<id>` — the explicit target (§6.4). Writes
     ///    require `Propose` (checked before the `Open` check — an
@@ -326,10 +335,14 @@ impl SpaceFs {
     /// 2. `draft:<slug>` — always `sub`'s own draft: `Propose` required;
     ///    a write lazily creates it (`Changesets::draft_for`); a read
     ///    with none open overlays nothing and falls back to `Main`
-    ///    (there's nothing to differ from yet).
-    /// 3. `space:<slug>` — authority-resolved: `Update` → `Main`; else
-    ///    `Propose` → the caller's draft (same lazy-on-write, `Main`-
-    ///    on-read-with-none-open rule as `draft:`); else `Unauthorized`.
+    ///    (there's nothing to differ from yet — §5.3's "no draft" form).
+    /// 3. `space:<slug>`: a **read** always sees `Main` (D19's differs
+    ///    stamp is computed separately, in `differs_note`, never by
+    ///    overlaying). A **write** requires `Update`; a subject with
+    ///    only `Propose` gets `UseDraft` (rev3 D9/D15 — replaces rev2's
+    ///    silent redirect into a draft); neither verb is `Unauthorized`.
+    ///    A subject that holds `Update` but already has an open draft
+    ///    gets `DraftOpen` (D15) rather than silently landing on `main`.
     async fn resolve_target(
         &self,
         sub: &AuthSubject,
@@ -353,34 +366,68 @@ impl SpaceFs {
                     .into());
                 }
             }
-            return self.changeset_target(cs).await;
+            return self.changeset_target(cs, false).await;
         }
 
-        if sref.scheme == SpaceScheme::Space
-            && sub
-                .can(AuthVerb::Update, AuthResource::Space(Some(space.id)))
-                .is_ok()
-        {
-            return Ok(Target::Main);
-        }
-        sub.can(AuthVerb::Propose, AuthResource::Space(Some(space.id)))?;
-
-        let cs = if intent == Intent::Write {
-            Some(
-                self.changesets
+        match sref.scheme {
+            SpaceScheme::Draft => {
+                sub.can(AuthVerb::Propose, AuthResource::Space(Some(space.id)))?;
+                if intent != Intent::Write {
+                    return match self
+                        .changesets
+                        .open_draft_for(sub)
+                        .await
+                        .map_err(map_changeset_err)?
+                    {
+                        Some(cs) => self.changeset_target(cs, false).await,
+                        None => Ok(Target::Main),
+                    };
+                }
+                let had_draft = self
+                    .changesets
+                    .open_draft_for(sub)
+                    .await
+                    .map_err(map_changeset_err)?
+                    .is_some();
+                let cs = self
+                    .changesets
                     .draft_for(sub, None, None, Some(sref.rel_path))
                     .await
-                    .map_err(map_changeset_err)?,
-            )
-        } else {
-            self.changesets
-                .open_draft_for(sub)
-                .await
-                .map_err(map_changeset_err)?
-        };
-        match cs {
-            Some(cs) => self.changeset_target(cs).await,
-            None => Ok(Target::Main),
+                    .map_err(map_changeset_err)?;
+                self.changeset_target(cs, !had_draft).await
+            }
+            SpaceScheme::Space => {
+                if intent != Intent::Write {
+                    return Ok(Target::Main);
+                }
+                if sub
+                    .can(AuthVerb::Update, AuthResource::Space(Some(space.id)))
+                    .is_ok()
+                {
+                    return match self
+                        .changesets
+                        .open_draft_for(sub)
+                        .await
+                        .map_err(map_changeset_err)?
+                    {
+                        Some(cs) => Err(SpaceError::DraftOpen {
+                            id: short_id(cs.id),
+                            title: cs.title,
+                            slug: space.slug.clone(),
+                        }
+                        .into()),
+                        None => Ok(Target::Main),
+                    };
+                }
+                // No `Update` — a `Propose`-only subject must stage
+                // through `draft:` instead; neither verb is a plain
+                // `Unauthorized`.
+                sub.can(AuthVerb::Propose, AuthResource::Space(Some(space.id)))?;
+                Err(SpaceError::UseDraft {
+                    slug: space.slug.clone(),
+                }
+                .into())
+            }
         }
     }
 
@@ -388,7 +435,13 @@ impl SpaceFs {
     /// where the hydrated entity is already in hand — never re-fetched
     /// downstream just to render a stamp. Best-effort: a `touched_count`
     /// failure degrades to `0` rather than failing the whole op.
-    async fn changeset_target(&self, cs: Changeset) -> Result<Target, ProjectError> {
+    /// `just_started` (D19/§5.3) is set only by the `draft:` write that
+    /// lazily created the draft.
+    async fn changeset_target(
+        &self,
+        cs: Changeset,
+        just_started: bool,
+    ) -> Result<Target, ProjectError> {
         let touched = self.changesets.touched_count(&cs).await.unwrap_or(0);
         let tip = self
             .changesets
@@ -401,7 +454,40 @@ impl SpaceFs {
             status: cs.status,
             title: cs.title,
             touched,
+            just_started,
         })
+    }
+
+    /// D19: for a `space:` **read** that resolved to `Main`, the short
+    /// id of the caller's open draft iff that draft has touched
+    /// `rel_path` in this same space — `None` in every other case
+    /// (`draft:` reads, writes, no open draft, or an untouched path).
+    /// Best-effort: any lookup failure degrades to `None` rather than
+    /// failing the read over a stamp.
+    async fn differs_note(
+        &self,
+        sub: &AuthSubject,
+        sref: &SpaceRef<'_>,
+        rel_path: &str,
+        target: &Target,
+        intent: Intent,
+    ) -> Option<String> {
+        if intent != Intent::Read
+            || sref.scheme != SpaceScheme::Space
+            || !matches!(target, Target::Main)
+        {
+            return None;
+        }
+        let draft = self.changesets.open_draft_for(sub).await.ok().flatten()?;
+        let touched = self
+            .changesets
+            .touched_paths_in(&draft, sref.slug)
+            .await
+            .ok()?;
+        touched
+            .iter()
+            .any(|p| p == rel_path)
+            .then_some(short_id(draft.id))
     }
 
     /// Slugs of every space the subject can address — admins see all
@@ -1076,18 +1162,25 @@ fn short_id(id: ChangesetId) -> String {
     id.to_string().chars().take(8).collect()
 }
 
-/// D10: the stamp line prepended to every `space:`/`draft:` file-tool
-/// result — see §5.3's exact formats. `prefix` is whichever scheme the
-/// caller actually typed (`space:` or `draft:`); the two can resolve
-/// to the same `Target::Changeset`, and the stamp should say what was
-/// asked for, not just what it means.
-fn stamp(scheme: SpaceScheme, slug: &str, target: &Target) -> String {
+/// D10/D19/§5.3: the stamp line prepended to every `space:`/`draft:`
+/// file-tool result. `prefix` is whichever scheme the caller actually
+/// typed (`space:` or `draft:`); the two can resolve to the same
+/// `Target::Changeset`, and the stamp should say what was asked for,
+/// not just what it means. `differs` (only ever `Some` for a
+/// `space:` read resolved to `Main`) names the caller's own draft when
+/// it has touched the same path — D19's "differs in your draft" form.
+fn stamp(scheme: SpaceScheme, slug: &str, target: &Target, differs: Option<&str>) -> String {
     let prefix = scheme.prefix();
     match target {
-        Target::Main => format!("[{prefix}:{slug} · main]"),
+        // rev3 D9: `draft:` never falls back silently to `main` — a
+        // read with no open draft says so explicitly.
+        Target::Main if scheme == SpaceScheme::Draft => format!("[draft:{slug} · no draft]"),
+        Target::Main => match differs {
+            Some(id) => format!("[space:{slug} · main · differs in your draft {id}]"),
+            None => format!("[space:{slug} · main]"),
+        },
         // Reached only via the explicit `space:<slug>@<id>` form —
-        // `draft:` and authority-resolved `space:` paths never point
-        // at a non-`Open` changeset.
+        // `draft:` paths never point at a non-`Open` changeset.
         Target::Changeset {
             id, status, title, ..
         } if scheme == SpaceScheme::Space && *status != ChangesetStatus::Open => {
@@ -1096,6 +1189,17 @@ fn stamp(scheme: SpaceScheme, slug: &str, target: &Target) -> String {
                 short_id(*id)
             )
         }
+        // rev3 §5.3: the write that lazily created the draft gets
+        // "started" instead of the touched-file count.
+        Target::Changeset {
+            id,
+            title,
+            just_started: true,
+            ..
+        } => format!(
+            "[{prefix}:{slug} · draft {} \"{title}\" · started]",
+            short_id(*id)
+        ),
         Target::Changeset {
             id, title, touched, ..
         } => format!(
@@ -1285,6 +1389,7 @@ mod tests {
             status: ChangesetStatus::Open,
             title: "a draft".to_string(),
             touched: 1,
+            just_started: false,
         };
         assert_eq!(target.git_ref(), Some(format!("refs/heads/drua/{id}")));
         assert_eq!(target.at(), Some("deadbeef"));

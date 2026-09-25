@@ -20,6 +20,7 @@ use drua_core::primitives::{AuthSubject, UserId};
 use drua_core::project::ProjectError;
 use drua_core::{App, AppConfig};
 use drua_library::{CommitAttribution, SpaceError};
+use rmcp::model::CallToolResult;
 
 const PG_CON: &str = "postgres://user:password@localhost:5432/drua";
 
@@ -285,7 +286,9 @@ async fn bound_write_lands_on_changeset_branch_and_leaves_main_untouched() {
         Arc::new(app.changesets().clone()),
     );
 
-    fs.write_file(&agent, "space:docs/a.md", "staged content\n".into())
+    // rev3 D9: `space:` never stages any more — a `Propose`-only
+    // subject writes `draft:` explicitly.
+    fs.write_file(&agent, "draft:docs/a.md", "staged content\n".into())
         .await
         .expect("write_file dispatch")
         .expect("space path");
@@ -456,10 +459,10 @@ async fn apply_on_an_empty_draft_is_rejected() {
     );
 }
 
-/// rev2 §2/§3: a `Propose`-only member's plain `space:` write creates
-/// a draft lazily (no `open`/`bind` needed) and leaves `main`
-/// untouched; a lead landing it via `apply` is what finally updates
-/// `main`.
+/// rev3 §2/§3: a `Propose`-only member's `draft:` write creates a
+/// draft lazily (no `open`/`bind`/`start-draft` needed) and leaves
+/// `main` untouched; a lead landing it via `apply` is what finally
+/// updates `main`.
 #[tokio::test]
 #[ignore = "requires postgres + writes a working library clone; run with --ignored"]
 async fn member_lazy_draft_write_leaves_main_untouched_until_a_lead_lands_it() {
@@ -467,7 +470,7 @@ async fn member_lazy_draft_write_leaves_main_untouched_until_a_lead_lands_it() {
     let (member, lead) = project_with_space_and_lead(&app, &user, "proj-lazy", "docs").await;
     let fs = space_fs(&app);
 
-    fs.write_file(&member, "space:docs/a.md", "member edit\n".into())
+    fs.write_file(&member, "draft:docs/a.md", "member edit\n".into())
         .await
         .expect("write_file dispatch")
         .expect("space path");
@@ -568,11 +571,12 @@ async fn space_read_with_no_open_draft_falls_back_to_main() {
     );
 }
 
-/// D10's exact stamp formats (§5.3), for the three shapes reachable
-/// without a GitHub App configured: authority `main`, an
-/// authority/`draft:`-resolved draft, and the explicit `@<id>` form
-/// (exercised here still `Open`, since `status` transitions need a
-/// GitHub App this test fixture doesn't configure).
+/// D10/D19/§5.3's exact stamp formats, for the shapes reachable
+/// without a GitHub App configured: `main` (no draft), the "started"
+/// first-write form, the normal touched-count form, the `draft:`
+/// "no draft" fallback, D19's "differs" form, and the explicit
+/// `@<id>` form (exercised here still `Open`, since `status`
+/// transitions need a GitHub App this test fixture doesn't configure).
 #[tokio::test]
 #[ignore = "requires postgres + writes a working library clone; run with --ignored"]
 async fn stamp_formats_match_the_documented_forms() {
@@ -587,7 +591,21 @@ async fn stamp_formats_match_the_documented_forms() {
         .expect("space path");
     assert_eq!(lead_stamp, "[space:docs · main]");
 
-    fs.write_file(&member, "space:docs/a.md", "staged\n".into())
+    let no_draft_stamp = fs
+        .resolved_stamp(&member, "draft:docs/a.md", false)
+        .await
+        .expect("resolved_stamp")
+        .expect("space path");
+    assert_eq!(no_draft_stamp, "[draft:docs · no draft]");
+
+    // The write that lazily creates the draft gets "started" feedback
+    // instead of a touched-file count.
+    let started_stamp = fs
+        .resolved_stamp(&member, "draft:docs/a.md", true)
+        .await
+        .expect("resolved_stamp")
+        .expect("space path");
+    fs.write_file(&member, "draft:docs/a.md", "staged\n".into())
         .await
         .expect("write_file dispatch")
         .expect("space path");
@@ -598,16 +616,10 @@ async fn stamp_formats_match_the_documented_forms() {
         .expect("open_draft_for")
         .expect("a draft exists");
     let short_id: String = draft.id.to_string().chars().take(8).collect();
-
-    let member_stamp = fs
-        .resolved_stamp(&member, "space:docs/a.md", false)
-        .await
-        .expect("resolved_stamp")
-        .expect("space path");
     assert_eq!(
-        member_stamp,
+        started_stamp,
         format!(
-            "[space:docs · draft {short_id} \"{}\" · 1 file]",
+            "[draft:docs · draft {short_id} \"{}\" · started]",
             draft.title
         )
     );
@@ -625,6 +637,18 @@ async fn stamp_formats_match_the_documented_forms() {
         )
     );
 
+    // D19: a `space:` read of the same path the member's draft has
+    // touched names the draft rather than silently showing `main`.
+    let differs_stamp = fs
+        .resolved_stamp(&member, "space:docs/a.md", false)
+        .await
+        .expect("resolved_stamp")
+        .expect("space path");
+    assert_eq!(
+        differs_stamp,
+        format!("[space:docs · main · differs in your draft {short_id}]")
+    );
+
     let explicit_path = format!("space:docs@{}/a.md", draft.id);
     let explicit_stamp = fs
         .resolved_stamp(&lead, &explicit_path, false)
@@ -633,7 +657,7 @@ async fn stamp_formats_match_the_documented_forms() {
         .expect("space path");
     // `Open` via the explicit form still renders the draft-shaped
     // stamp (only a non-`Open` status switches to the "changeset"
-    // form) — same id/title/count as the authority-resolved one above,
+    // form) — same id/title/count as the `draft:`-resolved one above,
     // just under the `@<id>` scheme text.
     assert_eq!(
         explicit_stamp,
@@ -641,6 +665,80 @@ async fn stamp_formats_match_the_documented_forms() {
             "[space:docs · draft {short_id} \"{}\" · 1 file]",
             draft.title
         )
+    );
+}
+
+/// rev3 D9/D15: a `Propose`-only member's `space:` write is refused —
+/// loud, never a silent redirect into a draft.
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn member_space_write_is_refused_with_use_draft() {
+    let (app, user) = setup("member_use_draft").await;
+    let agent = project_with_space(&app, &user, "proj-use-draft", "docs").await;
+    let fs = space_fs(&app);
+
+    let err = fs
+        .write_file(&agent, "space:docs/a.md", "nope\n".into())
+        .await
+        .expect_err("a Propose-only write to space: must be refused");
+    assert!(
+        matches!(err, ProjectError::Space(SpaceError::UseDraft { ref slug }) if slug == "docs"),
+        "expected UseDraft, got: {err}"
+    );
+
+    let main = app
+        .library()
+        .spaces()
+        .read_file("docs", "a.md", None)
+        .await
+        .expect("read main")
+        .expect("a.md exists on main");
+    assert_eq!(
+        main, b"main content\n",
+        "a refused write must not touch main"
+    );
+    assert!(
+        app.changesets()
+            .open_draft_for(&agent)
+            .await
+            .expect("open_draft_for")
+            .is_none(),
+        "a refused space: write must not lazily create a draft either"
+    );
+}
+
+/// rev3 D15: a lead who holds `Update` still can't write `space:`
+/// directly once a draft is open — fail closed, not a silent land.
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn lead_space_write_with_open_draft_is_refused_with_draft_open() {
+    let (app, user) = setup("lead_draft_open").await;
+    let (_, lead) = project_with_space_and_lead(&app, &user, "proj-draft-open", "docs").await;
+    let fs = space_fs(&app);
+
+    fs.write_file(&lead, "draft:docs/a.md", "staged\n".into())
+        .await
+        .expect("write_file dispatch")
+        .expect("space path");
+    let draft = app
+        .changesets()
+        .open_draft_for(&lead)
+        .await
+        .expect("open_draft_for")
+        .expect("a draft is open");
+
+    let err = fs
+        .write_file(&lead, "space:docs/b.md", "direct\n".into())
+        .await
+        .expect_err("a lead with an open draft must not write space: directly");
+    let short_id: String = draft.id.to_string().chars().take(8).collect();
+    assert!(
+        matches!(
+            err,
+            ProjectError::Space(SpaceError::DraftOpen { ref id, ref slug, .. })
+                if *id == short_id && slug == "docs"
+        ),
+        "expected DraftOpen, got: {err}"
     );
 }
 
@@ -663,8 +761,170 @@ async fn concurrent_draft_for_calls_yield_one_changeset() {
 
     let all = app
         .changesets()
-        .list(&agent, Some(drua_core::changeset::ChangesetStatus::Open))
+        .list(
+            &agent,
+            Some(drua_core::changeset::ChangesetStatus::Open),
+            None,
+        )
         .await
         .expect("list");
     assert_eq!(all.len(), 1, "exactly one Open changeset for this actor");
+}
+
+fn text_of(res: &CallToolResult) -> String {
+    res.content
+        .iter()
+        .filter_map(|c| c.as_text())
+        .map(|t| t.text.clone())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// rev3 D17/D18/D19: end-to-end through the real `spaces` top-level
+/// tool (not `SpaceFs` directly) — `edit`/`view` with an explicit
+/// `target`, the verb-noun draft commands, and the D10/D19 stamp
+/// wired into the rendered text (`inspect.rs::dispatch_view`/
+/// `dispatch_edit`'s own `stamped` helper, not just `SpaceFs::
+/// resolved_stamp`).
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn spaces_tool_target_param_and_verb_noun_commands_end_to_end() {
+    let (app, user) = setup("spaces_tool_e2e").await;
+    let (_, lead) = project_with_space_and_lead(&app, &user, "proj-tool-e2e", "docs").await;
+
+    let spaces = app
+        .toolsets()
+        .top_level_tool_arcs(&lead)
+        .find(|t| t.name() == "spaces")
+        .expect("spaces tool visible to a lead");
+
+    // `edit target: main` (explicit) as a lead with no open draft lands
+    // directly and stamps `[space:docs · main]`.
+    let res = spaces
+        .call(
+            &lead,
+            serde_json::json!({
+                "command": "edit", "slug": "docs", "op": "write",
+                "op_args": {"path": "a.md", "content": "lead direct\n"},
+                "target": "main",
+            })
+            .as_object()
+            .cloned(),
+        )
+        .await
+        .expect("edit target: main");
+    let text = text_of(&res);
+    assert!(text.contains("[space:docs · main]"), "got: {text}");
+    assert!(text.contains("Wrote space:docs/a.md"), "got: {text}");
+
+    // `start-draft` is explicit and idempotent.
+    let res = spaces
+        .call(
+            &lead,
+            serde_json::json!({"command": "start-draft", "title": "lead's draft"})
+                .as_object()
+                .cloned(),
+        )
+        .await
+        .expect("start-draft");
+    assert!(text_of(&res).contains("started"), "got: {}", text_of(&res));
+    let res = spaces
+        .call(
+            &lead,
+            serde_json::json!({"command": "start-draft"})
+                .as_object()
+                .cloned(),
+        )
+        .await
+        .expect("start-draft again");
+    assert!(
+        text_of(&res).contains("already open"),
+        "got: {}",
+        text_of(&res)
+    );
+
+    // `edit target: draft` stages; direct `edit target: main` is now
+    // refused (`DraftOpen`) even though the lead holds `Update`.
+    let res = spaces
+        .call(
+            &lead,
+            serde_json::json!({
+                "command": "edit", "slug": "docs", "op": "write",
+                "op_args": {"path": "b.md", "content": "staged\n"},
+                "target": "draft",
+            })
+            .as_object()
+            .cloned(),
+        )
+        .await
+        .expect("edit target: draft");
+    assert!(
+        text_of(&res).contains("[draft:docs"),
+        "got: {}",
+        text_of(&res)
+    );
+
+    let err = spaces
+        .call(
+            &lead,
+            serde_json::json!({
+                "command": "edit", "slug": "docs", "op": "write",
+                "op_args": {"path": "c.md", "content": "nope\n"},
+                "target": "main",
+            })
+            .as_object()
+            .cloned(),
+        )
+        .await
+        .expect_err("a lead with an open draft must not write target: main directly");
+    assert!(err.to_string().contains("DraftOpen"), "got: {err}");
+
+    // `list-drafts` sees it; `publish-draft` lands it (the lead holds
+    // `Update`); `draft-status` then reports no open draft.
+    let res = spaces
+        .call(
+            &lead,
+            serde_json::json!({"command": "list-drafts"})
+                .as_object()
+                .cloned(),
+        )
+        .await
+        .expect("list-drafts");
+    assert!(
+        text_of(&res).contains("lead's draft"),
+        "got: {}",
+        text_of(&res)
+    );
+
+    let res = spaces
+        .call(
+            &lead,
+            serde_json::json!({"command": "publish-draft"})
+                .as_object()
+                .cloned(),
+        )
+        .await
+        .expect("publish-draft");
+    assert!(text_of(&res).contains("landed"), "got: {}", text_of(&res));
+
+    let res = spaces
+        .call(
+            &lead,
+            serde_json::json!({"command": "draft-status"})
+                .as_object()
+                .cloned(),
+        )
+        .await
+        .expect("draft-status");
+    assert_eq!(text_of(&res), "No open draft.");
+
+    // The landed content is now on `main`.
+    let landed = app
+        .library()
+        .spaces()
+        .read_file("docs", "b.md", None)
+        .await
+        .expect("read main")
+        .expect("b.md landed on main");
+    assert_eq!(landed, b"staged\n");
 }

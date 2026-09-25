@@ -49,6 +49,25 @@ pub enum SpaceError {
     ChangesetNotOpen { id: String, status: String },
     #[error("SpaceError - ChangesetForeign: changeset {id} belongs to another project")]
     ChangesetForeign { id: String },
+    /// rev3 D9/D15 rule 3: a `Propose`-only subject's direct
+    /// `space:<slug>/` write — no `Update`, so there's nothing to fall
+    /// back to but a draft; the message names the exact path form and
+    /// command so the model can self-correct.
+    #[error(
+        "SpaceError - UseDraft: direct edits to space:{slug}/ are not permitted for this subject; write draft:{slug}/<path> instead — it is staged in your draft and published with `spaces publish-draft`"
+    )]
+    UseDraft { slug: String },
+    /// rev3 D15: a subject with an open draft may not write
+    /// `space:<slug>/` directly — fail closed rather than silently
+    /// landing on `main`, even for a subject that holds `Update`.
+    #[error(
+        "SpaceError - DraftOpen: you have an open draft {id} \"{title}\"; write draft:{slug}/<path> to keep staging, or run `spaces publish-draft` / `spaces discard-draft` before writing space:{slug}/ directly"
+    )]
+    DraftOpen {
+        id: String,
+        title: String,
+        slug: String,
+    },
 }
 
 impl From<derive_builder::UninitializedFieldError> for SpaceError {
