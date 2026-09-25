@@ -100,12 +100,13 @@ impl SpaceMounts {
 
     /// Rendered `<spaces>...</spaces>` system-prompt block for an agent
     /// in `project_id`. `Ok(None)` when no spaces are mounted.
-    /// `can_write_main` — subject-aware per the staged-changesets
-    /// handoff §8.3: `true` (a lead's `ProjectAdmin` scope) keeps
-    /// today's "writes commit automatically" line and offers staging
-    /// as an option; `false` (`Propose`-only — ordinary task/step
-    /// agents) flips the wording so it doesn't promise a write mode
-    /// the subject doesn't have.
+    /// `can_write_main` — subject-aware per rev2 §6.3 (amending the
+    /// handoff's §8.3): `true` (a lead's `ProjectAdmin` scope) keeps
+    /// direct `space:` writes and offers `draft:` to stage instead;
+    /// `false` (`Propose`-only — ordinary task/step agents) says
+    /// `space:` itself stages, so it doesn't promise a write mode the
+    /// subject doesn't have. Neither line mentions "changeset" or an
+    /// "open"/"bind" step — rev2 D2/D4 removed both.
     #[instrument(name = "library.space_mounts.spaces_block_for_project", skip(self))]
     pub async fn spaces_block_for_project(
         &self,
@@ -124,20 +125,21 @@ fn render_spaces_block(spaces: &[Space], can_write_main: bool) -> Option<String>
     let total = spaces.len();
 
     let write_line = if can_write_main {
-        "Writes commit to the upstream library automatically, or stage \
-         them with the `changeset` tool for review.\n"
+        "Edits to space:<slug>/ paths save straight to the library. Use \
+         draft:<slug>/ paths instead to stage them; `spaces publish` \
+         then lands the draft on main.\n"
     } else {
-        "Writes to these spaces must be staged: open a changeset with \
-         the `changeset` tool before editing; the file tools then read \
-         and write your changeset automatically.\n"
+        "Edits to space:<slug>/ paths save to your unpublished draft, \
+         never straight to the library. `spaces publish` sends the \
+         draft for review as a GitHub PR.\n"
     };
     let header = format!(
         "<spaces>\n\
          This project has the following knowledge spaces mounted — \
          collaborative folders backed by a shared library. Use the \
          file tools (Read, LS, Glob, Grep, Edit, Move, Delete) with \
-         paths prefixed `space:<slug>/` to read or write their \
-         contents. {write_line}"
+         paths prefixed `space:<slug>/` (or `draft:<slug>/` to always \
+         stage) to read or write their contents. {write_line}"
     );
 
     let mut buf = header;
