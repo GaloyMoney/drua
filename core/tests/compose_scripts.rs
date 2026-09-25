@@ -1170,3 +1170,110 @@ return {
     assert!(!trailers.contains("Co-Authored-By"));
     app.shutdown().await;
 }
+
+/// bugbot 2026-09-25 (High): `check_owner_or_lead`/`check_discard_authority`
+/// used to resolve ownership via `actor_for_subject`, which keys a step
+/// agent as plain `Agent { agent_id }`. `draft_for` (via `actor_key_for`)
+/// keys that same agent's draft as `WorkflowRun { run_id }` instead (rev2
+/// D8: every step agent in one run shares a single draft) — so the two
+/// never matched, and a step agent could stage writes into its own draft
+/// but never `spaces discard`/`submit`/`apply`/`rebase` it itself. Builds
+/// a real step `Agent` row (satisfying the `agents.workflow_run_id` FK)
+/// without running the executor, since only the ownership check — not
+/// execution — is under test here.
+#[tokio::test]
+#[ignore = "requires isolated postgres + local library clone"]
+async fn step_agent_can_discard_its_own_lazily_created_draft() {
+    use drua_core::workflow::repo::WorkflowDefinitionRepo;
+    use drua_core::workflow::run::NewWorkflowRun;
+    use drua_core::workflow::{WorkflowRunRepo, WorkflowStepDef, WorkflowTrigger};
+
+    let (app, _user, agent) = setup("step-agent-owns-draft").await;
+    let project_id = agent.project_id().unwrap();
+
+    let definitions = WorkflowDefinitionRepo::new_without_library(&pool().await);
+    let runs = WorkflowRunRepo::new(&pool().await);
+    let step: WorkflowStepDef = serde_json::from_value(
+        serde_json::json!({"type":"script_step","name":"inventory","script":"space:docs/tasks.js"}),
+    )
+    .unwrap();
+    let new_definition = drua_core::workflow::NewWorkflowDefinition::builder()
+        .project_id(project_id)
+        .name(format!("step-owns-draft-{}", uuid::Uuid::new_v4()))
+        .trigger(WorkflowTrigger::Manual { condition: None })
+        .steps(vec![step.clone()])
+        .build()
+        .unwrap();
+    let mut op = definitions.begin_op().await.unwrap();
+    let definition = definitions
+        .create_in_op(&mut op, new_definition)
+        .await
+        .unwrap();
+    op.commit().await.unwrap();
+    let run = runs
+        .create(
+            NewWorkflowRun::builder()
+                .definition_id(definition.id)
+                .project_id(project_id)
+                .steps_snapshot(vec![step])
+                .trigger_context(serde_json::json!({}))
+                .build()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let mut op = app.agents().begin_op().await.unwrap();
+    let step_agent = app
+        .agents()
+        .create_for_workflow_run_in_op(
+            &mut op,
+            project_id,
+            definition.id,
+            run.id,
+            "inventory",
+            None,
+            None,
+            drua_core::workflow::default_output_schema(),
+        )
+        .await
+        .unwrap();
+    op.commit().await.unwrap();
+    assert_eq!(step_agent.workflow_run_id, Some(run.id));
+
+    let step_agent_subject = AuthSubject::Agent(
+        project_id,
+        step_agent.id,
+        vec![drua_core::auth::AuthScope::ProjectMember(project_id)],
+    );
+
+    let draft = app
+        .changesets()
+        .draft_for(
+            &step_agent_subject,
+            Some("inventory draft".into()),
+            None,
+            None,
+        )
+        .await
+        .expect("step agent can lazily create its own draft");
+    assert_eq!(
+        app.changesets()
+            .open_draft_for_run(run.id)
+            .await
+            .unwrap()
+            .expect("keyed by the run, not the agent")
+            .id,
+        draft.id
+    );
+
+    // Before the fix: `Forbidden` — the ownership check resolved the
+    // step agent's key as `Agent`, not `WorkflowRun`, so it could never
+    // match `draft.opened_by`.
+    app.changesets()
+        .discard(&step_agent_subject, draft.id, Some("test".into()))
+        .await
+        .expect("the step agent that opened the draft must be able to close it itself");
+
+    app.shutdown().await;
+}

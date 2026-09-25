@@ -429,6 +429,33 @@ async fn write_against_a_discarded_changeset_is_rejected() {
     );
 }
 
+/// bugbot 2026-09-25 (Medium): `submit` already rejected a
+/// zero-commit changeset as `Empty`, but `apply` didn't — a lead
+/// `spaces publish` (or run-end `allow_land`) on a draft nobody ever
+/// wrote to would land a no-op merge commit on `main`.
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn apply_on_an_empty_draft_is_rejected() {
+    let (app, user) = setup("empty_apply").await;
+    let (member, lead) = project_with_space_and_lead(&app, &user, "proj-empty-apply", "docs").await;
+
+    let cs = app
+        .changesets()
+        .draft_for(&member, Some("never touched".into()), None, None)
+        .await
+        .expect("open changeset");
+    assert_eq!(cs.commit_count(), 0);
+
+    let err = match app.changesets().apply(&lead, cs.id).await {
+        Ok(_) => panic!("an empty draft must not be landable"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(err, drua_core::changeset::ChangesetError::Empty { id } if id == cs.id),
+        "expected Empty, got: {err}"
+    );
+}
+
 /// rev2 §2/§3: a `Propose`-only member's plain `space:` write creates
 /// a draft lazily (no `open`/`bind` needed) and leaves `main`
 /// untouched; a lead landing it via `apply` is what finally updates

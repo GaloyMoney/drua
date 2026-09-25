@@ -440,7 +440,7 @@ impl Changesets {
         let mut op = self.repo.begin_op().await?;
         let mut cs = self.repo.find_by_id_in_op(&mut op, id).await?;
         self.check_same_project(sub, &cs)?;
-        self.check_discard_authority(sub, &cs)?;
+        self.check_discard_authority(sub, &cs).await?;
 
         if cs.discard(reason)?.did_execute() {
             self.repo.update_in_op(&mut op, &mut cs).await?;
@@ -475,7 +475,7 @@ impl Changesets {
         let mut op = self.repo.begin_op().await?;
         let mut cs = self.repo.find_by_id_in_op(&mut op, id).await?;
         self.check_same_project(sub, &cs)?;
-        self.check_owner_or_lead(sub, &cs, "submit")?;
+        self.check_owner_or_lead(sub, &cs, "submit").await?;
         if !cs.is_open() {
             return Err(ChangesetError::InvalidTransition {
                 from: cs.status,
@@ -552,7 +552,7 @@ impl Changesets {
         let mut op = self.repo.begin_op().await?;
         let mut cs = self.repo.find_by_id_in_op(&mut op, id).await?;
         self.check_same_project(sub, &cs)?;
-        self.check_owner_or_lead(sub, &cs, "apply")?;
+        self.check_owner_or_lead(sub, &cs, "apply").await?;
         if !matches!(
             cs.status,
             ChangesetStatus::Open | ChangesetStatus::Submitted
@@ -561,6 +561,14 @@ impl Changesets {
                 from: cs.status,
                 op: "apply",
             });
+        }
+        // `submit`'s own `Empty` check doesn't cover `apply`: a lead can
+        // land any `Open` draft directly, and a YAML `changeset:` block
+        // pre-creates the run's draft before any step writes to it — so
+        // without this, an unused draft's `publish` would land a no-op
+        // merge commit on `main` (bugbot 2026-09-25).
+        if cs.commit_count() == 0 {
+            return Err(ChangesetError::Empty { id });
         }
 
         let main_oid = self
@@ -643,7 +651,7 @@ impl Changesets {
         let mut op = self.repo.begin_op().await?;
         let mut cs = self.repo.find_by_id_in_op(&mut op, id).await?;
         self.check_same_project(sub, &cs)?;
-        self.check_owner_or_lead(sub, &cs, "rebase")?;
+        self.check_owner_or_lead(sub, &cs, "rebase").await?;
         if !cs.is_open() {
             return Err(ChangesetError::InvalidTransition {
                 from: cs.status,
@@ -821,7 +829,7 @@ impl Changesets {
     /// or admin. `has_scope` treats `User` subjects as having every
     /// scope, so this also covers "Users are omnipotent" without a
     /// separate branch.
-    fn check_discard_authority(
+    async fn check_discard_authority(
         &self,
         sub: &AuthSubject,
         cs: &Changeset,
@@ -830,7 +838,7 @@ impl Changesets {
             return Ok(());
         }
         if cs.status == ChangesetStatus::Open {
-            if let Ok(actor) = actor_for_subject(sub) {
+            if let Ok(actor) = self.actor_key_for(sub).await {
                 if cs.opened_by == actor {
                     return Ok(());
                 }
@@ -849,7 +857,15 @@ impl Changesets {
     /// anyway (the caller's own status check catches that separately).
     /// Renamed from rev1's `check_bound_or_lead` — there is no bind
     /// state left to check, only ownership (D4).
-    fn check_owner_or_lead(
+    ///
+    /// Resolves the owner check through `actor_key_for`, the same
+    /// lookup `draft_for` uses to key the draft — not the cheaper
+    /// `actor_for_subject`. A workflow step agent's draft is keyed by
+    /// `WorkflowRun` (rev2 D8: two step agents in the same run share
+    /// one draft), so `actor_for_subject`'s plain `Agent` mapping never
+    /// matches `cs.opened_by` and the very agent that created the draft
+    /// could never `submit`/`apply`/`rebase` it (bugbot 2026-09-25).
+    async fn check_owner_or_lead(
         &self,
         sub: &AuthSubject,
         cs: &Changeset,
@@ -858,7 +874,7 @@ impl Changesets {
         if sub.is_admin() || sub.has_scope(&AuthScope::ProjectAdmin(cs.project_id)) {
             return Ok(());
         }
-        if let Ok(actor) = actor_for_subject(sub) {
+        if let Ok(actor) = self.actor_key_for(sub).await {
             if cs.opened_by == actor {
                 return Ok(());
             }

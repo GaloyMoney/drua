@@ -188,12 +188,18 @@ pub enum BatchOpKind {
     MultiFile {
         changes: Vec<(String, Option<Vec<u8>>)>,
     },
-    /// A pre-built tree committed as-is (no `apply_edit`), with a second
+    /// A 3-way merge committed against whatever `theirs` (the batch's
+    /// actual parent at commit time) turns out to be, with a second
     /// parent alongside the batch's normal parent. Used by
-    /// [`GitEngine::merge_into_main`] — `tree_oid` is the already-computed
-    /// merge result, `second_parent` the changeset tip being merged in.
+    /// [`GitEngine::merge_into_main`] — `base_oid` is the merge-base
+    /// computed ahead of enqueueing (stable: `main` only ever advances
+    /// past it), `second_parent` the changeset tip being merged in.
+    /// Deliberately NOT a precomputed tree: `commit_one` re-runs the
+    /// merge against the real parent tree so a `main` commit that lands
+    /// between enqueueing and commit — or a non-FF push retry — is
+    /// merged in rather than silently dropped from the resulting tree.
     MergeCommit {
-        tree_oid: String,
+        base_oid: String,
         second_parent: String,
     },
 }
@@ -1182,20 +1188,25 @@ impl GitEngine {
             .merge_base(&main_oid, changeset_tip)
             .await?
             .ok_or_else(|| LibraryError::Git("merge_into_main: no merge base with main".into()))?;
-        let tree_oid = match self.merge_trees(&base, changeset_tip, &main_oid).await? {
-            Ok(oid) => oid,
-            Err(paths) => {
-                return Err(LibraryError::Validation(format!(
-                    "merge conflicts: {}",
-                    paths.join(", ")
-                )))
-            }
-        };
+        // Pre-flight only — confirms there's a clean merge as of right
+        // now, so a doomed merge never reaches the write queue. The op
+        // itself carries `base` rather than this tree: `main` can (and
+        // does, under concurrent writers) advance between here and when
+        // `commit_one` actually applies the op, and a non-FF push retry
+        // can advance it further still — committing this snapshot's tree
+        // against a later parent would silently drop whatever landed on
+        // `main` in between.
+        if let Err(paths) = self.merge_trees(&base, changeset_tip, &main_oid).await? {
+            return Err(LibraryError::Validation(format!(
+                "merge conflicts: {}",
+                paths.join(", ")
+            )));
+        }
         let oid = self
             .enqueue(BatchOp {
                 commit_message: message,
                 kind: BatchOpKind::MergeCommit {
-                    tree_oid,
+                    base_oid: base,
                     second_parent: changeset_tip.to_string(),
                 },
                 attribution,
@@ -1927,7 +1938,7 @@ impl GitEngine {
                 current_oid
             }
             BatchOpKind::MergeCommit {
-                tree_oid,
+                base_oid,
                 second_parent: sp,
             } => {
                 let sp_oid = git2::Oid::from_str(sp)
@@ -1936,8 +1947,21 @@ impl GitEngine {
                     .find_commit(sp_oid)
                     .map_err(|e| LibraryError::Git(format!("find second parent: {e}")))?;
                 second_parent = Some(sp_commit);
-                git2::Oid::from_str(tree_oid)
-                    .map_err(|e| LibraryError::Git(format!("parse tree oid: {e}")))?
+                // Recomputed against `parent_oid` — the real, current
+                // parent at commit time, not `main`'s tip when this op
+                // was enqueued — so a concurrent `main` commit (or a
+                // non-FF retry landing on a newer parent still) is
+                // merged in rather than dropped from the resulting tree.
+                match Self::merge_trees_blocking(repo, base_oid, sp, &parent_oid.to_string())? {
+                    Ok(tree_oid) => git2::Oid::from_str(&tree_oid)
+                        .map_err(|e| LibraryError::Git(format!("parse tree oid: {e}")))?,
+                    Err(paths) => {
+                        return Err(LibraryError::Validation(format!(
+                            "merge conflicts: {}",
+                            paths.join(", ")
+                        )))
+                    }
+                }
             }
         };
 
@@ -3164,7 +3188,7 @@ mod tests {
         let op = BatchOp {
             commit_message: "changeset: land feature".into(),
             kind: BatchOpKind::MergeCommit {
-                tree_oid: tree_oid.clone(),
+                base_oid: main_oid.to_string(),
                 second_parent: changeset_tip.to_string(),
             },
             attribution: CommitAttribution::library_default(),
@@ -3181,6 +3205,83 @@ mod tests {
         assert_eq!(merge_commit.parent_id(0).unwrap(), main_oid);
         assert_eq!(merge_commit.parent_id(1).unwrap(), changeset_tip);
         assert_eq!(merge_commit.tree_id().to_string(), tree_oid);
+
+        let _ = std::fs::remove_dir_all(&origin_dir);
+        let _ = std::fs::remove_dir_all(&local_dir);
+    }
+
+    /// bugbot 2026-09-25: a `MergeCommit` op built with `base_oid` (not a
+    /// precomputed tree) must merge against whatever `main`'s tip really
+    /// is when `commit_one` runs, not the tip that was current when the
+    /// op was built — otherwise a commit that lands on `main` in between
+    /// (modeled here directly: `main` moves after the op is built, before
+    /// it's applied) would silently vanish from the merged tree despite
+    /// staying reachable as parent 1.
+    #[test]
+    fn merge_commit_op_preserves_a_main_commit_that_lands_after_the_op_was_built() {
+        let (origin_dir, local_dir, local_repo) = origin_and_clone("merge-concurrent-main");
+        let base_oid = local_repo
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .target()
+            .unwrap();
+        let changeset_tip = commit_file(
+            &local_repo,
+            Some(base_oid),
+            "feature.md",
+            b"feature\n",
+            "agent@example.com",
+            "changeset edit",
+        );
+
+        // Simulates another writer landing on `main` after this op's
+        // `base_oid`/`second_parent` were computed but before it reaches
+        // `commit_one` — e.g. a batch delay, or a non-FF push retry.
+        let concurrent_main_tip = commit_file(
+            &local_repo,
+            Some(base_oid),
+            "concurrent.md",
+            b"concurrent\n",
+            "other-writer@example.com",
+            "unrelated concurrent main write",
+        );
+        local_repo
+            .reference(
+                "refs/heads/main",
+                concurrent_main_tip,
+                true,
+                "advance main past base_oid",
+            )
+            .unwrap();
+
+        let op = BatchOp {
+            commit_message: "changeset: land feature".into(),
+            kind: BatchOpKind::MergeCommit {
+                base_oid: base_oid.to_string(),
+                second_parent: changeset_tip.to_string(),
+            },
+            attribution: CommitAttribution::library_default(),
+            target_ref: None,
+        };
+        let mut results = GitEngine::commit_each_then_push_blocking(&local_dir, vec![op], None);
+        let merge_oid = results.remove(0).unwrap().expect("merge produced a commit");
+
+        let origin_repo = git2::Repository::open_bare(&origin_dir).unwrap();
+        let merge_commit = origin_repo
+            .find_commit(git2::Oid::from_str(&merge_oid).unwrap())
+            .unwrap();
+        assert_eq!(merge_commit.parent_id(0).unwrap(), concurrent_main_tip);
+        assert_eq!(merge_commit.parent_id(1).unwrap(), changeset_tip);
+
+        let tree = merge_commit.tree().unwrap();
+        assert!(
+            tree.get_path(Path::new("feature.md")).is_ok(),
+            "the changeset's own edit must be in the merged tree"
+        );
+        assert!(
+            tree.get_path(Path::new("concurrent.md")).is_ok(),
+            "a main commit that landed after the op was built must survive the merge, not be dropped"
+        );
 
         let _ = std::fs::remove_dir_all(&origin_dir);
         let _ = std::fs::remove_dir_all(&local_dir);
