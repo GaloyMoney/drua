@@ -567,6 +567,7 @@ async fn execute_glob(session: &SharedSession, input: serde_json::Value) -> Resu
                 "--files",
                 "--color=never",
                 &format!("--glob={pattern}", pattern = input.pattern),
+                "--",
                 &search_path,
             ])
             .current_dir(&scope)
@@ -2047,6 +2048,35 @@ mod tests {
         assert!(!output.contains("bar.txt"));
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn glob_finds_matching_files_in_dash_prefixed_dir() {
+        if !rg_available().await {
+            eprintln!("rg not available, skipping");
+            return;
+        }
+        let dir = fresh_test_dir("sandbox-test-glob-dash");
+        let sub = PathBuf::from(&dir).join("-weird");
+        tokio::fs::create_dir_all(&sub).await.unwrap();
+        tokio::fs::write(sub.join("foo.rs"), "fn main() {}")
+            .await
+            .unwrap();
+        tokio::fs::write(PathBuf::from(&dir).join("outside.rs"), "fn other() {}")
+            .await
+            .unwrap();
+        let session = test_session();
+        session.set_cwd(dir.clone()).await;
+
+        let input = serde_json::json!({
+            "pattern": "*.rs",
+            "path": "-weird"
+        });
+        let result = execute_glob(&session, input).await;
+        assert!(result.is_ok(), "glob failed: {:?}", result);
+        let output = result.unwrap();
+        assert!(output.contains("foo.rs"));
+        assert!(!output.contains("outside.rs"));
     }
 
     #[tokio::test]
