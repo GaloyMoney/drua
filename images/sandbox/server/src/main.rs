@@ -450,11 +450,6 @@ async fn execute_delete(
     Ok(format!("Deleted {raw_path}"))
 }
 
-/// Resolves a `Grep`/`Glob` search path the same way the editor handlers
-/// resolve theirs — through [`validate_path`] — but returns it relative to
-/// the session scope (falling back to `.` for the scope root itself)
-/// instead of the absolute canonical form, so `rg`'s output keeps the
-/// scope-relative paths callers already expect.
 async fn validate_search_path(session: &SharedSession, raw_path: &str) -> Result<String, String> {
     let validated = validate_path(session, raw_path).await?;
 
@@ -2087,14 +2082,6 @@ mod tests {
         assert!(result.unwrap_err().contains("pattern"));
     }
 
-    // ── Grep/Glob path scope (handler-level — see validate_search_path) ──
-    //
-    // execute_grep/execute_glob used to hand `path` straight to `rg`
-    // without going through `validate_path` at all, unlike every other
-    // handler in this file. These exercise the handlers themselves (not
-    // just `validate_path_against` in isolation, see below) since handler
-    // coverage is exactly what was missing.
-
     #[tokio::test]
     async fn grep_rejects_absolute_path_outside_scope() {
         let dir = fresh_test_dir("sandbox-test-grep-abs-outside");
@@ -2138,9 +2125,6 @@ mod tests {
         let session = test_session();
         session.set_cwd(dir.clone()).await;
 
-        // Enough `../` segments to walk past root regardless of how deep
-        // the OS temp dir is nested; POSIX clamps extra `..` at `/`, so
-        // this deterministically lands on the real `/etc/passwd`.
         let traversal = format!("{}etc/passwd", "../".repeat(8));
         let input = serde_json::json!({
             "pattern": "root",
@@ -2228,9 +2212,6 @@ mod tests {
         });
         let result = execute_grep(&session, input).await;
         assert!(result.is_err(), "expected rejection, got: {:?}", result);
-        // Either "Access denied" (if the path exists) or "Cannot resolve"
-        // (if it doesn't in this environment) — both are rejections that
-        // never reach `rg`. Mirrors `validate_path_rejects_secrets` below.
         let err = result.unwrap_err();
         assert!(
             err.contains("Access denied") || err.contains("Cannot resolve"),
