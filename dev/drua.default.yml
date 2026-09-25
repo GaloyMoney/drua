@@ -45,7 +45,7 @@ toolsets:
     max_tool_result_bytes: 33554432
     max_return_bytes: 16777216
     max_console_bytes: 8192
-    memory_limit_bytes: 67108864
+    memory_limit_bytes: 268435456
     stack_limit_bytes: 524288
     timeout_ms: 420000
 sandbox:
