@@ -120,10 +120,12 @@ fn default_max_console_bytes() -> usize {
 }
 
 fn default_memory_limit_bytes() -> usize {
-    // 64 MiB. Must remain a comfortable multiple of
+    // 256 MiB. Must remain a comfortable multiple of
     // `max_tool_result_bytes` (≥ 2×) so scripts have working room for
     // `.split()` / `.filter()` / sorting on top of the parsed payload.
-    64 * 1024 * 1024
+    // Library scripts that normalise cited source text hold ~8 B per
+    // character with the r2 compiler; 256 MiB covers ~30 M characters.
+    256 * 1024 * 1024
 }
 
 fn default_stack_limit_bytes() -> usize {

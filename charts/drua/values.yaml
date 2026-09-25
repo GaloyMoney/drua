@@ -180,7 +180,9 @@ galoyAgents:
       maxConsoleBytes: "8192"
       ## JS heap. Must be ≥ 2× maxToolResultBytes so scripts have working
       ## headroom for split / filter / sort over the parsed payload.
-      memoryLimitBytes: "67108864"
+      ## Library scripts that normalise cited source text hold ~8 B per
+      ## character with the r2 compiler; 256 MiB covers ~30 M characters.
+      memoryLimitBytes: "268435456"
       stackLimitBytes: "524288"
       timeoutMs: 420000
     mcpUpstreams: []

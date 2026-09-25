@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use es_entity::context::{EventContext, WithEventContext};
 use tracing::Instrument;
@@ -688,7 +688,8 @@ impl Executor {
                     .unwrap_or(DEFAULT_TOOL_STEP_TIMEOUT_SECS)
                     .saturating_mul(1000);
                 let subject = AuthSubject::workflow_script(project_id, workflow_id, run_id);
-                let envelope = dispatch_step(
+                let dispatch_started = Instant::now();
+                let dispatch_result = dispatch_step(
                     name,
                     "compose",
                     None,
@@ -701,7 +702,22 @@ impl Executor {
                     "",
                     true,
                 )
-                .await?;
+                .await;
+                let envelope = match dispatch_result {
+                    Ok(envelope) => envelope,
+                    Err(err) => {
+                        tracing::warn!(
+                            %run_id,
+                            step = %name,
+                            script = %script,
+                            entry = %entry.as_deref().unwrap_or("run"),
+                            elapsed_ms = dispatch_started.elapsed().as_millis() as u64,
+                            error = %err,
+                            "script_step: compose call failed"
+                        );
+                        return Err(err);
+                    }
+                };
                 let output =
                     envelope
                         .get("result")
