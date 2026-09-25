@@ -217,9 +217,10 @@ impl Changesets {
             return Ok(cs);
         }
 
-        let project_id = sub
-            .effective_project_id()
-            .ok_or(ChangesetError::NoProject)?;
+        // rev3 D16: `None` for a project-less subject (a bare `Admin`)
+        // — the draft is actor-owned, so it has no project requirement
+        // of its own.
+        let project_id = sub.effective_project_id();
         let base_oid = self
             .library
             .fetch_and_head()
@@ -269,7 +270,9 @@ impl Changesets {
         }
 
         Audit::record_action_if_unset("changeset.draft_for");
-        Audit::record_project_id(project_id);
+        if let Some(project_id) = project_id {
+            Audit::record_project_id(project_id);
+        }
         Audit::record_changeset_id(changeset.id);
 
         Ok(changeset)
@@ -350,24 +353,57 @@ impl Changesets {
         Ok(())
     }
 
-    /// Changesets for `sub`'s own project, newest first, optionally
-    /// filtered to one `status`. §8.1's `changeset list` command.
+    /// Changesets visible to `sub`, newest first, optionally filtered
+    /// to one `status` (§8.1's `changeset list` command; rev3 §4/§6.1
+    /// `list-drafts`). rev3 D4: a project-scoped subject sees its
+    /// project's changesets union its own (covers the edge case of an
+    /// own draft that isn't project-scoped); an `Admin` sees every
+    /// changeset, optionally narrowed to one `project_id` (rev3 OQ-21
+    /// — admin, no filter, means everything).
     #[instrument(name = "domain.changeset.list", skip(self, sub))]
     pub async fn list(
         &self,
         sub: &AuthSubject,
         status: Option<ChangesetStatus>,
+        project_id: Option<ProjectId>,
     ) -> Result<Vec<Changeset>, ChangesetError> {
-        let project_id = sub
-            .effective_project_id()
-            .ok_or(ChangesetError::NoProject)?;
+        let mut out = if sub.is_admin() {
+            match project_id {
+                Some(pid) => self.list_all_for_project(pid).await?,
+                None => self.list_all_unfiltered().await?,
+            }
+        } else {
+            let mut acc = match sub.effective_project_id() {
+                Some(pid) => self.list_all_for_project(pid).await?,
+                None => Vec::new(),
+            };
+            if let Ok(actor) = self.actor_key_for(sub).await {
+                for cs in self.list_all_for_actor(actor).await? {
+                    if !acc.iter().any(|x| x.id == cs.id) {
+                        acc.push(cs);
+                    }
+                }
+            }
+            acc
+        };
+        if let Some(status) = status {
+            out.retain(|cs| cs.status == status);
+        }
+        out.sort_by_key(|b| std::cmp::Reverse(b.created_at()));
+        Ok(out)
+    }
+
+    async fn list_all_for_project(
+        &self,
+        project_id: ProjectId,
+    ) -> Result<Vec<Changeset>, ChangesetError> {
         let mut out = Vec::new();
         let mut after = None;
         loop {
             let page = self
                 .repo
                 .list_for_project_id_by_created_at(
-                    project_id,
+                    Some(project_id),
                     es_entity::PaginatedQueryArgs { first: 200, after },
                     es_entity::ListDirection::Descending,
                 )
@@ -378,8 +414,49 @@ impl Changesets {
             }
             after = page.end_cursor;
         }
-        if let Some(status) = status {
-            out.retain(|cs| cs.status == status);
+        Ok(out)
+    }
+
+    async fn list_all_unfiltered(&self) -> Result<Vec<Changeset>, ChangesetError> {
+        let mut out = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self
+                .repo
+                .list_by_created_at(
+                    es_entity::PaginatedQueryArgs { first: 200, after },
+                    es_entity::ListDirection::Descending,
+                )
+                .await?;
+            out.extend(page.entities);
+            if !page.has_next_page {
+                break;
+            }
+            after = page.end_cursor;
+        }
+        Ok(out)
+    }
+
+    async fn list_all_for_actor(
+        &self,
+        actor: ChangesetActor,
+    ) -> Result<Vec<Changeset>, ChangesetError> {
+        let mut out = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self
+                .repo
+                .list_for_opened_by_actor_by_created_at(
+                    actor.to_string(),
+                    es_entity::PaginatedQueryArgs { first: 200, after },
+                    es_entity::ListDirection::Descending,
+                )
+                .await?;
+            out.extend(page.entities);
+            if !page.has_next_page {
+                break;
+            }
+            after = page.end_cursor;
         }
         Ok(out)
     }
@@ -816,10 +893,16 @@ impl Changesets {
     /// requires `sub.project_id().is_some()` for anyone but an admin
     /// (`User`s are the one case that's genuinely omnipotent).
     fn check_same_project(&self, sub: &AuthSubject, cs: &Changeset) -> Result<(), ChangesetError> {
-        match sub.effective_project_id() {
-            Some(pid) if pid == cs.project_id => Ok(()),
-            Some(_) => Err(ChangesetError::Foreign { id: cs.id }),
-            None => Ok(()),
+        match (sub.effective_project_id(), cs.project_id) {
+            (Some(pid), Some(cpid)) if pid == cpid => Ok(()),
+            (Some(_), Some(_)) => Err(ChangesetError::Foreign { id: cs.id }),
+            // A project-less changeset (rev3 D16: a bare-`Admin`'s
+            // draft) is never "foreign" to a project-scoped subject in
+            // this read-gate sense — ownership, not project, is what
+            // actually restricts it (`check_owner_or_lead`/
+            // `check_discard_authority`).
+            (Some(_), None) => Ok(()),
+            (None, _) => Ok(()),
         }
     }
 
@@ -834,7 +917,11 @@ impl Changesets {
         sub: &AuthSubject,
         cs: &Changeset,
     ) -> Result<(), ChangesetError> {
-        if sub.is_admin() || sub.has_scope(&AuthScope::ProjectAdmin(cs.project_id)) {
+        if sub.is_admin()
+            || cs
+                .project_id
+                .is_some_and(|pid| sub.has_scope(&AuthScope::ProjectAdmin(pid)))
+        {
             return Ok(());
         }
         if cs.status == ChangesetStatus::Open {
@@ -871,7 +958,11 @@ impl Changesets {
         cs: &Changeset,
         action: &'static str,
     ) -> Result<(), ChangesetError> {
-        if sub.is_admin() || sub.has_scope(&AuthScope::ProjectAdmin(cs.project_id)) {
+        if sub.is_admin()
+            || cs
+                .project_id
+                .is_some_and(|pid| sub.has_scope(&AuthScope::ProjectAdmin(pid)))
+        {
             return Ok(());
         }
         if let Ok(actor) = self.actor_key_for(sub).await {
@@ -889,6 +980,22 @@ impl Changesets {
     /// check just to render a stamp.
     pub(crate) async fn touched_count(&self, cs: &Changeset) -> Result<usize, ChangesetError> {
         Ok(self.touched_files(cs).await?.len())
+    }
+
+    /// D19: `cs`'s touched paths, scoped to one space — used only by
+    /// `SpaceFs`'s `space:` read "differs in your draft" stamp.
+    pub(crate) async fn touched_paths_in(
+        &self,
+        cs: &Changeset,
+        slug: &str,
+    ) -> Result<Vec<String>, ChangesetError> {
+        Ok(self
+            .touched_files(cs)
+            .await?
+            .into_iter()
+            .filter(|t| t.space_slug == slug)
+            .map(|t| t.path)
+            .collect())
     }
 
     async fn touched_files(&self, cs: &Changeset) -> Result<Vec<TouchedFile>, ChangesetError> {
@@ -976,7 +1083,7 @@ mod tests {
 
     fn open_changeset() -> Changeset {
         let new = NewChangeset::builder()
-            .project_id(ProjectId::new())
+            .project_id(Some(ProjectId::new()))
             .title("curate: relink notes")
             .description("moves stale notes into the new effort")
             .base_oid("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
@@ -1021,7 +1128,7 @@ mod tests {
     #[test]
     fn pr_body_falls_back_when_no_description() {
         let new = NewChangeset::builder()
-            .project_id(ProjectId::new())
+            .project_id(Some(ProjectId::new()))
             .title("t")
             .base_oid("a")
             .opened_by(ChangesetActor::Agent {

@@ -41,8 +41,6 @@ pub enum ChangesetError {
         from: ChangesetStatus,
         op: &'static str,
     },
-    #[error("ChangesetError - NoProject: subject has no project context")]
-    NoProject,
     #[error("ChangesetError - UnsupportedActor: subject cannot open or act on a changeset")]
     UnsupportedActor,
     #[error("ChangesetError - MainUnborn: library repo has no commits on main yet")]

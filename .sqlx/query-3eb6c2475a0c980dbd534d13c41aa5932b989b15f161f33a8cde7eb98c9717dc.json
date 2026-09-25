@@ -1,0 +1,63 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "WITH entities AS ((SELECT created_at, id FROM changesets WHERE (NOT $1 OR project_id IS NOT DISTINCT FROM $2) AND COALESCE(status = $3, $3 IS NULL) AND COALESCE(opened_by_actor = $4, $4 IS NULL) AND (NOT $5 OR agent_id IS NOT DISTINCT FROM $6) AND (NOT $7 OR workflow_run_id IS NOT DISTINCT FROM $8) AND ((created_at, id) < ($11, $10)) AND ($10 IS NOT NULL) AND deleted = FALSE ORDER BY created_at DESC, id DESC LIMIT $9) UNION ALL (SELECT created_at, id FROM changesets WHERE (NOT $1 OR project_id IS NOT DISTINCT FROM $2) AND COALESCE(status = $3, $3 IS NULL) AND COALESCE(opened_by_actor = $4, $4 IS NULL) AND (NOT $5 OR agent_id IS NOT DISTINCT FROM $6) AND (NOT $7 OR workflow_run_id IS NOT DISTINCT FROM $8) AND ($10 IS NULL) AND deleted = FALSE ORDER BY created_at DESC, id DESC LIMIT $9) ORDER BY created_at DESC, id DESC LIMIT $9) SELECT i.id AS \"entity_id!: Repo__Id\", e.sequence, e.event, CASE WHEN $12 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at, NULL::jsonb as \"forgettable_payload?\" FROM entities i JOIN changeset_events e ON i.id = e.id ORDER BY i.created_at desc, i.id desc, i.id, e.sequence",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "entity_id!: Repo__Id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "sequence",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "event",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 3,
+        "name": "context: es_entity::ContextData",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 4,
+        "name": "recorded_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "forgettable_payload?",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Bool",
+        "Uuid",
+        "Text",
+        "Text",
+        "Bool",
+        "Uuid",
+        "Bool",
+        "Uuid",
+        "Int8",
+        "Uuid",
+        "Timestamptz",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      null,
+      false,
+      false,
+      null,
+      false,
+      null
+    ]
+  },
+  "hash": "3eb6c2475a0c980dbd534d13c41aa5932b989b15f161f33a8cde7eb98c9717dc"
+}

@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "WITH entities AS ((SELECT project_id, created_at, id FROM changesets WHERE (project_id = $1) AND ((created_at, id) < ($4, $3)) AND ($3 IS NOT NULL) AND deleted = FALSE ORDER BY created_at DESC, id DESC LIMIT $2) UNION ALL (SELECT project_id, created_at, id FROM changesets WHERE (project_id = $1) AND ($3 IS NULL) AND deleted = FALSE ORDER BY created_at DESC, id DESC LIMIT $2) ORDER BY created_at DESC, id DESC LIMIT $2) SELECT i.id AS \"entity_id!: Repo__Id\", e.sequence, e.event, CASE WHEN $5 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at, NULL::jsonb as \"forgettable_payload?\" FROM entities i JOIN changeset_events e ON i.id = e.id ORDER BY i.created_at desc, i.id desc, i.id, e.sequence",
+  "query": "WITH entities AS ((SELECT project_id, created_at, id FROM changesets WHERE (project_id IS NOT DISTINCT FROM $1) AND ((created_at, id) < ($4, $3)) AND ($3 IS NOT NULL) AND deleted = FALSE ORDER BY created_at DESC, id DESC LIMIT $2) UNION ALL (SELECT project_id, created_at, id FROM changesets WHERE (project_id IS NOT DISTINCT FROM $1) AND ($3 IS NULL) AND deleted = FALSE ORDER BY created_at DESC, id DESC LIMIT $2) ORDER BY created_at DESC, id DESC LIMIT $2) SELECT i.id AS \"entity_id!: Repo__Id\", e.sequence, e.event, CASE WHEN $5 THEN e.context ELSE NULL::jsonb END as \"context: es_entity::ContextData\", e.recorded_at, NULL::jsonb as \"forgettable_payload?\" FROM entities i JOIN changeset_events e ON i.id = e.id ORDER BY i.created_at desc, i.id desc, i.id, e.sequence",
   "describe": {
     "columns": [
       {
@@ -52,5 +52,5 @@
       null
     ]
   },
-  "hash": "ceae16c4de1634244499df5202474365c2c0224732b967d088e8bf48edd2e0e7"
+  "hash": "39bc844b15213f53a604f3b61a09bb0ab4965c9449fb77c50d4fd9df35daedde"
 }

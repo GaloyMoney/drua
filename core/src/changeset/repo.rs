@@ -10,7 +10,7 @@ use super::entity::*;
 #[es_repo(
     entity = "Changeset",
     columns(
-        project_id(ty = "ProjectId", list_for(by(created_at))),
+        project_id(ty = "Option<ProjectId>", list_for(by(created_at))),
         status(
             ty = "ChangesetStatus",
             list_for(by(created_at)),

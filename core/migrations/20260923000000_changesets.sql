@@ -1,6 +1,9 @@
 CREATE TABLE changesets (
     id uuid NOT NULL,
-    project_id uuid NOT NULL,
+    -- rev3 D16: drafts are actor-owned, not project-owned — a bare
+    -- admin subject has no project context, so NULL means "opened
+    -- outside any project".
+    project_id uuid,
     status varchar NOT NULL,
     opened_by_actor varchar NOT NULL,
     agent_id uuid,

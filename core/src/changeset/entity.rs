@@ -6,7 +6,9 @@ use es_entity::*;
 use super::error::ChangesetError;
 use crate::primitives::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "VARCHAR", rename_all = "snake_case")]
 pub enum ChangesetStatus {
@@ -106,7 +108,9 @@ impl std::str::FromStr for ChangesetActor {
 pub enum ChangesetEvent {
     Opened {
         id: ChangesetId,
-        project_id: ProjectId,
+        /// `None` for a project-less draft — a bare-`Admin` subject
+        /// has no project context (rev3 D16).
+        project_id: Option<ProjectId>,
         title: String,
         description: Option<String>,
         base_oid: String,
@@ -144,7 +148,10 @@ pub enum ChangesetEvent {
 #[builder(pattern = "owned", build_fn(error = "EntityHydrationError"))]
 pub struct Changeset {
     pub id: ChangesetId,
-    pub project_id: ProjectId,
+    /// `None` for a project-less draft (rev3 D16 — a bare-`Admin`
+    /// subject's draft; ownership and lookup are by actor, never by
+    /// project).
+    pub project_id: Option<ProjectId>,
     pub title: String,
     #[builder(setter(strip_option), default)]
     pub description: Option<String>,
@@ -438,8 +445,9 @@ impl TryFromEvents<ChangesetEvent> for Changeset {
 pub struct NewChangeset {
     #[builder(setter(into))]
     pub(super) id: ChangesetId,
-    #[builder(setter(into))]
-    pub(super) project_id: ProjectId,
+    /// `None` for a project-less draft (rev3 D16).
+    #[builder(default)]
+    pub(super) project_id: Option<ProjectId>,
     #[builder(setter(into))]
     pub(super) title: String,
     #[builder(setter(into, strip_option), default)]
@@ -491,7 +499,7 @@ mod tests {
 
     fn open_changeset() -> Changeset {
         let new = NewChangeset::builder()
-            .project_id(ProjectId::new())
+            .project_id(Some(ProjectId::new()))
             .title("curate: relink notes")
             .base_oid("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
             .opened_by(agent_actor())
