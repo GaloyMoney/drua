@@ -17,6 +17,12 @@ use super::entity::*;
             create(accessor = "initial_status()"),
             update(accessor = "status")
         ),
+        opened_by_actor(
+            ty = "String",
+            list_for(by(created_at)),
+            create(accessor = "opened_by.to_string()"),
+            update(persist = false)
+        ),
         agent_id(
             ty = "Option<AgentId>",
             list_for(by(created_at)),

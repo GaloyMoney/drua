@@ -189,7 +189,7 @@ impl Executor {
                                 .unwrap_or_else(|_| d.clone())
                         });
                         changesets
-                            .open(&executor_sub, title, description)
+                            .draft_for(&executor_sub, Some(title), description, None)
                             .await
                             .map_err(|e| e.to_string())
                     }

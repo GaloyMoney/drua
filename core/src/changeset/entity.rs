@@ -62,6 +62,44 @@ impl ChangesetActor {
     }
 }
 
+/// rev2 D4: the `opened_by_actor` repo column encoding — also the
+/// `draft_for` lookup key, so a schema change here needs the partial
+/// unique index (`changesets_opened_by_actor_key`) renamed to match.
+impl core::fmt::Display for ChangesetActor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChangesetActor::Agent { agent_id } => write!(f, "agent:{agent_id}"),
+            ChangesetActor::WorkflowRun { run_id } => write!(f, "run:{run_id}"),
+            ChangesetActor::User { user_id } => write!(f, "user:{user_id}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("invalid changeset actor encoding: {0:?}")]
+pub struct ParseChangesetActorError(String);
+
+impl std::str::FromStr for ChangesetActor {
+    type Err = ParseChangesetActorError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let invalid = || ParseChangesetActorError(s.to_string());
+        let (kind, id) = s.split_once(':').ok_or_else(invalid)?;
+        match kind {
+            "agent" => Ok(ChangesetActor::Agent {
+                agent_id: id.parse().map_err(|_| invalid())?,
+            }),
+            "run" => Ok(ChangesetActor::WorkflowRun {
+                run_id: id.parse().map_err(|_| invalid())?,
+            }),
+            "user" => Ok(ChangesetActor::User {
+                user_id: id.parse().map_err(|_| invalid())?,
+            }),
+            _ => Err(invalid()),
+        }
+    }
+}
+
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[es_event(id = "ChangesetId")]
@@ -100,17 +138,6 @@ pub enum ChangesetEvent {
     Discarded {
         reason: Option<String>,
     },
-    /// N agents/runs may bind the same `Open` changeset (OQ-2.2 in the
-    /// handoff: collaboration). Tracked here — not on `agents`/
-    /// `workflow_runs` — so `discard`/`submit` can unbind every actor
-    /// still pointing at this changeset without a reverse index (OQ-8's
-    /// documented default).
-    ActorBound {
-        actor: ChangesetActor,
-    },
-    ActorUnbound {
-        actor: ChangesetActor,
-    },
 }
 
 #[derive(EsEntity, Builder)]
@@ -129,11 +156,6 @@ pub struct Changeset {
     pub pr_number: Option<u64>,
     #[builder(default)]
     pub pr_url: Option<String>,
-    /// Every actor currently bound to this changeset (§2.2:
-    /// collaboration — N agents may bind one `Open` changeset). Opened-by
-    /// is bound automatically at `Opened`.
-    #[builder(default)]
-    pub bound_actors: Vec<ChangesetActor>,
     events: EntityEvents<ChangesetEvent>,
 }
 
@@ -179,26 +201,6 @@ impl Changeset {
             }
         }
         count
-    }
-
-    /// Idempotent if `actor` is already bound.
-    pub fn actor_bound(&mut self, actor: ChangesetActor) -> Idempotent<()> {
-        if self.bound_actors.contains(&actor) {
-            return Idempotent::AlreadyApplied;
-        }
-        self.bound_actors.push(actor);
-        self.events.push(ChangesetEvent::ActorBound { actor });
-        Idempotent::Executed(())
-    }
-
-    /// Idempotent if `actor` isn't bound.
-    pub fn actor_unbound(&mut self, actor: ChangesetActor) -> Idempotent<()> {
-        if !self.bound_actors.contains(&actor) {
-            return Idempotent::AlreadyApplied;
-        }
-        self.bound_actors.retain(|a| a != &actor);
-        self.events.push(ChangesetEvent::ActorUnbound { actor });
-        Idempotent::Executed(())
     }
 
     fn invalid_transition(&self, op: &'static str) -> ChangesetError {
@@ -369,7 +371,6 @@ impl TryFromEvents<ChangesetEvent> for Changeset {
     fn try_from_events(events: EntityEvents<ChangesetEvent>) -> Result<Self, EntityHydrationError> {
         let mut builder = ChangesetBuilder::default();
         let mut status = ChangesetStatus::Open;
-        let mut bound_actors: Vec<ChangesetActor> = Vec::new();
 
         for event in events.iter_all() {
             match event {
@@ -391,15 +392,6 @@ impl TryFromEvents<ChangesetEvent> for Changeset {
                     if let Some(desc) = description {
                         builder = builder.description(desc.clone());
                     }
-                    bound_actors.push(*opened_by);
-                }
-                ChangesetEvent::ActorBound { actor } => {
-                    if !bound_actors.contains(actor) {
-                        bound_actors.push(*actor);
-                    }
-                }
-                ChangesetEvent::ActorUnbound { actor } => {
-                    bound_actors.retain(|a| a != actor);
                 }
                 ChangesetEvent::CommitRecorded { head_oid, .. } => {
                     builder = builder.head_oid(head_oid.clone());
@@ -436,7 +428,7 @@ impl TryFromEvents<ChangesetEvent> for Changeset {
             }
         }
 
-        builder = builder.status(status).bound_actors(bound_actors);
+        builder = builder.status(status);
         builder.events(events).build()
     }
 }
@@ -810,57 +802,50 @@ mod tests {
     }
 
     #[test]
-    fn opener_is_bound_automatically() {
-        let cs = open_changeset();
-        assert_eq!(cs.bound_actors, vec![cs.opened_by]);
-    }
+    fn changeset_actor_display_round_trips_through_from_str() {
+        use std::str::FromStr;
 
-    #[test]
-    fn a_second_actor_can_bind_and_unbind() {
-        let mut cs = open_changeset();
-        let second = ChangesetActor::WorkflowRun {
+        let agent = ChangesetActor::Agent {
+            agent_id: AgentId::new(),
+        };
+        assert_eq!(ChangesetActor::from_str(&agent.to_string()).unwrap(), agent);
+
+        let run = ChangesetActor::WorkflowRun {
             run_id: WorkflowRunId::new(),
         };
-        assert!(cs.actor_bound(second).did_execute());
-        assert_eq!(cs.bound_actors.len(), 2);
-        assert!(cs.bound_actors.contains(&second));
+        assert_eq!(ChangesetActor::from_str(&run.to_string()).unwrap(), run);
 
-        assert!(cs.actor_unbound(second).did_execute());
-        assert_eq!(cs.bound_actors, vec![cs.opened_by]);
-    }
-
-    #[test]
-    fn actor_bound_is_idempotent() {
-        let mut cs = open_changeset();
-        let outcome = cs.actor_bound(cs.opened_by);
-        assert!(matches!(outcome, Idempotent::AlreadyApplied));
-        assert_eq!(cs.bound_actors.len(), 1);
-    }
-
-    #[test]
-    fn actor_unbound_of_non_bound_actor_is_noop() {
-        let mut cs = open_changeset();
-        let stranger = ChangesetActor::User {
+        let user = ChangesetActor::User {
             user_id: UserId::new(),
         };
-        let outcome = cs.actor_unbound(stranger);
-        assert!(matches!(outcome, Idempotent::AlreadyApplied));
-        assert_eq!(cs.bound_actors, vec![cs.opened_by]);
+        assert_eq!(ChangesetActor::from_str(&user.to_string()).unwrap(), user);
     }
 
     #[test]
-    fn bound_actors_hydrate_from_events() {
-        let mut cs = open_changeset();
-        let opener = cs.opened_by;
-        let second = ChangesetActor::WorkflowRun {
-            run_id: WorkflowRunId::new(),
-        };
-        cs.actor_bound(second).did_execute();
+    fn changeset_actor_display_uses_the_documented_prefixes() {
+        let agent_id = AgentId::new();
+        assert_eq!(
+            ChangesetActor::Agent { agent_id }.to_string(),
+            format!("agent:{agent_id}")
+        );
+        let run_id = WorkflowRunId::new();
+        assert_eq!(
+            ChangesetActor::WorkflowRun { run_id }.to_string(),
+            format!("run:{run_id}")
+        );
+        let user_id = UserId::new();
+        assert_eq!(
+            ChangesetActor::User { user_id }.to_string(),
+            format!("user:{user_id}")
+        );
+    }
 
-        let events = cs.events;
-        let rehydrated = Changeset::try_from_events(events).unwrap();
-        assert_eq!(rehydrated.bound_actors.len(), 2);
-        assert!(rehydrated.bound_actors.contains(&second));
-        assert!(rehydrated.bound_actors.contains(&opener));
+    #[test]
+    fn changeset_actor_from_str_rejects_garbage() {
+        use std::str::FromStr;
+
+        assert!(ChangesetActor::from_str("nonsense").is_err());
+        assert!(ChangesetActor::from_str("agent:not-a-uuid").is_err());
+        assert!(ChangesetActor::from_str("robot:00000000-0000-0000-0000-000000000000").is_err());
     }
 }

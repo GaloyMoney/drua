@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 use crate::auth::error::AuthorizationError;
-use crate::primitives::{AgentId, ChangesetId, ProjectId, SandboxId, WorkflowRunId};
+use crate::primitives::{AgentId, ProjectId, SandboxId, WorkflowRunId};
 use crate::sandbox::error::SandboxError;
 use crate::skill::SkillError;
 
@@ -42,10 +42,6 @@ pub enum AgentError {
     AlreadyAttachedToSandbox { current: SandboxId },
     #[error("AgentError - project lead cannot attach a sandbox")]
     LeadCannotAttachSandbox,
-    #[error(
-        "AgentError - agent is already bound to changeset {current}; unbind it before binding another"
-    )]
-    AlreadyBoundToChangeset { current: ChangesetId },
     #[error("AgentError - no lead agent found in project {0}")]
     NoLeadAgent(ProjectId),
     #[error("AgentError - workflow agents inherit their chain from the workflow definition")]

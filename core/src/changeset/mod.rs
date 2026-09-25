@@ -12,7 +12,6 @@ use crate::agent::repo::AgentRepo;
 use crate::audit::Audit;
 use crate::auth::{AuthResource, AuthScope, AuthSubject, AuthVerb};
 use crate::primitives::*;
-use crate::workflow::run::repo::WorkflowRunRepo;
 
 /// One touched path in a [`ChangesetStatusView`], repo-relative to the
 /// space it belongs to (not the repo root).
@@ -55,10 +54,12 @@ pub struct ChangesetStatusView {
     pub pr_url: Option<String>,
 }
 
-/// Actor a given [`AuthSubject`] maps to for changeset attribution.
-/// `Anonymous`/`ExportedAgent` can't open or bind a changeset yet —
-/// `UnsupportedActor` — matching the handoff's actor set (§3.1): agents,
-/// workflow runs, and humans via `User`.
+/// Actor a given [`AuthSubject`] maps to for changeset attribution —
+/// also the `draft_for`/`find_open_for_actor` lookup key (rev2 D4).
+/// `Anonymous` still can't act on a changeset (`UnsupportedActor`);
+/// `ExportedAgent` is a first-class actor as of rev2 D11 — it maps to
+/// `User` (the synthetic user id for agent-owned MCP creds is fine as
+/// a draft key: it's stable and unique per credential-owning agent).
 fn actor_for_subject(sub: &AuthSubject) -> Result<ChangesetActor, ChangesetError> {
     match sub {
         AuthSubject::Agent(_, agent_id, _)
@@ -68,10 +69,10 @@ fn actor_for_subject(sub: &AuthSubject) -> Result<ChangesetActor, ChangesetError
         AuthSubject::WorkflowExecutor(_, _, run_id, _) => {
             Ok(ChangesetActor::WorkflowRun { run_id: *run_id })
         }
-        AuthSubject::User(user_id) => Ok(ChangesetActor::User { user_id: *user_id }),
-        AuthSubject::ExportedAgent(..) | AuthSubject::Anonymous => {
-            Err(ChangesetError::UnsupportedActor)
+        AuthSubject::User(user_id) | AuthSubject::ExportedAgent(user_id, _, _) => {
+            Ok(ChangesetActor::User { user_id: *user_id })
         }
+        AuthSubject::Anonymous => Err(ChangesetError::UnsupportedActor),
     }
 }
 
@@ -79,59 +80,161 @@ fn actor_for_subject(sub: &AuthSubject) -> Result<ChangesetActor, ChangesetError
 pub struct Changesets {
     repo: ChangesetRepo,
     agents: AgentRepo,
-    workflow_runs: WorkflowRunRepo,
     library: drua_library::Library,
     users: crate::user::Users,
 }
 
 impl Changesets {
+    /// `WorkflowRunRepo` isn't wired here (rev2 D4: no lookup goes
+    /// through `Agent`/`WorkflowRun` any more — `draft_for` reads its
+    /// own `opened_by_actor` index). The executor/`Workflows` service
+    /// still own their run's `changeset_opened`/`changeset_closed`
+    /// history directly against their own `WorkflowRunRepo`.
     pub fn new(
         pool: &sqlx::PgPool,
         agents: &AgentRepo,
-        workflow_runs: &WorkflowRunRepo,
         library: &drua_library::Library,
         users: &crate::user::Users,
     ) -> Self {
         Self {
             repo: ChangesetRepo::new(pool),
             agents: agents.clone(),
-            workflow_runs: workflow_runs.clone(),
             library: library.clone(),
             users: users.clone(),
         }
     }
 
-    /// Opens a changeset at `main`'s current tip and binds `sub`'s actor
-    /// to it. The branch itself (`create_ref`) is created best-effort
-    /// after the DB commit — a failure here is repaired by `ensure_ref`
-    /// on first use, matching the "recreate on demand" contract the
-    /// design already requires for an ephemeral-clone pod restart.
-    ///
-    /// OQ-5 default: checked here (collection-level — "may propose at
-    /// all in this project") as well as per-file at every `SpaceFs`
-    /// write, so an unauthorized subject fails fast rather than after
-    /// pinning `base_oid` and creating a branch.
-    #[instrument(name = "domain.changeset.open", skip(self, sub))]
-    pub async fn open(
+    /// rev2 D8's step-agent rule (rev1 §2.1 rule 2 survives): a step
+    /// agent's draft key is its run, not itself — so two step agents in
+    /// the same run share one draft. Resolved by fetching the `Agent`
+    /// and checking `workflow_run_id` first; every other subject maps
+    /// via `actor_for_subject` directly.
+    async fn actor_key_for(&self, sub: &AuthSubject) -> Result<ChangesetActor, ChangesetError> {
+        if let AuthSubject::Agent(_, agent_id, _)
+        | AuthSubject::AgentOnBehalfOfUser(_, _, agent_id, _) = sub
+        {
+            // Best-effort: an `Agent` lookup miss (a synthetic/test
+            // subject, or a genuinely deleted agent racing a write in
+            // flight) falls back to the agent's own identity rather
+            // than hard-failing the write — this lookup exists only to
+            // *narrow* the key for a step agent, never to gate whether
+            // one can act at all.
+            match self.agents.find_by_id(*agent_id).await {
+                Ok(agent) => {
+                    if let Some(run_id) = agent.workflow_run_id {
+                        return Ok(ChangesetActor::WorkflowRun { run_id });
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        agent_id = %agent_id,
+                        "actor_key_for: agent lookup failed; keying the draft by agent id directly"
+                    );
+                }
+            }
+        }
+        actor_for_subject(sub)
+    }
+
+    /// rev2 D4/§3 rule 3: `sub`'s current `Open` draft, if any — a pure
+    /// read, one indexed query (`opened_by_actor`), never creates one.
+    /// Used by a read-intent `space:`/`draft:` resolution (nothing to
+    /// overlay if no draft exists yet) and the `spaces draft` command.
+    #[instrument(name = "domain.changeset.open_draft_for", skip(self, sub))]
+    pub async fn open_draft_for(
         &self,
         sub: &AuthSubject,
-        title: String,
+    ) -> Result<Option<Changeset>, ChangesetError> {
+        let actor = self.actor_key_for(sub).await?;
+        self.find_open_for_actor(actor).await
+    }
+
+    /// The run's current `Open` draft, if any — the same lookup as
+    /// `open_draft_for`, but keyed directly by `run_id` rather than a
+    /// resolved `AuthSubject`. The executor's run-end close and
+    /// `Workflows::cancel_run` call this with only a `WorkflowRunId`
+    /// in hand (a `WorkflowExecutor` subject only exists mid-run).
+    pub async fn open_draft_for_run(
+        &self,
+        run_id: WorkflowRunId,
+    ) -> Result<Option<Changeset>, ChangesetError> {
+        self.find_open_for_actor(ChangesetActor::WorkflowRun { run_id })
+            .await
+    }
+
+    /// The most recent changeset opened by `actor`, if it's still
+    /// `Open`. `list_for_opened_by_actor_by_created_at` orders by
+    /// `created_at` descending — since the partial unique index allows
+    /// at most one `Open` row per actor at a time, and a fresh draft is
+    /// always younger than whatever terminal changeset preceded it for
+    /// the same actor, "most recent for this actor" is exactly "the
+    /// open one, if any" without a second query or a status filter.
+    async fn find_open_for_actor(
+        &self,
+        actor: ChangesetActor,
+    ) -> Result<Option<Changeset>, ChangesetError> {
+        let page = self
+            .repo
+            .list_for_opened_by_actor_by_created_at(
+                actor.to_string(),
+                es_entity::PaginatedQueryArgs {
+                    first: 1,
+                    after: None,
+                },
+                es_entity::ListDirection::Descending,
+            )
+            .await?;
+        Ok(page.entities.into_iter().next().filter(|cs| cs.is_open()))
+    }
+
+    /// rev2 D2/D4: `sub`'s draft, created lazily on first use. No
+    /// `open` verb — this *is* the only way a changeset comes into
+    /// existence outside the executor's declared-title pre-create.
+    ///
+    /// `title`/`description` are used only when actually creating (a
+    /// `None` title is derived from the actor + `first_touched_path`,
+    /// §3: "Draft by \<agent name | user email\> — \<first touched
+    /// path\>"). The branch itself (`create_ref`) is created
+    /// best-effort after the DB commit, matching `apply`'s "recreate
+    /// on demand" contract for an ephemeral-clone pod restart.
+    ///
+    /// Concurrent first-writes from the same actor race on the
+    /// `changesets_opened_by_actor_key` partial unique index rather
+    /// than a lock: the loser's `create_in_op` fails `was_duplicate`,
+    /// and it re-reads the winner's row instead of erroring.
+    #[instrument(name = "domain.changeset.draft_for", skip(self, sub, description))]
+    pub async fn draft_for(
+        &self,
+        sub: &AuthSubject,
+        title: Option<String>,
         description: Option<String>,
+        first_touched_path: Option<&str>,
     ) -> Result<Changeset, ChangesetError> {
         sub.can(AuthVerb::Propose, AuthResource::Space(None))?;
-        let project_id = sub.project_id().ok_or(ChangesetError::NoProject)?;
-        let opened_by = actor_for_subject(sub)?;
+        let actor = self.actor_key_for(sub).await?;
+        if let Some(cs) = self.find_open_for_actor(actor).await? {
+            return Ok(cs);
+        }
+
+        let project_id = sub
+            .effective_project_id()
+            .ok_or(ChangesetError::NoProject)?;
         let base_oid = self
             .library
             .fetch_and_head()
             .await?
             .ok_or(ChangesetError::MainUnborn)?;
+        let title = match title {
+            Some(t) => t,
+            None => self.derive_draft_title(actor, first_touched_path).await,
+        };
 
         let mut builder = NewChangeset::builder()
             .project_id(project_id)
             .title(title)
             .base_oid(base_oid.clone())
-            .opened_by(opened_by);
+            .opened_by(actor);
         if let Some(desc) = description {
             builder = builder.description(desc);
         }
@@ -140,9 +243,17 @@ impl Changesets {
             .expect("all required NewChangeset fields set");
 
         let mut op = self.repo.begin_op().await?;
-        let changeset = self.repo.create_in_op(&mut op, new_changeset).await?;
-        self.bind_actor_entity_in_op(&mut op, opened_by, changeset.id)
-            .await?;
+        let changeset = match self.repo.create_in_op(&mut op, new_changeset).await {
+            Ok(cs) => cs,
+            Err(e) if e.was_duplicate() => {
+                drop(op);
+                return self
+                    .find_open_for_actor(actor)
+                    .await?
+                    .ok_or_else(|| ChangesetError::from(e));
+            }
+            Err(e) => return Err(e.into()),
+        };
         op.commit().await?;
 
         if let Err(e) = self
@@ -153,46 +264,40 @@ impl Changesets {
             tracing::warn!(
                 error = %e,
                 changeset_id = %changeset.id,
-                "changeset.open: create_ref failed; ensure_ref will repair it on first use"
+                "changeset.draft_for: create_ref failed; ensure_ref will repair it on first use"
             );
         }
 
-        Audit::record_action_if_unset("changeset.open");
+        Audit::record_action_if_unset("changeset.draft_for");
         Audit::record_project_id(project_id);
         Audit::record_changeset_id(changeset.id);
 
         Ok(changeset)
     }
 
-    /// §2.1 resolution rule 2: the subject's bound changeset. An
-    /// `Agent`/`AgentOnBehalfOfUser` with no binding of its own falls
-    /// through to its workflow run's changeset (step agents inherit the
-    /// run's declared changeset without their own bind).
-    #[instrument(name = "domain.changeset.active_for_subject", skip(self, sub))]
-    pub async fn active_for_subject(
+    /// §3's derived title: the acting agent's name, or the acting
+    /// user's email, falling back to `describe_actor`'s generic form
+    /// when the lookup fails (e.g. a since-deleted agent) — a draft
+    /// still needs a title, just a less friendly one.
+    async fn derive_draft_title(
         &self,
-        sub: &AuthSubject,
-    ) -> Result<Option<Changeset>, ChangesetError> {
-        let id = match sub {
-            AuthSubject::Agent(_, agent_id, _)
-            | AuthSubject::AgentOnBehalfOfUser(_, _, agent_id, _) => {
-                let agent = self.agents.find_by_id(*agent_id).await?;
-                match agent.active_changeset {
-                    Some(id) => Some(id),
-                    None => match agent.workflow_run_id {
-                        Some(run_id) => self.workflow_runs.find_by_id(run_id).await?.changeset,
-                        None => None,
-                    },
-                }
-            }
-            AuthSubject::WorkflowExecutor(_, _, run_id, _) => {
-                self.workflow_runs.find_by_id(*run_id).await?.changeset
-            }
-            AuthSubject::User(_) | AuthSubject::ExportedAgent(..) | AuthSubject::Anonymous => None,
+        actor: ChangesetActor,
+        first_touched_path: Option<&str>,
+    ) -> String {
+        let who = match actor {
+            ChangesetActor::Agent { agent_id } => match self.agents.find_by_id(agent_id).await {
+                Ok(agent) => agent.name,
+                Err(_) => describe_actor(&actor),
+            },
+            ChangesetActor::User { user_id } => match self.users.find_by_id(user_id).await {
+                Ok(user) => user.email.unwrap_or_else(|| describe_actor(&actor)),
+                Err(_) => describe_actor(&actor),
+            },
+            ChangesetActor::WorkflowRun { .. } => describe_actor(&actor),
         };
-        match id {
-            Some(id) => Ok(Some(self.repo.find_by_id(id).await?)),
-            None => Ok(None),
+        match first_touched_path {
+            Some(path) if !path.is_empty() => format!("Draft by {who} — {path}"),
+            _ => format!("Draft by {who}"),
         }
     }
 
@@ -253,7 +358,9 @@ impl Changesets {
         sub: &AuthSubject,
         status: Option<ChangesetStatus>,
     ) -> Result<Vec<Changeset>, ChangesetError> {
-        let project_id = sub.project_id().ok_or(ChangesetError::NoProject)?;
+        let project_id = sub
+            .effective_project_id()
+            .ok_or(ChangesetError::NoProject)?;
         let mut out = Vec::new();
         let mut after = None;
         loop {
@@ -319,60 +426,10 @@ impl Changesets {
         })
     }
 
-    /// Joins an existing `Open` changeset.
-    #[instrument(name = "domain.changeset.bind", skip(self, sub))]
-    pub async fn bind(&self, sub: &AuthSubject, id: ChangesetId) -> Result<(), ChangesetError> {
-        sub.can(AuthVerb::Propose, AuthResource::Space(None))?;
-        let actor = actor_for_subject(sub)?;
-        let mut op = self.repo.begin_op().await?;
-        let mut cs = self.repo.find_by_id_in_op(&mut op, id).await?;
-        self.check_same_project(sub, &cs)?;
-        if !cs.is_open() {
-            return Err(ChangesetError::InvalidTransition {
-                from: cs.status,
-                op: "bind",
-            });
-        }
-
-        if cs.actor_bound(actor).did_execute() {
-            self.repo.update_in_op(&mut op, &mut cs).await?;
-        }
-        self.bind_actor_entity_in_op(&mut op, actor, id).await?;
-        op.commit().await?;
-
-        Audit::record_action_if_unset("changeset.bind");
-        Audit::record_changeset_id(id);
-        Ok(())
-    }
-
-    /// Leaves `sub`'s bound changeset without closing it — a no-op if
-    /// not bound to anything.
-    #[instrument(name = "domain.changeset.unbind", skip(self, sub))]
-    pub async fn unbind(&self, sub: &AuthSubject) -> Result<(), ChangesetError> {
-        let actor = actor_for_subject(sub)?;
-        let Some(cs) = self.active_for_subject(sub).await? else {
-            return Ok(());
-        };
-
-        let mut op = self.repo.begin_op().await?;
-        let mut cs = self.repo.find_by_id_in_op(&mut op, cs.id).await?;
-        if cs.actor_unbound(actor).did_execute() {
-            self.repo.update_in_op(&mut op, &mut cs).await?;
-        }
-        self.unbind_actor_entity_in_op(&mut op, actor, cs.id)
-            .await?;
-        op.commit().await?;
-
-        Audit::record_action_if_unset("changeset.unbind");
-        Audit::record_changeset_id(cs.id);
-        Ok(())
-    }
-
-    /// `Open` bound actor, or a lead/admin closing an abandoned one;
+    /// `Open` owner, or a lead/admin closing an abandoned one;
     /// `Submitted` closes the PR (OQ-1's default) — that push/close call
     /// lands with PR 6's GitHub client, so for now the branch is just
-    /// deleted locally + on origin. Unbinds every actor still pointing
-    /// at this changeset.
+    /// deleted locally + on origin.
     #[instrument(name = "domain.changeset.discard", skip(self, sub))]
     pub async fn discard(
         &self,
@@ -385,12 +442,8 @@ impl Changesets {
         self.check_same_project(sub, &cs)?;
         self.check_discard_authority(sub, &cs)?;
 
-        let bound = cs.bound_actors.clone();
         if cs.discard(reason)?.did_execute() {
             self.repo.update_in_op(&mut op, &mut cs).await?;
-        }
-        for actor in bound {
-            self.unbind_actor_entity_in_op(&mut op, actor, id).await?;
         }
         op.commit().await?;
 
@@ -412,8 +465,7 @@ impl Changesets {
     /// commits) and it would merge cleanly (`Conflicts` — checked up
     /// front so a doomed PR is never opened). `PrUnavailable` when the
     /// library has no GitHub App / isn't a `github.com` remote
-    /// (OQ-14's default: error, not a silent `apply`). Unbinds every
-    /// actor still pointing at this changeset (OQ-8) on success.
+    /// (OQ-14's default: error, not a silent `apply`).
     #[instrument(name = "domain.changeset.submit", skip(self, sub))]
     pub async fn submit(
         &self,
@@ -423,7 +475,7 @@ impl Changesets {
         let mut op = self.repo.begin_op().await?;
         let mut cs = self.repo.find_by_id_in_op(&mut op, id).await?;
         self.check_same_project(sub, &cs)?;
-        self.check_bound_or_lead(sub, &cs, "submit")?;
+        self.check_owner_or_lead(sub, &cs, "submit")?;
         if !cs.is_open() {
             return Err(ChangesetError::InvalidTransition {
                 from: cs.status,
@@ -461,16 +513,12 @@ impl Changesets {
             .create_pull(&owner, &repo, &cs.branch(), "main", &cs.title, &body)
             .await?;
 
-        let bound = cs.bound_actors.clone();
         let head_oid = cs.head_oid.clone();
         if cs
             .submit(head_oid, pr.number, pr.html_url.clone())?
             .did_execute()
         {
             self.repo.update_in_op(&mut op, &mut cs).await?;
-        }
-        for actor in bound {
-            self.unbind_actor_entity_in_op(&mut op, actor, id).await?;
         }
         op.commit().await?;
 
@@ -483,7 +531,7 @@ impl Changesets {
     /// `Submitted`; requires the subject to be able to `Update`
     /// `main` at all (per-space `Update` was already required for
     /// every individual write that landed on `main` bypassing a
-    /// changeset — this is the collection-level twin of `open`'s
+    /// changeset — this is the collection-level twin of `draft_for`'s
     /// `Propose`-on-`Space(None)` check, for the same "fail before
     /// doing any work" reason). Closes the PR (best-effort) if one was
     /// open, and deletes the branch — a merge commit without the
@@ -504,7 +552,7 @@ impl Changesets {
         let mut op = self.repo.begin_op().await?;
         let mut cs = self.repo.find_by_id_in_op(&mut op, id).await?;
         self.check_same_project(sub, &cs)?;
-        self.check_bound_or_lead(sub, &cs, "apply")?;
+        self.check_owner_or_lead(sub, &cs, "apply")?;
         if !matches!(
             cs.status,
             ChangesetStatus::Open | ChangesetStatus::Submitted
@@ -540,13 +588,9 @@ impl Changesets {
             .merge_into_main(&cs.head_oid, message, attribution)
             .await?;
 
-        let bound = cs.bound_actors.clone();
         let pr_number = cs.pr_number;
         if cs.apply(merge_oid.clone(), actor)?.did_execute() {
             self.repo.update_in_op(&mut op, &mut cs).await?;
-        }
-        for a in bound {
-            self.unbind_actor_entity_in_op(&mut op, a, id).await?;
         }
         op.commit().await?;
 
@@ -599,7 +643,7 @@ impl Changesets {
         let mut op = self.repo.begin_op().await?;
         let mut cs = self.repo.find_by_id_in_op(&mut op, id).await?;
         self.check_same_project(sub, &cs)?;
-        self.check_bound_or_lead(sub, &cs, "rebase")?;
+        self.check_owner_or_lead(sub, &cs, "rebase")?;
         if !cs.is_open() {
             return Err(ChangesetError::InvalidTransition {
                 from: cs.status,
@@ -680,10 +724,22 @@ impl Changesets {
         main_oid: &str,
         status: ChangesetStatus,
     ) -> Result<(), ChangesetError> {
-        if let Some(base) = self.library.merge_base(main_oid, &cs.head_oid).await? {
-            if base == cs.head_oid {
-                self.mark_merged_in_op(cs.id, main_oid).await?;
-                return Ok(());
+        // A changeset that hasn't diverged from its own base yet
+        // (`head_oid == base_oid` — no commits recorded) trivially
+        // satisfies "head is an ancestor of main" the moment `base_oid`
+        // was pinned to main's tip, well before it's actually merged.
+        // rev2 surfaced this: lazy drafts spend real time in exactly
+        // this state (created on first write, momentarily empty) far
+        // more often than rev1's explicit `open`+immediate-bind did, so
+        // a sync tick landing in that window would wrongly mark a
+        // brand-new draft `Merged` and delete its ref out from under
+        // the write that's about to land on it.
+        if cs.head_oid != cs.base_oid {
+            if let Some(base) = self.library.merge_base(main_oid, &cs.head_oid).await? {
+                if base == cs.head_oid {
+                    self.mark_merged_in_op(cs.id, main_oid).await?;
+                    return Ok(());
+                }
             }
         }
 
@@ -708,12 +764,8 @@ impl Changesets {
     ) -> Result<(), ChangesetError> {
         let mut op = self.repo.begin_op().await?;
         let mut cs = self.repo.find_by_id_in_op(&mut op, id).await?;
-        let bound = cs.bound_actors.clone();
         if cs.mark_merged(merge_oid.to_string())?.did_execute() {
             self.repo.update_in_op(&mut op, &mut cs).await?;
-        }
-        for actor in bound {
-            self.unbind_actor_entity_in_op(&mut op, actor, id).await?;
         }
         op.commit().await?;
 
@@ -732,12 +784,8 @@ impl Changesets {
     async fn mark_abandoned_in_op(&self, id: ChangesetId) -> Result<(), ChangesetError> {
         let mut op = self.repo.begin_op().await?;
         let mut cs = self.repo.find_by_id_in_op(&mut op, id).await?;
-        let bound = cs.bound_actors.clone();
         if cs.mark_abandoned()?.did_execute() {
             self.repo.update_in_op(&mut op, &mut cs).await?;
-        }
-        for actor in bound {
-            self.unbind_actor_entity_in_op(&mut op, actor, id).await?;
         }
         op.commit().await?;
 
@@ -747,7 +795,7 @@ impl Changesets {
     }
 
     /// Same-project check backing every read/write access to an
-    /// already-resolved changeset (`status`, `bind`, `discard`,
+    /// already-resolved changeset (`status`, `discard`,
     /// `find_for_target`). Deliberately membership-based rather than a
     /// `sub.can(Read, Space(None))` scope check — the latter would deny
     /// a plain `ProjectMember` its own project's changesets, since
@@ -760,16 +808,16 @@ impl Changesets {
     /// requires `sub.project_id().is_some()` for anyone but an admin
     /// (`User`s are the one case that's genuinely omnipotent).
     fn check_same_project(&self, sub: &AuthSubject, cs: &Changeset) -> Result<(), ChangesetError> {
-        match sub.project_id() {
+        match sub.effective_project_id() {
             Some(pid) if pid == cs.project_id => Ok(()),
             Some(_) => Err(ChangesetError::Foreign { id: cs.id }),
             None => Ok(()),
         }
     }
 
-    /// §7/OQ-1's `discard` rule: an `Open` changeset's own bound actor
-    /// may discard it; a `Submitted` one (closing its PR) — or an
-    /// abandoned `Open` one nobody is bound to anymore — needs a lead
+    /// §7/OQ-1's `discard` rule: an `Open` changeset's own owner may
+    /// discard it; a `Submitted` one (closing its PR) — or an
+    /// abandoned `Open` one its owner walked away from — needs a lead
     /// or admin. `has_scope` treats `User` subjects as having every
     /// scope, so this also covers "Users are omnipotent" without a
     /// separate branch.
@@ -783,7 +831,7 @@ impl Changesets {
         }
         if cs.status == ChangesetStatus::Open {
             if let Ok(actor) = actor_for_subject(sub) {
-                if cs.bound_actors.contains(&actor) {
+                if cs.opened_by == actor {
                     return Ok(());
                 }
             }
@@ -794,12 +842,14 @@ impl Changesets {
         })
     }
 
-    /// OQ-7 default: only `cs`'s bound actor, or a lead/admin, may
+    /// rev2 OQ-7 default: only `cs`'s owner, or a lead/admin, may
     /// `submit`/`apply`/`rebase` it — status-independent, unlike
     /// `discard`'s OQ-1 rule (`check_discard_authority`), since none
     /// of these three are meaningful on an already-closed changeset
     /// anyway (the caller's own status check catches that separately).
-    fn check_bound_or_lead(
+    /// Renamed from rev1's `check_bound_or_lead` — there is no bind
+    /// state left to check, only ownership (D4).
+    fn check_owner_or_lead(
         &self,
         sub: &AuthSubject,
         cs: &Changeset,
@@ -809,65 +859,20 @@ impl Changesets {
             return Ok(());
         }
         if let Ok(actor) = actor_for_subject(sub) {
-            if cs.bound_actors.contains(&actor) {
+            if cs.opened_by == actor {
                 return Ok(());
             }
         }
         Err(ChangesetError::Forbidden { id: cs.id, action })
     }
 
-    async fn bind_actor_entity_in_op(
-        &self,
-        op: &mut es_entity::DbOp<'_>,
-        actor: ChangesetActor,
-        changeset_id: ChangesetId,
-    ) -> Result<(), ChangesetError> {
-        match actor {
-            ChangesetActor::Agent { agent_id } => {
-                let mut agent = self.agents.find_by_id_in_op(&mut *op, agent_id).await?;
-                if agent.changeset_bound(changeset_id)?.did_execute() {
-                    self.agents.update_in_op(op, &mut agent).await?;
-                }
-            }
-            ChangesetActor::WorkflowRun { run_id } => {
-                let mut run = self
-                    .workflow_runs
-                    .find_by_id_in_op(&mut *op, run_id)
-                    .await?;
-                if run.changeset_opened(changeset_id).did_execute() {
-                    self.workflow_runs.update_in_op(op, &mut run).await?;
-                }
-            }
-            ChangesetActor::User { .. } => {}
-        }
-        Ok(())
-    }
-
-    async fn unbind_actor_entity_in_op(
-        &self,
-        op: &mut es_entity::DbOp<'_>,
-        actor: ChangesetActor,
-        changeset_id: ChangesetId,
-    ) -> Result<(), ChangesetError> {
-        match actor {
-            ChangesetActor::Agent { agent_id } => {
-                let mut agent = self.agents.find_by_id_in_op(&mut *op, agent_id).await?;
-                if agent.changeset_unbound(changeset_id).did_execute() {
-                    self.agents.update_in_op(op, &mut agent).await?;
-                }
-            }
-            ChangesetActor::WorkflowRun { run_id } => {
-                let mut run = self
-                    .workflow_runs
-                    .find_by_id_in_op(&mut *op, run_id)
-                    .await?;
-                if run.changeset_closed(changeset_id).did_execute() {
-                    self.workflow_runs.update_in_op(op, &mut run).await?;
-                }
-            }
-            ChangesetActor::User { .. } => {}
-        }
-        Ok(())
+    /// The touched-file count at `cs`'s current tip vs its base —
+    /// D10's stamp `<n> files`. A thin, cheap wrapper around
+    /// `touched_files` (one git diff, no merge simulation) so
+    /// `SpaceFs` doesn't have to run `status`'s full mergeability
+    /// check just to render a stamp.
+    pub(crate) async fn touched_count(&self, cs: &Changeset) -> Result<usize, ChangesetError> {
+        Ok(self.touched_files(cs).await?.len())
     }
 
     async fn touched_files(&self, cs: &Changeset) -> Result<Vec<TouchedFile>, ChangesetError> {
@@ -1084,6 +1089,19 @@ mod tests {
 
         let user_id = UserId::new();
         let sub = AuthSubject::User(user_id);
+        assert_eq!(
+            actor_for_subject(&sub).unwrap(),
+            ChangesetActor::User { user_id }
+        );
+    }
+
+    /// rev2 D11: an external MCP agent is a first-class actor now,
+    /// mapped to `User` via its (possibly synthetic) user id — not
+    /// `UnsupportedActor` as in rev1.
+    #[test]
+    fn actor_for_subject_maps_exported_agent_to_user() {
+        let user_id = UserId::new();
+        let sub = AuthSubject::ExportedAgent(user_id, McpCredsId::new(), Vec::new());
         assert_eq!(
             actor_for_subject(&sub).unwrap(),
             ChangesetActor::User { user_id }

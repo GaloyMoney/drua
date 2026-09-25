@@ -49,14 +49,12 @@ use prompt_executor::PromptExecutor;
 use sandbox::Sandboxes;
 use skill::Skills;
 use toolset::{
-    AdminToolSet, Bash, ChangesetTool, CodeAssistantToolSet, Delete, GlobTool, Grep,
-    LibraryToolSet, Ls, MoveFile, NotesTool, ProjectAgent, ProjectLog, ProjectSandbox, Read,
-    SkillTool, SpacesTool, SubmitOutputTool, TextEditor, ToolSets, ToolSetsError, UseSkillTool,
-    WorkflowTool,
+    AdminToolSet, Bash, CodeAssistantToolSet, Delete, GlobTool, Grep, LibraryToolSet, Ls, MoveFile,
+    NotesTool, ProjectAgent, ProjectLog, ProjectSandbox, Read, SkillTool, SpacesTool,
+    SubmitOutputTool, TextEditor, ToolSets, ToolSetsError, UseSkillTool, WorkflowTool,
 };
 use tracing::instrument;
 use user::Users;
-use workflow::run::repo::WorkflowRunRepo;
 use workflow::Workflows;
 
 #[derive(Clone)]
@@ -279,15 +277,14 @@ impl App {
         toolsets.register_top_level(ProjectAgent::new(Arc::clone(&agents)));
         toolsets.register_top_level(SubmitOutputTool::new(Arc::clone(&agents)));
 
-        // Owns the `Changeset` entity/branch lifecycle. Built from fresh
-        // repo handles (cheap — both just wrap `pool`) rather than
-        // `Agents`/`Workflows`' own repos, avoiding a service-on-service
+        // Owns the `Changeset` entity/branch lifecycle. Built from a
+        // fresh `AgentRepo` handle (cheap — just wraps `pool`) rather
+        // than `Agents`' own repo, avoiding a service-on-service
         // dependency cycle (§7 of the handoff). Built before `Workflows`
-        // so the executor (PR 8) can open/close a run's changeset.
+        // so the executor can open/close a run's draft.
         let changesets = Arc::new(Changesets::new(
             pool,
             &AgentRepo::new(pool),
-            &WorkflowRunRepo::new(pool),
             &library,
             &users,
         ));
@@ -362,7 +359,6 @@ impl App {
             Arc::clone(&space_fs),
             Arc::clone(&search),
         ));
-        toolsets.register_top_level(ChangesetTool::new(Arc::clone(&changesets)));
         toolsets.register_top_level(ProjectSandbox::new(Arc::clone(&sandboxes)));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&projects)));
         toolsets.register_top_level(UseSkillTool::new(Arc::clone(&skills)));

@@ -38,7 +38,7 @@ impl AuthScope {
 
             AuthScope::ProjectAdmin(project) => {
                 // Spaces are library-wide; project admins manage the
-                // *collection* (`Create`/`Read`/`Propose` on
+                // *collection* (`Create`/`Read`/`Propose`/`Update` on
                 // `Space(None)`) but have no blanket authority over
                 // OTHER project-scoped resources — that's the `in_ws`
                 // fallthrough below. A specific space is the one
@@ -46,11 +46,20 @@ impl AuthScope {
                 // (`Update`) or stage (`Propose`) regardless of mount
                 // visibility, which is a project-membership concern,
                 // not an authorization one.
+                //
+                // `Update` on `Space(None)` (collection-level) is what
+                // `Changesets::apply`/rev2's `spaces publish` gate a
+                // lead's "land directly, skip the PR" authority on —
+                // without it here, a lead could `Update` any specific
+                // space but could never actually call `apply`, which
+                // checks the collection-level verb up front so it
+                // fails before doing any git work (rev2 §6.2/D6).
                 if matches!(
                     (verb, resource),
                     (AuthVerb::Create, AuthResource::Space(None))
                         | (AuthVerb::Read, AuthResource::Space(None))
                         | (AuthVerb::Propose, AuthResource::Space(None))
+                        | (AuthVerb::Update, AuthResource::Space(None))
                 ) {
                     return true;
                 }
@@ -377,14 +386,14 @@ mod tests {
         assert_eq!(parsed, AuthScope::Admin);
     }
 
-    /// Project admins may create and list library-wide spaces
-    /// (`Space(None)`), and — unlike a member — may write `main`
-    /// directly (`Update`) or stage (`Propose`) on any specific space
-    /// (`Space(Some(_))`); *mount* visibility there is still decided
-    /// separately by `Project.mounted_spaces` (`SpaceFs`'s mount gate
-    /// runs first). `Read` on a specific space and `Delete` on the
-    /// collection stay ungranted — nothing needs them through this
-    /// layer today.
+    /// Project admins may create, list, and (rev2) land changesets on
+    /// library-wide spaces (`Space(None)`), and — unlike a member —
+    /// may write `main` directly (`Update`) or stage (`Propose`) on
+    /// any specific space (`Space(Some(_))`); *mount* visibility there
+    /// is still decided separately by `Project.mounted_spaces`
+    /// (`SpaceFs`'s mount gate runs first). `Read` on a specific space
+    /// and `Delete` on the collection stay ungranted — nothing needs
+    /// them through this layer today.
     #[test]
     fn project_admin_space_authz() {
         use crate::primitives::SpaceId;
@@ -393,12 +402,16 @@ mod tests {
         assert!(s.permits(AuthVerb::Create, &AuthResource::Space(None)));
         assert!(s.permits(AuthVerb::Read, &AuthResource::Space(None)));
         assert!(s.permits(AuthVerb::Propose, &AuthResource::Space(None)));
+        // rev2: `Changesets::apply`/`spaces publish` gate a lead's
+        // "land directly" authority on this collection-level check —
+        // without it a lead could `Update` any specific space but
+        // could never actually call `apply`.
+        assert!(s.permits(AuthVerb::Update, &AuthResource::Space(None)));
 
         let space_id = SpaceId::new();
         assert!(!s.permits(AuthVerb::Read, &AuthResource::Space(Some(space_id))));
         assert!(s.permits(AuthVerb::Update, &AuthResource::Space(Some(space_id))));
         assert!(s.permits(AuthVerb::Propose, &AuthResource::Space(Some(space_id))));
-        assert!(!s.permits(AuthVerb::Update, &AuthResource::Space(None)));
         assert!(!s.permits(AuthVerb::Delete, &AuthResource::Space(None)));
     }
 

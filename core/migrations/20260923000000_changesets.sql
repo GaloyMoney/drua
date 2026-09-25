@@ -2,6 +2,7 @@ CREATE TABLE changesets (
     id uuid NOT NULL,
     project_id uuid NOT NULL,
     status varchar NOT NULL,
+    opened_by_actor varchar NOT NULL,
     agent_id uuid,
     workflow_run_id uuid,
     created_at timestamp with time zone NOT NULL,
@@ -31,6 +32,16 @@ CREATE INDEX idx_changesets_agent_id
 
 CREATE INDEX idx_changesets_workflow_run_id
     ON changesets USING btree (workflow_run_id);
+
+-- rev2 D4: at most one `Open` changeset per actor. `draft_for` relies
+-- on this to resolve a concurrent-create race (catch the violation,
+-- re-read the winner) instead of taking a lock.
+CREATE UNIQUE INDEX changesets_opened_by_actor_key
+    ON changesets (opened_by_actor)
+    WHERE status = 'open';
+
+CREATE INDEX idx_changesets_opened_by_actor_created_at
+    ON changesets USING btree (opened_by_actor, created_at);
 
 CREATE TABLE changeset_events (
     id uuid NOT NULL,
