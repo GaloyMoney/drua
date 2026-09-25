@@ -450,6 +450,30 @@ async fn execute_delete(
     Ok(format!("Deleted {raw_path}"))
 }
 
+/// Resolves a `Grep`/`Glob` search path the same way the editor handlers
+/// resolve theirs — through [`validate_path`] — but returns it relative to
+/// the session scope (falling back to `.` for the scope root itself)
+/// instead of the absolute canonical form, so `rg`'s output keeps the
+/// scope-relative paths callers already expect.
+async fn validate_search_path(session: &SharedSession, raw_path: &str) -> Result<String, String> {
+    let validated = validate_path(session, raw_path).await?;
+
+    let cwd = session.current_cwd().await;
+    let scope = if cwd.is_empty() {
+        PathBuf::from(workspace_root())
+    } else {
+        PathBuf::from(cwd)
+    };
+    let scope_canonical = std::fs::canonicalize(&scope)
+        .map_err(|e| format!("Cannot resolve scope root '{}': {e}", scope.display()))?;
+
+    Ok(match validated.strip_prefix(&scope_canonical) {
+        Ok(relative) if relative.as_os_str().is_empty() => ".".to_string(),
+        Ok(relative) => relative.to_string_lossy().into_owned(),
+        Err(_) => validated.to_string_lossy().into_owned(),
+    })
+}
+
 async fn execute_grep(session: &SharedSession, input: serde_json::Value) -> Result<String, String> {
     let input: GrepInput =
         serde_json::from_value(input).map_err(|e| format!("Invalid grep input: {e}"))?;
@@ -500,7 +524,8 @@ async fn execute_grep(session: &SharedSession, input: serde_json::Value) -> Resu
     args.push("--".to_string());
     args.push(input.pattern);
 
-    let search_path = input.path.unwrap_or_else(|| ".".to_string());
+    let raw_search_path = input.path.unwrap_or_else(|| ".".to_string());
+    let search_path = validate_search_path(session, &raw_search_path).await?;
     args.push(search_path);
 
     let scope = session.current_cwd().await;
@@ -536,7 +561,8 @@ async fn execute_glob(session: &SharedSession, input: serde_json::Value) -> Resu
     let input: GlobInput =
         serde_json::from_value(input).map_err(|e| format!("Invalid glob input: {e}"))?;
 
-    let search_path = input.path.unwrap_or_else(|| ".".to_string());
+    let raw_search_path = input.path.unwrap_or_else(|| ".".to_string());
+    let search_path = validate_search_path(session, &raw_search_path).await?;
 
     let scope = session.current_cwd().await;
     let output = tokio::time::timeout(
@@ -1892,13 +1918,15 @@ mod tests {
         )
         .await
         .unwrap();
+        let session = test_session();
+        session.set_cwd(dir.to_str().unwrap().to_string()).await;
 
         let input = serde_json::json!({
             "pattern": "hello",
             "path": dir.to_str().unwrap(),
             "output_mode": "content"
         });
-        let result = execute_grep(&test_session(), input).await;
+        let result = execute_grep(&session, input).await;
         assert!(result.is_ok(), "grep failed: {:?}", result);
         let output = result.unwrap();
         assert!(output.contains("hello world"));
@@ -1920,13 +1948,15 @@ mod tests {
             .await
             .unwrap();
         tokio::fs::write(dir.join("b.txt"), "no hit").await.unwrap();
+        let session = test_session();
+        session.set_cwd(dir.to_str().unwrap().to_string()).await;
 
         let input = serde_json::json!({
             "pattern": "match",
             "path": dir.to_str().unwrap(),
             "output_mode": "files_with_matches"
         });
-        let result = execute_grep(&test_session(), input).await.unwrap();
+        let result = execute_grep(&session, input).await.unwrap();
         assert!(result.contains("a.txt"));
         assert!(!result.contains("b.txt"));
 
@@ -1945,12 +1975,14 @@ mod tests {
         tokio::fs::write(dir.join("x.txt"), "nothing relevant")
             .await
             .unwrap();
+        let session = test_session();
+        session.set_cwd(dir.to_str().unwrap().to_string()).await;
 
         let input = serde_json::json!({
             "pattern": "zzz_nonexistent",
             "path": dir.to_str().unwrap()
         });
-        let result = execute_grep(&test_session(), input).await;
+        let result = execute_grep(&session, input).await;
         assert!(result.is_ok());
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -1968,6 +2000,8 @@ mod tests {
         tokio::fs::write(dir.join("many.txt"), "a\na\na\na\na\na\na\na\na\na")
             .await
             .unwrap();
+        let session = test_session();
+        session.set_cwd(dir.to_str().unwrap().to_string()).await;
 
         let input = serde_json::json!({
             "pattern": "a",
@@ -1975,7 +2009,7 @@ mod tests {
             "output_mode": "content",
             "head_limit": 3
         });
-        let result = execute_grep(&test_session(), input).await.unwrap();
+        let result = execute_grep(&session, input).await.unwrap();
         assert_eq!(result.lines().count(), 3);
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -2004,12 +2038,14 @@ mod tests {
             .await
             .unwrap();
         tokio::fs::write(dir.join("bar.txt"), "text").await.unwrap();
+        let session = test_session();
+        session.set_cwd(dir.to_str().unwrap().to_string()).await;
 
         let input = serde_json::json!({
             "pattern": "*.rs",
             "path": dir.to_str().unwrap()
         });
-        let result = execute_glob(&test_session(), input).await;
+        let result = execute_glob(&session, input).await;
         assert!(result.is_ok(), "glob failed: {:?}", result);
         let output = result.unwrap();
         assert!(output.contains("foo.rs"));
@@ -2030,12 +2066,14 @@ mod tests {
         tokio::fs::write(dir.join("hello.txt"), "text")
             .await
             .unwrap();
+        let session = test_session();
+        session.set_cwd(dir.to_str().unwrap().to_string()).await;
 
         let input = serde_json::json!({
             "pattern": "*.xyz",
             "path": dir.to_str().unwrap()
         });
-        let result = execute_glob(&test_session(), input).await;
+        let result = execute_glob(&session, input).await;
         assert!(result.is_ok());
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -2047,6 +2085,223 @@ mod tests {
         let result = execute_glob(&test_session(), input).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("pattern"));
+    }
+
+    // ── Grep/Glob path scope (handler-level — see validate_search_path) ──
+    //
+    // execute_grep/execute_glob used to hand `path` straight to `rg`
+    // without going through `validate_path` at all, unlike every other
+    // handler in this file. These exercise the handlers themselves (not
+    // just `validate_path_against` in isolation, see below) since handler
+    // coverage is exactly what was missing.
+
+    #[tokio::test]
+    async fn grep_rejects_absolute_path_outside_scope() {
+        let dir = fresh_test_dir("sandbox-test-grep-abs-outside");
+        let session = test_session();
+        session.set_cwd(dir.clone()).await;
+
+        let input = serde_json::json!({
+            "pattern": "root",
+            "path": "/etc/passwd",
+            "output_mode": "files_with_matches"
+        });
+        let result = execute_grep(&session, input).await;
+        assert!(result.is_err(), "expected rejection, got: {:?}", result);
+        assert!(
+            result.unwrap_err().contains("Access denied"),
+            "absolute path outside the workspace must be denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn glob_rejects_absolute_path_outside_scope() {
+        let dir = fresh_test_dir("sandbox-test-glob-abs-outside");
+        let session = test_session();
+        session.set_cwd(dir.clone()).await;
+
+        let input = serde_json::json!({
+            "pattern": "passwd",
+            "path": "/etc"
+        });
+        let result = execute_glob(&session, input).await;
+        assert!(result.is_err(), "expected rejection, got: {:?}", result);
+        assert!(
+            result.unwrap_err().contains("Access denied"),
+            "absolute path outside the workspace must be denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn grep_rejects_relative_traversal_outside_scope() {
+        let dir = fresh_test_dir("sandbox-test-grep-traversal");
+        let session = test_session();
+        session.set_cwd(dir.clone()).await;
+
+        // Enough `../` segments to walk past root regardless of how deep
+        // the OS temp dir is nested; POSIX clamps extra `..` at `/`, so
+        // this deterministically lands on the real `/etc/passwd`.
+        let traversal = format!("{}etc/passwd", "../".repeat(8));
+        let input = serde_json::json!({
+            "pattern": "root",
+            "path": traversal,
+            "output_mode": "files_with_matches"
+        });
+        let result = execute_grep(&session, input).await;
+        assert!(result.is_err(), "expected rejection, got: {:?}", result);
+        assert!(
+            result.unwrap_err().contains("Access denied"),
+            "`../` traversal out of the workspace must be denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn glob_rejects_relative_traversal_outside_scope() {
+        let dir = fresh_test_dir("sandbox-test-glob-traversal");
+        let session = test_session();
+        session.set_cwd(dir.clone()).await;
+
+        let traversal = format!("{}etc", "../".repeat(8));
+        let input = serde_json::json!({
+            "pattern": "passwd",
+            "path": traversal
+        });
+        let result = execute_glob(&session, input).await;
+        assert!(result.is_err(), "expected rejection, got: {:?}", result);
+        assert!(
+            result.unwrap_err().contains("Access denied"),
+            "`../` traversal out of the workspace must be denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn grep_rejects_symlink_escaping_scope() {
+        let dir = fresh_test_dir("sandbox-test-grep-symlink");
+        let link = PathBuf::from(&dir).join("escape.txt");
+        std::os::unix::fs::symlink("/etc/passwd", &link).unwrap();
+        let session = test_session();
+        session.set_cwd(dir.clone()).await;
+
+        let input = serde_json::json!({
+            "pattern": "root",
+            "path": link.to_str().unwrap(),
+            "output_mode": "files_with_matches"
+        });
+        let result = execute_grep(&session, input).await;
+        assert!(result.is_err(), "expected rejection, got: {:?}", result);
+        assert!(
+            result.unwrap_err().contains("Access denied"),
+            "a symlink inside the workspace pointing outside it must be denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn glob_rejects_symlink_escaping_scope() {
+        let dir = fresh_test_dir("sandbox-test-glob-symlink");
+        let link = PathBuf::from(&dir).join("escape-dir");
+        std::os::unix::fs::symlink("/etc", &link).unwrap();
+        let session = test_session();
+        session.set_cwd(dir.clone()).await;
+
+        let input = serde_json::json!({
+            "pattern": "passwd",
+            "path": link.to_str().unwrap()
+        });
+        let result = execute_glob(&session, input).await;
+        assert!(result.is_err(), "expected rejection, got: {:?}", result);
+        assert!(
+            result.unwrap_err().contains("Access denied"),
+            "a symlink inside the workspace pointing outside it must be denied"
+        );
+    }
+
+    #[tokio::test]
+    async fn grep_rejects_secret_shaped_path_outside_scope() {
+        let dir = fresh_test_dir("sandbox-test-grep-secret");
+        let session = test_session();
+        session.set_cwd(dir.clone()).await;
+
+        let input = serde_json::json!({
+            "pattern": "x",
+            "path": "/run/secrets/github-token",
+            "output_mode": "files_with_matches"
+        });
+        let result = execute_grep(&session, input).await;
+        assert!(result.is_err(), "expected rejection, got: {:?}", result);
+        // Either "Access denied" (if the path exists) or "Cannot resolve"
+        // (if it doesn't in this environment) — both are rejections that
+        // never reach `rg`. Mirrors `validate_path_rejects_secrets` below.
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Access denied") || err.contains("Cannot resolve"),
+            "expected rejection, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn glob_rejects_secret_shaped_path_outside_scope() {
+        let dir = fresh_test_dir("sandbox-test-glob-secret");
+        let session = test_session();
+        session.set_cwd(dir.clone()).await;
+
+        let input = serde_json::json!({
+            "pattern": "*",
+            "path": "/run/secrets"
+        });
+        let result = execute_glob(&session, input).await;
+        assert!(result.is_err(), "expected rejection, got: {:?}", result);
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Access denied") || err.contains("Cannot resolve"),
+            "expected rejection, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn grep_succeeds_for_relative_in_scope_path() {
+        let dir = fresh_test_dir("sandbox-test-grep-relative");
+        tokio::fs::write(PathBuf::from(&dir).join("hello.txt"), "hello world")
+            .await
+            .unwrap();
+        let session = test_session();
+        session.set_cwd(dir.clone()).await;
+
+        let input = serde_json::json!({
+            "pattern": "hello",
+            "path": "hello.txt",
+            "output_mode": "content"
+        });
+        let result = execute_grep(&session, input).await;
+        assert!(
+            result.is_ok(),
+            "a normal in-scope relative path must still work: {:?}",
+            result
+        );
+        assert!(result.unwrap().contains("hello world"));
+    }
+
+    #[tokio::test]
+    async fn glob_succeeds_for_relative_in_scope_path() {
+        let dir = fresh_test_dir("sandbox-test-glob-relative");
+        let sub = PathBuf::from(&dir).join("sub");
+        tokio::fs::create_dir_all(&sub).await.unwrap();
+        tokio::fs::write(sub.join("foo.rs"), "fn main() {}")
+            .await
+            .unwrap();
+        let session = test_session();
+        session.set_cwd(dir.clone()).await;
+
+        let input = serde_json::json!({
+            "pattern": "*.rs",
+            "path": "sub"
+        });
+        let result = execute_glob(&session, input).await;
+        assert!(
+            result.is_ok(),
+            "a normal in-scope relative path must still work: {:?}",
+            result
+        );
+        assert!(result.unwrap().contains("foo.rs"));
     }
 
     // ── validate_path (Layer 1 isolation) ─────────────────────────
