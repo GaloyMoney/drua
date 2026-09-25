@@ -48,7 +48,7 @@ galoyAgents:
       ## 32 MiB per inner-tool result — sized for realistic Concourse
       ## build logs (35–60 min builds typically 10–30 MiB).
       maxToolResultBytes: "33554432"
-      maxReturnBytes: "262144"
+      maxReturnBytes: "1048576"
       ## JS heap kept at ≥ 2× the per-tool cap so scripts have working
       ## room for split / filter / sort over the parsed payload.
       ## Library scripts that normalise cited source text hold ~8 B per
