@@ -711,9 +711,9 @@ mod tests {
         let decl = WorkflowChangesetDecl {
             title: "curate(${{ trigger.payload.space }}): file and relink".to_string(),
             description: Some("auto-curation pass".to_string()),
-            on_success: super::super::definition::ChangesetExit::Apply,
+            on_success: super::super::definition::ChangesetExit::Publish,
             on_failure: super::super::definition::ChangesetFailureExit::Keep,
-            allow_apply: true,
+            allow_land: true,
         };
         let content = render_workflow_yaml(
             id,
@@ -728,7 +728,7 @@ mod tests {
             "2026-09-24T00:00:00Z",
         );
         assert!(content.contains("changeset:"));
-        assert!(content.contains("allow_apply: true"));
+        assert!(content.contains("allow_land: true"));
 
         let path = canonical_workflow_path("curate-dev-spaces", None);
         let parsed = parse_workflow_yaml(&content, &path).expect("parses");
@@ -737,7 +737,25 @@ mod tests {
         assert_eq!(parsed_decl.description, decl.description);
         assert_eq!(parsed_decl.on_success, decl.on_success);
         assert_eq!(parsed_decl.on_failure, decl.on_failure);
-        assert!(parsed_decl.allow_apply);
+        assert!(parsed_decl.allow_land);
+    }
+
+    /// rev2 §7.1: `on_success`/`on_failure`/`allow_land` all default
+    /// when the block is present but sparse — a bare `changeset:
+    /// {title: "..."}`.
+    #[test]
+    fn workflow_yaml_changeset_block_defaults_are_publish_discard_no_land() {
+        let decl: WorkflowChangesetDecl =
+            serde_yaml::from_str("title: \"a draft\"\n").expect("parses sparse decl");
+        assert_eq!(
+            decl.on_success,
+            super::super::definition::ChangesetExit::Publish
+        );
+        assert_eq!(
+            decl.on_failure,
+            super::super::definition::ChangesetFailureExit::Discard
+        );
+        assert!(!decl.allow_land);
     }
 
     #[test]

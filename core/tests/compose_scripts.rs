@@ -7,7 +7,7 @@ use std::process::Command;
 
 use drua_core::agent::{AgentRole, AgentsConfig, ModelDefaults, RoleConfig};
 use drua_core::library::LibraryConfig;
-use drua_core::primitives::{AgentId, AuthSubject, UserId};
+use drua_core::primitives::{AuthSubject, UserId};
 use drua_core::{App, AppConfig};
 use drua_library::CommitAttribution;
 
@@ -187,7 +187,19 @@ async fn setup(test_name: &str) -> (App, AuthSubject, AuthSubject) {
 
     // Not a project admin, not a sandbox attachment — just enough to
     // pass `can_use_agent_file_tools` and mount-scoped `space:` access.
-    let agent = AuthSubject::Agent(project.id, AgentId::new(), Vec::new());
+    // `ProjectMember` is what actually grants `Propose` on `space:`
+    // writes (rev2 §2/§4.2 OQ-2: members stage, they don't write
+    // `main` directly) — an empty scope set can see the file tools
+    // (`can_use_agent_file_tools` doesn't check scopes) but can never
+    // actually write through them. Reuses the project's real lead
+    // `Agent` row (`project.create` already persists one) rather than
+    // a synthetic `AgentId::new()` — a lazily created draft's
+    // `agent_id` column is a real FK against `agents`.
+    let agent = AuthSubject::Agent(
+        project.id,
+        project.lead_agent_id,
+        vec![drua_core::auth::AuthScope::ProjectMember(project.id)],
+    );
     (app, user, agent)
 }
 
@@ -1023,9 +1035,21 @@ return {
             .unwrap();
         let text = format!("{:?}", request.prompt);
         assert!(text.contains("inventory.json"), "{text}");
+        // rev2 (and #504 before it): a script step's write always
+        // stages into the run's draft — never `main` directly — so
+        // this reads the draft's tip, not HEAD.
+        let draft = app
+            .changesets()
+            .open_draft_for_run(run_id)
+            .await
+            .unwrap()
+            .expect("the run step's write lazily created a draft");
         let file = app
             .library()
-            .read_blob_at_head(&format!("spaces/docs/runs/{run_id}/inventory.json"))
+            .read_blob_at(
+                &draft.head_oid,
+                &format!("spaces/docs/runs/{run_id}/inventory.json"),
+            )
             .await
             .unwrap()
             .unwrap();
@@ -1114,10 +1138,20 @@ return {
     assert!(serde_json::to_string(&log)
         .unwrap()
         .contains(&run_id.to_string()));
+    // The step's write staged into the run's draft branch, not
+    // `main` — `git log` needs to name it explicitly rather than
+    // relying on implicit HEAD.
+    let draft = app
+        .changesets()
+        .open_draft_for_run(run_id)
+        .await
+        .unwrap()
+        .expect("the run step's write left an open draft");
     let git_log = Command::new("git")
         .args([
             "log",
             "--format=%B",
+            &draft.branch(),
             "--",
             &format!("spaces/docs/runs/{run_id}/inventory.json"),
         ])

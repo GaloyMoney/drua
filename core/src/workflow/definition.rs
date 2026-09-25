@@ -480,15 +480,20 @@ impl WorkflowSandboxDecl {
     }
 }
 
-/// `changeset:` top-level workflow declaration (staged-changesets
-/// handoff §9.1). The executor opens a changeset at run start,
-/// step agents inherit it via `Agent.workflow_run_id` →
-/// `WorkflowRun.changeset` (§2.1's resolution rule; no per-agent
-/// bind needed), and lands/discards it at run end per `on_success`/
-/// `on_failure`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// `changeset:` top-level workflow declaration (rev2 §7.1, amending
+/// the handoff's §9.1). Optional: when declared, the executor
+/// pre-creates the run's draft at start with this title so the run's
+/// history reads well even before any step writes a space; when
+/// absent, a step that writes `space:`/`draft:` still gets a lazily
+/// created run-keyed draft (derived title, these same defaults) —
+/// there is no way to make a step agent write `main` directly, by
+/// design. Either way, the draft (if one ends up existing) is
+/// landed/discarded at run end per `on_success`/`on_failure`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorkflowChangesetDecl {
     /// CEL-substituted (`${{ trigger... }}`, etc.) at run start.
+    /// Ignored (a title is derived instead) when the block is absent.
+    #[serde(default)]
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -496,28 +501,31 @@ pub struct WorkflowChangesetDecl {
     pub on_success: ChangesetExit,
     #[serde(default)]
     pub on_failure: ChangesetFailureExit,
-    /// OQ-11's narrowing: `on_success: apply` is only honoured when
-    /// this is also `true`. Without it, an `apply`-declared workflow
-    /// falls back to `submit` at run end rather than silently landing
-    /// on `main` — see `ChangesetExit::Apply`'s doc.
+    /// OQ-11's narrowing: `on_success: publish` only lands on `main`
+    /// (`Changesets::apply`) when this is also `true` **and** the
+    /// executor subject holds `Update`. Without it, `publish` submits
+    /// a PR at run end instead of silently landing on `main` — see
+    /// `ChangesetExit::Publish`'s doc. Renamed from rev1's
+    /// `allow_apply` to match the `publish` verb (rev2 D6).
     #[serde(default)]
-    pub allow_apply: bool,
+    pub allow_land: bool,
 }
 
+/// rev2 D6: the tool-facing surface collapsed `submit`/`apply` into
+/// one `publish` verb whose effect is resolved by authority — the
+/// YAML mirrors that. `ChangesetExit::Publish` calls
+/// `Changesets::apply` only when `allow_land` is also set (OQ-11);
+/// otherwise it submits a PR, same as rev1's `Submit`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangesetExit {
-    /// Opens a GitHub PR. The default — every agent write stays reviewable.
+    /// Publishes the run's draft — a PR by default, or a direct land
+    /// on `main` when `allow_land: true` and the executor holds
+    /// `Update`. The default: every agent write stays reviewable
+    /// unless a workflow author explicitly opts into landing it.
     #[default]
-    Submit,
-    /// Merges directly into `main`. OQ-11: the executor's own
-    /// `ProjectAdmin` scope grants `Update` (§4.2's matrix), which
-    /// would let this land on `main` for *any* workflow — narrowed by
-    /// requiring `allow_apply: true` alongside it (checked in
-    /// `executor.rs`, not the auth layer; see PR 4's own OQ-11 note).
-    Apply,
-    /// Leaves the changeset `Open`, unbound, for a human or a later
-    /// run to pick up.
+    Publish,
+    /// Leaves the draft `Open` for a human or a later run to pick up.
     Keep,
 }
 

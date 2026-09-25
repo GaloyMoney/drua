@@ -233,6 +233,11 @@ pub struct Workflows {
     /// from `ToolSets` per validation) so `validate_steps` doesn't
     /// depend on the compose tool being registered.
     script_step_limits: crate::toolset::ScriptStepLimits,
+    /// Held so `cancel_run` can close a cancelled run's draft (rev2
+    /// §7.2: the cooperatively-cancelled path now runs `on_failure`,
+    /// same as a run that failed on its own — a gap flagged and left
+    /// open in #504).
+    changesets: Arc<crate::changeset::Changesets>,
     execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
     cron_spawner: ::job::JobSpawner<TriggerCronConfig>,
 }
@@ -279,6 +284,7 @@ impl Workflows {
             agents,
             sandboxes,
             script_step_limits,
+            changesets,
             execute_run_spawner,
             cron_spawner,
         }
@@ -1350,7 +1356,55 @@ impl Workflows {
         for agent_id in deleted_agents {
             self.agents.invalidate_agent_cache(agent_id);
         }
+
+        self.close_cancelled_run_changeset(&run).await;
+
         Ok(run)
+    }
+
+    /// rev2 §7.2's closed gap: a cancelled run "did not succeed", so
+    /// its draft (if any) gets the same `on_failure` treatment a
+    /// naturally-failed run's does — discarded by default, or left
+    /// `Open` for `on_failure: keep`. Looked up by
+    /// `Changesets::open_draft_for_run` rather than `run.changeset`
+    /// (D4: no lookup depends on that field). Best-effort: failures are
+    /// logged, never surfaced — `cancel_run` itself already committed.
+    async fn close_cancelled_run_changeset(&self, run: &WorkflowRun) {
+        let cs = match self.changesets.open_draft_for_run(run.id).await {
+            Ok(Some(cs)) => cs,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    run_id = %run.id,
+                    "cancel_run: draft lookup failed; leaving it as-is"
+                );
+                return;
+            }
+        };
+        let decl = self
+            .repo
+            .find_by_id(run.definition_id)
+            .await
+            .ok()
+            .and_then(|def| def.changeset)
+            .unwrap_or_default();
+        if !matches!(decl.on_failure, ChangesetFailureExit::Discard) {
+            return;
+        }
+        let sub = AuthSubject::workflow_executor(run.project_id, run.definition_id, run.id);
+        if let Err(e) = self
+            .changesets
+            .discard(&sub, cs.id, Some("workflow run cancelled".to_string()))
+            .await
+        {
+            tracing::warn!(
+                error = %e,
+                changeset_id = %cs.id,
+                run_id = %run.id,
+                "cancel_run: failed to discard the cancelled run's draft; left as-is for manual follow-up"
+            );
+        }
     }
 
     #[instrument(name = "core.workflow.delete_for_project_in_op", skip_all)]
