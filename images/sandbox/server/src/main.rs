@@ -2259,6 +2259,10 @@ mod tests {
 
     #[tokio::test]
     async fn grep_succeeds_for_relative_in_scope_path() {
+        if !rg_available().await {
+            eprintln!("rg not available, skipping");
+            return;
+        }
         let dir = fresh_test_dir("sandbox-test-grep-relative");
         tokio::fs::write(PathBuf::from(&dir).join("hello.txt"), "hello world")
             .await
@@ -2282,6 +2286,10 @@ mod tests {
 
     #[tokio::test]
     async fn glob_succeeds_for_relative_in_scope_path() {
+        if !rg_available().await {
+            eprintln!("rg not available, skipping");
+            return;
+        }
         let dir = fresh_test_dir("sandbox-test-glob-relative");
         let sub = PathBuf::from(&dir).join("sub");
         tokio::fs::create_dir_all(&sub).await.unwrap();
