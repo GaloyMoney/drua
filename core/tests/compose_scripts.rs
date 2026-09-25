@@ -529,7 +529,9 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
 async fn scripts_read_exact_text_while_mcp_read_stays_numbered() {
     let (app, _user, agent) = setup("read-raw").await;
 
-    let path = "space:docs/raw-fixture.md";
+    // rev3 D9/D15: a `ProjectMember`-scoped subject writes `draft:`;
+    // `space:` writes are refused with `UseDraft`.
+    let path = "draft:docs/raw-fixture.md";
     let fixture = "# Raw\r\nUnicode: \u{1F41F} \u{2014} caf\u{E9}\r\n\r\nEnd\r\n";
     let fixture_js = serde_json::to_string(fixture).expect("json-encode fixture");
 
@@ -615,7 +617,9 @@ async fn scripts_read_lifts_the_view_cap_but_mcp_read_still_enforces_it() {
     // Comfortably over MAX_VIEW_FILE_BYTES (1_048_576) so the assertion
     // survives any off-by-one at the boundary.
     const FIXTURE_LEN: usize = 1_048_576 + 200_000;
-    let path = "space:docs/oversized.txt";
+    // rev3 D9/D15: a `ProjectMember`-scoped subject writes `draft:`;
+    // `space:` writes are refused with `UseDraft`.
+    let path = "draft:docs/oversized.txt";
 
     let compose = app
         .toolsets()
@@ -835,10 +839,14 @@ async fn workflow_scripts_validate_execute_and_preserve_provenance() {
     let source = r#"
 return {
   run: async (args, run) => {
-    const path = `space:docs/runs/${run.id}/inventory.json`;
+    const path = `draft:docs/runs/${run.id}/inventory.json`;
     await tools.Edit({command: 'create', path, file_text: JSON.stringify({args, run})});
     await tools.Read({path});
     return {success: true, output: path, args, run};
+  },
+  direct_main_write: async () => {
+    await tools.Edit({command: 'create', path: 'space:docs/direct.json', file_text: '{}'});
+    return {success: true, output: 'unreachable'};
   },
   failed: () => ({success: false, output: 'declined', reason: 'test'}),
   missing: () => ({success: true}),
@@ -930,6 +938,9 @@ return {
             "side effects may have occurred",
         ),
         ("unmounted", json!({}), "access_denied"),
+        // rev3 D9/D15/OQ-20: a script step's direct `space:` write is
+        // now refused (`UseDraft`) rather than silently staged.
+        ("direct_main_write", json!({}), "usedraft"),
     ] {
         let run_id = seed(&definitions, &runs, project, vec![step(entry, extra)]).await;
         executor
@@ -1035,9 +1046,11 @@ return {
             .unwrap();
         let text = format!("{:?}", request.prompt);
         assert!(text.contains("inventory.json"), "{text}");
-        // rev2 (and #504 before it): a script step's write always
-        // stages into the run's draft — never `main` directly — so
-        // this reads the draft's tip, not HEAD.
+        // rev3: a script step writes `draft:` explicitly (a `space:`
+        // write is now refused with `UseDraft` — see
+        // `step_agent_space_write_is_refused_with_use_draft` below).
+        // The write always stages into the run's draft — never `main`
+        // directly — so this reads the draft's tip, not HEAD.
         let draft = app
             .changesets()
             .open_draft_for_run(run_id)

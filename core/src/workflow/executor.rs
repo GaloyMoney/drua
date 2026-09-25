@@ -164,13 +164,14 @@ impl Executor {
         let definition = self.definitions.find_by_id(workflow_id).await?;
         let sandbox_decls = definition.sandboxes.clone();
 
-        // rev2 §7.2 point 1: pre-create the run's draft only when
-        // `changeset:` is declared (so its title is used) — same "fail
-        // as a synthetic <pre-flight> step" idiom as a sandbox that
-        // never comes Ready. An undeclared workflow does nothing here;
-        // a step that writes `space:`/`draft:` still gets a lazily
+        // rev2 §7.2 point 1 (rev3 §7): pre-create the run's draft only
+        // when `changeset:` is declared (so its title is used) — same
+        // "fail as a synthetic <pre-flight> step" idiom as a sandbox
+        // that never comes Ready. An undeclared workflow does nothing
+        // here; a step that writes `draft:` still gets a lazily
         // created run-keyed draft (§3's derived title) the first time
-        // it writes. `run.changeset.is_none()` guards a resumed run
+        // it writes — a step's `space:` write is refused (`UseDraft`)
+        // instead. `run.changeset.is_none()` guards a resumed run
         // (crash/restart) from pre-creating a second one.
         if let Some(decl) = &definition.changeset {
             if run.changeset.is_none() {

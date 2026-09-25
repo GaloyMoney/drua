@@ -481,14 +481,15 @@ impl WorkflowSandboxDecl {
 }
 
 /// `changeset:` top-level workflow declaration (rev2 §7.1, amending
-/// the handoff's §9.1). Optional: when declared, the executor
+/// the handoff's §9.1; rev3 §7). Optional: when declared, the executor
 /// pre-creates the run's draft at start with this title so the run's
 /// history reads well even before any step writes a space; when
-/// absent, a step that writes `space:`/`draft:` still gets a lazily
-/// created run-keyed draft (derived title, these same defaults) —
-/// there is no way to make a step agent write `main` directly, by
-/// design. Either way, the draft (if one ends up existing) is
-/// landed/discarded at run end per `on_success`/`on_failure`.
+/// absent, a step that writes `draft:` still gets a lazily created
+/// run-keyed draft (derived title, these same defaults) — a step's
+/// `space:` write is refused (`UseDraft`, rev3 D9/D15/OQ-20); there is
+/// no way to make a step agent write `main` directly, by design.
+/// Either way, the draft (if one ends up existing) is landed/discarded
+/// at run end per `on_success`/`on_failure`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorkflowChangesetDecl {
     /// CEL-substituted (`${{ trigger... }}`, etc.) at run start.
