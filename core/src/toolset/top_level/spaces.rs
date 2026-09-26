@@ -6,7 +6,7 @@ use serde::Deserialize;
 use drua_library::{Space, SPACE_DOC_TYPE};
 
 use crate::audit::Audit;
-use crate::auth::{AuthResource, AuthScope, AuthSubject, AuthVerb};
+use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::changeset::{Changeset, ChangesetStatus, Changesets, TouchedFile, TouchedKind};
 use crate::library::{AuthedSearch, AuthedSpaces};
 use crate::primitives::ChangesetId;
@@ -537,13 +537,15 @@ impl TopLevelTool for SpacesTool {
         // rebase commands are theirs to use; `call()` doesn't gate
         // those further since `Changesets`/`SpaceFs` already do.
         //
-        // `WorkflowScript`-marked subjects are excluded even though
-        // `ProjectMember` grants them `Propose` on `Space` — a script
-        // step gets only the direct file-manipulation tools
-        // (`can_use_agent_file_tools`), never a management tool; it has
-        // no interactive turn to run `spaces publish` from, and the
-        // executor already closes its run's draft on its behalf.
-        if subject.scopes().contains(&AuthScope::WorkflowScript) {
+        // rev4 D31: any run subject (`WorkflowExecutor`, or an `Agent`
+        // carrying `WorkflowStepAgent`/`WorkflowScript`) is excluded
+        // even though `ProjectMember`/`ProjectAdmin` would otherwise
+        // grant it `Propose`/`Update` on `Space` — a step gets only the
+        // direct file-manipulation tools (`can_use_agent_file_tools`),
+        // never a management tool; it has no interactive turn to run
+        // `spaces merge-draft` from, and the executor's own pre-flight/
+        // exit owns the run's draft lifecycle end to end.
+        if subject.in_workflow_run() {
             return false;
         }
         subject.effective_project_id().is_some_and(|p| {
@@ -569,6 +571,24 @@ impl TopLevelTool for SpacesTool {
             .ok_or(ToolSetsError::Unauthorized)?;
         let params: SpacesParams = parse_params(arguments)?;
         Audit::record_action(format!("spaces.{}", params.command_name()));
+
+        // rev4 D31: defense in depth — `is_visible` already hides this
+        // whole tool from run subjects; this catches a composable
+        // tool-step path reaching `call()` directly. The executor's
+        // own pre-flight/exit owns the run's draft lifecycle; a step
+        // has nothing to run these for.
+        if subject.in_workflow_run()
+            && matches!(
+                params,
+                SpacesParams::StartDraft { .. }
+                    | SpacesParams::MergeDraft { .. }
+                    | SpacesParams::OpenPr { .. }
+                    | SpacesParams::DiscardDraft { .. }
+                    | SpacesParams::RebaseDraft { .. }
+            )
+        {
+            return Err(ToolSetsError::Unauthorized);
+        }
 
         let (text, out) = match params {
             SpacesParams::View {

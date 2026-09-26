@@ -21,6 +21,7 @@ use tracing::instrument;
 use crate::library::{AuthedSpaces, LibraryError};
 use crate::primitives::{ProjectId, SpaceId};
 use crate::project::repo::{ProjectFindError, ProjectRepo};
+use crate::workflow::SpaceWritesMode;
 
 #[derive(Error, Debug)]
 pub enum SpaceMountsError {
@@ -48,6 +49,18 @@ pub const SPACE_WRITE_MODE_SENTENCE: &str =
      write authority). Direct writes to space:<slug>/ are accepted only \
      with write authority and no open draft. On `spaces`/`drua_admin_spaces` \
      view/edit, pass target: draft instead of the draft: prefix.\n";
+
+/// rev5 D43: which write line `render_spaces_block` renders. `None`
+/// for `WorkflowRun` — the run has no draft, so `space:` is refused.
+#[derive(Debug, Clone, Copy)]
+pub enum SpacesBlockMode {
+    /// Leads, members, `ExportedAgent`, admins — rev3's one sentence.
+    Interactive,
+    /// A workflow-run step agent. `space:<slug>/` overlays the run's
+    /// draft (rev4 D25) whenever `mode != read_only`; there is no
+    /// `draft:` prefix or draft command to reach for.
+    WorkflowRun(SpaceWritesMode),
+}
 
 #[derive(Clone)]
 pub struct SpaceMounts {
@@ -115,26 +128,31 @@ impl SpaceMounts {
 
     /// Rendered `<spaces>...</spaces>` system-prompt block for an agent
     /// in `project_id`. `Ok(None)` when no spaces are mounted. rev3
-    /// §6.3: one sentence for every subject — there is no longer a
-    /// write mode to describe (`space:` fails closed per D15 rather
-    /// than resolving differently by authority).
+    /// §6.3 / rev5 D43: one sentence per `mode` — `Interactive`'s
+    /// write mode never varies by authority (`space:` fails closed per
+    /// D15); a `WorkflowRun` mode instead says what happens to the
+    /// run's overlay draft.
     #[instrument(name = "library.space_mounts.spaces_block_for_project", skip(self))]
     pub async fn spaces_block_for_project(
         &self,
         project_id: ProjectId,
+        mode: SpacesBlockMode,
     ) -> Result<Option<String>, SpaceMountsError> {
         let spaces = self.spaces_for_project(project_id).await?;
-        Ok(render_spaces_block(&spaces))
+        Ok(render_spaces_block(&spaces, mode))
     }
 }
 
-fn render_spaces_block(spaces: &[Space]) -> Option<String> {
+fn render_spaces_block(spaces: &[Space], mode: SpacesBlockMode) -> Option<String> {
     if spaces.is_empty() {
         return None;
     }
     let total = spaces.len();
 
-    let write_line = SPACE_WRITE_MODE_SENTENCE;
+    let write_line = match mode {
+        SpacesBlockMode::Interactive => SPACE_WRITE_MODE_SENTENCE.to_string(),
+        SpacesBlockMode::WorkflowRun(write_mode) => workflow_run_write_line(write_mode),
+    };
     let header = format!(
         "<spaces>\n\
          This project has the following knowledge spaces mounted — \
@@ -161,4 +179,27 @@ fn render_spaces_block(spaces: &[Space]) -> Option<String> {
     }
     buf.push_str("</spaces>\n");
     Some(buf)
+}
+
+/// rev5 §6.3/D43: one sentence per `space_writes.mode`, so a step
+/// agent knows whether its edits will merge, become a PR, or be
+/// refused outright — the run overlays its draft (rev4 D25), so there
+/// is no `draft:` prefix or draft command to reach for either way.
+fn workflow_run_write_line(mode: SpaceWritesMode) -> String {
+    match mode {
+        SpaceWritesMode::Merge => "This run's edits to space:<slug>/ paths are staged in a \
+             draft the workflow owns and are merged to the published library when the run \
+             succeeds. Use the file tools with space:<slug>/ paths as usual — no draft: prefix \
+             and no draft commands. library_search sees the published library only.\n"
+            .to_string(),
+        SpaceWritesMode::OpenPr => "This run's edits to space:<slug>/ paths are staged in a \
+             draft the workflow owns and are opened as a pull request for review when the run \
+             succeeds. Use the file tools with space:<slug>/ paths as usual — no draft: prefix \
+             and no draft commands. library_search sees the published library only.\n"
+            .to_string(),
+        SpaceWritesMode::ReadOnly => {
+            "Spaces are read-only in this run; space:<slug>/ paths can be read but not written.\n"
+                .to_string()
+        }
+    }
 }

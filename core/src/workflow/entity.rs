@@ -9,9 +9,7 @@ use crate::primitives::*;
 use crate::skill::file::slugify;
 use crate::workflow::WORKFLOW_DOC_TYPE;
 
-use super::definition::{
-    WorkflowChangesetDecl, WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger,
-};
+use super::definition::{SpaceWritesDecl, WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger};
 use super::yaml::{canonical_workflow_path, render_workflow_yaml};
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
@@ -37,10 +35,11 @@ pub enum WorkflowDefinitionEvent {
         /// `WriteToRuntime` job uses it to remove the old file.
         #[serde(default)]
         original_path: Option<String>,
-        /// §9.1's `changeset:` block. `None` — most workflows write
-        /// `main` directly through their step agents' own scopes.
+        /// rev5 D35's `space_writes:` block. Absent/default — the
+        /// backwards-compatible policy (`mode: merge, on_failure:
+        /// keep`).
         #[serde(default)]
-        changeset: Option<WorkflowChangesetDecl>,
+        space_writes: SpaceWritesDecl,
     },
     Updated {
         name: Option<String>,
@@ -53,9 +52,9 @@ pub enum WorkflowDefinitionEvent {
         /// `None` leaves the field untouched.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_chain: Option<Option<ModelChain>>,
-        /// Same `Some(Some)`/`Some(None)`/`None` convention as `model_chain`.
+        /// `Some(_)` replaces; `None` leaves the field untouched.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        changeset: Option<Option<WorkflowChangesetDecl>>,
+        space_writes: Option<SpaceWritesDecl>,
     },
 }
 
@@ -79,7 +78,7 @@ pub struct WorkflowDefinition {
     #[builder(default)]
     pub(crate) original_path: Option<String>,
     #[builder(default)]
-    pub changeset: Option<WorkflowChangesetDecl>,
+    pub space_writes: SpaceWritesDecl,
     events: EntityEvents<WorkflowDefinitionEvent>,
 }
 
@@ -120,7 +119,7 @@ impl WorkflowDefinition {
             &self.steps,
             &self.sandboxes,
             self.model_chain.as_ref(),
-            self.changeset.as_ref(),
+            &self.space_writes,
             &self.created_at().to_rfc3339(),
             &self.updated_at().to_rfc3339(),
         )
@@ -144,7 +143,7 @@ impl WorkflowDefinition {
         steps: Option<Vec<WorkflowStepDef>>,
         sandboxes: Option<Vec<WorkflowSandboxDecl>>,
         model_chain: Option<Option<ModelChain>>,
-        changeset: Option<Option<WorkflowChangesetDecl>>,
+        space_writes: Option<SpaceWritesDecl>,
         incoming_file_hash: GitFileHash,
     ) -> Idempotent<()> {
         if self.file_hash() == incoming_file_hash {
@@ -186,8 +185,8 @@ impl WorkflowDefinition {
         if let Some(mc) = &model_chain {
             self.model_chain = mc.clone();
         }
-        if let Some(cs) = &changeset {
-            self.changeset = cs.clone();
+        if let Some(sw) = &space_writes {
+            self.space_writes = sw.clone();
         }
 
         self.events.push(WorkflowDefinitionEvent::Updated {
@@ -197,7 +196,7 @@ impl WorkflowDefinition {
             steps,
             sandboxes,
             model_chain,
-            changeset,
+            space_writes,
         });
         Idempotent::Executed(())
     }
@@ -214,7 +213,7 @@ impl WorkflowDefinition {
         steps: Option<Vec<WorkflowStepDef>>,
         sandboxes: Option<Vec<WorkflowSandboxDecl>>,
         model_chain: Option<Option<ModelChain>>,
-        changeset: Option<Option<WorkflowChangesetDecl>>,
+        space_writes: Option<SpaceWritesDecl>,
     ) -> Idempotent<()> {
         if name.is_none()
             && description.is_none()
@@ -222,7 +221,7 @@ impl WorkflowDefinition {
             && steps.is_none()
             && sandboxes.is_none()
             && model_chain.is_none()
-            && changeset.is_none()
+            && space_writes.is_none()
         {
             return Idempotent::AlreadyApplied;
         }
@@ -262,8 +261,8 @@ impl WorkflowDefinition {
         if let Some(mc) = &model_chain {
             self.model_chain = mc.clone();
         }
-        if let Some(cs) = &changeset {
-            self.changeset = cs.clone();
+        if let Some(sw) = &space_writes {
+            self.space_writes = sw.clone();
         }
 
         self.events.push(WorkflowDefinitionEvent::Updated {
@@ -273,7 +272,7 @@ impl WorkflowDefinition {
             steps,
             sandboxes,
             model_chain,
-            changeset,
+            space_writes,
         });
         Idempotent::Executed(())
     }
@@ -366,7 +365,7 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     sandboxes,
                     model_chain,
                     original_path,
-                    changeset,
+                    space_writes,
                     ..
                 } => {
                     builder = builder
@@ -380,7 +379,7 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                         .sandboxes(sandboxes.clone())
                         .model_chain(model_chain.clone())
                         .original_path(original_path.clone())
-                        .changeset(changeset.clone());
+                        .space_writes(space_writes.clone());
                 }
                 WorkflowDefinitionEvent::Updated {
                     name,
@@ -389,7 +388,7 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     steps,
                     sandboxes,
                     model_chain,
-                    changeset,
+                    space_writes,
                     ..
                 } => {
                     if let Some(n) = name {
@@ -410,8 +409,8 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     if let Some(mc) = model_chain {
                         builder = builder.model_chain(mc.clone());
                     }
-                    if let Some(cs) = changeset {
-                        builder = builder.changeset(cs.clone());
+                    if let Some(sw) = space_writes {
+                        builder = builder.space_writes(sw.clone());
                     }
                 }
             }
@@ -442,8 +441,8 @@ pub struct NewWorkflowDefinition {
     pub(super) model_chain: Option<ModelChain>,
     #[builder(default, setter(into, strip_option))]
     pub(super) original_path: Option<String>,
-    #[builder(default, setter(strip_option))]
-    pub(super) changeset: Option<WorkflowChangesetDecl>,
+    #[builder(default)]
+    pub(super) space_writes: SpaceWritesDecl,
 }
 
 impl NewWorkflowDefinition {
@@ -476,7 +475,7 @@ impl IntoEvents<WorkflowDefinitionEvent> for NewWorkflowDefinition {
                 sandboxes: self.sandboxes,
                 model_chain: self.model_chain,
                 original_path: self.original_path,
-                changeset: self.changeset,
+                space_writes: self.space_writes,
             }],
         )
     }

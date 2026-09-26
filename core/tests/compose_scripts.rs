@@ -753,7 +753,7 @@ async fn workflow_scripts_validate_execute_and_preserve_provenance() {
                 vec![serde_json::from_value(value).unwrap()],
                 vec![],
                 None,
-                None,
+                Default::default(),
             )
             .await;
         assert!(result.is_err(), "accepted invalid step {patch}");
@@ -770,7 +770,7 @@ async fn workflow_scripts_validate_execute_and_preserve_provenance() {
             vec![serde_json::from_value(base.clone()).unwrap()],
             vec![],
             None,
-            None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -938,9 +938,6 @@ return {
             "side effects may have occurred",
         ),
         ("unmounted", json!({}), "access_denied"),
-        // rev3 D9/D15/OQ-20: a script step's direct `space:` write is
-        // now refused (`UseDraft`) rather than silently staged.
-        ("direct_main_write", json!({}), "usedraft"),
     ] {
         let run_id = seed(&definitions, &runs, project, vec![step(entry, extra)]).await;
         executor
@@ -957,6 +954,43 @@ return {
         }
         assert!(prompts.try_recv().is_err(), "script requested a model turn");
     }
+
+    // rev4 D25/D37: a script step is a run subject, so `space:`
+    // overlays its run draft — and rev5 D35/D37's backwards-compatible
+    // default (`space_writes: {mode: merge}`, implied when the block
+    // is absent) means the executor's pre-flight opens that draft
+    // before this step ever runs, so the direct `space:` write lands
+    // in it rather than erroring `RunReadOnly`. The run's own exit
+    // (also default `mode: merge`) then lands the draft on `main`.
+    let run_id = seed(
+        &definitions,
+        &runs,
+        project,
+        vec![step("direct_main_write", json!({}))],
+    )
+    .await;
+    executor
+        .run(run_id, Arc::new(AtomicBool::new(false)))
+        .with_event_context(serde_json::from_value(json!({})).unwrap())
+        .await
+        .unwrap();
+    let run = runs.find_by_id(run_id).await.unwrap();
+    assert_eq!(
+        run.state,
+        WorkflowRunState::Succeeded,
+        "{:?}",
+        run.step_results
+    );
+    assert!(run.changeset.is_none(), "the draft closed at run end");
+    let landed = app
+        .library()
+        .spaces()
+        .read_file("docs", "direct.json", None)
+        .await
+        .unwrap()
+        .expect("direct.json landed on main via the default merge exit");
+    assert_eq!(landed, b"{}");
+
     let run_id = seed(
         &definitions,
         &runs,
@@ -1036,6 +1070,11 @@ return {
         ],
     )
     .await;
+    // rev4 D26 / rev5 D37: a run subject never lazily creates its
+    // draft any more — but the default `space_writes: {mode: merge}`
+    // block means the executor's own pre-flight opens one before this
+    // run's first step, so the script step below's `draft:` write
+    // still has somewhere to land.
     let execute = executor
         .run(run_id, Arc::new(AtomicBool::new(false)))
         .with_event_context(serde_json::from_value(json!({})).unwrap());
@@ -1046,17 +1085,19 @@ return {
             .unwrap();
         let text = format!("{:?}", request.prompt);
         assert!(text.contains("inventory.json"), "{text}");
-        // rev3: a script step writes `draft:` explicitly (a `space:`
-        // write is now refused with `UseDraft` — see
-        // `step_agent_space_write_is_refused_with_use_draft` below).
-        // The write always stages into the run's draft — never `main`
-        // directly — so this reads the draft's tip, not HEAD.
+        // rev4 D25: a script step is a run subject, so `space:` and
+        // `draft:` both overlay the run's draft — opened by the
+        // executor's own pre-flight. The write always stages into the
+        // run's draft — never `main` directly — so this reads the
+        // draft's tip, not HEAD (the exit hasn't run yet either way;
+        // this assertion fires mid-run, from the concurrent `respond`
+        // task).
         let draft = app
             .changesets()
             .open_draft_for_run(run_id)
             .await
             .unwrap()
-            .expect("the run step's write lazily created a draft");
+            .expect("the pre-flight's draft is still open mid-run");
         let file = app
             .library()
             .read_blob_at(
@@ -1151,20 +1192,24 @@ return {
     assert!(serde_json::to_string(&log)
         .unwrap()
         .contains(&run_id.to_string()));
-    // The step's write staged into the run's draft branch, not
-    // `main` — `git log` needs to name it explicitly rather than
-    // relying on implicit HEAD.
-    let draft = app
-        .changesets()
-        .open_draft_for_run(run_id)
-        .await
-        .unwrap()
-        .expect("the run step's write left an open draft");
+    // The run succeeded under the default `space_writes: {mode:
+    // merge}` block, so the executor's exit already merged the run's
+    // draft into `main` and closed it (rev5 D35/D37) — no open draft
+    // left to name; `main`'s own history now carries the original
+    // commit (and its trailers) as an ancestor of the merge.
+    assert!(
+        app.changesets()
+            .open_draft_for_run(run_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the default merge exit should have closed the run's draft"
+    );
     let git_log = Command::new("git")
         .args([
             "log",
             "--format=%B",
-            &draft.branch(),
+            "main",
             "--",
             &format!("spaces/docs/runs/{run_id}/inventory.json"),
         ])
@@ -1248,6 +1293,7 @@ async fn step_agent_can_discard_its_own_lazily_created_draft() {
             None,
             None,
             drua_core::workflow::default_output_schema(),
+            drua_core::workflow::SpaceWritesMode::default(),
         )
         .await
         .unwrap();

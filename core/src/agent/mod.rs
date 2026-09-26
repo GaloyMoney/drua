@@ -200,9 +200,13 @@ impl Agents {
                     .map(|text| session::message::SystemBlock::Skills { text })
             }
         };
+        let spaces_block_mode = match agent.space_writes_mode {
+            Some(mode) => crate::library::SpacesBlockMode::WorkflowRun(mode),
+            None => crate::library::SpacesBlockMode::Interactive,
+        };
         let spaces_block = self
             .space_mounts
-            .spaces_block_for_project(project_id)
+            .spaces_block_for_project(project_id, spaces_block_mode)
             .await
             .ok()
             .flatten()
@@ -257,6 +261,7 @@ impl Agents {
                 None,
                 None,
                 None,
+                None,
             )
             .await?;
         op.commit().await?;
@@ -293,6 +298,7 @@ impl Agents {
                 None,
                 chain_override,
                 None,
+                None,
             )
             .await?;
         op.commit().await?;
@@ -315,6 +321,7 @@ impl Agents {
         attach_sandbox: Option<(SandboxId, SandboxAgentMode)>,
         chain_override: Option<llm::ModelChain>,
         output_schema: crate::workflow::OutputSchema,
+        space_writes_mode: crate::workflow::SpaceWritesMode,
     ) -> Result<Agent, AgentError> {
         Audit::record_action_if_unset("agent.create_for_workflow_run");
         Audit::record_project_id(project_id);
@@ -335,6 +342,7 @@ impl Agents {
             Some(workflow_run_id),
             chain_override,
             Some(output_schema),
+            Some(space_writes_mode),
         )
         .await
     }
@@ -383,6 +391,7 @@ impl Agents {
             None,
             None,
             None,
+            None,
         )
         .await
     }
@@ -402,6 +411,7 @@ impl Agents {
         workflow_run_id: Option<WorkflowRunId>,
         chain_override: Option<llm::ModelChain>,
         output_schema: Option<crate::workflow::OutputSchema>,
+        space_writes_mode: Option<crate::workflow::SpaceWritesMode>,
     ) -> Result<Agent, AgentError> {
         let role_config = self
             .config
@@ -420,7 +430,8 @@ impl Agents {
             .name(name)
             .authz_scopes(authz_scopes)
             .project_name(project_name)
-            .output_schema(output_schema.clone());
+            .output_schema(output_schema.clone())
+            .space_writes_mode(space_writes_mode);
         if let Some(wf_id) = workflow_id {
             new_agent_builder.workflow_id(wf_id);
         }
@@ -504,8 +515,14 @@ impl Agents {
             });
         }
 
-        if let Ok(Some(spaces_content)) =
-            self.space_mounts.spaces_block_for_project(project_id).await
+        let spaces_block_mode = match space_writes_mode {
+            Some(mode) => crate::library::SpacesBlockMode::WorkflowRun(mode),
+            None => crate::library::SpacesBlockMode::Interactive,
+        };
+        if let Ok(Some(spaces_content)) = self
+            .space_mounts
+            .spaces_block_for_project(project_id, spaces_block_mode)
+            .await
         {
             system_blocks.push(session::message::SystemBlock::Spaces {
                 text: spaces_content,

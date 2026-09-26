@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use es_entity::*;
 
 use crate::primitives::*;
-use crate::workflow::definition::WorkflowStepDef;
+use crate::workflow::definition::{SpaceWritesFailure, WorkflowStepDef};
 
 /// Terminal states distinguish how a run ended:
 /// - `Succeeded`: every step finished and reported semantic success.
@@ -172,11 +172,36 @@ pub enum WorkflowRunEvent {
         reason: Option<String>,
         cancelled_at: DateTime<Utc>,
     },
-    /// The run's `changeset:` block opened one at run start.
-    ChangesetOpened { changeset_id: ChangesetId },
-    /// The changeset was submitted, applied, or discarded — the run is
-    /// no longer bound to it.
-    ChangesetClosed { changeset_id: ChangesetId },
+    /// rev5 D37: the executor's pre-flight opened the run's draft
+    /// (`space_writes.mode != read_only`). `on_failure` is the policy
+    /// snapshotted from `space_writes` at that moment (D41), so a
+    /// mid-run definition edit can't change how this run's draft is
+    /// treated if it fails.
+    ChangesetOpened {
+        changeset_id: ChangesetId,
+        #[serde(default)]
+        on_failure: SpaceWritesFailure,
+    },
+    /// The run's exit closed the draft (rev5 D42) — merged, opened as
+    /// a PR, or discarded. `outcome` is `None` for events written
+    /// before rev5 (old callers had nothing to record) and is always
+    /// `Some` going forward.
+    ChangesetClosed {
+        changeset_id: ChangesetId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outcome: Option<SpaceWritesOutcome>,
+    },
+}
+
+/// rev5 D42: what happened to a run's draft at close time — run
+/// history, not a step output (there is no step after the top-level
+/// exit to consume it; see OQ-31).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SpaceWritesOutcome {
+    Merged { merge_oid: String },
+    PrOpened { pr_number: u64, pr_url: String },
+    Discarded { reason: String },
 }
 
 #[derive(EsEntity, Builder)]
@@ -193,13 +218,20 @@ pub struct WorkflowRun {
     pub completed_at: Option<DateTime<Utc>>,
     #[builder(default)]
     pub step_results: Vec<StepResult>,
-    /// Set by the executor at run start when the definition declares a
-    /// `changeset:` block; cleared once that changeset is submitted,
-    /// applied, or discarded. `Agent.workflow_run_id` → this is how a
-    /// step agent inherits the run's changeset without its own bind
-    /// (`SpaceFs::resolve`, resolution rule 2).
+    /// Set by the executor's pre-flight when `space_writes.mode !=
+    /// read_only`; cleared once the run's exit closes it (merged,
+    /// opened as a PR, or discarded) — or left set if a step errored
+    /// and `on_failure: keep` left it open for a human.
+    /// `Agent.workflow_run_id` → this is how a step agent inherits the
+    /// run's draft without its own bind (`SpaceFs::resolve` overlay,
+    /// rev4 D25).
     #[builder(default)]
     pub changeset: Option<ChangesetId>,
+    /// Snapshotted from `space_writes.on_failure` on
+    /// `ChangesetOpened` (rev5 D41) — set/cleared alongside
+    /// `changeset`.
+    #[builder(default)]
+    pub changeset_on_failure: Option<SpaceWritesFailure>,
     events: EntityEvents<WorkflowRunEvent>,
 }
 
@@ -218,6 +250,14 @@ impl WorkflowRun {
         self.step_results
             .iter()
             .any(StepResult::step_reported_agent_failure)
+    }
+
+    /// The classification `run_completed` would land on right now —
+    /// used by the executor's `finish_space_writes` (rev5 §5.2) to
+    /// decide whether to land/PR the run's draft or abandon it, ahead
+    /// of the `RunCompleted` event that records it.
+    pub fn would_succeed(&self) -> bool {
+        !self.any_step_errored() && !self.any_step_reported_failure()
     }
 
     pub fn step_already_terminal(&self, step_name: &str) -> bool {
@@ -549,19 +589,27 @@ impl WorkflowRun {
         })
     }
 
-    /// Called once by the executor at run start when `changeset:` is
-    /// declared. At most one changeset per run — a run's `changeset:`
-    /// block is set once at start and closed once at end, so unlike
-    /// `Agent::changeset_bound` this never needs to reject a second,
-    /// different id; it's simply idempotent against retry.
-    pub fn changeset_opened(&mut self, changeset_id: ChangesetId) -> Idempotent<()> {
+    /// Called once by the executor's pre-flight when `space_writes.mode
+    /// != read_only`. At most one draft per run — opened once at start
+    /// and closed once at end, so unlike `Agent::changeset_bound` this
+    /// never needs to reject a second, different id; it's simply
+    /// idempotent against retry. `on_failure` is snapshotted here
+    /// (rev5 D41) so it survives a mid-run definition edit.
+    pub fn changeset_opened(
+        &mut self,
+        changeset_id: ChangesetId,
+        on_failure: SpaceWritesFailure,
+    ) -> Idempotent<()> {
         idempotency_guard!(
             self.events.iter_all().rev(),
             already_applied: WorkflowRunEvent::ChangesetOpened { .. },
         );
         self.changeset = Some(changeset_id);
-        self.events
-            .push(WorkflowRunEvent::ChangesetOpened { changeset_id });
+        self.changeset_on_failure = Some(on_failure);
+        self.events.push(WorkflowRunEvent::ChangesetOpened {
+            changeset_id,
+            on_failure,
+        });
         Idempotent::Executed(())
     }
 
@@ -569,14 +617,23 @@ impl WorkflowRun {
     /// mirrors `Agent::changeset_unbound`'s current-state check (not an
     /// event-history scan: a retry closing the *same* id the run has
     /// since moved past, or a stray call for an id the run never had,
-    /// must both be no-ops).
-    pub fn changeset_closed(&mut self, changeset_id: ChangesetId) -> Idempotent<()> {
+    /// must both be no-ops). `outcome` is `None` when a human closed
+    /// the draft out-of-band (rare, but the field stays optional to
+    /// allow it).
+    pub fn changeset_closed(
+        &mut self,
+        changeset_id: ChangesetId,
+        outcome: Option<SpaceWritesOutcome>,
+    ) -> Idempotent<()> {
         if self.changeset != Some(changeset_id) {
             return Idempotent::AlreadyApplied;
         }
         self.changeset = None;
-        self.events
-            .push(WorkflowRunEvent::ChangesetClosed { changeset_id });
+        self.changeset_on_failure = None;
+        self.events.push(WorkflowRunEvent::ChangesetClosed {
+            changeset_id,
+            outcome,
+        });
         Idempotent::Executed(())
     }
 }
@@ -600,6 +657,7 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
         let mut completed_at: Option<DateTime<Utc>> = None;
         let mut results: Vec<StepResult> = Vec::new();
         let mut changeset: Option<ChangesetId> = None;
+        let mut changeset_on_failure: Option<SpaceWritesFailure> = None;
 
         for event in events.iter_all() {
             match event {
@@ -741,12 +799,17 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
                     state = WorkflowRunState::Cancelled;
                     completed_at = Some(*cancelled_at);
                 }
-                WorkflowRunEvent::ChangesetOpened { changeset_id } => {
+                WorkflowRunEvent::ChangesetOpened {
+                    changeset_id,
+                    on_failure,
+                } => {
                     changeset = Some(*changeset_id);
+                    changeset_on_failure = Some(*on_failure);
                 }
-                WorkflowRunEvent::ChangesetClosed { changeset_id } => {
+                WorkflowRunEvent::ChangesetClosed { changeset_id, .. } => {
                     if changeset == Some(*changeset_id) {
                         changeset = None;
+                        changeset_on_failure = None;
                     }
                 }
             }
@@ -755,6 +818,7 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
         builder = builder.state(state).step_results(results);
         builder = builder.completed_at(completed_at);
         builder = builder.changeset(changeset);
+        builder = builder.changeset_on_failure(changeset_on_failure);
 
         builder.events(events).build()
     }
@@ -1464,19 +1528,31 @@ mod tests {
         assert!(run.changeset.is_none());
 
         let id = ChangesetId::new();
-        assert!(run.changeset_opened(id).did_execute());
+        assert!(run
+            .changeset_opened(id, SpaceWritesFailure::Keep)
+            .did_execute());
         assert_eq!(run.changeset, Some(id));
+        assert_eq!(run.changeset_on_failure, Some(SpaceWritesFailure::Keep));
 
-        assert!(run.changeset_closed(id).did_execute());
+        assert!(run
+            .changeset_closed(
+                id,
+                Some(SpaceWritesOutcome::Merged {
+                    merge_oid: "abc123".into()
+                })
+            )
+            .did_execute());
         assert!(run.changeset.is_none());
+        assert!(run.changeset_on_failure.is_none());
     }
 
     #[test]
     fn changeset_opened_is_idempotent_against_retry() {
         let mut run = fresh_run(&["a"]);
         let id = ChangesetId::new();
-        run.changeset_opened(id).did_execute();
-        let outcome = run.changeset_opened(id);
+        run.changeset_opened(id, SpaceWritesFailure::Discard)
+            .did_execute();
+        let outcome = run.changeset_opened(id, SpaceWritesFailure::Discard);
         assert!(matches!(outcome, Idempotent::AlreadyApplied));
         assert_eq!(run.changeset, Some(id));
     }
@@ -1486,33 +1562,83 @@ mod tests {
         let mut run = fresh_run(&["a"]);
         let opened = ChangesetId::new();
         let other = ChangesetId::new();
-        run.changeset_opened(opened).did_execute();
+        run.changeset_opened(opened, SpaceWritesFailure::Keep)
+            .did_execute();
 
-        let outcome = run.changeset_closed(other);
+        let outcome = run.changeset_closed(
+            other,
+            Some(SpaceWritesOutcome::Discarded {
+                reason: "no space writes".into(),
+            }),
+        );
         assert!(matches!(outcome, Idempotent::AlreadyApplied));
         assert_eq!(run.changeset, Some(opened));
+        assert_eq!(run.changeset_on_failure, Some(SpaceWritesFailure::Keep));
     }
 
     #[test]
     fn changeset_binding_hydrates_from_events() {
         let mut run = fresh_run(&["a"]);
         let id = ChangesetId::new();
-        run.changeset_opened(id).did_execute();
+        run.changeset_opened(id, SpaceWritesFailure::Keep)
+            .did_execute();
 
         let events = run.events;
         let rehydrated = WorkflowRun::try_from_events(events).unwrap();
         assert_eq!(rehydrated.changeset, Some(id));
+        assert_eq!(
+            rehydrated.changeset_on_failure,
+            Some(SpaceWritesFailure::Keep)
+        );
     }
 
     #[test]
     fn changeset_closed_hydrates_as_cleared() {
         let mut run = fresh_run(&["a"]);
         let id = ChangesetId::new();
-        run.changeset_opened(id).did_execute();
-        run.changeset_closed(id).did_execute();
+        run.changeset_opened(id, SpaceWritesFailure::Keep)
+            .did_execute();
+        run.changeset_closed(
+            id,
+            Some(SpaceWritesOutcome::PrOpened {
+                pr_number: 7,
+                pr_url: "https://example.com/pr/7".into(),
+            }),
+        )
+        .did_execute();
 
         let events = run.events;
         let rehydrated = WorkflowRun::try_from_events(events).unwrap();
         assert!(rehydrated.changeset.is_none());
+        assert!(rehydrated.changeset_on_failure.is_none());
+    }
+
+    /// Old `ChangesetOpened`/`ChangesetClosed` events (pre-rev5, no
+    /// `on_failure`/`outcome`) hydrate cleanly — `on_failure` defaults
+    /// to `Keep`, `outcome` is `None`.
+    #[test]
+    fn pre_rev5_changeset_events_hydrate_with_defaults() {
+        let id = ChangesetId::new();
+        let opened = serde_json::json!({
+            "type": "changeset_opened",
+            "changeset_id": id,
+        });
+        let closed = serde_json::json!({
+            "type": "changeset_closed",
+            "changeset_id": id,
+        });
+        let opened: WorkflowRunEvent = serde_json::from_value(opened).unwrap();
+        let closed: WorkflowRunEvent = serde_json::from_value(closed).unwrap();
+        assert!(matches!(
+            opened,
+            WorkflowRunEvent::ChangesetOpened {
+                on_failure: SpaceWritesFailure::Keep,
+                ..
+            }
+        ));
+        assert!(matches!(
+            closed,
+            WorkflowRunEvent::ChangesetClosed { outcome: None, .. }
+        ));
     }
 }

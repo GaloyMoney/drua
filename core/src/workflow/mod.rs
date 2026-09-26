@@ -31,9 +31,9 @@ use yaml::canonical_workflow_path;
 pub const WORKFLOW_DOC_TYPE: drua_library::DocType = drua_library::DocType::new("workflow");
 
 pub use definition::{
-    default_output_schema, parse_cron_schedule, parse_timezone, ChangesetExit,
-    ChangesetFailureExit, OutputSchema, OutputSchemaError, WorkflowChangesetDecl,
-    WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger,
+    default_output_schema, parse_cron_schedule, parse_timezone, OutputSchema, OutputSchemaError,
+    SpaceWritesDecl, SpaceWritesFailure, SpaceWritesMessage, SpaceWritesMode, WorkflowSandboxDecl,
+    WorkflowStepDef, WorkflowTrigger,
 };
 pub use entity::*;
 pub use error::*;
@@ -205,6 +205,44 @@ fn reject_forward_step_refs(
     Ok(())
 }
 
+/// rev5 D40/D41: applies a run's snapshotted `on_failure` (default
+/// `Keep` if somehow unset — same default as an absent `space_writes:`
+/// block) to a draft belonging to a run that did not succeed. Shared
+/// by the executor's `finish_space_writes` and `cancel_run` — a
+/// cancelled run "did not succeed" the same way a failed one didn't.
+pub(crate) async fn abandon_run_draft(
+    changesets: &crate::changeset::Changesets,
+    sub: &AuthSubject,
+    run: &mut WorkflowRun,
+    id: ChangesetId,
+) {
+    if run.changeset_on_failure.unwrap_or_default() == SpaceWritesFailure::Keep {
+        tracing::info!(changeset_id = %id, run_id = %run.id, "abandon_run_draft: on_failure=keep; leaving the draft open");
+        return;
+    }
+    match changesets
+        .discard(sub, id, Some("workflow run did not succeed".to_string()))
+        .await
+    {
+        Ok(_) => {
+            let _ = run.changeset_closed(
+                id,
+                Some(run::entity::SpaceWritesOutcome::Discarded {
+                    reason: "workflow run did not succeed".to_string(),
+                }),
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                changeset_id = %id,
+                run_id = %run.id,
+                "abandon_run_draft: failed to discard; left open for manual follow-up"
+            );
+        }
+    }
+}
+
 fn validate_ref_against_prior_steps(
     step_name: &str,
     r: &TemplateRef,
@@ -318,7 +356,7 @@ impl Workflows {
             steps,
             sandboxes,
             model_chain,
-            changeset,
+            space_writes,
             original_path,
             rendered,
             ..
@@ -379,7 +417,7 @@ impl Workflows {
                     Some(steps),
                     Some(sandboxes),
                     Some(model_chain.clone()),
-                    Some(changeset.clone()),
+                    Some(space_writes.clone()),
                     file_hash,
                 )
                 .did_execute()
@@ -414,15 +452,13 @@ impl Workflows {
             .trigger(trigger)
             .steps(steps)
             .sandboxes(sandboxes)
-            .model_chain(model_chain);
+            .model_chain(model_chain)
+            .space_writes(space_writes);
         if let Some(project) = project_name {
             builder = builder.project_name(project);
         }
         if let Some(desc) = description {
             builder = builder.description(desc);
-        }
-        if let Some(cs) = changeset {
-            builder = builder.changeset(cs);
         }
         builder = builder.original_path(original_path);
         let new = builder
@@ -663,6 +699,49 @@ impl Workflows {
         Ok(())
     }
 
+    /// rev5 D35/D38: per-mode requirements (§4's table) plus
+    /// `message.title`/`body` template refs. Validated against every
+    /// declared step, not just prior ones — the exit conceptually
+    /// runs after all of them (D38), so a ref to any declared step
+    /// is fine regardless of position.
+    fn validate_space_writes(
+        decl: &SpaceWritesDecl,
+        steps: &[WorkflowStepDef],
+    ) -> Result<(), WorkflowError> {
+        match (decl.mode, &decl.message) {
+            (SpaceWritesMode::ReadOnly, Some(_)) => {
+                return Err(WorkflowError::InvalidSpaceWrites(
+                    "space_writes.message is set but mode is read_only — remove the message or choose merge / open_pr".to_string(),
+                ));
+            }
+            (SpaceWritesMode::OpenPr, None) => {
+                return Err(WorkflowError::InvalidSpaceWrites(
+                    "space_writes.mode open_pr requires space_writes.message.title (the PR title)"
+                        .to_string(),
+                ));
+            }
+            (SpaceWritesMode::OpenPr, Some(m)) if m.title.trim().is_empty() => {
+                return Err(WorkflowError::InvalidSpaceWrites(
+                    "space_writes.message.title must not be empty for mode open_pr".to_string(),
+                ));
+            }
+            _ => {}
+        }
+        let Some(message) = &decl.message else {
+            return Ok(());
+        };
+        let all_steps: std::collections::HashSet<String> =
+            steps.iter().map(|s| s.name().to_string()).collect();
+        for s in std::iter::once(&message.title).chain(message.body.iter()) {
+            for r in template::extract_refs_in_string(s).map_err(|e| {
+                WorkflowError::InvalidTemplateRef(format!("space_writes.message: {e}"))
+            })? {
+                validate_ref_against_prior_steps("space_writes.message", &r, &all_steps)?;
+            }
+        }
+        Ok(())
+    }
+
     /// For every `Preexisting` decl, look the sandbox up by name in
     /// the workflow's project (project-unique) and verify `sub`
     /// can `Read` it. Returns a map from decl name to resolved
@@ -706,7 +785,7 @@ impl Workflows {
         steps: Vec<WorkflowStepDef>,
         sandboxes: Vec<WorkflowSandboxDecl>,
         model_chain: Option<llm::ModelChain>,
-        changeset: Option<WorkflowChangesetDecl>,
+        space_writes: SpaceWritesDecl,
     ) -> Result<WorkflowDefinition, WorkflowError> {
         sub.can(AuthVerb::Create, AuthResource::Workflow(project_id, None))?;
 
@@ -720,6 +799,7 @@ impl Workflows {
 
         self.validate_steps(sub, project_id, &steps, &sandboxes)
             .await?;
+        Self::validate_space_writes(&space_writes, &steps)?;
 
         let trigger = match trigger {
             WorkflowTrigger::Webhook {
@@ -740,15 +820,13 @@ impl Workflows {
             .trigger(trigger)
             .steps(steps)
             .sandboxes(sandboxes)
-            .model_chain(model_chain);
+            .model_chain(model_chain)
+            .space_writes(space_writes);
         if !project_name.is_empty() {
             builder = builder.project_name(project_name);
         }
         if let Some(desc) = description {
             builder = builder.description(desc);
-        }
-        if let Some(cs) = changeset {
-            builder = builder.changeset(cs);
         }
         let new = builder
             .build()
@@ -776,7 +854,7 @@ impl Workflows {
         steps: Option<Vec<WorkflowStepDef>>,
         sandboxes: Option<Vec<WorkflowSandboxDecl>>,
         model_chain: Option<Option<llm::ModelChain>>,
-        changeset: Option<Option<WorkflowChangesetDecl>>,
+        space_writes: Option<SpaceWritesDecl>,
     ) -> Result<WorkflowDefinition, WorkflowError> {
         let mut definition = self.repo.find_by_id(id).await?;
         sub.can(
@@ -799,6 +877,12 @@ impl Workflows {
             self.validate_steps(sub, definition.project_id, next_steps, next_sandboxes)
                 .await?;
         }
+        // rev5 D38: a step rename/removal can orphan a `space_writes.
+        // message` ref, so re-validate whenever either changes.
+        if steps.is_some() || space_writes.is_some() {
+            let next_space_writes = space_writes.as_ref().unwrap_or(&definition.space_writes);
+            Self::validate_space_writes(next_space_writes, next_steps)?;
+        }
 
         // Capture before `update_content` mutates `definition.trigger`.
         // Only a non-cron → cron transition needs a fresh spawn. A
@@ -816,7 +900,7 @@ impl Workflows {
                 steps,
                 sandboxes,
                 model_chain,
-                changeset,
+                space_writes,
             )
             .did_execute()
         {
@@ -1357,19 +1441,21 @@ impl Workflows {
             self.agents.invalidate_agent_cache(agent_id);
         }
 
-        self.close_cancelled_run_changeset(&run).await;
+        self.close_cancelled_run_changeset(&mut run).await;
 
         Ok(run)
     }
 
-    /// rev2 §7.2's closed gap: a cancelled run "did not succeed", so
-    /// its draft (if any) gets the same `on_failure` treatment a
-    /// naturally-failed run's does — discarded by default, or left
-    /// `Open` for `on_failure: keep`. Looked up by
-    /// `Changesets::open_draft_for_run` rather than `run.changeset`
-    /// (D4: no lookup depends on that field). Best-effort: failures are
-    /// logged, never surfaced — `cancel_run` itself already committed.
-    async fn close_cancelled_run_changeset(&self, run: &WorkflowRun) {
+    /// rev2 §7.2's closed gap, rev5 D41: a cancelled run "did not
+    /// succeed", so its draft (if any) gets the same
+    /// `changeset_on_failure` treatment a failed run's does via
+    /// `abandon_run_draft` — the policy snapshotted at pre-flight open
+    /// time, not a fresh read of the (possibly since-edited)
+    /// definition. Looked up by `Changesets::open_draft_for_run` rather
+    /// than `run.changeset` (D4: no lookup depends on that field).
+    /// Best-effort: failures are logged, never surfaced — `cancel_run`
+    /// itself already committed.
+    async fn close_cancelled_run_changeset(&self, run: &mut WorkflowRun) {
         let cs = match self.changesets.open_draft_for_run(run.id).await {
             Ok(Some(cs)) => cs,
             Ok(None) => return,
@@ -1382,27 +1468,14 @@ impl Workflows {
                 return;
             }
         };
-        let decl = self
-            .repo
-            .find_by_id(run.definition_id)
-            .await
-            .ok()
-            .and_then(|def| def.changeset)
-            .unwrap_or_default();
-        if !matches!(decl.on_failure, ChangesetFailureExit::Discard) {
-            return;
-        }
         let sub = AuthSubject::workflow_executor(run.project_id, run.definition_id, run.id);
-        if let Err(e) = self
-            .changesets
-            .discard(&sub, cs.id, Some("workflow run cancelled".to_string()))
-            .await
-        {
+        abandon_run_draft(&self.changesets, &sub, run, cs.id).await;
+        if let Err(e) = self.run_repo.update(run).await {
             tracing::warn!(
                 error = %e,
                 changeset_id = %cs.id,
                 run_id = %run.id,
-                "cancel_run: failed to discard the cancelled run's draft; left as-is for manual follow-up"
+                "cancel_run: failed to persist the run after abandoning its draft"
             );
         }
     }

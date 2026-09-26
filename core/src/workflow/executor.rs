@@ -16,16 +16,18 @@ use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxSpecs, SandboxState, Sand
 use crate::skill::Skills;
 use crate::toolset::ToolSets;
 
-use super::definition::{
-    ChangesetExit, ChangesetFailureExit, WorkflowChangesetDecl, WorkflowSandboxDecl,
-    WorkflowStepDef,
-};
+use super::abandon_run_draft;
+use super::definition::{SpaceWritesMode, WorkflowSandboxDecl, WorkflowStepDef};
+use super::entity::WorkflowDefinition;
 use super::error::WorkflowError;
 use super::repo::WorkflowDefinitionRepo;
-use super::run::{StepResult, WorkflowRun, WorkflowRunRepo, WorkflowRunState};
+use super::run::entity::SpaceWritesOutcome;
+use super::run::{StepResult, WorkflowRun, WorkflowRunRepo};
 use super::template::{
     format_template_diagnostics, template_diagnostics, ConditionOutcome, TemplateContext,
 };
+use crate::changeset::ChangesetError;
+use crate::primitives::ChangesetId;
 
 /// Hard cap on the pre-flight per-sandbox readiness wait. Protects the
 /// queue from a stuck infrastructure step.
@@ -66,6 +68,14 @@ fn first_text_content(result: &rmcp::model::CallToolResult) -> Option<String> {
         rmcp::model::RawContent::Text(t) => Some(t.text.clone()),
         _ => None,
     })
+}
+
+fn short_run_id(run_id: WorkflowRunId) -> String {
+    run_id.to_string().chars().take(8).collect()
+}
+
+fn short_changeset_id(id: ChangesetId) -> String {
+    id.to_string().chars().take(8).collect()
 }
 
 fn type_label(v: &serde_json::Value) -> &'static str {
@@ -147,7 +157,7 @@ impl Executor {
         let workflow_id = run.definition_id;
         let trigger_context = run.trigger_context.clone();
         let steps = run.steps_snapshot.clone();
-        let mut run_context = serde_json::json!({
+        let run_context = serde_json::json!({
             "id": run_id.to_string(),
             "started_at": run.started_at().to_rfc3339(),
             "date": run.started_at().format("%Y-%m-%d").to_string(),
@@ -164,73 +174,56 @@ impl Executor {
         let definition = self.definitions.find_by_id(workflow_id).await?;
         let sandbox_decls = definition.sandboxes.clone();
 
-        // rev2 §7.2 point 1 (rev3 §7): pre-create the run's draft only
-        // when `changeset:` is declared (so its title is used) — same
-        // "fail as a synthetic <pre-flight> step" idiom as a sandbox
-        // that never comes Ready. An undeclared workflow does nothing
-        // here; a step that writes `draft:` still gets a lazily
-        // created run-keyed draft (§3's derived title) the first time
-        // it writes — a step's `space:` write is refused (`UseDraft`)
-        // instead. `run.changeset.is_none()` guards a resumed run
-        // (crash/restart) from pre-creating a second one.
-        if let Some(decl) = &definition.changeset {
-            if run.changeset.is_none() {
-                let open_result = match &self.changesets {
-                    Some(changesets) => {
-                        let executor_sub =
-                            AuthSubject::workflow_executor(project_id, workflow_id, run_id);
-                        let template_ctx = TemplateContext {
-                            trigger: &trigger_context,
-                            steps: &HashMap::new(),
-                            run: &run_context,
-                        };
-                        let title = template_ctx
-                            .substitute_in_string(&decl.title)
-                            .unwrap_or_else(|_| decl.title.clone());
-                        let description = decl.description.as_ref().map(|d| {
-                            template_ctx
-                                .substitute_in_string(d)
-                                .unwrap_or_else(|_| d.clone())
-                        });
-                        changesets
-                            .draft_for(&executor_sub, Some(title), description, None)
-                            .await
-                            .map_err(|e| e.to_string())
-                    }
-                    None => Err(
-                        "workflow declares a changeset but this executor has no Changesets \
-                         service configured"
-                            .to_string(),
-                    ),
-                };
-                match open_result {
-                    Ok(cs) => {
-                        if run.changeset_opened(cs.id).did_execute() {
-                            self.runs.update(&mut run).await?;
-                        }
-                        run_context["changeset"] =
-                            serde_json::json!({ "id": cs.id.to_string(), "title": cs.title });
-                    }
-                    Err(err) => {
-                        let step_name = "<pre-flight>".to_string();
-                        if run.step_started(step_name.clone()).did_execute() {
-                            self.runs.update(&mut run).await?;
-                        }
-                        if run
-                            .step_errored(step_name, format!("changeset open failed: {err}"))
-                            .did_execute()
-                        {
-                            self.runs.update(&mut run).await?;
-                        }
-                        if run.run_completed().did_execute() {
-                            self.runs.update(&mut run).await?;
-                        }
-                        return Ok(());
+        // rev5 D37: open the run's draft eagerly whenever `space_writes.
+        // mode != read_only` — same "fail as a synthetic <pre-flight>
+        // step" idiom as a sandbox that never comes Ready. No lazy
+        // creation any more (D26): a step's `space:` write with no run
+        // draft is refused with `RunReadOnly`. `run.changeset.is_none()`
+        // guards a resumed run (crash/restart) from pre-creating a
+        // second one — `draft_for` is idempotent per actor key anyway.
+        let space_writes_decl = definition.space_writes.clone();
+        if space_writes_decl.opens_draft() && run.changeset.is_none() {
+            let open_result = match &self.changesets {
+                Some(changesets) => {
+                    let executor_sub =
+                        AuthSubject::workflow_executor(project_id, workflow_id, run_id);
+                    let title = format!("{} run {}", definition.name, short_run_id(run_id));
+                    changesets
+                        .draft_for(&executor_sub, Some(title), None, None)
+                        .await
+                        .map_err(|e| e.to_string())
+                }
+                None => Err(
+                    "workflow has space_writes.mode != read_only but this executor has no \
+                     Changesets service configured"
+                        .to_string(),
+                ),
+            };
+            match open_result {
+                Ok(cs) => {
+                    if run
+                        .changeset_opened(cs.id, space_writes_decl.on_failure)
+                        .did_execute()
+                    {
+                        self.runs.update(&mut run).await?;
                     }
                 }
-            } else if let Some(id) = run.changeset {
-                run_context["changeset"] =
-                    serde_json::json!({ "id": id.to_string(), "title": decl.title });
+                Err(err) => {
+                    let step_name = "<pre-flight>".to_string();
+                    if run.step_started(step_name.clone()).did_execute() {
+                        self.runs.update(&mut run).await?;
+                    }
+                    if run
+                        .step_errored(step_name, format!("space draft open failed: {err}"))
+                        .did_execute()
+                    {
+                        self.runs.update(&mut run).await?;
+                    }
+                    if run.run_completed().did_execute() {
+                        self.runs.update(&mut run).await?;
+                    }
+                    return Ok(());
+                }
             }
         }
 
@@ -375,21 +368,24 @@ impl Executor {
             }
         }
 
+        // rev5 D40: the exit runs BEFORE `run_completed` — an exit
+        // failure records a synthetic `<space-writes>` step error, so
+        // `run_completed`'s classification (any_step_errored → Errored)
+        // picks it up for free.
+        self.finish_space_writes(
+            &mut run,
+            project_id,
+            workflow_id,
+            run_id,
+            &definition,
+            &trigger_context,
+            &run_context,
+        )
+        .await;
+
         if run.run_completed().did_execute() {
             self.runs.update(&mut run).await?;
         }
-
-        // rev2 §7.2 point 3: land/discard/keep the run's draft per
-        // `on_success`/`on_failure` — unconditionally, not just when
-        // `changeset:` was declared, since an undeclared workflow whose
-        // step wrote `space:`/`draft:` still has a lazily created
-        // run-keyed draft to close (with the block's defaults:
-        // `publish` / `discard`). A no-op if there's no open draft for
-        // this run (nothing was ever written, or a step already closed
-        // it itself via `spaces publish`/`discard`).
-        let decl = definition.changeset.clone().unwrap_or_default();
-        self.close_run_changeset(&mut run, project_id, workflow_id, run_id, &decl)
-            .await;
 
         // Post-flight: always runs (even when a step failed).
         // Best-effort. Workflow-scoped sandboxes always suspend; borrowed
@@ -400,102 +396,195 @@ impl Executor {
         Ok(())
     }
 
-    /// The run's current draft's exit action, looked up by
+    /// rev5 §5.2: the run's exit. Looked up by
     /// `Changesets::open_draft_for_run` rather than `run.changeset`
-    /// (rev2 D4: no lookup depends on that field any more — it's run
-    /// history only, and a lazily created draft never set it in the
-    /// first place). `Ok(None)` (nothing was ever written under this
-    /// run, or a step already closed its draft itself) is a silent
-    /// no-op.
+    /// (same D4 rationale as before) — `Ok(None)` (nothing ever opened
+    /// one, or a human already closed it) is a silent no-op.
     ///
-    /// `on_success`/`on_failure` map to `Changesets::{submit,apply,
-    /// discard}` (or a no-op for `keep`). OQ-11's narrowing lives
-    /// here, not the auth layer: `Publish` without the workflow's own
-    /// `allow_land: true` submits a PR rather than landing on `main`
-    /// — the executor's `WorkflowExecutor` subject carries
-    /// `ProjectAdmin`, which the §4.2 matrix grants real `Update`
-    /// through, so this is the one place standing between "every
-    /// workflow can land" and intent. Failures are logged and
-    /// swallowed — a stuck PR/branch is recoverable by hand via
-    /// `spaces publish`/`discard`; failing the run retroactively over
-    /// its own cleanup step would be worse.
-    async fn close_run_changeset(
+    /// A run that would succeed lands/opens-a-PR-for the draft
+    /// (`space_writes.mode`); an empty draft is discarded silently
+    /// (D39). A run that would not succeed is handed to
+    /// `abandon_run_draft` instead (D41's snapshotted `on_failure`). An
+    /// exit action that errors for any other reason fails the run as a
+    /// synthetic `<space-writes>` step, left for `run_completed` to
+    /// classify as `Errored` (D40) — the draft stays `Open` regardless
+    /// of `on_failure`.
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_space_writes(
         &self,
         run: &mut WorkflowRun,
         project_id: ProjectId,
         workflow_id: WorkflowDefinitionId,
         run_id: WorkflowRunId,
-        decl: &WorkflowChangesetDecl,
+        definition: &WorkflowDefinition,
+        trigger_context: &serde_json::Value,
+        run_context: &serde_json::Value,
     ) {
         let Some(changesets) = &self.changesets else {
             return;
         };
         let cs = match changesets.open_draft_for_run(run_id).await {
             Ok(Some(cs)) => cs,
-            Ok(None) => return,
+            Ok(None) => {
+                if definition.space_writes.opens_draft() {
+                    tracing::warn!(
+                        run_id = %run_id,
+                        "finish_space_writes: no run draft open to close (a human may have \
+                         closed it already)"
+                    );
+                }
+                return;
+            }
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     run_id = %run_id,
-                    "close_run_changeset: draft lookup failed; leaving it as-is"
+                    "finish_space_writes: draft lookup failed; leaving it as-is"
                 );
                 return;
             }
         };
         let id = cs.id;
         let sub = AuthSubject::workflow_executor(project_id, workflow_id, run_id);
-        let succeeded = run.state == WorkflowRunState::Succeeded;
 
-        let result = if succeeded {
-            match decl.on_success {
-                ChangesetExit::Publish if decl.allow_land => {
-                    changesets.apply(&sub, id, None, None).await.map(|_| ())
-                }
-                // rev3 addendum A D23: no human is typing a title/body
-                // here, so a run's auto-submit derives them from the
-                // draft itself — the same fallback `submit`'s old
-                // caller-side PR body rendering used.
-                ChangesetExit::Publish => {
-                    let title = cs.title.clone();
-                    let body = cs
-                        .description
-                        .clone()
-                        .unwrap_or_else(|| "(no description)".to_string());
-                    changesets.submit(&sub, id, title, body).await.map(|_| ())
-                }
-                ChangesetExit::Keep => Ok(()),
+        if !run.would_succeed() {
+            abandon_run_draft(changesets, &sub, run, id).await;
+            if let Err(e) = self.runs.update(run).await {
+                tracing::warn!(
+                    error = %e,
+                    run_id = %run_id,
+                    "finish_space_writes: failed to persist the run after abandoning its draft"
+                );
             }
-        } else {
-            match decl.on_failure {
-                ChangesetFailureExit::Discard => changesets
-                    .discard(&sub, id, Some("workflow run did not succeed".to_string()))
-                    .await
-                    .map(|_| ()),
-                ChangesetFailureExit::Keep => Ok(()),
+            return;
+        }
+
+        let decl = &definition.space_writes;
+        let step_outputs = collect_step_outputs(&run.step_results);
+        let ctx = TemplateContext {
+            trigger: trigger_context,
+            steps: &step_outputs,
+            run: run_context,
+        };
+        let message = match decl.message.as_ref().map(|m| {
+            let title = ctx.substitute_in_string(&m.title)?;
+            let body = m
+                .body
+                .as_ref()
+                .map(|b| ctx.substitute_in_string(b))
+                .transpose()?;
+            Ok::<_, super::template::TemplateError>((title, body))
+        }) {
+            None => None,
+            Some(Ok(pair)) => Some(pair),
+            Some(Err(e)) => {
+                self.fail_space_writes(run, id, decl.mode, format!("space_writes.message: {e}"))
+                    .await;
+                return;
             }
         };
-        match result {
-            Ok(()) => {
-                if run.changeset_closed(id).did_execute() {
+        let (title, body) = match message {
+            Some((t, b)) => (Some(t), b),
+            None => (None, None),
+        };
+
+        let action_result: Result<SpaceWritesOutcome, ChangesetError> = match decl.mode {
+            SpaceWritesMode::Merge => changesets
+                .apply(&sub, id, title, body)
+                .await
+                .map(|(_, merge_oid)| SpaceWritesOutcome::Merged { merge_oid }),
+            SpaceWritesMode::OpenPr => changesets
+                .submit(
+                    &sub,
+                    id,
+                    title.unwrap_or_default(),
+                    body.unwrap_or_default(),
+                )
+                .await
+                .map(|cs| SpaceWritesOutcome::PrOpened {
+                    pr_number: cs.pr_number.unwrap_or_default(),
+                    pr_url: cs.pr_url.unwrap_or_default(),
+                }),
+            SpaceWritesMode::ReadOnly => return, // no draft is ever opened in this mode
+        };
+
+        match action_result {
+            Ok(outcome) => {
+                if run.changeset_closed(id, Some(outcome)).did_execute() {
                     if let Err(e) = self.runs.update(run).await {
                         tracing::warn!(
                             error = %e,
                             changeset_id = %id,
                             run_id = %run_id,
-                            "close_run_changeset: failed to record changeset_closed on the run \
+                            "finish_space_writes: failed to record changeset_closed on the run \
                              (best effort; the exit action itself already landed)"
                         );
                     }
                 }
             }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    changeset_id = %id,
-                    run_id = %run_id,
-                    "changeset exit action failed; changeset left as-is for manual follow-up"
-                );
+            // rev5 D39: nothing was ever written — a benign discard,
+            // not a run failure.
+            Err(ChangesetError::Empty { .. }) => {
+                match changesets
+                    .discard(&sub, id, Some("no space writes".to_string()))
+                    .await
+                {
+                    Ok(_) => {
+                        if run
+                            .changeset_closed(
+                                id,
+                                Some(SpaceWritesOutcome::Discarded {
+                                    reason: "no space writes".to_string(),
+                                }),
+                            )
+                            .did_execute()
+                        {
+                            if let Err(e) = self.runs.update(run).await {
+                                tracing::warn!(error = %e, changeset_id = %id, run_id = %run_id, "finish_space_writes: failed to record the empty-draft discard");
+                            }
+                        }
+                        tracing::info!(changeset_id = %id, run_id = %run_id, "finish_space_writes: discarded an empty run draft");
+                    }
+                    Err(e) => {
+                        self.fail_space_writes(run, id, decl.mode, e.to_string())
+                            .await;
+                    }
+                }
             }
+            Err(e) => {
+                self.fail_space_writes(run, id, decl.mode, e.to_string())
+                    .await;
+            }
+        }
+    }
+
+    /// rev5 D40: records the exit failure as a synthetic step error so
+    /// `run_completed` lands on `Errored`. The draft is left `Open`
+    /// regardless of `on_failure` — the message names the id and the
+    /// command a human can run to finish it by hand.
+    async fn fail_space_writes(
+        &self,
+        run: &mut WorkflowRun,
+        id: ChangesetId,
+        mode: SpaceWritesMode,
+        reason: String,
+    ) {
+        let (verb, cmd) = match mode {
+            SpaceWritesMode::Merge => ("merge", "merge-draft"),
+            SpaceWritesMode::OpenPr => ("open-pr", "open-pr"),
+            SpaceWritesMode::ReadOnly => ("space-writes", "discard-draft"),
+        };
+        let step_name = "<space-writes>".to_string();
+        let msg = format!(
+            "{verb} failed: {reason}; draft {} is kept open — finish it with \
+             `drua_admin_spaces {cmd}` or `discard-draft`",
+            short_changeset_id(id)
+        );
+        if run.step_started(step_name.clone()).did_execute() {
+            let _ = self.runs.update(run).await;
+        }
+        if run.step_errored(step_name, msg).did_execute() {
+            let _ = self.runs.update(run).await;
         }
     }
 
@@ -805,6 +894,7 @@ impl Executor {
                             attach_sandbox,
                             chain_override,
                             output_schema.as_ref().clone(),
+                            definition.space_writes.mode,
                         )
                         .await?;
                     (agent, detached_agents)

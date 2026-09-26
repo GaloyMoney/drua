@@ -432,6 +432,137 @@ async fn write_against_a_discarded_changeset_is_rejected() {
     );
 }
 
+/// rev4 D25/D26, rev5 D37: a workflow-run subject's `space:` writes
+/// are refused (`RunReadOnly`, never lazily staged) until a run draft
+/// is open, and once one is, `space:`/`draft:` both overlay it — reads
+/// and writes hit the same branch, `main` stays untouched, and the
+/// stamp says "run draft". An explicit `@<id>` write is `BadRequest`
+/// (a run writes only its own draft); an explicit `@<id>` **read**
+/// stays allowed (OQ-29).
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn workflow_run_subject_overlays_its_run_draft() {
+    let (app, user) = setup("run_overlay").await;
+    let agent = project_with_space(&app, &user, "proj-run-overlay", "docs").await;
+    let project_id = agent.project_id().expect("agent has a project");
+
+    // `changesets.workflow_run_id` FKs into `workflow_runs` — a
+    // synthetic `WorkflowRunId` alone isn't enough; the run (and its
+    // definition) must actually exist.
+    let pool = pool().await;
+    let definitions = drua_core::workflow::repo::WorkflowDefinitionRepo::new_without_library(&pool);
+    let runs = drua_core::workflow::WorkflowRunRepo::new(&pool);
+    let new_def = drua_core::workflow::NewWorkflowDefinition::builder()
+        .project_id(project_id)
+        .name(format!("run-overlay-{}", uuid::Uuid::new_v4()))
+        .trigger(drua_core::workflow::WorkflowTrigger::Manual { condition: None })
+        .steps(Vec::new())
+        .build()
+        .expect("build definition");
+    let mut op = definitions.begin_op().await.expect("begin op");
+    let definition = definitions
+        .create_in_op(&mut op, new_def)
+        .await
+        .expect("create definition");
+    op.commit().await.expect("commit");
+    let run = runs
+        .create(
+            drua_core::workflow::run::NewWorkflowRun::builder()
+                .definition_id(definition.id)
+                .project_id(project_id)
+                .steps_snapshot(Vec::new())
+                .trigger_context(serde_json::json!({}))
+                .build()
+                .expect("build run"),
+        )
+        .await
+        .expect("create run");
+    let run_sub = AuthSubject::workflow_executor(project_id, definition.id, run.id);
+
+    let fs = space_fs(&app);
+
+    // No run draft open yet: refused, not lazily created.
+    let err = fs
+        .write_file(&run_sub, "space:docs/a.md", "nope\n".into())
+        .await
+        .expect_err("a run subject must not lazily create its draft");
+    assert!(
+        matches!(err, ProjectError::Space(SpaceError::RunReadOnly { .. })),
+        "expected RunReadOnly, got: {err}"
+    );
+
+    // Stand-in for the executor's pre-flight (lands in a later rev5
+    // commit): open the run's draft by hand.
+    let cs = app
+        .changesets()
+        .draft_for(&run_sub, Some("wf run".into()), None, None)
+        .await
+        .expect("open run draft");
+
+    // `space:` now overlays the run draft; the stamp names it a "run
+    // draft" and preserves the typed `space:` prefix.
+    let stamp = fs
+        .write_file(&run_sub, "space:docs/a.md", "staged by run\n".into())
+        .await
+        .expect("write_file dispatch")
+        .expect("space path");
+    assert!(stamp.contains("space:docs · run draft"), "got: {stamp}");
+
+    // `main` is untouched.
+    let main = app
+        .library()
+        .spaces()
+        .read_file("docs", "a.md", None)
+        .await
+        .expect("read main")
+        .expect("a.md exists on main");
+    assert_eq!(main, b"main content\n");
+
+    // `space:` reads the overlay, not `main`.
+    let read = fs
+        .view_file(&run_sub, "space:docs/a.md", None)
+        .await
+        .expect("view_file dispatch")
+        .expect("space path");
+    match read {
+        drua_core::space_fs::FileView::File(content) => {
+            assert_eq!(content, "staged by run\n");
+        }
+        drua_core::space_fs::FileView::Dir(_) => panic!("expected a file"),
+    }
+
+    // `draft:` is an accepted alias for the same overlay.
+    let read = fs
+        .view_file(&run_sub, "draft:docs/a.md", None)
+        .await
+        .expect("view_file dispatch")
+        .expect("space path");
+    match read {
+        drua_core::space_fs::FileView::File(content) => {
+            assert_eq!(content, "staged by run\n");
+        }
+        drua_core::space_fs::FileView::Dir(_) => panic!("expected a file"),
+    }
+
+    // An explicit `@<id>` write from a run subject is `BadRequest` —
+    // a run writes only its own draft.
+    let idpath = format!("space:docs@{}/a.md", cs.id);
+    let err = fs
+        .write_file(&run_sub, &idpath, "explicit\n".into())
+        .await
+        .expect_err("explicit @id write must be rejected for a run subject");
+    assert!(
+        matches!(err, ProjectError::Space(SpaceError::BadRequest { .. })),
+        "expected BadRequest, got: {err}"
+    );
+
+    // The same explicit `@<id>` form stays readable (OQ-29).
+    fs.view_file(&run_sub, &idpath, None)
+        .await
+        .expect("view_file dispatch")
+        .expect("explicit @id reads stay allowed for a run subject");
+}
+
 /// bugbot 2026-09-25 (Medium): `submit` already rejected a
 /// zero-commit changeset as `Empty`, but `apply` didn't — a lead
 /// `spaces publish` (or run-end `allow_land`) on a draft nobody ever

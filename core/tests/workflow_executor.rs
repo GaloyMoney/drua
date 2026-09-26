@@ -207,11 +207,21 @@ async fn seed_one_step_run(
         condition: None,
     }];
 
+    // rev5 D35/D37: this file's `Executor` is built with `changesets:
+    // None` (breaker/continuation/prompt behavior is under test here,
+    // not space writes) — the default `space_writes` block would
+    // otherwise have the pre-flight try to open a draft and fail with
+    // "no Changesets service configured" before the agent step ever
+    // runs. `read_only` opens no draft, so pre-flight is a no-op.
     let new_definition = NewWorkflowDefinition::builder()
         .project_id(project_id)
         .name(format!("test-wf-{}", uuid::Uuid::new_v4()))
         .trigger(WorkflowTrigger::Manual { condition: None })
         .steps(steps.clone())
+        .space_writes(drua_core::workflow::SpaceWritesDecl {
+            mode: drua_core::workflow::SpaceWritesMode::ReadOnly,
+            ..Default::default()
+        })
         .build()
         .expect("build definition");
     let mut op = definitions.begin_op().await.expect("begin op");

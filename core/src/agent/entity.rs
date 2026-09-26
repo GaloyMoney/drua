@@ -8,7 +8,7 @@ use crate::primitives::{
     WorkflowRunId,
 };
 use crate::sandbox::SandboxAgentMode;
-use crate::workflow::OutputSchema;
+use crate::workflow::{OutputSchema, SpaceWritesMode};
 use es_entity::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, sqlx::Type)]
@@ -47,6 +47,12 @@ pub enum AgentEvent {
         /// variant size bounded — `RootSchema` is ~300 bytes.
         #[serde(default)]
         output_schema: Option<Box<OutputSchema>>,
+        /// rev5 D43: the run's `space_writes.mode` at the moment this
+        /// step agent was created — lets `<spaces>` tell the agent
+        /// whether its edits will merge, become a PR, or be refused.
+        /// `None` for non-workflow agents.
+        #[serde(default)]
+        space_writes_mode: Option<SpaceWritesMode>,
     },
     /// Effective delta only (no-ops filtered out before firing).
     AuthScopesUpdated {
@@ -89,6 +95,9 @@ pub struct Agent {
     /// agents.
     #[builder(default)]
     pub output_schema: Option<OutputSchema>,
+    /// rev5 D43. `None` for non-workflow agents.
+    #[builder(default)]
+    pub space_writes_mode: Option<SpaceWritesMode>,
     events: EntityEvents<AgentEvent>,
 }
 
@@ -232,6 +241,7 @@ impl TryFromEvents<AgentEvent> for Agent {
                     workflow_id,
                     workflow_run_id,
                     output_schema,
+                    space_writes_mode,
                 } => {
                     builder = builder
                         .id(*id)
@@ -241,7 +251,8 @@ impl TryFromEvents<AgentEvent> for Agent {
                         .project_name(project_name.clone())
                         .workflow_id(*workflow_id)
                         .workflow_run_id(*workflow_run_id)
-                        .output_schema(output_schema.as_deref().cloned());
+                        .output_schema(output_schema.as_deref().cloned())
+                        .space_writes_mode(*space_writes_mode);
                     scopes = authz_scopes.iter().cloned().collect();
                 }
                 AgentEvent::AuthScopesUpdated { added, removed } => {
@@ -288,6 +299,8 @@ pub struct NewAgent {
     pub(super) workflow_run_id: Option<WorkflowRunId>,
     #[builder(default)]
     pub(super) output_schema: Option<OutputSchema>,
+    #[builder(default)]
+    pub(super) space_writes_mode: Option<SpaceWritesMode>,
 }
 
 impl NewAgent {
@@ -310,6 +323,7 @@ impl IntoEvents<AgentEvent> for NewAgent {
                 workflow_id: self.workflow_id,
                 workflow_run_id: self.workflow_run_id,
                 output_schema: self.output_schema.map(Box::new),
+                space_writes_mode: self.space_writes_mode,
             }],
         )
     }

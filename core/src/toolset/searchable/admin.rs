@@ -1604,7 +1604,7 @@ impl AdminToolSet {
                         steps,
                         sandboxes,
                         params.model_chain,
-                        None,
+                        crate::workflow::SpaceWritesDecl::default(),
                     )
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;

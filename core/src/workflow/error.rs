@@ -38,6 +38,8 @@ pub enum WorkflowError {
     InvalidDefinition(String),
     #[error("WorkflowError - InvalidStep: {0}")]
     InvalidStep(String),
+    #[error("WorkflowError - InvalidSpaceWrites: {0}")]
+    InvalidSpaceWrites(String),
     #[error("WorkflowError - InvalidTemplateRef: {0}")]
     InvalidTemplateRef(String),
     #[error("WorkflowError - InvalidCondition: {0}")]

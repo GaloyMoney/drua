@@ -16,9 +16,7 @@ fn default_output_schema_boxed() -> Box<OutputSchema> {
 use crate::skill::file::slugify;
 use crate::skill::name_from_filename;
 
-use super::definition::{
-    WorkflowChangesetDecl, WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger,
-};
+use super::definition::{SpaceWritesDecl, WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger};
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
 struct WorkflowYaml {
@@ -32,8 +30,14 @@ struct WorkflowYaml {
     model_chain: Option<ModelChain>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     sandboxes: Vec<WorkflowSandboxYaml>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    changeset: Option<WorkflowChangesetDecl>,
+    #[serde(default, skip_serializing_if = "SpaceWritesDecl::is_default")]
+    space_writes: SpaceWritesDecl,
+    /// rev5 D35: rejects a pre-rev5 (`changeset:`) file rather than
+    /// silently dropping the block — `WorkflowYaml` has no
+    /// `deny_unknown_fields`, so an unrecognised key otherwise parses
+    /// clean. Never serialised; `parse_workflow_yaml` errors on `Some`.
+    #[serde(default, skip_serializing)]
+    changeset: Option<serde_yaml::Value>,
     steps: Vec<WorkflowStepYaml>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     created: String,
@@ -436,7 +440,7 @@ pub fn render_workflow_yaml(
     steps: &[WorkflowStepDef],
     sandboxes: &[WorkflowSandboxDecl],
     model_chain: Option<&ModelChain>,
-    changeset: Option<&WorkflowChangesetDecl>,
+    space_writes: &SpaceWritesDecl,
     created_at: &str,
     updated_at: &str,
 ) -> String {
@@ -450,7 +454,8 @@ pub fn render_workflow_yaml(
             .iter()
             .map(WorkflowSandboxYaml::from_runtime)
             .collect(),
-        changeset: changeset.cloned(),
+        space_writes: space_writes.clone(),
+        changeset: None,
         steps: steps.iter().map(WorkflowStepYaml::from_runtime).collect(),
         created: created_at.to_string(),
         updated: updated_at.to_string(),
@@ -470,7 +475,7 @@ pub struct ParsedWorkflow {
     pub steps: Vec<WorkflowStepDef>,
     pub sandboxes: Vec<WorkflowSandboxDecl>,
     pub model_chain: Option<ModelChain>,
-    pub changeset: Option<WorkflowChangesetDecl>,
+    pub space_writes: SpaceWritesDecl,
     pub created_at: String,
     pub updated_at: String,
     pub original_path: String,
@@ -489,6 +494,13 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
     }
 
     let yaml: WorkflowYaml = serde_yaml::from_str(trimmed).ok()?;
+    if yaml.changeset.is_some() {
+        tracing::warn!(
+            path,
+            "workflow YAML uses the pre-rev5 `changeset:` block, replaced by `space_writes:`; refusing to import"
+        );
+        return None;
+    }
 
     let (workflow_id, has_id) = match yaml.id {
         Some(uuid) => (WorkflowDefinitionId::from(uuid), true),
@@ -535,7 +547,7 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
 
     let description = yaml.description;
     let model_chain = yaml.model_chain;
-    let changeset = yaml.changeset;
+    let space_writes = yaml.space_writes;
 
     let rendered = render_workflow_yaml(
         workflow_id,
@@ -545,7 +557,7 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
         &steps,
         &sandboxes,
         model_chain.as_ref(),
-        changeset.as_ref(),
+        &space_writes,
         &yaml.created,
         &yaml.updated,
     );
@@ -562,7 +574,7 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
         steps,
         sandboxes,
         model_chain,
-        changeset,
+        space_writes,
         created_at: yaml.created,
         updated_at: yaml.updated,
         original_path: path.to_string(),
@@ -596,6 +608,7 @@ pub fn project_name_from_workflow_path(relative_path: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::definition::{SpaceWritesFailure, SpaceWritesMessage, SpaceWritesMode};
     use super::*;
 
     fn sample_steps() -> Vec<WorkflowStepDef> {
@@ -634,7 +647,7 @@ mod tests {
             &sample_steps(),
             sandboxes,
             None,
-            None,
+            &SpaceWritesDecl::default(),
             "2026-04-29T00:00:00Z",
             "2026-04-29T00:00:00Z",
         )
@@ -705,15 +718,65 @@ mod tests {
         ));
     }
 
+    /// rev5 D35: `space_writes:` round-trips for all three modes, with
+    /// a `message` block on the two that accept one.
     #[test]
-    fn workflow_yaml_roundtrip_preserves_changeset_block() {
+    fn workflow_yaml_roundtrip_preserves_space_writes_block() {
+        for decl in [
+            SpaceWritesDecl {
+                mode: SpaceWritesMode::Merge,
+                on_failure: SpaceWritesFailure::Keep,
+                message: Some(SpaceWritesMessage {
+                    title: "curate: ${{ trigger.date }}".to_string(),
+                    body: None,
+                }),
+            },
+            SpaceWritesDecl {
+                mode: SpaceWritesMode::OpenPr,
+                on_failure: SpaceWritesFailure::Discard,
+                message: Some(SpaceWritesMessage {
+                    title: "${{ steps.proofread.outputs.pr_title }}".to_string(),
+                    body: Some("${{ steps.proofread.outputs.pr_body }}".to_string()),
+                }),
+            },
+            SpaceWritesDecl {
+                mode: SpaceWritesMode::ReadOnly,
+                on_failure: SpaceWritesFailure::Keep,
+                message: None,
+            },
+        ] {
+            let id = WorkflowDefinitionId::new();
+            let content = render_workflow_yaml(
+                id,
+                "curate-dev-spaces",
+                None,
+                &WorkflowTrigger::Manual { condition: None },
+                &sample_steps(),
+                &[],
+                None,
+                &decl,
+                "2026-09-26T00:00:00Z",
+                "2026-09-26T00:00:00Z",
+            );
+            assert!(content.contains("space_writes:"), "got: {content}");
+
+            let path = canonical_workflow_path("curate-dev-spaces", None);
+            let parsed = parse_workflow_yaml(&content, &path).expect("parses");
+            assert_eq!(parsed.space_writes, decl, "mode {:?}", decl.mode);
+        }
+    }
+
+    /// A `message` without `body` serialises without the key at all.
+    #[test]
+    fn workflow_yaml_message_without_body_omits_key() {
         let id = WorkflowDefinitionId::new();
-        let decl = WorkflowChangesetDecl {
-            title: "curate(${{ trigger.payload.space }}): file and relink".to_string(),
-            description: Some("auto-curation pass".to_string()),
-            on_success: super::super::definition::ChangesetExit::Publish,
-            on_failure: super::super::definition::ChangesetFailureExit::Keep,
-            allow_land: true,
+        let decl = SpaceWritesDecl {
+            mode: SpaceWritesMode::Merge,
+            on_failure: SpaceWritesFailure::Keep,
+            message: Some(SpaceWritesMessage {
+                title: "curate: ${{ trigger.date }}".to_string(),
+                body: None,
+            }),
         };
         let content = render_workflow_yaml(
             id,
@@ -723,60 +786,53 @@ mod tests {
             &sample_steps(),
             &[],
             None,
-            Some(&decl),
-            "2026-09-24T00:00:00Z",
-            "2026-09-24T00:00:00Z",
+            &decl,
+            "2026-09-26T00:00:00Z",
+            "2026-09-26T00:00:00Z",
         );
-        assert!(content.contains("changeset:"));
-        assert!(content.contains("allow_land: true"));
-
-        let path = canonical_workflow_path("curate-dev-spaces", None);
-        let parsed = parse_workflow_yaml(&content, &path).expect("parses");
-        let parsed_decl = parsed.changeset.expect("changeset round-trips");
-        assert_eq!(parsed_decl.title, decl.title);
-        assert_eq!(parsed_decl.description, decl.description);
-        assert_eq!(parsed_decl.on_success, decl.on_success);
-        assert_eq!(parsed_decl.on_failure, decl.on_failure);
-        assert!(parsed_decl.allow_land);
+        assert!(!content.contains("body:"), "got: {content}");
     }
 
-    /// rev2 §7.1: `on_success`/`on_failure`/`allow_land` all default
-    /// when the block is present but sparse — a bare `changeset:
-    /// {title: "..."}`.
+    /// Default `space_writes:` block (`merge`/`keep`/no message) is
+    /// omitted entirely on serialise — byte-identical round-trip for
+    /// every pre-rev5 workflow.
     #[test]
-    fn workflow_yaml_changeset_block_defaults_are_publish_discard_no_land() {
-        let decl: WorkflowChangesetDecl =
-            serde_yaml::from_str("title: \"a draft\"\n").expect("parses sparse decl");
-        assert_eq!(
-            decl.on_success,
-            super::super::definition::ChangesetExit::Publish
-        );
-        assert_eq!(
-            decl.on_failure,
-            super::super::definition::ChangesetFailureExit::Discard
-        );
-        assert!(!decl.allow_land);
-    }
-
-    #[test]
-    fn workflow_yaml_omits_changeset_block_when_absent() {
+    fn workflow_yaml_omits_default_space_writes_block() {
         let id = WorkflowDefinitionId::new();
         let content = render_workflow_yaml(
             id,
-            "no-changeset",
+            "no-space-writes",
             None,
             &WorkflowTrigger::Manual { condition: None },
             &sample_steps(),
             &[],
             None,
-            None,
+            &SpaceWritesDecl::default(),
             "2026-09-24T00:00:00Z",
             "2026-09-24T00:00:00Z",
         );
-        assert!(!content.contains("changeset:"));
-        let path = canonical_workflow_path("no-changeset", None);
+        assert!(!content.contains("space_writes:"));
+        let path = canonical_workflow_path("no-space-writes", None);
         let parsed = parse_workflow_yaml(&content, &path).expect("parses");
-        assert!(parsed.changeset.is_none());
+        assert!(parsed.space_writes.is_default());
+    }
+
+    /// A pre-rev5 file using the old `changeset:` block is rejected
+    /// rather than silently parsed with the block dropped.
+    #[test]
+    fn workflow_yaml_rejects_pre_rev5_changeset_block() {
+        let yaml = "\
+name: curate-dev-spaces
+trigger:
+  type: manual
+changeset:
+  title: a draft
+steps:
+  - type: agent_step
+    name: investigate
+    skill: alert-investigator
+";
+        assert!(parse_workflow_yaml(yaml, "workflows/curate-dev-spaces.yml").is_none());
     }
 
     #[test]
@@ -903,7 +959,7 @@ steps:
             &steps,
             &[],
             None,
-            None,
+            &SpaceWritesDecl::default(),
             "2026-05-06T00:00:00Z",
             "2026-05-06T00:00:00Z",
         );

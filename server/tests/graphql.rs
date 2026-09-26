@@ -615,7 +615,7 @@ async fn workflow_definitions_query_exposes_yaml_and_structured_fields() {
             }],
             Vec::new(),
             None,
-            None,
+            drua_core::workflow::SpaceWritesDecl::default(),
         )
         .await
         .expect("create workflow");
@@ -707,7 +707,7 @@ async fn workflow_trigger_mutation_returns_run_or_filtered() {
             steps(),
             Vec::new(),
             None,
-            None,
+            drua_core::workflow::SpaceWritesDecl::default(),
         )
         .await
         .expect("create runnable workflow");
@@ -725,7 +725,7 @@ async fn workflow_trigger_mutation_returns_run_or_filtered() {
             steps(),
             Vec::new(),
             None,
-            None,
+            drua_core::workflow::SpaceWritesDecl::default(),
         )
         .await
         .expect("create filtered workflow");
