@@ -640,14 +640,18 @@ impl SpaceFs {
         )))
     }
 
-    /// Blind overwrite of `space:<slug>/<rel>` with `content`.
+    /// Blind overwrite of `space:<slug>/<rel>` with `content`. Returns
+    /// the D10 stamp computed by the same `resolve` that performed the
+    /// write, so a caller rendering it doesn't need a second `resolve`
+    /// afterward — which would see the draft this call just lazily
+    /// created and report `just_started: false` (bugbot 2026-09-26).
     #[instrument(name = "library.space_fs.write_file", skip(self, sub, content))]
     pub async fn write_file(
         &self,
         sub: &AuthSubject,
         path: &str,
         content: String,
-    ) -> Result<Option<()>, ProjectError> {
+    ) -> Result<Option<String>, ProjectError> {
         let Some(resolved) = self.resolve(sub, path, Intent::Write).await? else {
             return Ok(None);
         };
@@ -667,7 +671,7 @@ impl SpaceFs {
             .map_err(|e| -> ProjectError { e.into() })?;
         self.record_write(&resolved.target, oid, "write_file", &resolved.rel_path)
             .await?;
-        Ok(Some(()))
+        Ok(Some(resolved.stamp))
     }
 
     /// `text_editor` `str_replace`. The unique-occurrence check happens
@@ -683,7 +687,7 @@ impl SpaceFs {
         path: &str,
         old_str: String,
         new_str: String,
-    ) -> Result<Option<()>, ProjectError> {
+    ) -> Result<Option<String>, ProjectError> {
         let Some(resolved) = self.resolve(sub, path, Intent::Write).await? else {
             return Ok(None);
         };
@@ -704,7 +708,7 @@ impl SpaceFs {
             .map_err(|e| -> ProjectError { e.into() })?;
         self.record_write(&resolved.target, oid, "str_replace", &resolved.rel_path)
             .await?;
-        Ok(Some(()))
+        Ok(Some(resolved.stamp))
     }
 
     /// `text_editor` `insert`. Insertion happens at the worker against
@@ -716,7 +720,7 @@ impl SpaceFs {
         path: &str,
         line_number: usize,
         text: String,
-    ) -> Result<Option<()>, ProjectError> {
+    ) -> Result<Option<String>, ProjectError> {
         let Some(resolved) = self.resolve(sub, path, Intent::Write).await? else {
             return Ok(None);
         };
@@ -737,7 +741,7 @@ impl SpaceFs {
             .map_err(|e| -> ProjectError { e.into() })?;
         self.record_write(&resolved.target, oid, "insert", &resolved.rel_path)
             .await?;
-        Ok(Some(()))
+        Ok(Some(resolved.stamp))
     }
 
     /// Removes the file at `space:<slug>/<rel>`. Success even if the
@@ -747,7 +751,7 @@ impl SpaceFs {
         &self,
         sub: &AuthSubject,
         path: &str,
-    ) -> Result<Option<()>, ProjectError> {
+    ) -> Result<Option<String>, ProjectError> {
         let Some(resolved) = self.resolve(sub, path, Intent::Write).await? else {
             return Ok(None);
         };
@@ -766,7 +770,7 @@ impl SpaceFs {
             .map_err(|e| -> ProjectError { e.into() })?;
         self.record_write(&resolved.target, oid, "delete_file", &resolved.rel_path)
             .await?;
-        Ok(Some(()))
+        Ok(Some(resolved.stamp))
     }
 
     /// Renames `from` → `to` within a single space. `Ok(None)` only when
@@ -779,7 +783,7 @@ impl SpaceFs {
         sub: &AuthSubject,
         from: &str,
         to: &str,
-    ) -> Result<Option<()>, ProjectError> {
+    ) -> Result<Option<String>, ProjectError> {
         let from_is_space = Self::is_space_path(from);
         let to_is_space = Self::is_space_path(to);
         if !from_is_space && !to_is_space {
@@ -850,7 +854,7 @@ impl SpaceFs {
             .map_err(|e| -> ProjectError { e.into() })?;
         self.record_write(&from_resolved.target, oid, "move_file", &to_rel)
             .await?;
-        Ok(Some(()))
+        Ok(Some(from_resolved.stamp))
     }
 
     /// Glob walk across the space's tree. Pattern is the standard

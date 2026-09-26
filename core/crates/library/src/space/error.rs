@@ -51,17 +51,22 @@ pub enum SpaceError {
     ChangesetForeign { id: String },
     /// rev3 D9/D15 rule 3: a `Propose`-only subject's direct
     /// `space:<slug>/` write — no `Update`, so there's nothing to fall
-    /// back to but a draft; the message names the exact path form and
-    /// command so the model can self-correct.
+    /// back to but a draft; the message names both remediations (the
+    /// `draft:` path prefix for direct file-tool callers, `target:
+    /// draft` for callers whose only lever is `spaces`/
+    /// `drua_admin_spaces` `edit`, which never sees a raw `draft:`
+    /// prefix in its `path` field) so either kind of caller can
+    /// self-correct (bugbot 2026-09-26).
     #[error(
-        "SpaceError - UseDraft: direct edits to space:{slug}/ are not permitted for this subject; write draft:{slug}/<path> instead — it is staged in your draft and published with `spaces publish-draft`"
+        "SpaceError - UseDraft: direct edits to space:{slug}/ are not permitted for this subject; write draft:{slug}/<path> instead, or pass target: draft to spaces edit / drua_admin_spaces spaces — it is staged in your draft and published with `spaces publish-draft`"
     )]
     UseDraft { slug: String },
     /// rev3 D15: a subject with an open draft may not write
     /// `space:<slug>/` directly — fail closed rather than silently
-    /// landing on `main`, even for a subject that holds `Update`.
+    /// landing on `main`, even for a subject that holds `Update`. See
+    /// `UseDraft`'s doc for why both remediations are named.
     #[error(
-        "SpaceError - DraftOpen: you have an open draft {id} \"{title}\"; write draft:{slug}/<path> to keep staging, or run `spaces publish-draft` / `spaces discard-draft` before writing space:{slug}/ directly"
+        "SpaceError - DraftOpen: you have an open draft {id} \"{title}\"; write draft:{slug}/<path> (or pass target: draft to spaces edit / drua_admin_spaces spaces) to keep staging, or run `spaces publish-draft` / `spaces discard-draft` before writing space:{slug}/ directly"
     )]
     DraftOpen {
         id: String,

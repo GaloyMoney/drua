@@ -45,7 +45,8 @@ pub const SPACE_WRITE_MODE_SENTENCE: &str =
      `spaces start-draft` — and are published with `spaces publish-draft` \
      (landed directly if you hold write authority, otherwise as a GitHub PR). \
      Direct writes to space:<slug>/ are accepted only with write authority \
-     and no open draft.\n";
+     and no open draft. On `spaces`/`drua_admin_spaces` view/edit, pass \
+     target: draft instead of the draft: prefix.\n";
 
 #[derive(Clone)]
 pub struct SpaceMounts {

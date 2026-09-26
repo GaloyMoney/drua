@@ -559,7 +559,7 @@ impl Changesets {
                 op: "submit",
             });
         }
-        if cs.commit_count() == 0 {
+        if !cs.has_commits() {
             return Err(ChangesetError::Empty { id });
         }
 
@@ -643,8 +643,10 @@ impl Changesets {
         // land any `Open` draft directly, and a YAML `changeset:` block
         // pre-creates the run's draft before any step writes to it — so
         // without this, an unused draft's `publish` would land a no-op
-        // merge commit on `main` (bugbot 2026-09-25).
-        if cs.commit_count() == 0 {
+        // merge commit on `main` (bugbot 2026-09-25). Uses `has_commits`,
+        // not `commit_count`, so a cleanly rebased draft with real prior
+        // content isn't rejected as empty (bugbot 2026-09-26).
+        if !cs.has_commits() {
             return Err(ChangesetError::Empty { id });
         }
 

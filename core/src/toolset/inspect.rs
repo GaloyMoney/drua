@@ -167,27 +167,27 @@ pub(crate) async fn dispatch_view(
     };
 
     Ok(CallToolResult::success(vec![Content::text(
-        stamped(space_fs, subject, &space_path, false, text).await,
+        stamped_read(space_fs, subject, &space_path, text).await,
     )]))
 }
 
-/// D10/D19/§5.3: prefixes `text` with the resolved stamp for
-/// `space_path`, so every `spaces`/`drua_admin_spaces` `view`/`edit`
-/// result carries it — not just the direct file tools' own
-/// `SpaceFs::resolve`-backed callers. `write` must match the op that
-/// just ran (`resolved_stamp`'s contract: safe to call before or after
-/// the paired op, never a second write). Falls back to `text`
-/// unstamped if the resolve somehow fails a second time — the op
-/// itself already succeeded, so a stamp lookup failure shouldn't turn
-/// a successful result into an error.
-async fn stamped(
+/// D10/D19/§5.3: prefixes `text` with the resolved stamp for a
+/// `view`-side `space_path`, so every `spaces`/`drua_admin_spaces`
+/// read carries it too — not just the direct file tools' own
+/// `SpaceFs::resolve`-backed callers. Read-only: `dispatch_edit`
+/// doesn't use this — its stamp comes back from the write call itself,
+/// since a second `resolve` here would see the draft a lazy write just
+/// created and under-report it (bugbot 2026-09-26). Falls back to
+/// `text` unstamped if the resolve somehow fails a second time — the
+/// op itself already succeeded, so a stamp lookup failure shouldn't
+/// turn a successful result into an error.
+async fn stamped_read(
     space_fs: &SpaceFs,
     subject: &AuthSubject,
     space_path: &str,
-    write: bool,
     text: String,
 ) -> String {
-    match space_fs.resolved_stamp(subject, space_path, write).await {
+    match space_fs.resolved_stamp(subject, space_path, false).await {
         Ok(Some(stamp)) => format!("{stamp}\n{text}"),
         _ => text,
     }
@@ -223,15 +223,19 @@ pub(crate) async fn dispatch_edit(
             .ok_or_else(|| ToolSetsError::MissingArgument(key.to_string()))
     };
 
-    let (space_path, text) = match op {
+    // Each arm's `stamp` comes from the very `resolve` that performed
+    // the write, not a second one after the fact — re-resolving here
+    // would see the draft a lazy first write just created and report
+    // `just_started: false`, losing the "started" stamp (bugbot
+    // 2026-09-26; see `SpaceFs::write_file`'s doc).
+    let (text, stamp) = match op {
         EditOp::Write => {
             let path = str_arg("path")?;
             let content = str_arg("content")?;
             let space_path = format!("{scheme}:{slug}/{path}");
             let result = space_fs.write_file(subject, &space_path, content).await?;
-            require_space_op(result, "write")?;
-            let text = format!("Wrote {space_path}");
-            (space_path, text)
+            let stamp = require_space_op(result, "write")?;
+            (format!("Wrote {space_path}"), stamp)
         }
         EditOp::StrReplace => {
             let path = str_arg("path")?;
@@ -241,9 +245,8 @@ pub(crate) async fn dispatch_edit(
             let result = space_fs
                 .str_replace(subject, &space_path, old_str, new_str)
                 .await?;
-            require_space_op(result, "str_replace")?;
-            let text = format!("Replaced in {space_path}");
-            (space_path, text)
+            let stamp = require_space_op(result, "str_replace")?;
+            (format!("Replaced in {space_path}"), stamp)
         }
         EditOp::Insert => {
             let path = str_arg("path")?;
@@ -258,17 +261,15 @@ pub(crate) async fn dispatch_edit(
             let result = space_fs
                 .insert_line(subject, &space_path, line as usize, text)
                 .await?;
-            require_space_op(result, "insert")?;
-            let text = format!("Inserted into {space_path}");
-            (space_path, text)
+            let stamp = require_space_op(result, "insert")?;
+            (format!("Inserted into {space_path}"), stamp)
         }
         EditOp::Delete => {
             let path = str_arg("path")?;
             let space_path = format!("{scheme}:{slug}/{path}");
             let result = space_fs.delete_file(subject, &space_path).await?;
-            require_space_op(result, "delete")?;
-            let text = format!("Deleted {space_path}");
-            (space_path, text)
+            let stamp = require_space_op(result, "delete")?;
+            (format!("Deleted {space_path}"), stamp)
         }
         EditOp::Move => {
             let from = str_arg("from")?;
@@ -276,25 +277,20 @@ pub(crate) async fn dispatch_edit(
             let from_path = format!("{scheme}:{slug}/{from}");
             let to_path = format!("{scheme}:{slug}/{to}");
             let result = space_fs.move_file(subject, &from_path, &to_path).await?;
-            require_space_op(result, "move")?;
-            let text = format!("Moved {from_path} -> {to_path}");
-            (to_path, text)
+            let stamp = require_space_op(result, "move")?;
+            (format!("Moved {from_path} -> {to_path}"), stamp)
         }
     };
 
-    Ok(CallToolResult::success(vec![Content::text(
-        stamped(space_fs, subject, &space_path, true, text).await,
-    )]))
+    Ok(CallToolResult::success(vec![Content::text(format!(
+        "{stamp}\n{text}"
+    ))]))
 }
 
 /// Errors `Ok(None)` (empty slug → `parse_space_path` returns None)
 /// as `InvalidArgument` so callers can't silently no-op. Successful
 /// ops just propagate.
-pub(crate) fn require_space_op(result: Option<()>, what: &str) -> Result<(), ToolSetsError> {
-    if result.is_none() {
-        return Err(ToolSetsError::InvalidArgument(format!(
-            "slug must be non-empty for {what}"
-        )));
-    }
-    Ok(())
+pub(crate) fn require_space_op<T>(result: Option<T>, what: &str) -> Result<T, ToolSetsError> {
+    result
+        .ok_or_else(|| ToolSetsError::InvalidArgument(format!("slug must be non-empty for {what}")))
 }

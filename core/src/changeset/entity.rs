@@ -210,6 +210,15 @@ impl Changeset {
         count
     }
 
+    /// Whether there's anything to land. Unlike `commit_count`, this
+    /// survives a rebase: a clean rebase resets `commit_count` to 0
+    /// (it only counts ops since the last `Opened`/`Rebased`) even
+    /// though `head_oid` still differs from `base_oid` for a draft
+    /// with real prior content (bugbot 2026-09-26).
+    pub fn has_commits(&self) -> bool {
+        self.head_oid != self.base_oid
+    }
+
     fn invalid_transition(&self, op: &'static str) -> ChangesetError {
         ChangesetError::InvalidTransition {
             from: self.status,
@@ -578,6 +587,24 @@ mod tests {
             .unwrap()
             .did_execute();
         assert_eq!(cs.commit_count(), 1);
+    }
+
+    #[test]
+    fn has_commits_survives_a_clean_rebase() {
+        let mut cs = open_changeset();
+        cs.record_commit("bbb...".to_string(), "edit", "a.md")
+            .unwrap()
+            .did_execute();
+        assert!(cs.has_commits());
+
+        cs.rebase("new-main...".to_string(), "squashed...".to_string())
+            .unwrap()
+            .did_execute();
+        assert_eq!(cs.commit_count(), 0, "rebase resets the op count");
+        assert!(
+            cs.has_commits(),
+            "base and head still differ after a rebase that squashed real content"
+        );
     }
 
     #[test]
