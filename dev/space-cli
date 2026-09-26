@@ -67,6 +67,7 @@ Usage: space-cli [--json] [--as ACTOR] <command> [args...]
   spaces draft-status
   spaces list-drafts [STATUS]
   spaces publish-draft [ID]
+  spaces submit-draft TITLE BODY [ID]
   spaces discard-draft [ID] [REASON]
   spaces rebase-draft [ID]
 
@@ -91,6 +92,7 @@ Usage: space-cli [--json] [--as ACTOR] <command> [args...]
   admin draft-status
   admin list-drafts [STATUS]
   admin publish-draft [ID]
+  admin submit-draft TITLE BODY [ID]
   admin discard-draft [ID] [REASON]
   admin rebase-draft [ID]
                                  drua_admin_spaces via call_tool ("spaces" is
@@ -125,9 +127,11 @@ prefix: `space:<slug>/<rel>` (or bare `<slug>/<rel>`) addresses the
 published library — reads always see it; writes need write authority
 (a `--project ID` bootstrap) and no open draft, else `UseDraft`/
 `DraftOpen`. `draft:<slug>/<rel>` always addresses your own draft —
-started on first write or with `spaces start-draft`; publish it with
-`spaces publish-draft` (lands if you hold write authority, else opens a
-PR). The space must be mounted on the token's project first
+started on first write or with `spaces start-draft`; land it with
+`spaces publish-draft` (requires write authority — Forbidden without
+it, no fallback), or send it for review with `spaces submit-draft`
+(opens a GitHub PR; works even if you also hold write authority). The
+space must be mounted on the token's project first
 (`spaces mount`). Env: SPACE_CLI_URL (default http://localhost:4200),
 PG_CON (bootstrap only, default postgres://user:password@localhost:5432/drua),
 SPACE_CLI_TOKEN (skips the token file).
@@ -423,7 +427,7 @@ cmd_mv() {
 # ── spaces ───────────────────────────────────────────────────────────
 
 cmd_spaces() {
-  local sub="${1:?usage: space-cli spaces <list|create|mount|unmount|start-draft|draft-status|list-drafts|publish-draft|discard-draft|rebase-draft> ...}"; shift
+  local sub="${1:?usage: space-cli spaces <list|create|mount|unmount|start-draft|draft-status|list-drafts|publish-draft|submit-draft|discard-draft|rebase-draft> ...}"; shift
   local args
   case "$sub" in
     list)
@@ -452,6 +456,11 @@ cmd_spaces() {
     publish-draft)
       local id="${1:-null}"; [ "$id" = "null" ] || id="\"$id\""
       args="$(jq -n --argjson id "$id" '{command:"publish-draft", id:$id}')" ;;
+    submit-draft)
+      local title="${1:?usage: space-cli spaces submit-draft TITLE BODY [ID]}"
+      local body="${2:?usage: space-cli spaces submit-draft TITLE BODY [ID]}"
+      local id="${3:-null}"; [ "$id" = "null" ] || id="\"$id\""
+      args="$(jq -n --arg title "$title" --arg body "$body" --argjson id "$id" '{command:"submit-draft", title:$title, body:$body, id:$id}')" ;;
     discard-draft)
       local id="${1:-null}"; [ "$id" = "null" ] || id="\"$id\""
       local reason="${2:-null}"; [ "$reason" = "null" ] || reason="\"$reason\""
@@ -488,7 +497,7 @@ cmd_raw() {
 }
 
 cmd_admin() {
-  local first="${1:?usage: space-cli admin <list|create|get|mount|unmount|ls|cat|grep|glob|write|edit|insert|rm|mv|search|start-draft|draft-status|list-drafts|publish-draft|discard-draft|rebase-draft> ... (or: space-cli admin SUBTOOL JSON_ARGS)}"
+  local first="${1:?usage: space-cli admin <list|create|get|mount|unmount|ls|cat|grep|glob|write|edit|insert|rm|mv|search|start-draft|draft-status|list-drafts|publish-draft|submit-draft|discard-draft|rebase-draft> ... (or: space-cli admin SUBTOOL JSON_ARGS)}"
   case "$first" in
     # Other admin subtools keep the raw-JSON-args escape hatch — named
     # explicitly so they don't collide with the (implied) spaces verbs above.
@@ -560,7 +569,7 @@ admin_resolve_path() {
 }
 
 cmd_admin_spaces() {
-  local sub="${1:?usage: space-cli admin <list|create|get|mount|unmount|ls|cat|grep|glob|write|edit|insert|rm|mv|search|start-draft|draft-status|list-drafts|publish-draft|discard-draft|rebase-draft> ...}"; shift
+  local sub="${1:?usage: space-cli admin <list|create|get|mount|unmount|ls|cat|grep|glob|write|edit|insert|rm|mv|search|start-draft|draft-status|list-drafts|publish-draft|submit-draft|discard-draft|rebase-draft> ...}"; shift
   case "$sub" in
     list)
       admin_spaces_call '{"command":"list"}' ;;
@@ -638,6 +647,11 @@ cmd_admin_spaces() {
     publish-draft)
       local id="${1:-null}"; [ "$id" = "null" ] || id="\"$id\""
       admin_spaces_call "$(jq -n --argjson id "$id" '{command:"publish-draft", id:$id}')" ;;
+    submit-draft)
+      local title="${1:?usage: space-cli admin submit-draft TITLE BODY [ID]}"
+      local body="${2:?usage: space-cli admin submit-draft TITLE BODY [ID]}"
+      local id="${3:-null}"; [ "$id" = "null" ] || id="\"$id\""
+      admin_spaces_call "$(jq -n --arg title "$title" --arg body "$body" --argjson id "$id" '{command:"submit-draft", title:$title, body:$body, id:$id}')" ;;
     discard-draft)
       local id="${1:-null}"; [ "$id" = "null" ] || id="\"$id\""
       local reason="${2:-null}"; [ "$reason" = "null" ] || reason="\"$reason\""

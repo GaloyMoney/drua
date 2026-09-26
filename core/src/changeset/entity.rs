@@ -130,6 +130,11 @@ pub enum ChangesetEvent {
         head_oid: String,
         pr_number: u64,
         pr_url: String,
+        /// rev3 addendum A, D23: what `submit-draft` actually sent to
+        /// GitHub — never projected onto `title`/`description`, which
+        /// stay whatever `Opened` set them to.
+        pr_title: String,
+        pr_body: String,
     },
     Applied {
         merge_oid: String,
@@ -163,6 +168,12 @@ pub struct Changeset {
     pub pr_number: Option<u64>,
     #[builder(default)]
     pub pr_url: Option<String>,
+    /// rev3 addendum A, D23: the title/body actually sent to GitHub by
+    /// `submit-draft` — distinct from `title`/`description`.
+    #[builder(default)]
+    pub pr_title: Option<String>,
+    #[builder(default)]
+    pub pr_body: Option<String>,
     events: EntityEvents<ChangesetEvent>,
 }
 
@@ -275,6 +286,8 @@ impl Changeset {
         head_oid: String,
         pr_number: u64,
         pr_url: String,
+        pr_title: String,
+        pr_body: String,
     ) -> Result<Idempotent<()>, ChangesetError> {
         idempotency_guard!(
             self.events.iter_all().rev(),
@@ -287,10 +300,14 @@ impl Changeset {
         self.head_oid = head_oid.clone();
         self.pr_number = Some(pr_number);
         self.pr_url = Some(pr_url.clone());
+        self.pr_title = Some(pr_title.clone());
+        self.pr_body = Some(pr_body.clone());
         self.events.push(ChangesetEvent::Submitted {
             head_oid,
             pr_number,
             pr_url,
+            pr_title,
+            pr_body,
         });
         Ok(Idempotent::Executed(()))
     }
@@ -422,11 +439,15 @@ impl TryFromEvents<ChangesetEvent> for Changeset {
                     head_oid,
                     pr_number,
                     pr_url,
+                    pr_title,
+                    pr_body,
                 } => {
                     builder = builder
                         .head_oid(head_oid.clone())
                         .pr_number(Some(*pr_number))
-                        .pr_url(Some(pr_url.clone()));
+                        .pr_url(Some(pr_url.clone()))
+                        .pr_title(Some(pr_title.clone()))
+                        .pr_body(Some(pr_body.clone()));
                     status = ChangesetStatus::Submitted;
                 }
                 ChangesetEvent::Applied { .. } => {
@@ -625,19 +646,31 @@ mod tests {
             .unwrap()
             .did_execute();
         assert!(cs
-            .submit("bbb...".into(), 42, "https://github.com/x/y/pull/42".into())
+            .submit(
+                "bbb...".into(),
+                42,
+                "https://github.com/x/y/pull/42".into(),
+                "t".into(),
+                "b".into(),
+            )
             .unwrap()
             .did_execute());
         assert_eq!(cs.status, ChangesetStatus::Submitted);
         assert_eq!(cs.pr_number, Some(42));
         assert_eq!(cs.pr_url.as_deref(), Some("https://github.com/x/y/pull/42"));
+        assert_eq!(cs.pr_title.as_deref(), Some("t"));
+        assert_eq!(cs.pr_body.as_deref(), Some("b"));
     }
 
     #[test]
     fn submit_is_idempotent_against_retry() {
         let mut cs = open_changeset();
-        cs.submit("h".into(), 1, "u".into()).unwrap().did_execute();
-        let outcome = cs.submit("h2".into(), 2, "u2".into()).unwrap();
+        cs.submit("h".into(), 1, "u".into(), "t".into(), "b".into())
+            .unwrap()
+            .did_execute();
+        let outcome = cs
+            .submit("h2".into(), 2, "u2".into(), "t2".into(), "b2".into())
+            .unwrap();
         assert!(matches!(outcome, Idempotent::AlreadyApplied));
         // The first submit's values stick — a retry doesn't clobber them.
         assert_eq!(cs.pr_number, Some(1));
@@ -647,7 +680,7 @@ mod tests {
     fn submit_rejected_when_not_open() {
         let mut cs = open_changeset();
         cs.discard(None).unwrap().did_execute();
-        let outcome = cs.submit("h".into(), 1, "u".into());
+        let outcome = cs.submit("h".into(), 1, "u".into(), "t".into(), "b".into());
         assert!(matches!(
             outcome,
             Err(ChangesetError::InvalidTransition { op: "submit", .. })
@@ -667,7 +700,9 @@ mod tests {
     #[test]
     fn apply_transitions_submitted_to_applied() {
         let mut cs = open_changeset();
-        cs.submit("h".into(), 1, "u".into()).unwrap().did_execute();
+        cs.submit("h".into(), 1, "u".into(), "t".into(), "b".into())
+            .unwrap()
+            .did_execute();
         assert!(cs
             .apply("merge-oid".into(), agent_actor())
             .unwrap()
@@ -699,7 +734,9 @@ mod tests {
     #[test]
     fn mark_merged_from_submitted() {
         let mut cs = open_changeset();
-        cs.submit("h".into(), 1, "u".into()).unwrap().did_execute();
+        cs.submit("h".into(), 1, "u".into(), "t".into(), "b".into())
+            .unwrap()
+            .did_execute();
         assert!(cs.mark_merged("merge-oid".into()).unwrap().did_execute());
         assert_eq!(cs.status, ChangesetStatus::Merged);
     }
@@ -728,7 +765,9 @@ mod tests {
     #[test]
     fn mark_abandoned_from_submitted() {
         let mut cs = open_changeset();
-        cs.submit("h".into(), 1, "u".into()).unwrap().did_execute();
+        cs.submit("h".into(), 1, "u".into(), "t".into(), "b".into())
+            .unwrap()
+            .did_execute();
         assert!(cs.mark_abandoned().unwrap().did_execute());
         assert_eq!(cs.status, ChangesetStatus::Abandoned);
     }
@@ -756,7 +795,9 @@ mod tests {
     #[test]
     fn discard_from_submitted() {
         let mut cs = open_changeset();
-        cs.submit("h".into(), 1, "u".into()).unwrap().did_execute();
+        cs.submit("h".into(), 1, "u".into(), "t".into(), "b".into())
+            .unwrap()
+            .did_execute();
         assert!(cs.discard(None).unwrap().did_execute());
         assert_eq!(cs.status, ChangesetStatus::Discarded);
     }

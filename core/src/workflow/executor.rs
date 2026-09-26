@@ -430,8 +430,8 @@ impl Executor {
         let Some(changesets) = &self.changesets else {
             return;
         };
-        let id = match changesets.open_draft_for_run(run_id).await {
-            Ok(Some(cs)) => cs.id,
+        let cs = match changesets.open_draft_for_run(run_id).await {
+            Ok(Some(cs)) => cs,
             Ok(None) => return,
             Err(e) => {
                 tracing::warn!(
@@ -442,6 +442,7 @@ impl Executor {
                 return;
             }
         };
+        let id = cs.id;
         let sub = AuthSubject::workflow_executor(project_id, workflow_id, run_id);
         let succeeded = run.state == WorkflowRunState::Succeeded;
 
@@ -450,7 +451,18 @@ impl Executor {
                 ChangesetExit::Publish if decl.allow_land => {
                     changesets.apply(&sub, id).await.map(|_| ())
                 }
-                ChangesetExit::Publish => changesets.submit(&sub, id).await.map(|_| ()),
+                // rev3 addendum A D23: no human is typing a title/body
+                // here, so a run's auto-submit derives them from the
+                // draft itself — the same fallback `submit`'s old
+                // caller-side PR body rendering used.
+                ChangesetExit::Publish => {
+                    let title = cs.title.clone();
+                    let body = cs
+                        .description
+                        .clone()
+                        .unwrap_or_else(|| "(no description)".to_string());
+                    changesets.submit(&sub, id, title, body).await.map(|_| ())
+                }
                 ChangesetExit::Keep => Ok(()),
             }
         } else {

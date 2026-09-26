@@ -537,18 +537,28 @@ impl Changesets {
         Ok(cs)
     }
 
-    /// Opens a PR `cs`'s branch → `main` (§7, §10). `Open` only, and
-    /// only when there's something to review (`Empty` on zero
-    /// commits) and it would merge cleanly (`Conflicts` — checked up
-    /// front so a doomed PR is never opened). `PrUnavailable` when the
-    /// library has no GitHub App / isn't a `github.com` remote
-    /// (OQ-14's default: error, not a silent `apply`).
-    #[instrument(name = "domain.changeset.submit", skip(self, sub))]
+    /// Opens a PR `cs`'s branch → `main` (§7, §10; rev3 addendum A
+    /// D21/D23). `Open` only, and only when there's something to
+    /// review (`Empty` on zero commits) and it would merge cleanly
+    /// (`Conflicts` — checked up front so a doomed PR is never
+    /// opened). `PrUnavailable` when the library has no GitHub App /
+    /// isn't a `github.com` remote (OQ-14's default: error, not a
+    /// silent `apply`). `title`/`body` are the caller's own — `submit`
+    /// no longer derives them from `cs.title`/`cs.description`
+    /// (addendum A D23); drua still appends its provenance trailer
+    /// block (`append_pr_trailers`) so a GitHub squash-merge doesn't
+    /// lose it. Requires `Propose` on `Space(None)` — the collection-
+    /// level twin of `apply`'s `Update` check, same reasoning: fail
+    /// before doing any work, not deep inside `check_owner_or_lead`.
+    #[instrument(name = "domain.changeset.submit", skip(self, sub, title, body))]
     pub async fn submit(
         &self,
         sub: &AuthSubject,
         id: ChangesetId,
+        title: String,
+        body: String,
     ) -> Result<Changeset, ChangesetError> {
+        sub.can(AuthVerb::Propose, AuthResource::Space(None))?;
         let mut op = self.repo.begin_op().await?;
         let mut cs = self.repo.find_by_id_in_op(&mut op, id).await?;
         self.check_same_project(sub, &cs)?;
@@ -584,15 +594,14 @@ impl Changesets {
             .library
             .github_app()
             .ok_or(ChangesetError::PrUnavailable)?;
-        let touched = self.touched_files(&cs).await?;
-        let body = render_pr_body(&cs, &touched);
+        let full_body = append_pr_trailers(&body, &cs);
         let pr = github
-            .create_pull(&owner, &repo, &cs.branch(), "main", &cs.title, &body)
+            .create_pull(&owner, &repo, &cs.branch(), "main", &title, &full_body)
             .await?;
 
         let head_oid = cs.head_oid.clone();
         if cs
-            .submit(head_oid, pr.number, pr.html_url.clone())?
+            .submit(head_oid, pr.number, pr.html_url.clone(), title, body)?
             .did_execute()
         {
             self.repo.update_in_op(&mut op, &mut cs).await?;
@@ -604,13 +613,17 @@ impl Changesets {
         Ok(cs)
     }
 
-    /// Merges `cs`'s tip into `main` directly (§7). `Open` or
+    /// Merges `cs`'s tip into `main` directly (§7; rev3 addendum A
+    /// D21/D24 — this is what `publish-draft` calls, exclusively, now
+    /// that `submit-draft` is its own command). `Open` or
     /// `Submitted`; requires the subject to be able to `Update`
     /// `main` at all (per-space `Update` was already required for
     /// every individual write that landed on `main` bypassing a
     /// changeset — this is the collection-level twin of `draft_for`'s
     /// `Propose`-on-`Space(None)` check, for the same "fail before
-    /// doing any work" reason). Closes the PR (best-effort) if one was
+    /// doing any work" reason). Without `Update` this already fails
+    /// closed via `ChangesetError::Authorization` (D24 — no fallback
+    /// to `submit` upstream of this call any more). Closes the PR (best-effort) if one was
     /// open, and deletes the branch — a merge commit without the
     /// `Drua-Projection` trailer, so the reverse-sync importer picks
     /// it up like any human-authored commit.
@@ -1037,44 +1050,25 @@ fn describe_actor(actor: &ChangesetActor) -> String {
     }
 }
 
-/// §10's PR body template — plain markdown, deterministic. Repeating
-/// the trailers here (branch commits already carry them via
-/// `user::commit_attribution`'s trailer loop) is what preserves
-/// provenance through a squash-merge on GitHub's side.
-fn render_pr_body(cs: &Changeset, touched: &[TouchedFile]) -> String {
-    let mut body = match cs.description.as_deref() {
-        Some(d) if !d.is_empty() => d.to_string(),
-        _ => "(no description)".to_string(),
-    };
-    body.push_str("\n\n");
-    let base_short = &cs.base_oid[..cs.base_oid.len().min(8)];
-    body.push_str(&format!(
-        "**Changeset** `{}` · opened by {} · base `{base_short}` · {} commit(s)\n",
-        cs.id,
-        describe_actor(&cs.opened_by),
-        cs.commit_count(),
-    ));
-
-    if !touched.is_empty() {
-        body.push_str("\n| op | path |\n|---|---|\n");
-        for t in touched {
-            let op = match t.kind {
-                TouchedKind::Added => "add",
-                TouchedKind::Modified => "edit",
-                TouchedKind::Deleted => "delete",
-            };
-            body.push_str(&format!("| {op} | space:{}/{} |\n", t.space_slug, t.path));
-        }
+/// §10, rev3 addendum A D23: appends drua's provenance trailer block to
+/// `submit-draft`'s caller-supplied `body` — the same trailers the
+/// branch's own commits already carry via `user::commit_attribution`'s
+/// trailer loop; repeating them here is what preserves provenance
+/// through a squash-merge on GitHub's side, regardless of what the
+/// caller wrote.
+fn append_pr_trailers(body: &str, cs: &Changeset) -> String {
+    let mut out = body.to_string();
+    if !out.ends_with('\n') {
+        out.push('\n');
     }
-
-    body.push_str(&format!("\nDrua-Changeset: {}\n", cs.id));
+    out.push_str(&format!("\nDrua-Changeset: {}\n", cs.id));
     if let Some(run_id) = cs.opened_by.workflow_run_id() {
-        body.push_str(&format!("Drua-Workflow-Run: {run_id}\n"));
+        out.push_str(&format!("Drua-Workflow-Run: {run_id}\n"));
     }
     if let ChangesetActor::User { user_id } = &cs.opened_by {
-        body.push_str(&format!("Drua-Acting-User: {user_id}\n"));
+        out.push_str(&format!("Drua-Acting-User: {user_id}\n"));
     }
-    body
+    out
 }
 
 #[cfg(test)]
@@ -1117,50 +1111,38 @@ mod tests {
     }
 
     #[test]
-    fn pr_body_includes_description_id_and_base() {
+    fn append_pr_trailers_preserves_the_callers_body_and_adds_the_changeset_trailer() {
         let cs = open_changeset();
-        let body = render_pr_body(&cs, &[]);
-        assert!(body.starts_with("moves stale notes into the new effort"));
-        assert!(body.contains(&format!("**Changeset** `{}`", cs.id)));
-        assert!(body.contains("base `aaaaaaaa`"));
-        assert!(body.contains("0 commit(s)"));
-        assert!(body.contains(&format!("Drua-Changeset: {}", cs.id)));
+        let out = append_pr_trailers("my own PR description", &cs);
+        assert!(out.starts_with("my own PR description"));
+        assert!(out.contains(&format!("Drua-Changeset: {}", cs.id)));
     }
 
     #[test]
-    fn pr_body_falls_back_when_no_description() {
+    fn append_pr_trailers_adds_workflow_run_and_acting_user_trailers() {
+        let run_id = WorkflowRunId::new();
         let new = NewChangeset::builder()
             .project_id(Some(ProjectId::new()))
             .title("t")
             .base_oid("a")
-            .opened_by(ChangesetActor::Agent {
-                agent_id: AgentId::new(),
-            })
+            .opened_by(ChangesetActor::WorkflowRun { run_id })
             .build()
             .unwrap();
         let cs = Changeset::try_from_events(new.into_events()).unwrap();
-        let body = render_pr_body(&cs, &[]);
-        assert!(body.starts_with("(no description)"));
-    }
+        let out = append_pr_trailers("body", &cs);
+        assert!(out.contains(&format!("Drua-Workflow-Run: {run_id}")));
 
-    #[test]
-    fn pr_body_lists_touched_files_as_a_table() {
-        let cs = open_changeset();
-        let touched = vec![
-            TouchedFile {
-                space_slug: "docs".to_string(),
-                path: "a.md".to_string(),
-                kind: TouchedKind::Modified,
-            },
-            TouchedFile {
-                space_slug: "docs".to_string(),
-                path: "b.md".to_string(),
-                kind: TouchedKind::Added,
-            },
-        ];
-        let body = render_pr_body(&cs, &touched);
-        assert!(body.contains("| edit | space:docs/a.md |"));
-        assert!(body.contains("| add | space:docs/b.md |"));
+        let user_id = UserId::new();
+        let new = NewChangeset::builder()
+            .project_id(Some(ProjectId::new()))
+            .title("t")
+            .base_oid("a")
+            .opened_by(ChangesetActor::User { user_id })
+            .build()
+            .unwrap();
+        let cs = Changeset::try_from_events(new.into_events()).unwrap();
+        let out = append_pr_trailers("body", &cs);
+        assert!(out.contains(&format!("Drua-Acting-User: {user_id}")));
     }
 
     #[test]

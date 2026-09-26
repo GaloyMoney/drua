@@ -34,19 +34,20 @@ pub enum SpaceMountsError {
 /// truncation footer; agents enumerate the rest via the `spaces` tool.
 const SPACES_BLOCK_LIMIT: usize = 20;
 
-/// rev3 §6.3: the one sentence describing `space:`/`draft:` write mode
-/// for every subject — `render_spaces_block`'s `write_line` and
-/// `whoami`'s `space_write_mode_note` both render this verbatim. There
-/// is no longer a mode to branch on: `space:` fails closed (D15)
-/// rather than resolving differently by authority.
+/// rev3 §6.3 (amended by addendum A): the one sentence describing
+/// `space:`/`draft:` write mode for every subject — `render_spaces_block`'s
+/// `write_line` and `whoami`'s `space_write_mode_note` both render this
+/// verbatim. There is no longer a mode to branch on: `space:` fails
+/// closed (D15) rather than resolving differently by authority.
 pub const SPACE_WRITE_MODE_SENTENCE: &str =
     "Reads of space:<slug>/ paths see the published library. Writes go to \
      draft:<slug>/ — your unpublished draft, started on first write or with \
-     `spaces start-draft` — and are published with `spaces publish-draft` \
-     (landed directly if you hold write authority, otherwise as a GitHub PR). \
-     Direct writes to space:<slug>/ are accepted only with write authority \
-     and no open draft. On `spaces`/`drua_admin_spaces` view/edit, pass \
-     target: draft instead of the draft: prefix.\n";
+     `spaces start-draft`. Land it with `spaces publish-draft` (requires \
+     write authority; Forbidden without it), or send it for review with \
+     `spaces submit-draft` (opens a GitHub PR; works even if you also hold \
+     write authority). Direct writes to space:<slug>/ are accepted only \
+     with write authority and no open draft. On `spaces`/`drua_admin_spaces` \
+     view/edit, pass target: draft instead of the draft: prefix.\n";
 
 #[derive(Clone)]
 pub struct SpaceMounts {

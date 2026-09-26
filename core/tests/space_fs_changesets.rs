@@ -928,3 +928,100 @@ async fn spaces_tool_target_param_and_verb_noun_commands_end_to_end() {
         .expect("b.md landed on main");
     assert_eq!(landed, b"staged\n");
 }
+
+/// rev3 addendum A D21/D24: `publish-draft` means "land," full stop —
+/// a `Propose`-only subject calling it directly (bypassing the fact
+/// that it's schema-visible to every `spaces` caller per D22) must get
+/// an authorization error, never a silent fallback to opening a PR.
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn member_publish_draft_without_update_is_forbidden() {
+    let (app, user) = setup("member_publish_forbidden").await;
+    let agent = project_with_space(&app, &user, "proj-publish-forbidden", "docs").await;
+
+    let spaces = app
+        .toolsets()
+        .top_level_tool_arcs(&agent)
+        .find(|t| t.name() == "spaces")
+        .expect("spaces tool visible to a member");
+
+    spaces
+        .call(
+            &agent,
+            serde_json::json!({
+                "command": "edit", "slug": "docs", "op": "write",
+                "op_args": {"path": "a.md", "content": "staged\n"},
+                "target": "draft",
+            })
+            .as_object()
+            .cloned(),
+        )
+        .await
+        .expect("edit target: draft stages a lazy draft");
+
+    let err = spaces
+        .call(
+            &agent,
+            serde_json::json!({"command": "publish-draft"})
+                .as_object()
+                .cloned(),
+        )
+        .await
+        .expect_err("a Propose-only subject must not be able to land directly");
+    assert!(
+        err.to_string().to_lowercase().contains("forbidden"),
+        "expected a Forbidden/authorization error, got: {err}"
+    );
+}
+
+/// rev3 addendum A D21/D23: `submit-draft` is reachable by any subject
+/// that can draft at all, regardless of `Update` — it opens a PR, it
+/// never lands. The local test fixture has no GitHub App configured,
+/// so a subject that clears the `Propose` gate still ends in
+/// `PrUnavailable`, not `Forbidden` — proving the authorization check
+/// is the `Propose` one, not `Update`, and that `title`/`body` reach
+/// the call (a missing one would fail argument parsing first).
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn member_submit_draft_reaches_pr_unavailable_not_forbidden() {
+    let (app, user) = setup("member_submit_pr_unavailable").await;
+    let agent = project_with_space(&app, &user, "proj-submit-draft", "docs").await;
+
+    let spaces = app
+        .toolsets()
+        .top_level_tool_arcs(&agent)
+        .find(|t| t.name() == "spaces")
+        .expect("spaces tool visible to a member");
+
+    spaces
+        .call(
+            &agent,
+            serde_json::json!({
+                "command": "edit", "slug": "docs", "op": "write",
+                "op_args": {"path": "a.md", "content": "staged\n"},
+                "target": "draft",
+            })
+            .as_object()
+            .cloned(),
+        )
+        .await
+        .expect("edit target: draft stages a lazy draft");
+
+    let err = spaces
+        .call(
+            &agent,
+            serde_json::json!({
+                "command": "submit-draft",
+                "title": "my PR title",
+                "body": "my PR body",
+            })
+            .as_object()
+            .cloned(),
+        )
+        .await
+        .expect_err("no GitHub App is configured in this fixture");
+    assert!(
+        err.to_string().contains("PrUnavailable"),
+        "expected PrUnavailable (proves the Propose gate passed), got: {err}"
+    );
+}

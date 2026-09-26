@@ -289,11 +289,18 @@ enum SpacesCommand {
     /// means every changeset).
     #[serde(rename = "list-drafts")]
     ListDrafts,
-    /// Sends a draft for review or landing — effect resolved by
-    /// authority (an `Admin` always holds `Update`, so this always
-    /// lands). Optional `id` defaults to the admin's own open draft.
+    /// Lands a draft on `main` directly (an `Admin` always holds
+    /// `Update`, so this always succeeds for one; rev3 addendum A
+    /// D21/D24 — no fallback to opening a PR). Optional `id` defaults
+    /// to the admin's own open draft.
     #[serde(rename = "publish-draft")]
     PublishDraft,
+    /// Opens a GitHub PR for a draft instead of landing it — useful
+    /// even for an admin who could `publish-draft` instead (rev3
+    /// addendum A D21). Required `title`/`body` go straight to the PR
+    /// (D23). Optional `id` defaults to the admin's own open draft.
+    #[serde(rename = "submit-draft")]
+    SubmitDraft,
     /// Closes a draft without landing it. Optional `id`/`reason`.
     #[serde(rename = "discard-draft")]
     DiscardDraft,
@@ -343,10 +350,16 @@ struct SpacesParams {
     limit: Option<usize>,
 
     /// `start-draft`: optional title override (default: derived).
+    /// `submit-draft`: required — the PR's title, sent to GitHub as-is.
     #[serde(default)]
     title: Option<String>,
-    /// `publish-draft`/`discard-draft`/`rebase-draft`: changeset id.
-    /// Optional — defaults to the admin's own open draft.
+    /// `submit-draft` only, required: the PR's body, sent to GitHub
+    /// (with drua's own provenance trailers appended). Recorded on the
+    /// changeset but never overrides its own title/description.
+    #[serde(default)]
+    body: Option<String>,
+    /// `publish-draft`/`submit-draft`/`discard-draft`/`rebase-draft`:
+    /// changeset id. Optional — defaults to the admin's own open draft.
     #[schemars(with = "Option<uuid::Uuid>")]
     #[serde(default)]
     id: Option<crate::primitives::ChangesetId>,
@@ -868,10 +881,12 @@ static TOOLS: &[ToolDef] = &[
                        `spaces/<slug>/` in the knowledge-base repo. Reads of \
                        `space:<slug>/` paths see the published library. Writes go \
                        to `draft:<slug>/` — your unpublished draft, started on \
-                       first write or with `start-draft` — and are published with \
-                       `publish-draft` (landed directly, since an admin always \
-                       holds write authority). Direct writes to `space:<slug>/` \
-                       are accepted only with no open draft. Commands: \
+                       first write or with `start-draft` — and are landed with \
+                       `publish-draft` (an admin always holds write authority, \
+                       so this always succeeds) or sent for review with \
+                       `submit-draft` (opens a GitHub PR instead). Direct writes \
+                       to `space:<slug>/` are accepted only with no open draft. \
+                       Commands: \
                        `create` (requires `slug`, optional `description`; the space \
                        is created unmounted — pair with `mount` to attach), \
                        `list` (no args; every space in the library), \
@@ -896,9 +911,13 @@ static TOOLS: &[ToolDef] = &[
                        `list-drafts` (changesets the admin can see, newest first; \
                        optional `status` filter and optional `project_id` filter — \
                        omitted means every changeset), \
-                       `publish-draft` (sends a draft for review or landing — an \
-                       admin always lands; optional `id` defaults to the admin's \
-                       own open draft), \
+                       `publish-draft` (lands a draft on `main` directly; an \
+                       admin always holds write authority, so this always \
+                       succeeds; optional `id` defaults to the admin's own open \
+                       draft), \
+                       `submit-draft` (opens a GitHub PR for a draft instead of \
+                       landing it; required `title`/`body` go straight to the \
+                       PR; optional `id` defaults to the admin's own open draft), \
                        `discard-draft` (closes a draft without landing it; \
                        optional `id`/`reason`), \
                        `rebase-draft` (moves a draft onto current `main`, \
@@ -1449,22 +1468,29 @@ impl AdminToolSet {
             SpacesCommand::PublishDraft => {
                 Audit::record_action("spaces.publish_draft");
                 let id = self.resolve_draft_id(subject, params.id).await?;
-                // rev2 D6: one verb, effect resolved by authority — a
-                // bare `Admin` always holds `Update`, so this always lands.
-                let can_land = subject
-                    .can(AuthVerb::Update, AuthResource::Space(None))
-                    .is_ok();
-                let text = if can_land {
-                    let (cs, merge_oid) = self.changesets.apply(subject, id).await?;
-                    format!("Changeset {} landed as {merge_oid}.", cs.id)
-                } else {
-                    let cs = self.changesets.submit(subject, id).await?;
-                    format!(
-                        "Changeset {} submitted.\n  PR: {}",
-                        cs.id,
-                        cs.pr_url.as_deref().unwrap_or("(unknown)"),
-                    )
-                };
+                // rev3 addendum A D21/D24: lands only. `apply` itself
+                // enforces `Update` on `Space(None)` and fails closed
+                // (Forbidden) without it — no fallback to `submit`.
+                let (cs, merge_oid) = self.changesets.apply(subject, id).await?;
+                let text = format!("Changeset {} landed as {merge_oid}.", cs.id);
+                Ok(CallToolResult::success(vec![Content::text(text)]))
+            }
+
+            SpacesCommand::SubmitDraft => {
+                Audit::record_action("spaces.submit_draft");
+                let id = self.resolve_draft_id(subject, params.id).await?;
+                let title = params
+                    .title
+                    .ok_or_else(|| ToolSetsError::MissingArgument("title".to_string()))?;
+                let body = params
+                    .body
+                    .ok_or_else(|| ToolSetsError::MissingArgument("body".to_string()))?;
+                let cs = self.changesets.submit(subject, id, title, body).await?;
+                let text = format!(
+                    "Changeset {} submitted.\n  PR: {}",
+                    cs.id,
+                    cs.pr_url.as_deref().unwrap_or("(unknown)"),
+                );
                 Ok(CallToolResult::success(vec![Content::text(text)]))
             }
 
@@ -1491,8 +1517,8 @@ impl AdminToolSet {
     }
 
     /// `id` if given; else the admin's own open draft. Shared by
-    /// `publish-draft`/`discard-draft`/`rebase-draft` (rev3 D20 —
-    /// mirrors `SpacesTool::resolve_draft_id`).
+    /// `publish-draft`/`submit-draft`/`discard-draft`/`rebase-draft`
+    /// (rev3 D20 — mirrors `SpacesTool::resolve_draft_id`).
     async fn resolve_draft_id(
         &self,
         sub: &AuthSubject,

@@ -108,15 +108,31 @@ enum SpacesParams {
         #[serde(default)]
         status: Option<ChangesetStatus>,
     },
-    /// Sends a draft for review or landing — effect resolved by
-    /// authority (rev2 D6): a subject holding `Update` on spaces lands
-    /// it on `main`; a `Propose`-only subject opens a GitHub PR.
-    /// `id` defaults to the caller's own open draft; leads/admins may
-    /// pass another context's draft id. Replaces rev2's `publish`.
+    /// Lands a draft on `main` directly. Requires `Update` on spaces;
+    /// `Forbidden` without it — no fallback to opening a PR (rev3
+    /// addendum A D21/D24; replaces the old authority-resolved
+    /// `publish-draft`, which is now `submit-draft` for a subject that
+    /// only holds `Propose`). `id` defaults to the caller's own open
+    /// draft; leads/admins may pass another context's draft id.
     #[serde(rename = "publish-draft")]
     PublishDraft {
         #[serde(default)]
         id: Option<ChangesetId>,
+    },
+    /// Opens a GitHub PR for a draft instead of landing it. Requires
+    /// only `Propose`, so it's reachable even by a subject that also
+    /// holds `Update` and could `publish-draft` instead (rev3 addendum
+    /// A D21). `title`/`body` are required — they go straight to the
+    /// PR, and are recorded on the changeset (`Submitted.pr_title`/
+    /// `pr_body`) without touching the draft's own `title`/
+    /// `description` (D23). `id` defaults to the caller's own open
+    /// draft.
+    #[serde(rename = "submit-draft")]
+    SubmitDraft {
+        #[serde(default)]
+        id: Option<ChangesetId>,
+        title: String,
+        body: String,
     },
     /// Closes a draft without landing it. `id` defaults to the
     /// caller's own open draft. Replaces rev2's `discard`.
@@ -151,6 +167,7 @@ impl SpacesParams {
             Self::DraftStatus => "draft-status",
             Self::ListDrafts { .. } => "list-drafts",
             Self::PublishDraft { .. } => "publish-draft",
+            Self::SubmitDraft { .. } => "submit-draft",
             Self::DiscardDraft { .. } => "discard-draft",
             Self::RebaseDraft { .. } => "rebase-draft",
         }
@@ -284,7 +301,7 @@ static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
         "properties": {
             "command": {
                 "type": "string",
-                "enum": ["create", "mount", "unmount", "list", "view", "edit", "search", "start-draft", "draft-status", "list-drafts", "publish-draft", "discard-draft", "rebase-draft"],
+                "enum": ["create", "mount", "unmount", "list", "view", "edit", "search", "start-draft", "draft-status", "list-drafts", "publish-draft", "submit-draft", "discard-draft", "rebase-draft"],
                 "description": "Which spaces operation to perform."
             },
             "slug": {
@@ -329,11 +346,15 @@ static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "title": {
                 "type": "string",
-                "description": "start-draft only: optional title override (default: derived — 'Draft by <you>')."
+                "description": "start-draft: optional title override (default: derived — 'Draft by <you>'). submit-draft: required — the PR's title, sent to GitHub as-is."
+            },
+            "body": {
+                "type": "string",
+                "description": "submit-draft only, required: the PR's body, sent to GitHub (with drua's own provenance trailers appended). Recorded on the changeset but never overrides its own title/description."
             },
             "id": {
                 "type": "string",
-                "description": "Changeset id (uuid). Optional for publish-draft/discard-draft/rebase-draft — defaults to the caller's own open draft; leads/admins may target another context's draft."
+                "description": "Changeset id (uuid). Optional for publish-draft/submit-draft/discard-draft/rebase-draft — defaults to the caller's own open draft; leads/admins may target another context's draft."
             },
             "status": {
                 "type": "string",
@@ -376,7 +397,8 @@ impl SpacesTool {
     }
 
     /// `id` if given; else the caller's own open draft. Shared by
-    /// `publish`/`discard`/`rebase` (rev2 §6.2).
+    /// `publish-draft`/`submit-draft`/`discard-draft`/`rebase-draft`
+    /// (rev2 §6.2; rev3 addendum A).
     async fn resolve_draft_id(
         &self,
         sub: &AuthSubject,
@@ -447,10 +469,11 @@ impl TopLevelTool for SpacesTool {
          `spaces/<slug>/` in the knowledge-base repo. Reads of `space:<slug>/` \
          paths see the published library. Writes go to `draft:<slug>/` — your \
          unpublished draft, started on first write or with `start-draft` — \
-         and are published with `publish-draft` (landed directly if you hold \
-         write authority, otherwise as a GitHub PR). Direct writes to \
-         `space:<slug>/` are accepted only with write authority and no open \
-         draft. Commands: \
+         and are landed with `publish-draft` (requires write authority) or \
+         sent for review with `submit-draft` (opens a GitHub PR; works for \
+         everyone who can draft, including those who could also \
+         `publish-draft`). Direct writes to `space:<slug>/` are accepted only \
+         with write authority and no open draft. Commands: \
          `create` (requires `slug`, optional `description`; auto-mounts \
          onto the caller's project; leads/admins only), \
          `mount` / `unmount` (requires `slug`; idempotent; leads/admins only), \
@@ -477,9 +500,13 @@ impl TopLevelTool for SpacesTool {
          open draft if you already have one), \
          `draft-status` (your own open draft, or {draft: null}), \
          `list-drafts` (drafts you can see, newest first; optional `status` filter), \
-         `publish-draft` (sends a draft for review or landing — effect \
-         decided by your own write authority, not a choice you make; \
-         optional `id` defaults to your own open draft), \
+         `publish-draft` (lands a draft on `main` directly; requires write \
+         authority — `Forbidden` without it, no fallback; optional `id` \
+         defaults to your own open draft), \
+         `submit-draft` (opens a GitHub PR for a draft instead of landing \
+         it; requires only the authority to draft at all; required `title`, \
+         `body` go straight to the PR; optional `id` defaults to your own \
+         open draft), \
          `discard-draft` (closes a draft without landing it; optional `id`/`reason`), \
          `rebase-draft` (moves a draft onto current `main`, squashing; optional `id`). \
          File ops and search are gated on the slug being mounted on \
@@ -792,40 +819,35 @@ impl TopLevelTool for SpacesTool {
             }
             SpacesParams::PublishDraft { id } => {
                 let id = self.resolve_draft_id(subject, id).await?;
-                // rev2 D6: one verb, effect resolved by authority — not
-                // a choice the caller makes.
-                let can_land = subject
-                    .can(AuthVerb::Update, AuthResource::Space(None))
-                    .is_ok();
-                let (text, out) = if can_land {
-                    let (cs, merge_oid) = self.changesets.apply(subject, id).await?;
-                    (
-                        format!("Changeset {} landed as {merge_oid}.", cs.id),
-                        SpacesOutput {
-                            command: "publish-draft".to_string(),
-                            draft: Some(ChangesetSummary::from(&cs)),
-                            outcome: Some("landed".to_string()),
-                            merge_oid: Some(merge_oid),
-                            ..Default::default()
-                        },
-                    )
-                } else {
-                    let cs = self.changesets.submit(subject, id).await?;
-                    (
-                        format!(
-                            "Changeset {} submitted.\n  PR: {}",
-                            cs.id,
-                            cs.pr_url.as_deref().unwrap_or("(unknown)"),
-                        ),
-                        SpacesOutput {
-                            command: "publish-draft".to_string(),
-                            pr_number: cs.pr_number,
-                            pr_url: cs.pr_url.clone(),
-                            draft: Some(ChangesetSummary::from(&cs)),
-                            outcome: Some("pr_opened".to_string()),
-                            ..Default::default()
-                        },
-                    )
+                // rev3 addendum A D21/D24: lands only. `apply` itself
+                // enforces `Update` on `Space(None)` and fails closed
+                // (Forbidden) without it — no fallback to `submit`.
+                let (cs, merge_oid) = self.changesets.apply(subject, id).await?;
+                let text = format!("Changeset {} landed as {merge_oid}.", cs.id);
+                let out = SpacesOutput {
+                    command: "publish-draft".to_string(),
+                    draft: Some(ChangesetSummary::from(&cs)),
+                    outcome: Some("landed".to_string()),
+                    merge_oid: Some(merge_oid),
+                    ..Default::default()
+                };
+                (text, out)
+            }
+            SpacesParams::SubmitDraft { id, title, body } => {
+                let id = self.resolve_draft_id(subject, id).await?;
+                let cs = self.changesets.submit(subject, id, title, body).await?;
+                let text = format!(
+                    "Changeset {} submitted.\n  PR: {}",
+                    cs.id,
+                    cs.pr_url.as_deref().unwrap_or("(unknown)"),
+                );
+                let out = SpacesOutput {
+                    command: "submit-draft".to_string(),
+                    pr_number: cs.pr_number,
+                    pr_url: cs.pr_url.clone(),
+                    draft: Some(ChangesetSummary::from(&cs)),
+                    outcome: Some("pr_opened".to_string()),
+                    ..Default::default()
                 };
                 (text, out)
             }
