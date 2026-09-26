@@ -449,7 +449,7 @@ impl Executor {
         let result = if succeeded {
             match decl.on_success {
                 ChangesetExit::Publish if decl.allow_land => {
-                    changesets.apply(&sub, id).await.map(|_| ())
+                    changesets.apply(&sub, id, None, None).await.map(|_| ())
                 }
                 // rev3 addendum A D23: no human is typing a title/body
                 // here, so a run's auto-submit derives them from the

@@ -631,12 +631,16 @@ impl Changesets {
     /// only ever lives in the `Applied` event (§3.1's `ChangesetEvent`),
     /// never projected onto a builder field, so the caller (the
     /// `changeset` tool) needs it handed back explicitly rather than
-    /// re-deriving it from history.
+    /// re-deriving it from history. `title`/`body` (rev4 D32) override
+    /// the merge commit's message; `None` falls back to
+    /// `changeset: <draft title>\n\n<description>`.
     #[instrument(name = "domain.changeset.apply", skip(self, sub))]
     pub async fn apply(
         &self,
         sub: &AuthSubject,
         id: ChangesetId,
+        title: Option<String>,
+        body: Option<String>,
     ) -> Result<(Changeset, String), ChangesetError> {
         sub.can(AuthVerb::Update, AuthResource::Space(None))?;
         let mut op = self.repo.begin_op().await?;
@@ -678,10 +682,16 @@ impl Changesets {
 
         let actor = actor_for_subject(sub)?;
         let attribution = self.users.commit_attribution().await;
+        // rev4 D32: an explicit title/body overrides the default
+        // `changeset: <title>` message derived from the draft itself.
         let message = format!(
-            "changeset: {}\n\n{}",
-            cs.title,
-            cs.description.clone().unwrap_or_default(),
+            "{}\n\n{}",
+            title
+                .clone()
+                .unwrap_or_else(|| format!("changeset: {}", cs.title)),
+            body.clone()
+                .or_else(|| cs.description.clone())
+                .unwrap_or_default(),
         );
         let merge_oid = self
             .library
@@ -689,7 +699,10 @@ impl Changesets {
             .await?;
 
         let pr_number = cs.pr_number;
-        if cs.apply(merge_oid.clone(), actor)?.did_execute() {
+        if cs
+            .apply(merge_oid.clone(), actor, title, body)?
+            .did_execute()
+        {
             self.repo.update_in_op(&mut op, &mut cs).await?;
         }
         op.commit().await?;

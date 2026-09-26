@@ -292,7 +292,8 @@ enum SpacesCommand {
     /// Lands a draft on `main` directly (an `Admin` always holds
     /// `Update`, so this always succeeds for one; rev3 addendum A
     /// D21/D24 — no fallback to opening a PR). Optional `id` defaults
-    /// to the admin's own open draft.
+    /// to the admin's own open draft; optional `title`/`body` (rev4
+    /// D32) override the merge commit's message.
     #[serde(rename = "publish-draft")]
     PublishDraft,
     /// Opens a GitHub PR for a draft instead of landing it — useful
@@ -351,11 +352,15 @@ struct SpacesParams {
 
     /// `start-draft`: optional title override (default: derived).
     /// `submit-draft`: required — the PR's title, sent to GitHub as-is.
+    /// `publish-draft`: optional merge-commit title override (default:
+    /// 'changeset: <draft title>').
     #[serde(default)]
     title: Option<String>,
-    /// `submit-draft` only, required: the PR's body, sent to GitHub
-    /// (with drua's own provenance trailers appended). Recorded on the
+    /// `submit-draft`: required — the PR's body, sent to GitHub (with
+    /// drua's own provenance trailers appended); recorded on the
     /// changeset but never overrides its own title/description.
+    /// `publish-draft`: optional merge-commit body override (default:
+    /// the draft's description).
     #[serde(default)]
     body: Option<String>,
     /// `publish-draft`/`submit-draft`/`discard-draft`/`rebase-draft`:
@@ -914,7 +919,8 @@ static TOOLS: &[ToolDef] = &[
                        `publish-draft` (lands a draft on `main` directly; an \
                        admin always holds write authority, so this always \
                        succeeds; optional `id` defaults to the admin's own open \
-                       draft), \
+                       draft; optional `title`/`body` override the merge \
+                       commit's message), \
                        `submit-draft` (opens a GitHub PR for a draft instead of \
                        landing it; required `title`/`body` go straight to the \
                        PR; optional `id` defaults to the admin's own open draft), \
@@ -1471,7 +1477,10 @@ impl AdminToolSet {
                 // rev3 addendum A D21/D24: lands only. `apply` itself
                 // enforces `Update` on `Space(None)` and fails closed
                 // (Forbidden) without it — no fallback to `submit`.
-                let (cs, merge_oid) = self.changesets.apply(subject, id).await?;
+                let (cs, merge_oid) = self
+                    .changesets
+                    .apply(subject, id, params.title, params.body)
+                    .await?;
                 let text = format!("Changeset {} landed as {merge_oid}.", cs.id);
                 Ok(CallToolResult::success(vec![Content::text(text)]))
             }

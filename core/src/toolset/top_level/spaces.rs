@@ -118,6 +118,12 @@ enum SpacesParams {
     PublishDraft {
         #[serde(default)]
         id: Option<ChangesetId>,
+        /// rev4 D32: optional merge-commit title/body override. `None`
+        /// falls back to `changeset: <draft title>\n\n<description>`.
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        body: Option<String>,
     },
     /// Opens a GitHub PR for a draft instead of landing it. Requires
     /// only `Propose`, so it's reachable even by a subject that also
@@ -346,11 +352,11 @@ static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "title": {
                 "type": "string",
-                "description": "start-draft: optional title override (default: derived — 'Draft by <you>'). submit-draft: required — the PR's title, sent to GitHub as-is."
+                "description": "start-draft: optional title override (default: derived — 'Draft by <you>'). submit-draft: required — the PR's title, sent to GitHub as-is. publish-draft: optional merge-commit title (default: 'changeset: <draft title>')."
             },
             "body": {
                 "type": "string",
-                "description": "submit-draft only, required: the PR's body, sent to GitHub (with drua's own provenance trailers appended). Recorded on the changeset but never overrides its own title/description."
+                "description": "submit-draft: required — the PR's body, sent to GitHub (with drua's own provenance trailers appended); recorded on the changeset but never overrides its own title/description. publish-draft: optional merge-commit body (default: the draft's description)."
             },
             "id": {
                 "type": "string",
@@ -502,7 +508,9 @@ impl TopLevelTool for SpacesTool {
          `list-drafts` (drafts you can see, newest first; optional `status` filter), \
          `publish-draft` (lands a draft on `main` directly; requires write \
          authority — `Forbidden` without it, no fallback; optional `id` \
-         defaults to your own open draft), \
+         defaults to your own open draft; optional `title`/`body` override \
+         the merge commit's message, default 'changeset: <draft title>' \
+         plus the draft's description), \
          `submit-draft` (opens a GitHub PR for a draft instead of landing \
          it; requires only the authority to draft at all; required `title`, \
          `body` go straight to the PR; optional `id` defaults to your own \
@@ -817,12 +825,12 @@ impl TopLevelTool for SpacesTool {
                 };
                 (text, out)
             }
-            SpacesParams::PublishDraft { id } => {
+            SpacesParams::PublishDraft { id, title, body } => {
                 let id = self.resolve_draft_id(subject, id).await?;
                 // rev3 addendum A D21/D24: lands only. `apply` itself
                 // enforces `Update` on `Space(None)` and fails closed
                 // (Forbidden) without it — no fallback to `submit`.
-                let (cs, merge_oid) = self.changesets.apply(subject, id).await?;
+                let (cs, merge_oid) = self.changesets.apply(subject, id, title, body).await?;
                 let text = format!("Changeset {} landed as {merge_oid}.", cs.id);
                 let out = SpacesOutput {
                     command: "publish-draft".to_string(),

@@ -66,7 +66,7 @@ Usage: space-cli [--json] [--as ACTOR] <command> [args...]
   spaces start-draft [TITLE] [DESCRIPTION]
   spaces draft-status
   spaces list-drafts [STATUS]
-  spaces publish-draft [ID]
+  spaces publish-draft [ID] [--title T] [--body B]
   spaces submit-draft TITLE BODY [ID]
   spaces discard-draft [ID] [REASON]
   spaces rebase-draft [ID]
@@ -91,7 +91,7 @@ Usage: space-cli [--json] [--as ACTOR] <command> [args...]
   admin start-draft [TITLE] [DESCRIPTION]
   admin draft-status
   admin list-drafts [STATUS]
-  admin publish-draft [ID]
+  admin publish-draft [ID] [--title T] [--body B]
   admin submit-draft TITLE BODY [ID]
   admin discard-draft [ID] [REASON]
   admin rebase-draft [ID]
@@ -454,8 +454,17 @@ cmd_spaces() {
       local status="${1:-null}"; [ "$status" = "null" ] || status="\"$status\""
       args="$(jq -n --argjson status "$status" '{command:"list-drafts", status:$status}')" ;;
     publish-draft)
-      local id="${1:-null}"; [ "$id" = "null" ] || id="\"$id\""
-      args="$(jq -n --argjson id "$id" '{command:"publish-draft", id:$id}')" ;;
+      local id="null" title="null" body="null"
+      if [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; then id="\"$1\""; shift; fi
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --title) title="\"$2\""; shift 2 ;;
+          --body) body="\"$2\""; shift 2 ;;
+          *) die "publish-draft: unknown flag $1" ;;
+        esac
+      done
+      args="$(jq -n --argjson id "$id" --argjson title "$title" --argjson body "$body" \
+        '{command:"publish-draft", id:$id, title:$title, body:$body}')" ;;
     submit-draft)
       local title="${1:?usage: space-cli spaces submit-draft TITLE BODY [ID]}"
       local body="${2:?usage: space-cli spaces submit-draft TITLE BODY [ID]}"
@@ -645,8 +654,17 @@ cmd_admin_spaces() {
       local status="${1:-null}"; [ "$status" = "null" ] || status="\"$status\""
       admin_spaces_call "$(jq -n --argjson status "$status" '{command:"list-drafts", status:$status}')" ;;
     publish-draft)
-      local id="${1:-null}"; [ "$id" = "null" ] || id="\"$id\""
-      admin_spaces_call "$(jq -n --argjson id "$id" '{command:"publish-draft", id:$id}')" ;;
+      local id="null" title="null" body="null"
+      if [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; then id="\"$1\""; shift; fi
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --title) title="\"$2\""; shift 2 ;;
+          --body) body="\"$2\""; shift 2 ;;
+          *) die "publish-draft: unknown flag $1" ;;
+        esac
+      done
+      admin_spaces_call "$(jq -n --argjson id "$id" --argjson title "$title" --argjson body "$body" \
+        '{command:"publish-draft", id:$id, title:$title, body:$body}')" ;;
     submit-draft)
       local title="${1:?usage: space-cli admin submit-draft TITLE BODY [ID]}"
       local body="${2:?usage: space-cli admin submit-draft TITLE BODY [ID]}"

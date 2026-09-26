@@ -139,6 +139,13 @@ pub enum ChangesetEvent {
     Applied {
         merge_oid: String,
         applied_by: ChangesetActor,
+        /// rev4 D32: caller-supplied merge-commit title/body — absent
+        /// for events written before rev4 (`#[serde(default)]` so they
+        /// still hydrate).
+        #[serde(default)]
+        commit_title: Option<String>,
+        #[serde(default)]
+        commit_body: Option<String>,
     },
     Merged {
         merge_oid: String,
@@ -313,10 +320,15 @@ impl Changeset {
     }
 
     /// `Open` or `Submitted` — drua merges the branch into `main` itself.
+    /// `commit_title`/`commit_body` (rev4 D32) are the caller-supplied
+    /// merge-commit title/body; `None` falls back to the draft's own
+    /// title/description.
     pub fn apply(
         &mut self,
         merge_oid: String,
         applied_by: ChangesetActor,
+        commit_title: Option<String>,
+        commit_body: Option<String>,
     ) -> Result<Idempotent<()>, ChangesetError> {
         idempotency_guard!(
             self.events.iter_all().rev(),
@@ -332,6 +344,8 @@ impl Changeset {
         self.events.push(ChangesetEvent::Applied {
             merge_oid,
             applied_by,
+            commit_title,
+            commit_body,
         });
         Ok(Idempotent::Executed(()))
     }
@@ -691,7 +705,7 @@ mod tests {
     fn apply_transitions_open_to_applied() {
         let mut cs = open_changeset();
         assert!(cs
-            .apply("merge-oid".into(), agent_actor())
+            .apply("merge-oid".into(), agent_actor(), None, None)
             .unwrap()
             .did_execute());
         assert_eq!(cs.status, ChangesetStatus::Applied);
@@ -704,7 +718,7 @@ mod tests {
             .unwrap()
             .did_execute();
         assert!(cs
-            .apply("merge-oid".into(), agent_actor())
+            .apply("merge-oid".into(), agent_actor(), None, None)
             .unwrap()
             .did_execute());
         assert_eq!(cs.status, ChangesetStatus::Applied);
@@ -714,7 +728,7 @@ mod tests {
     fn apply_rejected_from_terminal_state() {
         let mut cs = open_changeset();
         cs.discard(None).unwrap().did_execute();
-        let outcome = cs.apply("merge-oid".into(), agent_actor());
+        let outcome = cs.apply("merge-oid".into(), agent_actor(), None, None);
         assert!(matches!(
             outcome,
             Err(ChangesetError::InvalidTransition { op: "apply", .. })
@@ -724,11 +738,56 @@ mod tests {
     #[test]
     fn apply_is_idempotent() {
         let mut cs = open_changeset();
-        cs.apply("merge-oid".into(), agent_actor())
+        cs.apply("merge-oid".into(), agent_actor(), None, None)
             .unwrap()
             .did_execute();
-        let outcome = cs.apply("other-oid".into(), agent_actor()).unwrap();
+        let outcome = cs
+            .apply("other-oid".into(), agent_actor(), None, None)
+            .unwrap();
         assert!(matches!(outcome, Idempotent::AlreadyApplied));
+    }
+
+    #[test]
+    fn apply_records_commit_title_and_body() {
+        let mut cs = open_changeset();
+        cs.apply(
+            "merge-oid".into(),
+            agent_actor(),
+            Some("custom title".into()),
+            Some("custom body".into()),
+        )
+        .unwrap()
+        .did_execute();
+        let recorded = cs.events.iter_all().rev().find_map(|e| match e {
+            ChangesetEvent::Applied {
+                commit_title,
+                commit_body,
+                ..
+            } => Some((commit_title.clone(), commit_body.clone())),
+            _ => None,
+        });
+        assert_eq!(
+            recorded,
+            Some((Some("custom title".into()), Some("custom body".into())))
+        );
+    }
+
+    #[test]
+    fn applied_event_without_commit_title_body_still_hydrates() {
+        let json = serde_json::json!({
+            "type": "applied",
+            "merge_oid": "merge-oid",
+            "applied_by": { "kind": "agent", "agent_id": AgentId::new() }
+        });
+        let event: ChangesetEvent = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            event,
+            ChangesetEvent::Applied {
+                commit_title: None,
+                commit_body: None,
+                ..
+            }
+        ));
     }
 
     #[test]

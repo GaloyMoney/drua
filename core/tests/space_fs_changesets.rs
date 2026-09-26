@@ -449,7 +449,7 @@ async fn apply_on_an_empty_draft_is_rejected() {
         .expect("open changeset");
     assert_eq!(cs.commit_count(), 0);
 
-    let err = match app.changesets().apply(&lead, cs.id).await {
+    let err = match app.changesets().apply(&lead, cs.id, None, None).await {
         Ok(_) => panic!("an empty draft must not be landable"),
         Err(e) => e,
     };
@@ -493,7 +493,7 @@ async fn member_lazy_draft_write_leaves_main_untouched_until_a_lead_lands_it() {
     assert_eq!(draft.commit_count(), 1);
 
     app.changesets()
-        .apply(&lead, draft.id)
+        .apply(&lead, draft.id, None, None)
         .await
         .expect("lead lands the draft");
 
@@ -927,6 +927,60 @@ async fn spaces_tool_target_param_and_verb_noun_commands_end_to_end() {
         .expect("read main")
         .expect("b.md landed on main");
     assert_eq!(landed, b"staged\n");
+
+    // rev4 D32: `publish-draft` with an explicit `title`/`body`
+    // overrides the default `changeset: <title>` merge-commit message.
+    spaces
+        .call(
+            &lead,
+            serde_json::json!({"command": "start-draft", "title": "second draft"})
+                .as_object()
+                .cloned(),
+        )
+        .await
+        .expect("start second draft");
+    spaces
+        .call(
+            &lead,
+            serde_json::json!({
+                "command": "edit", "slug": "docs", "op": "write",
+                "op_args": {"path": "d.md", "content": "second\n"},
+                "target": "draft",
+            })
+            .as_object()
+            .cloned(),
+        )
+        .await
+        .expect("edit target: draft (second)");
+    let res = spaces
+        .call(
+            &lead,
+            serde_json::json!({
+                "command": "publish-draft",
+                "title": "custom merge title",
+                "body": "custom merge body",
+            })
+            .as_object()
+            .cloned(),
+        )
+        .await
+        .expect("publish-draft with title/body");
+    let text = text_of(&res);
+    let merge_oid = text
+        .strip_prefix("Changeset ")
+        .and_then(|s| s.split(" landed as ").nth(1))
+        .and_then(|s| s.strip_suffix('.'))
+        .expect("merge_oid in publish-draft text");
+    let git_log = Command::new("git")
+        .args(["log", "-1", "--format=%B", merge_oid])
+        .current_dir(app.library().repo_path())
+        .output()
+        .expect("git log");
+    let message = String::from_utf8(git_log.stdout).unwrap();
+    assert!(
+        message.starts_with("custom merge title\n\ncustom merge body"),
+        "got: {message}"
+    );
 }
 
 /// rev3 addendum A D21/D24: `publish-draft` means "land," full stop —
