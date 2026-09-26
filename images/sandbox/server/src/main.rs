@@ -183,6 +183,19 @@ async fn validate_path(session: &SharedSession, path: &str) -> Result<PathBuf, S
 /// Pure-fn core of `validate_path` — used by both the async wrapper
 /// and the unit tests so the latter don't need a real `SharedSession`.
 fn validate_path_against(scope: &std::path::Path, path: &str) -> Result<PathBuf, String> {
+    validate_path_against_with_scope(scope, path).map(|(canonical, _)| canonical)
+}
+
+/// Same validation as `validate_path_against`, but also returns the
+/// canonicalized scope root it checked against. Callers that need to
+/// express the result relative to that scope (e.g. `validate_search_path`)
+/// must derive it from this single call rather than re-resolving the
+/// scope separately — resolving it twice reopens a TOCTOU window if the
+/// session's cwd changes between the two resolutions.
+fn validate_path_against_with_scope(
+    scope: &std::path::Path,
+    path: &str,
+) -> Result<(PathBuf, PathBuf), String> {
     let scope_canonical = std::fs::canonicalize(scope)
         .map_err(|e| format!("Cannot resolve scope root '{}': {e}", scope.display()))?;
 
@@ -215,7 +228,7 @@ fn validate_path_against(scope: &std::path::Path, path: &str) -> Result<PathBuf,
             scope.display()
         ));
     }
-    Ok(canonical)
+    Ok((canonical, scope_canonical))
 }
 
 async fn execute_text_editor(
@@ -450,23 +463,51 @@ async fn execute_delete(
     Ok(format!("Deleted {raw_path}"))
 }
 
-async fn validate_search_path(session: &SharedSession, raw_path: &str) -> Result<String, String> {
-    let validated = validate_path(session, raw_path).await?;
+/// Expresses an already-validated path relative to the scope it was
+/// validated against, as a native `PathBuf`. Kept separate from
+/// `validate_search_path` so it can be unit-tested with synthetic,
+/// non-UTF-8 byte sequences without touching a filesystem.
+///
+/// `validated` is expected to come from the same `validate_path_against`
+/// call that produced `scope_canonical`, which guarantees
+/// `validated.starts_with(scope_canonical)`. The `Err` arm below is
+/// therefore defense-in-depth against a caller breaking that invariant
+/// (e.g. pairing paths validated against two different scope snapshots)
+/// rather than a case expected to trigger in practice.
+fn relative_search_path(validated: &Path, scope_canonical: &Path) -> Result<PathBuf, String> {
+    match validated.strip_prefix(scope_canonical) {
+        Ok(relative) if relative.as_os_str().is_empty() => Ok(PathBuf::from(".")),
+        Ok(relative) => Ok(relative.to_path_buf()),
+        Err(_) => Err(format!(
+            "Internal error: validated path '{}' is not under scope '{}'",
+            validated.display(),
+            scope_canonical.display()
+        )),
+    }
+}
 
+/// Resolves `raw_path` the same way `validate_path` does, then returns
+/// it relative to the search scope as a native `PathBuf`. This must stay
+/// a `PathBuf` (or `OsString`) all the way to the `rg` argument: on
+/// Linux a filename can contain bytes that aren't valid UTF-8, and
+/// stringifying here with a lossy conversion would let the argument
+/// handed to `rg` name a different filesystem entry than the one that
+/// was just validated.
+///
+/// Resolves the scope once and reuses it for both validation and the
+/// `strip_prefix` below, rather than re-reading the session's cwd a
+/// second time — the previous two-read version raced a concurrent
+/// `/initialize` or `/attach` call that mutates the session's cwd
+/// between the two reads.
+async fn validate_search_path(session: &SharedSession, raw_path: &str) -> Result<PathBuf, String> {
     let cwd = session.current_cwd().await;
     let scope = if cwd.is_empty() {
         PathBuf::from(workspace_root())
     } else {
         PathBuf::from(cwd)
     };
-    let scope_canonical = std::fs::canonicalize(&scope)
-        .map_err(|e| format!("Cannot resolve scope root '{}': {e}", scope.display()))?;
-
-    Ok(match validated.strip_prefix(&scope_canonical) {
-        Ok(relative) if relative.as_os_str().is_empty() => ".".to_string(),
-        Ok(relative) => relative.to_string_lossy().into_owned(),
-        Err(_) => validated.to_string_lossy().into_owned(),
-    })
+    let (validated, scope_canonical) = validate_path_against_with_scope(&scope, raw_path)?;
+    relative_search_path(&validated, &scope_canonical)
 }
 
 async fn execute_grep(session: &SharedSession, input: serde_json::Value) -> Result<String, String> {
@@ -521,12 +562,15 @@ async fn execute_grep(session: &SharedSession, input: serde_json::Value) -> Resu
 
     let raw_search_path = input.path.unwrap_or_else(|| ".".to_string());
     let search_path = validate_search_path(session, &raw_search_path).await?;
-    args.push(search_path);
 
     let scope = session.current_cwd().await;
     let output = tokio::time::timeout(
         Duration::from_millis(GREP_GLOB_TIMEOUT_MS),
-        Command::new("rg").args(&args).current_dir(&scope).output(),
+        Command::new("rg")
+            .args(&args)
+            .arg(&search_path)
+            .current_dir(&scope)
+            .output(),
     )
     .await
     .map_err(|_| format!("Grep timed out after {GREP_GLOB_TIMEOUT_MS}ms"))?
@@ -568,8 +612,8 @@ async fn execute_glob(session: &SharedSession, input: serde_json::Value) -> Resu
                 "--color=never",
                 &format!("--glob={pattern}", pattern = input.pattern),
                 "--",
-                &search_path,
             ])
+            .arg(&search_path)
             .current_dir(&scope)
             .output(),
     )
@@ -2321,6 +2365,169 @@ mod tests {
             result
         );
         assert!(result.unwrap().contains("foo.rs"));
+    }
+
+    // ── validate_search_path (lossy-conversion bypass of PR #507) ──
+    //
+    // `to_string_lossy()` replaces any byte sequence that isn't valid
+    // UTF-8 with U+FFFD. On Linux that means the string handed to `rg`
+    // can name a different filesystem entry than the `PathBuf` that was
+    // actually validated. `relative_search_path` is the pure core of
+    // that step, so it can be exercised with synthetic non-UTF-8 bytes
+    // without needing a filesystem that can store them (APFS can't).
+
+    #[test]
+    fn relative_search_path_preserves_non_utf8_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let scope = PathBuf::from("/workspace/repo");
+        // 0xff is not a valid standalone UTF-8 byte; a `to_string_lossy()`
+        // conversion would rewrite it to U+FFFD and so name a different
+        // directory entry than the one that was actually validated.
+        let raw_name = std::ffi::OsStr::from_bytes(b"canary-\xffmarker.txt");
+        let validated = scope.join(raw_name);
+
+        let relative =
+            relative_search_path(&validated, &scope).expect("path under scope must resolve");
+
+        assert_eq!(
+            relative.as_os_str().as_bytes(),
+            raw_name.as_bytes(),
+            "the path handed to `rg` must carry the exact validated bytes, not a lossy \
+             re-encoding of them"
+        );
+    }
+
+    #[test]
+    fn relative_search_path_returns_dot_for_scope_root_itself() {
+        let scope = PathBuf::from("/workspace/repo");
+        let relative = relative_search_path(&scope, &scope).unwrap();
+        assert_eq!(relative, PathBuf::from("."));
+    }
+
+    /// `validate_path_against_with_scope` guarantees `validated` is always
+    /// under `scope_canonical`, so this pairing can't arise from a real
+    /// call into `validate_search_path`. It simulates a broken invariant
+    /// to pin down that the fallback for it is a hard error, not the
+    /// silent absolute-path leak the old code returned.
+    #[test]
+    fn relative_search_path_errors_instead_of_falling_back_when_outside_scope() {
+        let scope = PathBuf::from("/workspace/repo");
+        let unrelated = PathBuf::from("/etc/passwd");
+
+        let result = relative_search_path(&unrelated, &scope);
+        assert!(
+            result.is_err(),
+            "a path outside its scope must be a hard error, not a silent fallback: {:?}",
+            result
+        );
+    }
+
+    // End-to-end reproduction of the reported bypass: an in-scope file
+    // with a non-UTF-8 name validates fine, but the old lossy re-encoding
+    // of its name can collide with a second, attacker-planted entry that
+    // is a symlink pointing outside the workspace — so the search reads
+    // that instead. Gated to Linux because APFS (macOS) rejects non-UTF-8
+    // filenames outright, so the fixture can't be created here at all.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn grep_does_not_follow_lossy_encoded_symlink_substitution() {
+        use std::os::unix::ffi::OsStrExt;
+
+        if !rg_available().await {
+            eprintln!("rg not available, skipping");
+            return;
+        }
+
+        let dir = fresh_test_dir("sandbox-test-grep-lossy-escape");
+        let outside = fresh_test_dir("sandbox-test-grep-lossy-outside");
+        let outside_file = PathBuf::from(&outside).join("secret.txt");
+        tokio::fs::write(&outside_file, "TOP_SECRET_OUTSIDE_CONTENT")
+            .await
+            .unwrap();
+
+        // The real, in-scope file: a name containing an invalid UTF-8 byte.
+        let raw_name = std::ffi::OsStr::from_bytes(b"canary-\xffmarker.txt");
+        let real_file = PathBuf::from(&dir).join(raw_name);
+        tokio::fs::write(&real_file, "just an ordinary in-scope file")
+            .await
+            .unwrap();
+
+        // A UTF-8-safe symlink name an agent could legitimately request.
+        let entry_link = PathBuf::from(&dir).join("mylink");
+        std::os::unix::fs::symlink(&real_file, &entry_link).unwrap();
+
+        // The second entry: the exact name the old lossy conversion would
+        // have produced for `raw_name`, but pointing outside the scope.
+        let lossy_name = String::from_utf8_lossy(raw_name.as_bytes()).into_owned();
+        let substituted = PathBuf::from(&dir).join(&lossy_name);
+        std::os::unix::fs::symlink(&outside_file, &substituted).unwrap();
+
+        let session = test_session();
+        session.set_cwd(dir.clone()).await;
+
+        let input = serde_json::json!({
+            "pattern": "SECRET",
+            "path": "mylink",
+            "output_mode": "content"
+        });
+        let result = execute_grep(&session, input).await.unwrap();
+        assert!(
+            !result.contains("TOP_SECRET_OUTSIDE_CONTENT"),
+            "grep must search the validated in-scope file, not the lossy-encoded \
+             substitute symlink pointing outside the workspace: {result:?}"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn glob_does_not_follow_lossy_encoded_symlink_substitution() {
+        use std::os::unix::ffi::OsStrExt;
+
+        if !rg_available().await {
+            eprintln!("rg not available, skipping");
+            return;
+        }
+
+        let dir = fresh_test_dir("sandbox-test-glob-lossy-escape");
+        let outside = fresh_test_dir("sandbox-test-glob-lossy-outside");
+        tokio::fs::write(PathBuf::from(&outside).join("outside-marker.txt"), "x")
+            .await
+            .unwrap();
+
+        // The real, in-scope directory: a name containing an invalid
+        // UTF-8 byte.
+        let raw_name = std::ffi::OsStr::from_bytes(b"canary-\xffdir");
+        let real_dir = PathBuf::from(&dir).join(raw_name);
+        tokio::fs::create_dir_all(&real_dir).await.unwrap();
+        tokio::fs::write(real_dir.join("inside-marker.txt"), "x")
+            .await
+            .unwrap();
+
+        let entry_link = PathBuf::from(&dir).join("mylink");
+        std::os::unix::fs::symlink(&real_dir, &entry_link).unwrap();
+
+        let lossy_name = String::from_utf8_lossy(raw_name.as_bytes()).into_owned();
+        let substituted = PathBuf::from(&dir).join(&lossy_name);
+        std::os::unix::fs::symlink(&outside, &substituted).unwrap();
+
+        let session = test_session();
+        session.set_cwd(dir.clone()).await;
+
+        let input = serde_json::json!({
+            "pattern": "*",
+            "path": "mylink"
+        });
+        let result = execute_glob(&session, input).await.unwrap();
+        assert!(
+            !result.contains("outside-marker.txt"),
+            "glob must list the validated in-scope directory, not the lossy-encoded \
+             substitute symlink pointing outside the workspace: {result:?}"
+        );
+        assert!(
+            result.contains("inside-marker.txt"),
+            "glob should still list the real in-scope directory's contents: {result:?}"
+        );
     }
 
     // ── validate_path (Layer 1 isolation) ─────────────────────────
