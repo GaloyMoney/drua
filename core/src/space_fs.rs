@@ -290,7 +290,7 @@ impl SpaceFs {
         path: &str,
         intent: Intent,
     ) -> Result<Option<Resolved>, ProjectError> {
-        let Some(sref) = parse_space_path(path) else {
+        let Some(mut sref) = parse_space_path(path) else {
             if path.starts_with("space:") || path.starts_with("draft:") {
                 return Err(SpaceError::BadRequest {
                     reason: format!(
@@ -310,6 +310,26 @@ impl SpaceFs {
             }
             .into());
         }
+        // rev4 D25 / rev5 D37: inside a workflow run, `space:` and
+        // `draft:` are the same draft — every step's writes and reads
+        // overlay it. `typed_scheme` is kept only for the stamp, which
+        // should echo the prefix the caller actually typed.
+        let typed_scheme = sref.scheme;
+        let is_run_subject = sub.in_workflow_run();
+        if is_run_subject {
+            if sref.changeset_id.is_some() && intent == Intent::Write {
+                return Err(SpaceError::BadRequest {
+                    reason: format!(
+                        "'{path}': a workflow run writes only its own draft; drop the '@<changeset-id>'"
+                    ),
+                }
+                .into());
+            }
+            if sref.changeset_id.is_none() {
+                sref.scheme = SpaceScheme::Draft;
+            }
+        }
+        let in_run = is_run_subject && sref.changeset_id.is_none();
         let space = self.projects.space_for_subject(sub, sref.slug).await?;
         let rel_path = normalize_rel_path(sref.rel_path);
         Self::validate_rel_path(&rel_path)?;
@@ -317,7 +337,13 @@ impl SpaceFs {
         let differs = self
             .differs_note(sub, &sref, &rel_path, &target, intent)
             .await;
-        let stamp = stamp(sref.scheme, &space.slug, &target, differs.as_deref());
+        let stamp = stamp(
+            typed_scheme,
+            &space.slug,
+            &target,
+            differs.as_deref(),
+            in_run,
+        );
         Ok(Some(Resolved {
             space,
             rel_path,
@@ -383,18 +409,28 @@ impl SpaceFs {
                         None => Ok(Target::Main),
                     };
                 }
-                let had_draft = self
+                match self
                     .changesets
                     .open_draft_for(sub)
                     .await
                     .map_err(map_changeset_err)?
-                    .is_some();
-                let cs = self
-                    .changesets
-                    .draft_for(sub, None, None, Some(sref.rel_path))
-                    .await
-                    .map_err(map_changeset_err)?;
-                self.changeset_target(cs, !had_draft).await
+                {
+                    Some(cs) => self.changeset_target(cs, false).await,
+                    // rev4 D26 / rev5 D37: no lazy creation for a run —
+                    // only the executor's pre-flight opens a run draft.
+                    None if sub.in_workflow_run() => Err(SpaceError::RunReadOnly {
+                        slug: space.slug.clone(),
+                    }
+                    .into()),
+                    None => {
+                        let cs = self
+                            .changesets
+                            .draft_for(sub, None, None, Some(sref.rel_path))
+                            .await
+                            .map_err(map_changeset_err)?;
+                        self.changeset_target(cs, true).await
+                    }
+                }
             }
             SpaceScheme::Space => {
                 if intent != Intent::Write {
@@ -1173,11 +1209,20 @@ fn short_id(id: ChangesetId) -> String {
 /// not just what it means. `differs` (only ever `Some` for a
 /// `space:` read resolved to `Main`) names the caller's own draft when
 /// it has touched the same path — D19's "differs in your draft" form.
-fn stamp(scheme: SpaceScheme, slug: &str, target: &Target, differs: Option<&str>) -> String {
+fn stamp(
+    scheme: SpaceScheme,
+    slug: &str,
+    target: &Target,
+    differs: Option<&str>,
+    in_run: bool,
+) -> String {
     let prefix = scheme.prefix();
     match target {
         // rev3 D9: `draft:` never falls back silently to `main` — a
-        // read with no open draft says so explicitly.
+        // read with no open draft says so explicitly. Never reached
+        // for a run subject (`in_run` writes are `RunReadOnly`, and a
+        // run read with no draft resolves to `Target::Main` via the
+        // normalised `Draft` scheme, caught by the next arm instead).
         Target::Main if scheme == SpaceScheme::Draft => format!("[draft:{slug} · no draft]"),
         Target::Main => match differs {
             Some(id) => format!("[space:{slug} · main · differs in your draft {id}]"),
@@ -1193,6 +1238,15 @@ fn stamp(scheme: SpaceScheme, slug: &str, target: &Target, differs: Option<&str>
                 short_id(*id)
             )
         }
+        // rev4 §7.2: a run subject's overlay draft — never
+        // `just_started` (no lazy creation for runs, D26/D37).
+        Target::Changeset {
+            id, title, touched, ..
+        } if in_run => format!(
+            "[{prefix}:{slug} · run draft {} \"{title}\" · {touched} file{}]",
+            short_id(*id),
+            if *touched == 1 { "" } else { "s" }
+        ),
         // rev3 §5.3: the write that lazily created the draft gets
         // "started" instead of the touched-file count.
         Target::Changeset {
@@ -1659,5 +1713,56 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("non-utf8"), "got: {err}");
+    }
+
+    fn changeset_target(just_started: bool) -> Target {
+        Target::Changeset {
+            id: ChangesetId::new(),
+            tip: "deadbeef".to_string(),
+            status: ChangesetStatus::Open,
+            title: "workflow-fix-typos run ab12cd34".to_string(),
+            touched: 2,
+            just_started,
+        }
+    }
+
+    /// rev4 §7.2: a run subject's overlay draft renders "run draft",
+    /// never "started" (no lazy creation for runs — `just_started` is
+    /// never `true` on a run's own target).
+    #[test]
+    fn stamp_run_draft_form() {
+        let target = changeset_target(false);
+        let s = stamp(SpaceScheme::Space, "docs", &target, None, true);
+        assert!(s.contains("space:docs · run draft "), "got: {s}");
+        assert!(s.contains("2 files"), "got: {s}");
+    }
+
+    /// The stamp echoes the prefix the caller actually typed
+    /// (`typed_scheme`), even though `in_workflow_run()` subjects
+    /// normalise `space:` to `draft:` internally for resolution.
+    #[test]
+    fn stamp_run_draft_preserves_typed_prefix() {
+        let target = changeset_target(false);
+        let s = stamp(SpaceScheme::Draft, "docs", &target, None, true);
+        assert!(s.starts_with("[draft:docs · run draft "), "got: {s}");
+    }
+
+    /// A run subject reading with no draft open sees plain `main` —
+    /// never the "started"/`just_started` form, which a run can't
+    /// reach (no lazy creation).
+    #[test]
+    fn stamp_run_no_draft_is_plain_main() {
+        let s = stamp(SpaceScheme::Space, "docs", &Target::Main, None, true);
+        assert_eq!(s, "[space:docs · main]");
+    }
+
+    /// Non-run callers keep rev3's "started" form for the write that
+    /// lazily created their draft.
+    #[test]
+    fn stamp_non_run_just_started_form_unchanged() {
+        let target = changeset_target(true);
+        let s = stamp(SpaceScheme::Draft, "docs", &target, None, false);
+        assert!(s.contains("started"), "got: {s}");
+        assert!(!s.contains("run draft"), "got: {s}");
     }
 }

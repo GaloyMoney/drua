@@ -174,6 +174,14 @@ impl AuthSubject {
             || (self.is_agent() && !self.is_project_admin())
     }
 
+    /// rev4 D25: a workflow run's steps share one draft for the run's
+    /// lifetime; every `space:` path they touch resolves to it. Uses
+    /// `scopes().contains`, not `has_scope` — `User` claims every scope.
+    pub fn in_workflow_run(&self) -> bool {
+        matches!(self, AuthSubject::WorkflowExecutor(_, _, _, _))
+            || self.scopes().contains(&AuthScope::WorkflowStepAgent)
+    }
+
     /// `SandboxUse` implies read; first match wins.
     pub fn readable_sandbox_id(&self) -> Option<SandboxId> {
         self.scopes().iter().find_map(|s| match s {
@@ -440,5 +448,53 @@ mod workflow_script_tests {
         assert!(Option::<drua_tool_caching::ToolCallOwnerId>::from(&subject).is_none());
         assert!(!AuthScope::WorkflowScript
             .permits(AuthVerb::Read, &AuthResource::Project(Some(project))));
+    }
+
+    #[test]
+    fn workflow_executor_variants_are_in_workflow_run() {
+        let project = ProjectId::new();
+        let run = WorkflowRunId::new();
+        let def = WorkflowDefinitionId::new();
+        assert!(AuthSubject::workflow_executor(project, def, run).in_workflow_run());
+        assert!(AuthSubject::workflow_script(project, def, run).in_workflow_run());
+    }
+
+    #[test]
+    fn agent_with_workflow_step_agent_scope_is_in_workflow_run() {
+        let project = ProjectId::new();
+        let step_agent = AuthSubject::Agent(
+            project,
+            AgentId::new(),
+            vec![
+                AuthScope::ProjectMember(project),
+                AuthScope::WorkflowStepAgent,
+            ],
+        );
+        assert!(step_agent.in_workflow_run());
+    }
+
+    #[test]
+    fn ordinary_subjects_are_not_in_workflow_run() {
+        let project = ProjectId::new();
+        assert!(!AuthSubject::User(UserId::new()).in_workflow_run());
+        assert!(!AuthSubject::Anonymous.in_workflow_run());
+        assert!(!AuthSubject::ExportedAgent(
+            UserId::new(),
+            McpCredsId::new(),
+            vec![AuthScope::Admin]
+        )
+        .in_workflow_run());
+        assert!(!AuthSubject::Agent(
+            project,
+            AgentId::new(),
+            vec![AuthScope::ProjectAdmin(project)],
+        )
+        .in_workflow_run());
+        assert!(!AuthSubject::Agent(
+            project,
+            AgentId::new(),
+            vec![AuthScope::ProjectMember(project)],
+        )
+        .in_workflow_run());
     }
 }

@@ -73,6 +73,11 @@ pub enum SpaceError {
         title: String,
         slug: String,
     },
+    /// rev5 D37: a workflow run whose `space_writes.mode` is `read_only`
+    /// (or whose draft a human already closed). Names the fix for the
+    /// workflow author — the step agent reading this cannot apply it.
+    #[error("SpaceError - RunReadOnly: space:{slug}/ is read-only in this workflow run — set `space_writes.mode` to `merge` or `open_pr` in the workflow definition to let its steps write")]
+    RunReadOnly { slug: String },
 }
 
 impl From<derive_builder::UninitializedFieldError> for SpaceError {
