@@ -879,7 +879,7 @@ async fn spaces_tool_target_param_and_verb_noun_commands_end_to_end() {
         .expect_err("a lead with an open draft must not write target: main directly");
     assert!(err.to_string().contains("DraftOpen"), "got: {err}");
 
-    // `list-drafts` sees it; `publish-draft` lands it (the lead holds
+    // `list-drafts` sees it; `merge-draft` lands it (the lead holds
     // `Update`); `draft-status` then reports no open draft.
     let res = spaces
         .call(
@@ -899,12 +899,12 @@ async fn spaces_tool_target_param_and_verb_noun_commands_end_to_end() {
     let res = spaces
         .call(
             &lead,
-            serde_json::json!({"command": "publish-draft"})
+            serde_json::json!({"command": "merge-draft"})
                 .as_object()
                 .cloned(),
         )
         .await
-        .expect("publish-draft");
+        .expect("merge-draft");
     assert!(text_of(&res).contains("landed"), "got: {}", text_of(&res));
 
     let res = spaces
@@ -928,7 +928,7 @@ async fn spaces_tool_target_param_and_verb_noun_commands_end_to_end() {
         .expect("b.md landed on main");
     assert_eq!(landed, b"staged\n");
 
-    // rev4 D32: `publish-draft` with an explicit `title`/`body`
+    // rev4 D32: `merge-draft` with an explicit `title`/`body`
     // overrides the default `changeset: <title>` merge-commit message.
     spaces
         .call(
@@ -956,7 +956,7 @@ async fn spaces_tool_target_param_and_verb_noun_commands_end_to_end() {
         .call(
             &lead,
             serde_json::json!({
-                "command": "publish-draft",
+                "command": "merge-draft",
                 "title": "custom merge title",
                 "body": "custom merge body",
             })
@@ -964,13 +964,13 @@ async fn spaces_tool_target_param_and_verb_noun_commands_end_to_end() {
             .cloned(),
         )
         .await
-        .expect("publish-draft with title/body");
+        .expect("merge-draft with title/body");
     let text = text_of(&res);
     let merge_oid = text
         .strip_prefix("Changeset ")
         .and_then(|s| s.split(" landed as ").nth(1))
         .and_then(|s| s.strip_suffix('.'))
-        .expect("merge_oid in publish-draft text");
+        .expect("merge_oid in merge-draft text");
     let git_log = Command::new("git")
         .args(["log", "-1", "--format=%B", merge_oid])
         .current_dir(app.library().repo_path())
@@ -983,15 +983,15 @@ async fn spaces_tool_target_param_and_verb_noun_commands_end_to_end() {
     );
 }
 
-/// rev3 addendum A D21/D24: `publish-draft` means "land," full stop —
+/// rev3 addendum A D21/D24: `merge-draft` means "land," full stop —
 /// a `Propose`-only subject calling it directly (bypassing the fact
 /// that it's schema-visible to every `spaces` caller per D22) must get
 /// an authorization error, never a silent fallback to opening a PR.
 #[tokio::test]
 #[ignore = "requires postgres + writes a working library clone; run with --ignored"]
-async fn member_publish_draft_without_update_is_forbidden() {
-    let (app, user) = setup("member_publish_forbidden").await;
-    let agent = project_with_space(&app, &user, "proj-publish-forbidden", "docs").await;
+async fn member_merge_draft_without_update_is_forbidden() {
+    let (app, user) = setup("member_merge_forbidden").await;
+    let agent = project_with_space(&app, &user, "proj-merge-forbidden", "docs").await;
 
     let spaces = app
         .toolsets()
@@ -1016,7 +1016,7 @@ async fn member_publish_draft_without_update_is_forbidden() {
     let err = spaces
         .call(
             &agent,
-            serde_json::json!({"command": "publish-draft"})
+            serde_json::json!({"command": "merge-draft"})
                 .as_object()
                 .cloned(),
         )
@@ -1028,7 +1028,7 @@ async fn member_publish_draft_without_update_is_forbidden() {
     );
 }
 
-/// rev3 addendum A D21/D23: `submit-draft` is reachable by any subject
+/// rev3 addendum A D21/D23: `open-pr` is reachable by any subject
 /// that can draft at all, regardless of `Update` — it opens a PR, it
 /// never lands. The local test fixture has no GitHub App configured,
 /// so a subject that clears the `Propose` gate still ends in
@@ -1037,9 +1037,9 @@ async fn member_publish_draft_without_update_is_forbidden() {
 /// the call (a missing one would fail argument parsing first).
 #[tokio::test]
 #[ignore = "requires postgres + writes a working library clone; run with --ignored"]
-async fn member_submit_draft_reaches_pr_unavailable_not_forbidden() {
-    let (app, user) = setup("member_submit_pr_unavailable").await;
-    let agent = project_with_space(&app, &user, "proj-submit-draft", "docs").await;
+async fn member_open_pr_reaches_pr_unavailable_not_forbidden() {
+    let (app, user) = setup("member_open_pr_pr_unavailable").await;
+    let agent = project_with_space(&app, &user, "proj-open-pr", "docs").await;
 
     let spaces = app
         .toolsets()
@@ -1065,7 +1065,7 @@ async fn member_submit_draft_reaches_pr_unavailable_not_forbidden() {
         .call(
             &agent,
             serde_json::json!({
-                "command": "submit-draft",
+                "command": "open-pr",
                 "title": "my PR title",
                 "body": "my PR body",
             })

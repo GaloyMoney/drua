@@ -614,8 +614,8 @@ impl Changesets {
     }
 
     /// Merges `cs`'s tip into `main` directly (§7; rev3 addendum A
-    /// D21/D24 — this is what `publish-draft` calls, exclusively, now
-    /// that `submit-draft` is its own command). `Open` or
+    /// D21/D24 — this is what `merge-draft` calls, exclusively, now
+    /// that `open-pr` is its own command). `Open` or
     /// `Submitted`; requires the subject to be able to `Update`
     /// `main` at all (per-space `Update` was already required for
     /// every individual write that landed on `main` bypassing a
@@ -1064,7 +1064,7 @@ fn describe_actor(actor: &ChangesetActor) -> String {
 }
 
 /// §10, rev3 addendum A D23: appends drua's provenance trailer block to
-/// `submit-draft`'s caller-supplied `body` — the same trailers the
+/// `open-pr`'s caller-supplied `body` — the same trailers the
 /// branch's own commits already carry via `user::commit_attribution`'s
 /// trailer loop; repeating them here is what preserves provenance
 /// through a squash-merge on GitHub's side, regardless of what the

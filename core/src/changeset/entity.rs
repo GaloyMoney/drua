@@ -130,7 +130,7 @@ pub enum ChangesetEvent {
         head_oid: String,
         pr_number: u64,
         pr_url: String,
-        /// rev3 addendum A, D23: what `submit-draft` actually sent to
+        /// rev3 addendum A, D23: what `open-pr` actually sent to
         /// GitHub — never projected onto `title`/`description`, which
         /// stay whatever `Opened` set them to.
         pr_title: String,
@@ -176,7 +176,7 @@ pub struct Changeset {
     #[builder(default)]
     pub pr_url: Option<String>,
     /// rev3 addendum A, D23: the title/body actually sent to GitHub by
-    /// `submit-draft` — distinct from `title`/`description`.
+    /// `open-pr` — distinct from `title`/`description`.
     #[builder(default)]
     pub pr_title: Option<String>,
     #[builder(default)]

@@ -58,7 +58,7 @@ pub enum SpaceError {
     /// prefix in its `path` field) so either kind of caller can
     /// self-correct (bugbot 2026-09-26).
     #[error(
-        "SpaceError - UseDraft: direct edits to space:{slug}/ are not permitted for this subject; write draft:{slug}/<path> instead, or pass target: draft to spaces edit / drua_admin_spaces spaces — it is staged in your draft and published with `spaces publish-draft`"
+        "SpaceError - UseDraft: direct edits to space:{slug}/ are not permitted for this subject; write draft:{slug}/<path> instead, or pass target: draft to spaces edit / drua_admin_spaces spaces — it is staged in your draft and landed with `spaces merge-draft`"
     )]
     UseDraft { slug: String },
     /// rev3 D15: a subject with an open draft may not write
@@ -66,7 +66,7 @@ pub enum SpaceError {
     /// landing on `main`, even for a subject that holds `Update`. See
     /// `UseDraft`'s doc for why both remediations are named.
     #[error(
-        "SpaceError - DraftOpen: you have an open draft {id} \"{title}\"; write draft:{slug}/<path> (or pass target: draft to spaces edit / drua_admin_spaces spaces) to keep staging, or run `spaces publish-draft` / `spaces discard-draft` before writing space:{slug}/ directly"
+        "SpaceError - DraftOpen: you have an open draft {id} \"{title}\"; write draft:{slug}/<path> (or pass target: draft to spaces edit / drua_admin_spaces spaces) to keep staging, or run `spaces merge-draft` / `spaces discard-draft` before writing space:{slug}/ directly"
     )]
     DraftOpen {
         id: String,

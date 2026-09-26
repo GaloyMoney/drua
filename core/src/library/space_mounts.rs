@@ -42,9 +42,9 @@ const SPACES_BLOCK_LIMIT: usize = 20;
 pub const SPACE_WRITE_MODE_SENTENCE: &str =
     "Reads of space:<slug>/ paths see the published library. Writes go to \
      draft:<slug>/ — your unpublished draft, started on first write or with \
-     `spaces start-draft`. Land it with `spaces publish-draft` (requires \
+     `spaces start-draft`. Land it with `spaces merge-draft` (requires \
      write authority; Forbidden without it), or send it for review with \
-     `spaces submit-draft` (opens a GitHub PR; works even if you also hold \
+     `spaces open-pr` (opens a GitHub PR; works even if you also hold \
      write authority). Direct writes to space:<slug>/ are accepted only \
      with write authority and no open draft. On `spaces`/`drua_admin_spaces` \
      view/edit, pass target: draft instead of the draft: prefix.\n";
