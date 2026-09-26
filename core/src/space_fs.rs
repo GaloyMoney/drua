@@ -679,10 +679,8 @@ impl SpaceFs {
     }
 
     /// Blind overwrite of `space:<slug>/<rel>` with `content`. Returns
-    /// the D10 stamp computed by the same `resolve` that performed the
-    /// write, so a caller rendering it doesn't need a second `resolve`
-    /// afterward — which would see the draft this call just lazily
-    /// created and report `just_started: false` (bugbot 2026-09-26).
+    /// the D10 stamp for the write that just landed (`stamp_after_write`),
+    /// so callers never need a second `resolve` of their own.
     #[instrument(name = "library.space_fs.write_file", skip(self, sub, content))]
     pub async fn write_file(
         &self,
@@ -1019,19 +1017,16 @@ impl SpaceFs {
             .map_err(map_changeset_err)
     }
 
-    /// bugbot 2026-09-26 (Low): `resolved.stamp` is computed by
-    /// `resolve()` *before* the write it accompanies lands, so its
-    /// touched-file count is stale by exactly that write — every write
-    /// after the first reports the pre-write count (`0 files` right
-    /// after landing the first file, `n` after adding file `n+1`).
-    /// Re-derives the stamp from a fresh entity once `record_write` has
-    /// updated `head_oid`, for every write except the one that just
-    /// lazily created the draft — that one keeps `resolve()`'s own
-    /// "started" form, since re-resolving would see the now-open draft
-    /// and report `just_started: false` (the bug the "started" form
-    /// itself was added to fix). `path` is re-parsed rather than
-    /// carrying `typed_scheme`/`in_run` on `Resolved` — cheap, pure,
-    /// and exactly what `resolve()` used to derive them.
+    /// `resolved.stamp` is computed by `resolve()` *before* the write
+    /// it accompanies lands, so its touched-file count would
+    /// otherwise be stale by exactly that write. Re-derives the stamp
+    /// from a fresh entity once `record_write` has updated `head_oid`,
+    /// for every write except the one that just lazily created the
+    /// draft — that one keeps `resolve()`'s own "started" form, since
+    /// re-resolving would see the now-open draft and report
+    /// `just_started: false`. `path` is re-parsed rather than carrying
+    /// `typed_scheme`/`in_run` on `Resolved` — cheap, pure, and exactly
+    /// what `resolve()` used to derive them.
     async fn stamp_after_write(
         &self,
         sub: &AuthSubject,

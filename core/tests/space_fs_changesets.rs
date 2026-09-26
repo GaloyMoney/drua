@@ -799,13 +799,11 @@ async fn stamp_formats_match_the_documented_forms() {
     );
 }
 
-/// bugbot 2026-09-26 (Low): a write's own returned stamp used to be
-/// computed by `resolve()` *before* that write landed, so its
-/// touched-file count was stale by exactly the write in flight — the
-/// second write of a sequence reported the count as of the first
-/// (`1 file`) instead of itself (`2 files`). `stamp_after_write`
-/// re-derives it from a fresh entity once the write (and
-/// `record_write`'s `head_oid` update) have landed.
+/// A write's own returned stamp must report its own effect, not the
+/// prior write's — the second write of a sequence should say
+/// `2 files`, not `1 file` (the count as of the first).
+/// `stamp_after_write` re-derives it from a fresh entity once the
+/// write (and `record_write`'s `head_oid` update) have landed.
 #[tokio::test]
 #[ignore = "requires postgres + writes a working library clone; run with --ignored"]
 async fn write_file_returns_its_own_touched_count_not_the_prior_writes() {

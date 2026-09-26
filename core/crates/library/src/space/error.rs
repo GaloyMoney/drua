@@ -56,11 +56,9 @@ pub enum SpaceError {
     /// draft` for callers whose only lever is `spaces`/
     /// `drua_admin_spaces` `edit`, which never sees a raw `draft:`
     /// prefix in its `path` field) so either kind of caller can
-    /// self-correct (bugbot 2026-09-26). Names `open-pr`, not
-    /// `merge-draft` — the subject reaching this only ever holds
-    /// `Propose`, and `merge-draft` requires `Update` (bugbot
-    /// 2026-09-26: the message named the one command this caller can
-    /// never reach).
+    /// self-correct. Names `open-pr`, not `merge-draft` — the subject
+    /// reaching this only ever holds `Propose`, and `merge-draft`
+    /// requires `Update`.
     #[error(
         "SpaceError - UseDraft: direct edits to space:{slug}/ are not permitted for this subject; write draft:{slug}/<path> instead, or pass target: draft to spaces edit / drua_admin_spaces spaces — it is staged in your draft and sent for review with `spaces open-pr`"
     )]

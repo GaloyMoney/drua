@@ -226,8 +226,7 @@ pub(crate) async fn dispatch_edit(
     // Each arm's `stamp` is `SpaceFs`'s own post-write stamp
     // (`stamp_after_write`) — accurate for the write that just landed,
     // except the one that lazily created the draft, which keeps the
-    // "started" form instead (bugbot 2026-09-26; see
-    // `SpaceFs::write_file`'s doc).
+    // "started" form instead (see `SpaceFs::write_file`'s doc).
     let (text, stamp) = match op {
         EditOp::Write => {
             let path = str_arg("path")?;

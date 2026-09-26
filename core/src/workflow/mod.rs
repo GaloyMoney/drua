@@ -400,6 +400,11 @@ impl Workflows {
         }
 
         Self::validate_trigger(&trigger)?;
+        // Same check `create`/`update` run — without it, a
+        // hand-edited or externally authored YAML file could persist
+        // `mode: open_pr` with no `message` and only fail at run end,
+        // inside `finish_space_writes`, with the draft left open.
+        Self::validate_space_writes(&space_writes, &steps)?;
 
         let file_hash = drua_library::GitFileHash::new(rendered);
 

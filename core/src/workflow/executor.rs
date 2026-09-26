@@ -22,7 +22,7 @@ use super::entity::WorkflowDefinition;
 use super::error::WorkflowError;
 use super::repo::WorkflowDefinitionRepo;
 use super::run::entity::SpaceWritesOutcome;
-use super::run::{StepResult, WorkflowRun, WorkflowRunRepo};
+use super::run::{StepResult, WorkflowRun, WorkflowRunRepo, WorkflowRunState};
 use super::template::{
     format_template_diagnostics, template_diagnostics, ConditionOutcome, TemplateContext,
 };
@@ -447,7 +447,19 @@ impl Executor {
         let id = cs.id;
         let sub = AuthSubject::workflow_executor(project_id, workflow_id, run_id);
 
-        if !run.would_succeed() {
+        // `Workflows::cancel_run` writes `Cancelled` straight to the
+        // DB without signalling this in-flight executor's own
+        // `cancel` flag, so a cancel landing after the last step (but
+        // before this point) is invisible to `run.would_succeed()`,
+        // which only looks at step results. Reload the persisted
+        // state right before deciding whether to merge/open a PR, so
+        // that race routes to `abandon_run_draft` instead.
+        let cancelled_concurrently = matches!(
+            self.runs.find_by_id(run_id).await,
+            Ok(fresh) if fresh.state == WorkflowRunState::Cancelled
+        );
+
+        if cancelled_concurrently || !run.would_succeed() {
             abandon_run_draft(changesets, &sub, run, id).await;
             if let Err(e) = self.runs.update(run).await {
                 tracing::warn!(
