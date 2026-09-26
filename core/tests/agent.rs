@@ -2,7 +2,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use drua_core::agent::{AgentRole, Agents, AgentsConfig, ModelDefaults, RoleConfig};
-use drua_core::primitives::{AuthSubject, ChatOutputEvent, ContextGeneration, ProjectId, UserId};
+use drua_core::primitives::{
+    AuthScope, AuthSubject, ChatOutputEvent, ContextGeneration, McpCredsId, ProjectId, SandboxId,
+    UserId,
+};
 use drua_core::sandbox::{SandboxConfig, Sandboxes};
 use drua_core::toolset::{ToolSets, ToolSetsConfig, ToolSetsError, TopLevelTool};
 use llm::prompt::AssistantBlock;
@@ -1490,4 +1493,423 @@ async fn delete_rejects_workflow_agents() {
     // The agent must survive the rejected delete.
     let still_there = agents.find_by_id(&sub, agent.id).await;
     assert!(still_there.is_ok(), "workflow agent should not be deleted");
+}
+
+/// An `ExportedAgent` bearer credential carries no project of its own —
+/// it's the dashboard's default non-admin MCP credential shape
+/// (`scopes = []`), so an empty scope list must never be enough to drive
+/// an arbitrary agent.
+#[tokio::test]
+async fn send_message_with_choice_rejects_exported_agent_with_empty_scopes() {
+    let pool = pool().await;
+    let (agents, _sandboxes) = build_agents(&pool).await;
+    let target_project = insert_project(&pool).await;
+    let owner = AuthSubject::User(UserId::new());
+
+    let target = agents
+        .create_project_lead(&owner, target_project, "lead", "target-project")
+        .await
+        .expect("create target agent");
+
+    let credential = AuthSubject::ExportedAgent(UserId::new(), McpCredsId::new(), vec![]);
+    let result = agents
+        .send_message_with_choice(credential, target.id, "attack".to_string(), None)
+        .await;
+
+    let err = result.expect_err("empty-scope ExportedAgent must be rejected");
+    assert!(
+        matches!(err, drua_core::agent::AgentError::Unauthorized),
+        "expected Unauthorized, got {err:?}"
+    );
+}
+
+/// Same defect, second call site — `resume_message` runs the identical
+/// authorization gate before it ever looks at session state, so an
+/// empty-scope `ExportedAgent` must be rejected here too, independently
+/// of `send_message_with_choice`.
+#[tokio::test]
+async fn resume_message_rejects_exported_agent_with_empty_scopes() {
+    let pool = pool().await;
+    let (agents, _sandboxes) = build_agents(&pool).await;
+    let target_project = insert_project(&pool).await;
+    let owner = AuthSubject::User(UserId::new());
+
+    let target = agents
+        .create_project_lead(&owner, target_project, "lead", "target-project")
+        .await
+        .expect("create target agent");
+
+    let credential = AuthSubject::ExportedAgent(UserId::new(), McpCredsId::new(), vec![]);
+    let result = agents.resume_message(credential, target.id).await;
+
+    let err = result.expect_err("empty-scope ExportedAgent must be rejected");
+    assert!(
+        matches!(err, drua_core::agent::AgentError::Unauthorized),
+        "expected Unauthorized, got {err:?}"
+    );
+}
+
+/// Non-regression: an `Agent` subject messaging a peer in its own
+/// project must keep working — this is the normal agent-to-agent
+/// messaging model the authorization gate must not disturb.
+#[tokio::test]
+async fn send_message_with_choice_allows_agent_caller_in_same_project() {
+    let pool = pool().await;
+
+    let (prompt_tx, mut prompt_rx) = mpsc::channel::<PromptRequest>(64);
+
+    let model_name = "claude-haiku-4-5-20251001".to_string();
+    let mut builtin_roles = HashMap::new();
+    builtin_roles.insert(
+        AgentRole::ProjectLead,
+        RoleConfig {
+            chain: Some(llm::ModelChain::new(model_name.clone())),
+            compaction: Default::default(),
+            breaker: Default::default(),
+        },
+    );
+    builtin_roles.insert(
+        AgentRole::Agent,
+        RoleConfig {
+            chain: Some(llm::ModelChain::new(model_name.clone())),
+            compaction: Default::default(),
+            breaker: Default::default(),
+        },
+    );
+    let mut models = HashMap::new();
+    models.insert(
+        model_name.clone(),
+        ModelDefaults {
+            model: model_name,
+            max_tokens_per_response: 1024,
+            context_window_tokens: 200_000,
+            effort: None,
+        },
+    );
+    let config = AgentsConfig {
+        builtin_roles,
+        models,
+        ..Default::default()
+    };
+
+    let toolsets = Arc::new(
+        ToolSets::init(ToolSetsConfig::default(), None, None, None)
+            .await
+            .expect("init toolsets"),
+    );
+    let sandboxes = Arc::new(
+        Sandboxes::init(
+            &pool,
+            SandboxConfig::default(),
+            std::sync::Arc::new(drua_git_proxy::Allowlist::default()),
+        )
+        .await
+        .expect("init sandboxes"),
+    );
+    let skills = Arc::new(drua_core::skill::Skills::new_without_library(
+        &pool,
+        Arc::clone(&sandboxes),
+    ));
+    let agents = Agents::new(
+        &pool,
+        config,
+        toolsets,
+        prompt_tx,
+        Arc::clone(&sandboxes),
+        Arc::clone(&skills),
+        None,
+        ContextGeneration::new(),
+        Arc::new(drua_core::library::SpaceMounts::empty()),
+    );
+
+    let project_id = insert_project(&pool).await;
+    let owner = AuthSubject::User(UserId::new());
+    let _lead = agents
+        .create_project_lead(&owner, project_id, "lead", "test-project")
+        .await
+        .expect("create lead");
+    let sender = agents
+        .create_agent(&owner, project_id, "sender", None, None)
+        .await
+        .expect("create sender agent");
+    let target = agents
+        .create_agent(&owner, project_id, "target", None, None)
+        .await
+        .expect("create target agent");
+
+    let mut events_rx = agents
+        .send_message_with_choice(
+            sender.auth_subject(),
+            target.id,
+            "Hello peer".to_string(),
+            None,
+        )
+        .await
+        .expect("send_message_with_choice");
+
+    let request = prompt_rx.recv().await.expect("prompt request dispatched");
+    request
+        .response_channel
+        .send(Ok(PromptResult::Complete(PromptResponse {
+            content: vec![AssistantBlock::Text {
+                text: "hi sender".to_string(),
+            }],
+            usage: Usage {
+                input_tokens: 3,
+                output_tokens: 2,
+                ..Default::default()
+            },
+            stop_reason: None,
+            model_used: None,
+        })))
+        .expect("send response");
+
+    let mut events = Vec::new();
+    while let Some(event) = events_rx.recv().await {
+        events.push(event);
+    }
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, ChatOutputEvent::AssistantText { text } if text == "hi sender")),
+        "same-project Agent caller should still be able to message a peer, got {events:?}"
+    );
+}
+
+/// Non-regression: an `Agent` subject resuming a peer in its own project
+/// must still pass the authorization gate (the fresh agent has nothing
+/// pending, so `resume_message` legitimately returns `Ok(None)` right
+/// after — the point is that it isn't rejected as `Unauthorized`).
+#[tokio::test]
+async fn resume_message_allows_agent_caller_in_same_project() {
+    let pool = pool().await;
+    let (agents, _sandboxes) = build_agents(&pool).await;
+    let project_id = insert_project(&pool).await;
+    let owner = AuthSubject::User(UserId::new());
+
+    let _lead = agents
+        .create_project_lead(&owner, project_id, "lead", "test-project")
+        .await
+        .expect("create lead");
+    let sender = agents
+        .create_agent(&owner, project_id, "sender", None, None)
+        .await
+        .expect("create sender agent");
+    let target = agents
+        .create_agent(&owner, project_id, "target", None, None)
+        .await
+        .expect("create target agent");
+
+    let result = agents
+        .resume_message(sender.auth_subject(), target.id)
+        .await;
+
+    assert!(
+        matches!(result, Ok(None)),
+        "same-project Agent caller must not be rejected by the authorization gate, got {result:?}"
+    );
+}
+
+/// Test-only tool reporting, via its call-time result, whether the
+/// dispatched subject carries a scope planted only on the *caller's*
+/// credential. Used to lock in that `send_message_with_choice` keeps
+/// dispatching tool calls under the target agent's own scopes rather
+/// than the caller's — the substitution at `auth_subject_for_user` is
+/// deliberate and untouched by the authorization fix.
+struct ScopeMarkerTool {
+    caller_marker: SandboxId,
+    schema: serde_json::Value,
+}
+
+impl ScopeMarkerTool {
+    fn new(caller_marker: SandboxId) -> Self {
+        Self {
+            caller_marker,
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false,
+            }),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TopLevelTool for ScopeMarkerTool {
+    fn name(&self) -> &str {
+        "scope_marker"
+    }
+    fn description(&self) -> &str {
+        "Reports whether the dispatched subject carries the caller's marker scope. Test-only tool."
+    }
+    fn input_schema(&self) -> &serde_json::Value {
+        &self.schema
+    }
+    async fn call(
+        &self,
+        subject: &AuthSubject,
+        _arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        let has_callers_marker = subject
+            .scopes()
+            .contains(&AuthScope::SandboxUse(self.caller_marker));
+        Ok(CallToolResult::success(vec![Content::text(
+            has_callers_marker.to_string(),
+        )]))
+    }
+}
+
+#[tokio::test]
+async fn send_message_with_choice_dispatches_target_agents_scopes_not_callers() {
+    let pool = pool().await;
+
+    let (prompt_tx, mut prompt_rx) = mpsc::channel::<PromptRequest>(64);
+
+    let model_name = "claude-haiku-4-5-20251001".to_string();
+    let mut builtin_roles = HashMap::new();
+    builtin_roles.insert(
+        AgentRole::ProjectLead,
+        RoleConfig {
+            chain: Some(llm::ModelChain::new(model_name.clone())),
+            compaction: Default::default(),
+            breaker: Default::default(),
+        },
+    );
+    builtin_roles.insert(
+        AgentRole::Agent,
+        RoleConfig {
+            chain: Some(llm::ModelChain::new(model_name.clone())),
+            compaction: Default::default(),
+            breaker: Default::default(),
+        },
+    );
+    let mut models = HashMap::new();
+    models.insert(
+        model_name.clone(),
+        ModelDefaults {
+            model: model_name,
+            max_tokens_per_response: 1024,
+            context_window_tokens: 200_000,
+            effort: None,
+        },
+    );
+    let config = AgentsConfig {
+        builtin_roles,
+        models,
+        ..Default::default()
+    };
+
+    let caller_marker = SandboxId::new();
+    let toolsets = ToolSets::init(ToolSetsConfig::default(), None, None, None)
+        .await
+        .expect("init toolsets");
+    toolsets.register_top_level(ScopeMarkerTool::new(caller_marker));
+    let toolsets = Arc::new(toolsets);
+
+    let sandboxes = Arc::new(
+        Sandboxes::init(
+            &pool,
+            SandboxConfig::default(),
+            std::sync::Arc::new(drua_git_proxy::Allowlist::default()),
+        )
+        .await
+        .expect("init sandboxes"),
+    );
+    let skills = Arc::new(drua_core::skill::Skills::new_without_library(
+        &pool,
+        Arc::clone(&sandboxes),
+    ));
+    let agents = Agents::new(
+        &pool,
+        config,
+        toolsets,
+        prompt_tx,
+        Arc::clone(&sandboxes),
+        Arc::clone(&skills),
+        None,
+        ContextGeneration::new(),
+        Arc::new(drua_core::library::SpaceMounts::empty()),
+    );
+
+    let project_id = insert_project(&pool).await;
+    let owner = AuthSubject::User(UserId::new());
+    let _lead = agents
+        .create_project_lead(&owner, project_id, "lead", "test-project")
+        .await
+        .expect("create lead");
+    // Plain `Agent` role ⇒ `ProjectMember` scope only — no `SandboxUse`.
+    let target = agents
+        .create_agent(&owner, project_id, "worker", None, None)
+        .await
+        .expect("create target agent");
+
+    // `Admin` clears the new authorization gate; `SandboxUse(caller_marker)`
+    // is the poison scope that must not leak into the dispatched subject.
+    let caller = AuthSubject::ExportedAgent(
+        UserId::new(),
+        McpCredsId::new(),
+        vec![AuthScope::Admin, AuthScope::SandboxUse(caller_marker)],
+    );
+
+    let mut events_rx = agents
+        .send_message_with_choice(caller, target.id, "call scope_marker".to_string(), None)
+        .await
+        .expect("admin-scoped ExportedAgent should pass the authorization gate");
+
+    let request = prompt_rx.recv().await.expect("first prompt request");
+    request
+        .response_channel
+        .send(Ok(PromptResult::Complete(PromptResponse {
+            content: vec![AssistantBlock::ToolUse {
+                id: "tu_1".to_string(),
+                name: "scope_marker".to_string(),
+                input: serde_json::json!({}),
+            }],
+            usage: Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                ..Default::default()
+            },
+            stop_reason: Some(StopReason::ToolUse),
+            model_used: None,
+        })))
+        .expect("send first response");
+
+    let request = prompt_rx
+        .recv()
+        .await
+        .expect("second prompt request after tool result");
+    request
+        .response_channel
+        .send(Ok(PromptResult::Complete(PromptResponse {
+            content: vec![AssistantBlock::Text {
+                text: "done".to_string(),
+            }],
+            usage: Usage {
+                input_tokens: 1,
+                output_tokens: 1,
+                ..Default::default()
+            },
+            stop_reason: None,
+            model_used: None,
+        })))
+        .expect("send second response");
+
+    let mut events = Vec::new();
+    while let Some(event) = events_rx.recv().await {
+        events.push(event);
+    }
+
+    let tool_result_content = events.iter().find_map(|e| match e {
+        ChatOutputEvent::ToolResult { name, content, .. } if name == "scope_marker" => {
+            content.clone()
+        }
+        _ => None,
+    });
+
+    assert_eq!(
+        tool_result_content,
+        Some("false".to_string()),
+        "dispatched subject must run with the target agent's own scopes, not the caller's; got {events:?}"
+    );
 }

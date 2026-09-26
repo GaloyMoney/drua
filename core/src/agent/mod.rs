@@ -44,6 +44,32 @@ fn default_authz_scopes(role: AgentRole, project_id: ProjectId) -> Vec<AuthScope
     }
 }
 
+/// Shared by [`Agents::send_message_with_choice`] and
+/// [`Agents::resume_message`]. Agents may message any peer in their own
+/// project regardless of their specific granted scopes — that's the
+/// normal agent-to-agent messaging model. `ExportedAgent` bearer
+/// credentials carry no inherent project of their own, so instead of a
+/// project-tuple comparison they're run through the same `can()` scope
+/// check every other `Agents` method uses. Anonymous and cross-project
+/// `Agent` callers are rejected outright.
+fn authorize_message_subject(subject: &AuthSubject, agent: &Agent) -> Result<(), AgentError> {
+    match subject {
+        AuthSubject::User(_) => Ok(()),
+        AuthSubject::ExportedAgent(_, _, _) => subject
+            .can(
+                AuthVerb::Use,
+                AuthResource::Agent(agent.project_id, Some(agent.id)),
+            )
+            .map_err(|_| AgentError::Unauthorized),
+        AuthSubject::Agent(project, _, _) | AuthSubject::AgentOnBehalfOfUser(_, project, _, _)
+            if *project == agent.project_id =>
+        {
+            Ok(())
+        }
+        _ => Err(AgentError::Unauthorized),
+    }
+}
+
 use tracing::instrument;
 
 use crate::primitives::{
@@ -1314,15 +1340,7 @@ impl Agents {
         tool_choice: Option<llm::prompt::ToolChoice>,
     ) -> Result<tokio::sync::mpsc::Receiver<ChatOutputEvent>, AgentError> {
         let agent = self.repo.find_by_id(id).await?;
-
-        // Agents may only message peers in their own project; anonymous rejected.
-        match &subject {
-            AuthSubject::User(_) | AuthSubject::ExportedAgent(_, _, _) => {}
-            AuthSubject::Agent(project, _, _)
-            | AuthSubject::AgentOnBehalfOfUser(_, project, _, _)
-                if *project == agent.project_id => {}
-            _ => return Err(AgentError::Unauthorized),
-        }
+        authorize_message_subject(&subject, &agent)?;
 
         Audit::record_action_if_unset("agent.send_message");
         Audit::record_project_id(agent.project_id);
@@ -1434,14 +1452,7 @@ impl Agents {
         id: AgentId,
     ) -> Result<Option<tokio::sync::mpsc::Receiver<ChatOutputEvent>>, AgentError> {
         let agent = self.repo.find_by_id(id).await?;
-
-        match &subject {
-            AuthSubject::User(_) | AuthSubject::ExportedAgent(_, _, _) => {}
-            AuthSubject::Agent(project, _, _)
-            | AuthSubject::AgentOnBehalfOfUser(_, project, _, _)
-                if *project == agent.project_id => {}
-            _ => return Err(AgentError::Unauthorized),
-        }
+        authorize_message_subject(&subject, &agent)?;
 
         Audit::record_action_if_unset("agent.resume_message");
         Audit::record_project_id(agent.project_id);
