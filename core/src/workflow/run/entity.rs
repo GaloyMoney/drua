@@ -172,6 +172,11 @@ pub enum WorkflowRunEvent {
         reason: Option<String>,
         cancelled_at: DateTime<Utc>,
     },
+    /// The run's `changeset:` block opened one at run start.
+    ChangesetOpened { changeset_id: ChangesetId },
+    /// The changeset was submitted, applied, or discarded — the run is
+    /// no longer bound to it.
+    ChangesetClosed { changeset_id: ChangesetId },
 }
 
 #[derive(EsEntity, Builder)]
@@ -188,6 +193,13 @@ pub struct WorkflowRun {
     pub completed_at: Option<DateTime<Utc>>,
     #[builder(default)]
     pub step_results: Vec<StepResult>,
+    /// Set by the executor at run start when the definition declares a
+    /// `changeset:` block; cleared once that changeset is submitted,
+    /// applied, or discarded. `Agent.workflow_run_id` → this is how a
+    /// step agent inherits the run's changeset without its own bind
+    /// (`SpaceFs::resolve`, resolution rule 2).
+    #[builder(default)]
+    pub changeset: Option<ChangesetId>,
     events: EntityEvents<WorkflowRunEvent>,
 }
 
@@ -536,6 +548,37 @@ impl WorkflowRun {
                 && r.completed_at.is_none()
         })
     }
+
+    /// Called once by the executor at run start when `changeset:` is
+    /// declared. At most one changeset per run — a run's `changeset:`
+    /// block is set once at start and closed once at end, so unlike
+    /// `Agent::changeset_bound` this never needs to reject a second,
+    /// different id; it's simply idempotent against retry.
+    pub fn changeset_opened(&mut self, changeset_id: ChangesetId) -> Idempotent<()> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied: WorkflowRunEvent::ChangesetOpened { .. },
+        );
+        self.changeset = Some(changeset_id);
+        self.events
+            .push(WorkflowRunEvent::ChangesetOpened { changeset_id });
+        Idempotent::Executed(())
+    }
+
+    /// Idempotent unless `changeset_id` is the one currently open —
+    /// mirrors `Agent::changeset_unbound`'s current-state check (not an
+    /// event-history scan: a retry closing the *same* id the run has
+    /// since moved past, or a stray call for an id the run never had,
+    /// must both be no-ops).
+    pub fn changeset_closed(&mut self, changeset_id: ChangesetId) -> Idempotent<()> {
+        if self.changeset != Some(changeset_id) {
+            return Idempotent::AlreadyApplied;
+        }
+        self.changeset = None;
+        self.events
+            .push(WorkflowRunEvent::ChangesetClosed { changeset_id });
+        Idempotent::Executed(())
+    }
 }
 
 impl core::fmt::Display for WorkflowRun {
@@ -556,6 +599,7 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
         let mut state = WorkflowRunState::Pending;
         let mut completed_at: Option<DateTime<Utc>> = None;
         let mut results: Vec<StepResult> = Vec::new();
+        let mut changeset: Option<ChangesetId> = None;
 
         for event in events.iter_all() {
             match event {
@@ -697,11 +741,20 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
                     state = WorkflowRunState::Cancelled;
                     completed_at = Some(*cancelled_at);
                 }
+                WorkflowRunEvent::ChangesetOpened { changeset_id } => {
+                    changeset = Some(*changeset_id);
+                }
+                WorkflowRunEvent::ChangesetClosed { changeset_id } => {
+                    if changeset == Some(*changeset_id) {
+                        changeset = None;
+                    }
+                }
             }
         }
 
         builder = builder.state(state).step_results(results);
         builder = builder.completed_at(completed_at);
+        builder = builder.changeset(changeset);
 
         builder.events(events).build()
     }
@@ -1401,5 +1454,65 @@ mod tests {
             v.get("cancelled_by").and_then(|c| c.as_str()),
             Some("user:abc")
         );
+    }
+
+    // ── Changeset binding tests ──
+
+    #[test]
+    fn changeset_opened_and_closed_round_trip() {
+        let mut run = fresh_run(&["a"]);
+        assert!(run.changeset.is_none());
+
+        let id = ChangesetId::new();
+        assert!(run.changeset_opened(id).did_execute());
+        assert_eq!(run.changeset, Some(id));
+
+        assert!(run.changeset_closed(id).did_execute());
+        assert!(run.changeset.is_none());
+    }
+
+    #[test]
+    fn changeset_opened_is_idempotent_against_retry() {
+        let mut run = fresh_run(&["a"]);
+        let id = ChangesetId::new();
+        run.changeset_opened(id).did_execute();
+        let outcome = run.changeset_opened(id);
+        assert!(matches!(outcome, Idempotent::AlreadyApplied));
+        assert_eq!(run.changeset, Some(id));
+    }
+
+    #[test]
+    fn changeset_closed_wrong_id_is_noop() {
+        let mut run = fresh_run(&["a"]);
+        let opened = ChangesetId::new();
+        let other = ChangesetId::new();
+        run.changeset_opened(opened).did_execute();
+
+        let outcome = run.changeset_closed(other);
+        assert!(matches!(outcome, Idempotent::AlreadyApplied));
+        assert_eq!(run.changeset, Some(opened));
+    }
+
+    #[test]
+    fn changeset_binding_hydrates_from_events() {
+        let mut run = fresh_run(&["a"]);
+        let id = ChangesetId::new();
+        run.changeset_opened(id).did_execute();
+
+        let events = run.events;
+        let rehydrated = WorkflowRun::try_from_events(events).unwrap();
+        assert_eq!(rehydrated.changeset, Some(id));
+    }
+
+    #[test]
+    fn changeset_closed_hydrates_as_cleared() {
+        let mut run = fresh_run(&["a"]);
+        let id = ChangesetId::new();
+        run.changeset_opened(id).did_execute();
+        run.changeset_closed(id).did_execute();
+
+        let events = run.events;
+        let rehydrated = WorkflowRun::try_from_events(events).unwrap();
+        assert!(rehydrated.changeset.is_none());
     }
 }

@@ -7,7 +7,7 @@ use std::process::Command;
 
 use drua_core::agent::{AgentRole, AgentsConfig, ModelDefaults, RoleConfig};
 use drua_core::library::LibraryConfig;
-use drua_core::primitives::{AgentId, AuthSubject, UserId};
+use drua_core::primitives::{AuthSubject, UserId};
 use drua_core::{App, AppConfig};
 use drua_library::CommitAttribution;
 
@@ -180,13 +180,26 @@ async fn setup(test_name: &str) -> (App, AuthSubject, AuthSubject) {
             "a.md",
             "hello\n".into(),
             CommitAttribution::library_default(),
+            None,
         )
         .await
         .expect("write a.md");
 
     // Not a project admin, not a sandbox attachment — just enough to
     // pass `can_use_agent_file_tools` and mount-scoped `space:` access.
-    let agent = AuthSubject::Agent(project.id, AgentId::new(), Vec::new());
+    // `ProjectMember` is what actually grants `Propose` on `space:`
+    // writes (rev2 §2/§4.2 OQ-2: members stage, they don't write
+    // `main` directly) — an empty scope set can see the file tools
+    // (`can_use_agent_file_tools` doesn't check scopes) but can never
+    // actually write through them. Reuses the project's real lead
+    // `Agent` row (`project.create` already persists one) rather than
+    // a synthetic `AgentId::new()` — a lazily created draft's
+    // `agent_id` column is a real FK against `agents`.
+    let agent = AuthSubject::Agent(
+        project.id,
+        project.lead_agent_id,
+        vec![drua_core::auth::AuthScope::ProjectMember(project.id)],
+    );
     (app, user, agent)
 }
 
@@ -266,6 +279,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "helper.js",
             "return {relative: (a,b) => a + b};".into(),
             CommitAttribution::library_default(),
+            None,
         )
         .await
         .unwrap();
@@ -281,6 +295,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "helper.js",
             "return 7;".into(),
             CommitAttribution::library_default(),
+            None,
         )
         .await
         .unwrap();
@@ -290,6 +305,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "dependency.js",
             "return await loadScript('space:private/helper.js');".into(),
             CommitAttribution::library_default(),
+            None,
         )
         .await
         .unwrap();
@@ -300,6 +316,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "caller.js",
             "return {run: async () => await tools.caller_probe({})};".into(),
             CommitAttribution::library_default(),
+            None,
         )
         .await
         .unwrap();
@@ -368,7 +385,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
         async {
             let resume = changes.recv().await.unwrap();
             for path in ["helper.js", "fresh.js"] {
-                spaces.write_file("docs", path, "return {version: 2};".into(), CommitAttribution::library_default()).await.unwrap();
+                spaces.write_file("docs", path, "return {version: 2};".into(), CommitAttribution::library_default(), None).await.unwrap();
             }
             resume.send(()).unwrap();
         }
@@ -396,6 +413,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "dir.js/child",
             "child".into(),
             CommitAttribution::library_default(),
+            None,
         )
         .await
         .unwrap();
@@ -416,6 +434,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "failure.js",
             "throw new Error('attributed failure');".into(),
             CommitAttribution::library_default(),
+            None,
         )
         .await
         .unwrap();
@@ -510,7 +529,9 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
 async fn scripts_read_exact_text_while_mcp_read_stays_numbered() {
     let (app, _user, agent) = setup("read-raw").await;
 
-    let path = "space:docs/raw-fixture.md";
+    // rev3 D9/D15: a `ProjectMember`-scoped subject writes `draft:`;
+    // `space:` writes are refused with `UseDraft`.
+    let path = "draft:docs/raw-fixture.md";
     let fixture = "# Raw\r\nUnicode: \u{1F41F} \u{2014} caf\u{E9}\r\n\r\nEnd\r\n";
     let fixture_js = serde_json::to_string(fixture).expect("json-encode fixture");
 
@@ -596,7 +617,9 @@ async fn scripts_read_lifts_the_view_cap_but_mcp_read_still_enforces_it() {
     // Comfortably over MAX_VIEW_FILE_BYTES (1_048_576) so the assertion
     // survives any off-by-one at the boundary.
     const FIXTURE_LEN: usize = 1_048_576 + 200_000;
-    let path = "space:docs/oversized.txt";
+    // rev3 D9/D15: a `ProjectMember`-scoped subject writes `draft:`;
+    // `space:` writes are refused with `UseDraft`.
+    let path = "draft:docs/oversized.txt";
 
     let compose = app
         .toolsets()
@@ -730,6 +753,7 @@ async fn workflow_scripts_validate_execute_and_preserve_provenance() {
                 vec![serde_json::from_value(value).unwrap()],
                 vec![],
                 None,
+                None,
             )
             .await;
         assert!(result.is_err(), "accepted invalid step {patch}");
@@ -745,6 +769,7 @@ async fn workflow_scripts_validate_execute_and_preserve_provenance() {
             WorkflowTrigger::Manual { condition: None },
             vec![serde_json::from_value(base.clone()).unwrap()],
             vec![],
+            None,
             None,
         )
         .await
@@ -762,6 +787,7 @@ async fn workflow_scripts_validate_execute_and_preserve_provenance() {
             None,
             Some(vec![invalid_update]),
             None,
+            None,
             None
         )
         .await
@@ -772,6 +798,7 @@ async fn workflow_scripts_validate_execute_and_preserve_provenance() {
         Arc::new(app.library().spaces().clone()),
         Arc::new(app.projects().clone()),
         users,
+        Arc::new(app.changesets().clone()),
     ));
     let audit = Arc::new(Audit::new(&pool));
     let toolsets = Arc::new(
@@ -806,15 +833,20 @@ async fn workflow_scripts_validate_execute_and_preserve_provenance() {
         skills.clone(),
         sandboxes,
         toolsets,
+        Some(Arc::new(app.changesets().clone())),
     );
 
     let source = r#"
 return {
   run: async (args, run) => {
-    const path = `space:docs/runs/${run.id}/inventory.json`;
+    const path = `draft:docs/runs/${run.id}/inventory.json`;
     await tools.Edit({command: 'create', path, file_text: JSON.stringify({args, run})});
     await tools.Read({path});
     return {success: true, output: path, args, run};
+  },
+  direct_main_write: async () => {
+    await tools.Edit({command: 'create', path: 'space:docs/direct.json', file_text: '{}'});
+    return {success: true, output: 'unreachable'};
   },
   failed: () => ({success: false, output: 'declined', reason: 'test'}),
   missing: () => ({success: true}),
@@ -832,6 +864,7 @@ return {
             "tasks.js",
             source.into(),
             CommitAttribution::library_default(),
+            None,
         )
         .await
         .unwrap();
@@ -851,6 +884,7 @@ return {
             "private.js",
             "return {};".into(),
             CommitAttribution::library_default(),
+            None,
         )
         .await
         .unwrap();
@@ -904,6 +938,9 @@ return {
             "side effects may have occurred",
         ),
         ("unmounted", json!({}), "access_denied"),
+        // rev3 D9/D15/OQ-20: a script step's direct `space:` write is
+        // now refused (`UseDraft`) rather than silently staged.
+        ("direct_main_write", json!({}), "usedraft"),
     ] {
         let run_id = seed(&definitions, &runs, project, vec![step(entry, extra)]).await;
         executor
@@ -1009,9 +1046,23 @@ return {
             .unwrap();
         let text = format!("{:?}", request.prompt);
         assert!(text.contains("inventory.json"), "{text}");
+        // rev3: a script step writes `draft:` explicitly (a `space:`
+        // write is now refused with `UseDraft` — see
+        // `step_agent_space_write_is_refused_with_use_draft` below).
+        // The write always stages into the run's draft — never `main`
+        // directly — so this reads the draft's tip, not HEAD.
+        let draft = app
+            .changesets()
+            .open_draft_for_run(run_id)
+            .await
+            .unwrap()
+            .expect("the run step's write lazily created a draft");
         let file = app
             .library()
-            .read_blob_at_head(&format!("spaces/docs/runs/{run_id}/inventory.json"))
+            .read_blob_at(
+                &draft.head_oid,
+                &format!("spaces/docs/runs/{run_id}/inventory.json"),
+            )
             .await
             .unwrap()
             .unwrap();
@@ -1100,10 +1151,20 @@ return {
     assert!(serde_json::to_string(&log)
         .unwrap()
         .contains(&run_id.to_string()));
+    // The step's write staged into the run's draft branch, not
+    // `main` — `git log` needs to name it explicitly rather than
+    // relying on implicit HEAD.
+    let draft = app
+        .changesets()
+        .open_draft_for_run(run_id)
+        .await
+        .unwrap()
+        .expect("the run step's write left an open draft");
     let git_log = Command::new("git")
         .args([
             "log",
             "--format=%B",
+            &draft.branch(),
             "--",
             &format!("spaces/docs/runs/{run_id}/inventory.json"),
         ])
@@ -1120,5 +1181,112 @@ return {
     }
     assert!(!trailers.contains("Drua-Acting-Agent"));
     assert!(!trailers.contains("Co-Authored-By"));
+    app.shutdown().await;
+}
+
+/// bugbot 2026-09-25 (High): `check_owner_or_lead`/`check_discard_authority`
+/// used to resolve ownership via `actor_for_subject`, which keys a step
+/// agent as plain `Agent { agent_id }`. `draft_for` (via `actor_key_for`)
+/// keys that same agent's draft as `WorkflowRun { run_id }` instead (rev2
+/// D8: every step agent in one run shares a single draft) — so the two
+/// never matched, and a step agent could stage writes into its own draft
+/// but never `spaces discard`/`submit`/`apply`/`rebase` it itself. Builds
+/// a real step `Agent` row (satisfying the `agents.workflow_run_id` FK)
+/// without running the executor, since only the ownership check — not
+/// execution — is under test here.
+#[tokio::test]
+#[ignore = "requires isolated postgres + local library clone"]
+async fn step_agent_can_discard_its_own_lazily_created_draft() {
+    use drua_core::workflow::repo::WorkflowDefinitionRepo;
+    use drua_core::workflow::run::NewWorkflowRun;
+    use drua_core::workflow::{WorkflowRunRepo, WorkflowStepDef, WorkflowTrigger};
+
+    let (app, _user, agent) = setup("step-agent-owns-draft").await;
+    let project_id = agent.project_id().unwrap();
+
+    let definitions = WorkflowDefinitionRepo::new_without_library(&pool().await);
+    let runs = WorkflowRunRepo::new(&pool().await);
+    let step: WorkflowStepDef = serde_json::from_value(
+        serde_json::json!({"type":"script_step","name":"inventory","script":"space:docs/tasks.js"}),
+    )
+    .unwrap();
+    let new_definition = drua_core::workflow::NewWorkflowDefinition::builder()
+        .project_id(project_id)
+        .name(format!("step-owns-draft-{}", uuid::Uuid::new_v4()))
+        .trigger(WorkflowTrigger::Manual { condition: None })
+        .steps(vec![step.clone()])
+        .build()
+        .unwrap();
+    let mut op = definitions.begin_op().await.unwrap();
+    let definition = definitions
+        .create_in_op(&mut op, new_definition)
+        .await
+        .unwrap();
+    op.commit().await.unwrap();
+    let run = runs
+        .create(
+            NewWorkflowRun::builder()
+                .definition_id(definition.id)
+                .project_id(project_id)
+                .steps_snapshot(vec![step])
+                .trigger_context(serde_json::json!({}))
+                .build()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let mut op = app.agents().begin_op().await.unwrap();
+    let step_agent = app
+        .agents()
+        .create_for_workflow_run_in_op(
+            &mut op,
+            project_id,
+            definition.id,
+            run.id,
+            "inventory",
+            None,
+            None,
+            drua_core::workflow::default_output_schema(),
+        )
+        .await
+        .unwrap();
+    op.commit().await.unwrap();
+    assert_eq!(step_agent.workflow_run_id, Some(run.id));
+
+    let step_agent_subject = AuthSubject::Agent(
+        project_id,
+        step_agent.id,
+        vec![drua_core::auth::AuthScope::ProjectMember(project_id)],
+    );
+
+    let draft = app
+        .changesets()
+        .draft_for(
+            &step_agent_subject,
+            Some("inventory draft".into()),
+            None,
+            None,
+        )
+        .await
+        .expect("step agent can lazily create its own draft");
+    assert_eq!(
+        app.changesets()
+            .open_draft_for_run(run.id)
+            .await
+            .unwrap()
+            .expect("keyed by the run, not the agent")
+            .id,
+        draft.id
+    );
+
+    // Before the fix: `Forbidden` — the ownership check resolved the
+    // step agent's key as `Agent`, not `WorkflowRun`, so it could never
+    // match `draft.opened_by`.
+    app.changesets()
+        .discard(&step_agent_subject, draft.id, Some("test".into()))
+        .await
+        .expect("the step agent that opened the draft must be able to close it itself");
+
     app.shutdown().await;
 }

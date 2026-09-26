@@ -480,6 +480,64 @@ impl WorkflowSandboxDecl {
     }
 }
 
+/// `changeset:` top-level workflow declaration (rev2 §7.1, amending
+/// the handoff's §9.1; rev3 §7). Optional: when declared, the executor
+/// pre-creates the run's draft at start with this title so the run's
+/// history reads well even before any step writes a space; when
+/// absent, a step that writes `draft:` still gets a lazily created
+/// run-keyed draft (derived title, these same defaults) — a step's
+/// `space:` write is refused (`UseDraft`, rev3 D9/D15/OQ-20); there is
+/// no way to make a step agent write `main` directly, by design.
+/// Either way, the draft (if one ends up existing) is landed/discarded
+/// at run end per `on_success`/`on_failure`.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WorkflowChangesetDecl {
+    /// CEL-substituted (`${{ trigger... }}`, etc.) at run start.
+    /// Ignored (a title is derived instead) when the block is absent.
+    #[serde(default)]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub on_success: ChangesetExit,
+    #[serde(default)]
+    pub on_failure: ChangesetFailureExit,
+    /// OQ-11's narrowing: `on_success: publish` only lands on `main`
+    /// (`Changesets::apply`) when this is also `true` **and** the
+    /// executor subject holds `Update`. Without it, `publish` submits
+    /// a PR at run end instead of silently landing on `main` — see
+    /// `ChangesetExit::Publish`'s doc. Renamed from rev1's
+    /// `allow_apply` to match the `publish` verb (rev2 D6).
+    #[serde(default)]
+    pub allow_land: bool,
+}
+
+/// rev2 D6: the tool-facing surface collapsed `submit`/`apply` into
+/// one `publish` verb whose effect is resolved by authority — the
+/// YAML mirrors that. `ChangesetExit::Publish` calls
+/// `Changesets::apply` only when `allow_land` is also set (OQ-11);
+/// otherwise it submits a PR, same as rev1's `Submit`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangesetExit {
+    /// Publishes the run's draft — a PR by default, or a direct land
+    /// on `main` when `allow_land: true` and the executor holds
+    /// `Update`. The default: every agent write stays reviewable
+    /// unless a workflow author explicitly opts into landing it.
+    #[default]
+    Publish,
+    /// Leaves the draft `Open` for a human or a later run to pick up.
+    Keep,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangesetFailureExit {
+    #[default]
+    Discard,
+    Keep,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

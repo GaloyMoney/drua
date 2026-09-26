@@ -5,6 +5,7 @@ use job::*;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::Agents;
+use crate::changeset::Changesets;
 use crate::primitives::WorkflowRunId;
 use crate::sandbox::Sandboxes;
 use crate::skill::Skills;
@@ -29,9 +30,11 @@ pub struct ExecuteRunJobInitializer {
     skills: Arc<Skills>,
     sandboxes: Arc<Sandboxes>,
     toolsets: Arc<ToolSets>,
+    changesets: Arc<Changesets>,
 }
 
 impl ExecuteRunJobInitializer {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         runs: WorkflowRunRepo,
         definitions: WorkflowDefinitionRepo,
@@ -39,6 +42,7 @@ impl ExecuteRunJobInitializer {
         skills: Arc<Skills>,
         sandboxes: Arc<Sandboxes>,
         toolsets: Arc<ToolSets>,
+        changesets: Arc<Changesets>,
     ) -> Self {
         Self {
             runs,
@@ -47,6 +51,7 @@ impl ExecuteRunJobInitializer {
             skills,
             sandboxes,
             toolsets,
+            changesets,
         }
     }
 }
@@ -71,6 +76,7 @@ impl JobInitializer for ExecuteRunJobInitializer {
             Arc::clone(&self.skills),
             Arc::clone(&self.sandboxes),
             Arc::clone(&self.toolsets),
+            Some(Arc::clone(&self.changesets)),
         );
         Ok(Box::new(ExecuteRunRunner { executor, config }))
     }

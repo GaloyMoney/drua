@@ -16,10 +16,13 @@ use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxSpecs, SandboxState, Sand
 use crate::skill::Skills;
 use crate::toolset::ToolSets;
 
-use super::definition::{WorkflowSandboxDecl, WorkflowStepDef};
+use super::definition::{
+    ChangesetExit, ChangesetFailureExit, WorkflowChangesetDecl, WorkflowSandboxDecl,
+    WorkflowStepDef,
+};
 use super::error::WorkflowError;
 use super::repo::WorkflowDefinitionRepo;
-use super::run::{StepResult, WorkflowRunRepo};
+use super::run::{StepResult, WorkflowRun, WorkflowRunRepo, WorkflowRunState};
 use super::template::{
     format_template_diagnostics, template_diagnostics, ConditionOutcome, TemplateContext,
 };
@@ -85,9 +88,16 @@ pub struct Executor {
     /// Used by `ToolStep` dispatch; held here rather than passed per
     /// call so the agent-step path is unchanged.
     toolsets: Arc<ToolSets>,
+    /// `None` only in test harnesses that don't stand up a `Library`
+    /// (`Changesets::new` needs one). Production always wires `Some`
+    /// (`Workflows::init` → `ExecuteRunJobInitializer`). A workflow
+    /// that declares `changeset:` against a `None` executor fails its
+    /// pre-flight rather than silently skipping the declaration.
+    changesets: Option<Arc<crate::changeset::Changesets>>,
 }
 
 impl Executor {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         runs: WorkflowRunRepo,
         definitions: WorkflowDefinitionRepo,
@@ -95,6 +105,7 @@ impl Executor {
         skills: Arc<Skills>,
         sandboxes: Arc<Sandboxes>,
         toolsets: Arc<ToolSets>,
+        changesets: Option<Arc<crate::changeset::Changesets>>,
     ) -> Self {
         Self {
             runs,
@@ -103,6 +114,7 @@ impl Executor {
             skills,
             sandboxes,
             toolsets,
+            changesets,
         }
     }
 
@@ -135,7 +147,7 @@ impl Executor {
         let workflow_id = run.definition_id;
         let trigger_context = run.trigger_context.clone();
         let steps = run.steps_snapshot.clone();
-        let run_context = serde_json::json!({
+        let mut run_context = serde_json::json!({
             "id": run_id.to_string(),
             "started_at": run.started_at().to_rfc3339(),
             "date": run.started_at().format("%Y-%m-%d").to_string(),
@@ -151,6 +163,76 @@ impl Executor {
         // sees its updated sandbox list on the next trigger.
         let definition = self.definitions.find_by_id(workflow_id).await?;
         let sandbox_decls = definition.sandboxes.clone();
+
+        // rev2 §7.2 point 1 (rev3 §7): pre-create the run's draft only
+        // when `changeset:` is declared (so its title is used) — same
+        // "fail as a synthetic <pre-flight> step" idiom as a sandbox
+        // that never comes Ready. An undeclared workflow does nothing
+        // here; a step that writes `draft:` still gets a lazily
+        // created run-keyed draft (§3's derived title) the first time
+        // it writes — a step's `space:` write is refused (`UseDraft`)
+        // instead. `run.changeset.is_none()` guards a resumed run
+        // (crash/restart) from pre-creating a second one.
+        if let Some(decl) = &definition.changeset {
+            if run.changeset.is_none() {
+                let open_result = match &self.changesets {
+                    Some(changesets) => {
+                        let executor_sub =
+                            AuthSubject::workflow_executor(project_id, workflow_id, run_id);
+                        let template_ctx = TemplateContext {
+                            trigger: &trigger_context,
+                            steps: &HashMap::new(),
+                            run: &run_context,
+                        };
+                        let title = template_ctx
+                            .substitute_in_string(&decl.title)
+                            .unwrap_or_else(|_| decl.title.clone());
+                        let description = decl.description.as_ref().map(|d| {
+                            template_ctx
+                                .substitute_in_string(d)
+                                .unwrap_or_else(|_| d.clone())
+                        });
+                        changesets
+                            .draft_for(&executor_sub, Some(title), description, None)
+                            .await
+                            .map_err(|e| e.to_string())
+                    }
+                    None => Err(
+                        "workflow declares a changeset but this executor has no Changesets \
+                         service configured"
+                            .to_string(),
+                    ),
+                };
+                match open_result {
+                    Ok(cs) => {
+                        if run.changeset_opened(cs.id).did_execute() {
+                            self.runs.update(&mut run).await?;
+                        }
+                        run_context["changeset"] =
+                            serde_json::json!({ "id": cs.id.to_string(), "title": cs.title });
+                    }
+                    Err(err) => {
+                        let step_name = "<pre-flight>".to_string();
+                        if run.step_started(step_name.clone()).did_execute() {
+                            self.runs.update(&mut run).await?;
+                        }
+                        if run
+                            .step_errored(step_name, format!("changeset open failed: {err}"))
+                            .did_execute()
+                        {
+                            self.runs.update(&mut run).await?;
+                        }
+                        if run.run_completed().did_execute() {
+                            self.runs.update(&mut run).await?;
+                        }
+                        return Ok(());
+                    }
+                }
+            } else if let Some(id) = run.changeset {
+                run_context["changeset"] =
+                    serde_json::json!({ "id": id.to_string(), "title": decl.title });
+            }
+        }
 
         // Pre-flight: bring all declared sandboxes to Ready. If this
         // fails the run terminates as Failed without running any step.
@@ -297,6 +379,18 @@ impl Executor {
             self.runs.update(&mut run).await?;
         }
 
+        // rev2 §7.2 point 3: land/discard/keep the run's draft per
+        // `on_success`/`on_failure` — unconditionally, not just when
+        // `changeset:` was declared, since an undeclared workflow whose
+        // step wrote `space:`/`draft:` still has a lazily created
+        // run-keyed draft to close (with the block's defaults:
+        // `publish` / `discard`). A no-op if there's no open draft for
+        // this run (nothing was ever written, or a step already closed
+        // it itself via `spaces publish`/`discard`).
+        let decl = definition.changeset.clone().unwrap_or_default();
+        self.close_run_changeset(&mut run, project_id, workflow_id, run_id, &decl)
+            .await;
+
         // Post-flight: always runs (even when a step failed).
         // Best-effort. Workflow-scoped sandboxes always suspend; borrowed
         // preexisting sandboxes only suspend if uncontested.
@@ -304,6 +398,105 @@ impl Executor {
             .await;
 
         Ok(())
+    }
+
+    /// The run's current draft's exit action, looked up by
+    /// `Changesets::open_draft_for_run` rather than `run.changeset`
+    /// (rev2 D4: no lookup depends on that field any more — it's run
+    /// history only, and a lazily created draft never set it in the
+    /// first place). `Ok(None)` (nothing was ever written under this
+    /// run, or a step already closed its draft itself) is a silent
+    /// no-op.
+    ///
+    /// `on_success`/`on_failure` map to `Changesets::{submit,apply,
+    /// discard}` (or a no-op for `keep`). OQ-11's narrowing lives
+    /// here, not the auth layer: `Publish` without the workflow's own
+    /// `allow_land: true` submits a PR rather than landing on `main`
+    /// — the executor's `WorkflowExecutor` subject carries
+    /// `ProjectAdmin`, which the §4.2 matrix grants real `Update`
+    /// through, so this is the one place standing between "every
+    /// workflow can land" and intent. Failures are logged and
+    /// swallowed — a stuck PR/branch is recoverable by hand via
+    /// `spaces publish`/`discard`; failing the run retroactively over
+    /// its own cleanup step would be worse.
+    async fn close_run_changeset(
+        &self,
+        run: &mut WorkflowRun,
+        project_id: ProjectId,
+        workflow_id: WorkflowDefinitionId,
+        run_id: WorkflowRunId,
+        decl: &WorkflowChangesetDecl,
+    ) {
+        let Some(changesets) = &self.changesets else {
+            return;
+        };
+        let cs = match changesets.open_draft_for_run(run_id).await {
+            Ok(Some(cs)) => cs,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    run_id = %run_id,
+                    "close_run_changeset: draft lookup failed; leaving it as-is"
+                );
+                return;
+            }
+        };
+        let id = cs.id;
+        let sub = AuthSubject::workflow_executor(project_id, workflow_id, run_id);
+        let succeeded = run.state == WorkflowRunState::Succeeded;
+
+        let result = if succeeded {
+            match decl.on_success {
+                ChangesetExit::Publish if decl.allow_land => {
+                    changesets.apply(&sub, id).await.map(|_| ())
+                }
+                // rev3 addendum A D23: no human is typing a title/body
+                // here, so a run's auto-submit derives them from the
+                // draft itself — the same fallback `submit`'s old
+                // caller-side PR body rendering used.
+                ChangesetExit::Publish => {
+                    let title = cs.title.clone();
+                    let body = cs
+                        .description
+                        .clone()
+                        .unwrap_or_else(|| "(no description)".to_string());
+                    changesets.submit(&sub, id, title, body).await.map(|_| ())
+                }
+                ChangesetExit::Keep => Ok(()),
+            }
+        } else {
+            match decl.on_failure {
+                ChangesetFailureExit::Discard => changesets
+                    .discard(&sub, id, Some("workflow run did not succeed".to_string()))
+                    .await
+                    .map(|_| ()),
+                ChangesetFailureExit::Keep => Ok(()),
+            }
+        };
+        match result {
+            Ok(()) => {
+                if run.changeset_closed(id).did_execute() {
+                    if let Err(e) = self.runs.update(run).await {
+                        tracing::warn!(
+                            error = %e,
+                            changeset_id = %id,
+                            run_id = %run_id,
+                            "close_run_changeset: failed to record changeset_closed on the run \
+                             (best effort; the exit action itself already landed)"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    changeset_id = %id,
+                    run_id = %run_id,
+                    "changeset exit action failed; changeset left as-is for manual follow-up"
+                );
+            }
+        }
     }
 
     /// For each declared sandbox: find or create scoped to the workflow,

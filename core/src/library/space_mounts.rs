@@ -34,6 +34,21 @@ pub enum SpaceMountsError {
 /// truncation footer; agents enumerate the rest via the `spaces` tool.
 const SPACES_BLOCK_LIMIT: usize = 20;
 
+/// rev3 §6.3 (amended by addendum A): the one sentence describing
+/// `space:`/`draft:` write mode for every subject — `render_spaces_block`'s
+/// `write_line` and `whoami`'s `space_write_mode_note` both render this
+/// verbatim. There is no longer a mode to branch on: `space:` fails
+/// closed (D15) rather than resolving differently by authority.
+pub const SPACE_WRITE_MODE_SENTENCE: &str =
+    "Reads of space:<slug>/ paths see the published library. Writes go to \
+     draft:<slug>/ — your unpublished draft, started on first write or with \
+     `spaces start-draft`. Land it with `spaces publish-draft` (requires \
+     write authority; Forbidden without it), or send it for review with \
+     `spaces submit-draft` (opens a GitHub PR; works even if you also hold \
+     write authority). Direct writes to space:<slug>/ are accepted only \
+     with write authority and no open draft. On `spaces`/`drua_admin_spaces` \
+     view/edit, pass target: draft instead of the draft: prefix.\n";
+
 #[derive(Clone)]
 pub struct SpaceMounts {
     /// `None` in test contexts (`empty()`) where no library is wired up.
@@ -99,7 +114,10 @@ impl SpaceMounts {
     }
 
     /// Rendered `<spaces>...</spaces>` system-prompt block for an agent
-    /// in `project_id`. `Ok(None)` when no spaces are mounted.
+    /// in `project_id`. `Ok(None)` when no spaces are mounted. rev3
+    /// §6.3: one sentence for every subject — there is no longer a
+    /// write mode to describe (`space:` fails closed per D15 rather
+    /// than resolving differently by authority).
     #[instrument(name = "library.space_mounts.spaces_block_for_project", skip(self))]
     pub async fn spaces_block_for_project(
         &self,
@@ -116,15 +134,17 @@ fn render_spaces_block(spaces: &[Space]) -> Option<String> {
     }
     let total = spaces.len();
 
-    let header = "<spaces>\n\
+    let write_line = SPACE_WRITE_MODE_SENTENCE;
+    let header = format!(
+        "<spaces>\n\
          This project has the following knowledge spaces mounted — \
          collaborative folders backed by a shared library. Use the \
          file tools (Read, LS, Glob, Grep, Edit, Move, Delete) with \
-         paths prefixed `space:<slug>/` to read or write their \
-         contents. Writes commit to the upstream library automatically; \
-         no sandbox attachment is required.\n";
+         paths prefixed `space:<slug>/` (or `draft:<slug>/` to always \
+         stage) to read or write their contents. {write_line}"
+    );
 
-    let mut buf = String::from(header);
+    let mut buf = header;
     for s in spaces.iter().take(SPACES_BLOCK_LIMIT) {
         match s.description.as_deref() {
             Some(d) if !d.is_empty() => {

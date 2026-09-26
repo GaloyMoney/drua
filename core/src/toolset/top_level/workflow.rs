@@ -792,6 +792,7 @@ impl TopLevelTool for WorkflowTool {
                         resolved_steps,
                         sandbox_decls,
                         model_chain,
+                        None,
                     )
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
@@ -966,6 +967,7 @@ impl TopLevelTool for WorkflowTool {
                         steps_arg,
                         sandboxes_arg,
                         model_chain_arg,
+                        None,
                     )
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;

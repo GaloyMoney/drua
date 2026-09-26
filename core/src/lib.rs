@@ -4,6 +4,7 @@ pub mod agent;
 mod arguments_envelope;
 pub mod audit;
 pub mod auth;
+pub mod changeset;
 pub mod code_assistant;
 mod config;
 pub mod encryption;
@@ -30,9 +31,11 @@ pub use llm::{ModelChain, ModelSpec, ReasoningEffort};
 
 use std::sync::Arc;
 
+use agent::repo::AgentRepo;
 use agent::Agents;
 use audit::Audit;
 use auth::{AuthResource, AuthSubject, AuthVerb};
+use changeset::Changesets;
 use code_assistant::CodeAssistant;
 use git_proxy::GitProxies;
 use github_app::GitHubAppTokenProvider;
@@ -72,6 +75,7 @@ pub struct App {
     git_proxies: Arc<GitProxies>,
     tunnel: Arc<tunnel::TunnelService>,
     library: drua_library::Library,
+    changesets: Arc<Changesets>,
     spaces: Arc<AuthedSpaces>,
     search: Arc<AuthedSearch>,
     notes: Arc<Notes>,
@@ -273,6 +277,34 @@ impl App {
         toolsets.register_top_level(ProjectAgent::new(Arc::clone(&agents)));
         toolsets.register_top_level(SubmitOutputTool::new(Arc::clone(&agents)));
 
+        // Owns the `Changeset` entity/branch lifecycle. Built from a
+        // fresh `AgentRepo` handle (cheap — just wraps `pool`) rather
+        // than `Agents`' own repo, avoiding a service-on-service
+        // dependency cycle (§7 of the handoff). Built before `Workflows`
+        // so the executor can open/close a run's draft.
+        let changesets = Arc::new(Changesets::new(
+            pool,
+            &AgentRepo::new(pool),
+            &library,
+            &users,
+        ));
+
+        // §11: sweeps Open/Submitted changesets for merges, abandoned
+        // PRs, and external pushes after every sync tick.
+        {
+            let changesets = Arc::clone(&changesets);
+            library
+                .on_head_advanced(Arc::new(move |head: String| {
+                    let changesets = Arc::clone(&changesets);
+                    Box::pin(async move {
+                        if let Err(e) = changesets.observe_main(&head).await {
+                            tracing::warn!(error = %e, %head, "changeset.observe_main failed");
+                        }
+                    })
+                }))
+                .await;
+        }
+
         let workflows = Arc::new(Workflows::init(
             pool,
             library.clone(),
@@ -282,6 +314,7 @@ impl App {
             Arc::clone(&users),
             Arc::clone(&toolsets),
             compose_config.script_step,
+            Arc::clone(&changesets),
             &mut jobs,
         ));
 
@@ -307,6 +340,7 @@ impl App {
             Arc::new(library.spaces().clone()),
             Arc::clone(&projects),
             Arc::clone(&users),
+            Arc::clone(&changesets),
         ));
         toolsets.register_top_level(TextEditor::new(
             Arc::clone(&sandboxes),
@@ -324,6 +358,7 @@ impl App {
             Arc::clone(&projects),
             Arc::clone(&space_fs),
             Arc::clone(&search),
+            Arc::clone(&changesets),
         ));
         toolsets.register_top_level(ProjectSandbox::new(Arc::clone(&sandboxes)));
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&projects)));
@@ -354,6 +389,7 @@ impl App {
             Arc::clone(&workflows),
             Arc::clone(&skills),
             Arc::clone(&notes),
+            Arc::clone(&changesets),
         ));
 
         // Compose is constructed with its complete dependencies after the other
@@ -414,6 +450,7 @@ impl App {
             git_proxies,
             tunnel,
             library,
+            changesets,
             spaces,
             search,
             notes,
@@ -492,6 +529,10 @@ impl App {
 
     pub fn library(&self) -> &drua_library::Library {
         &self.library
+    }
+
+    pub fn changesets(&self) -> &Changesets {
+        &self.changesets
     }
 
     pub fn spaces(&self) -> &AuthedSpaces {

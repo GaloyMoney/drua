@@ -83,7 +83,7 @@ impl TextEditor {
                     .space_fs
                     .write_file(subject, &path, file_text)
                     .await?
-                    .map(|()| format!("Wrote {path}")),
+                    .map(|_| format!("Wrote {path}")),
                 TextEditorAction::StrReplace {
                     path,
                     old_str,
@@ -92,7 +92,7 @@ impl TextEditor {
                     .space_fs
                     .str_replace(subject, &path, old_str, new_str)
                     .await?
-                    .map(|()| format!("Replaced text in {path}")),
+                    .map(|_| format!("Replaced text in {path}")),
                 TextEditorAction::Insert {
                     path,
                     insert_line,
@@ -101,7 +101,7 @@ impl TextEditor {
                     .space_fs
                     .insert_line(subject, &path, insert_line as usize, new_str)
                     .await?
-                    .map(|()| format!("Inserted text at line {insert_line} of {path}")),
+                    .map(|_| format!("Inserted text at line {insert_line} of {path}")),
             };
             if let Some(output) = space_result {
                 let out = TextOutput {
@@ -196,9 +196,10 @@ impl TopLevelTool for TextEditor {
     fn description(&self) -> &str {
         "Anthropic-compatible text editor. Commands: `view` (read file or list \
          directory), `create` (write a new file), `str_replace` (replace a \
-         unique substring), `insert` (insert text at a line). Accepts both \
-         in-sandbox absolute paths and `space:<slug>/...` paths from mounted \
-         spaces — writes to spaces commit to the upstream library. \
+         unique substring), `insert` (insert text at a line). Accepts \
+         in-sandbox absolute paths, `space:<slug>/...` paths (the published \
+         library), and `draft:<slug>/...` paths (your unpublished draft) — \
+         results are stamped with which. \
          Notes for `str_replace`: `old_str` must match the file byte-for-byte \
          AND appear exactly once. If you don't already have the file content \
          in context, `view` it first — guessing the surrounding text will \

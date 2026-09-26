@@ -147,6 +147,7 @@ async fn build_stack(
         Arc::clone(&skills),
         Arc::clone(&sandboxes),
         Arc::clone(&toolsets),
+        None,
     );
 
     (

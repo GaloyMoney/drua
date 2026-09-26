@@ -76,6 +76,29 @@ impl AuthSubject {
         }
     }
 
+    /// `project_id()`, falling back to the subject's own scopes for
+    /// `ExportedAgent` — its variant carries no `ProjectId` (an export
+    /// credential can in principle span projects), but in practice a
+    /// credential is provisioned for one project at a time, named by
+    /// its `ProjectMember`/`ProjectAdmin` scope. rev2 D11: this is what
+    /// lets an external MCP agent's draft (`Changeset.project_id`) and
+    /// its `space:` mount gate (`Projects::space_for_subject`) resolve
+    /// at all — without it every such subject hits `NoProject`/
+    /// `AuthenticationRequired` before reaching either.
+    ///
+    /// Still `None` for `User`/`Anonymous`: a `User` reaches
+    /// project-scoped state through its `is_admin()`/`can()` shortcuts
+    /// instead (it is never actually "in" a project), and `Anonymous`
+    /// never gets this far.
+    pub fn effective_project_id(&self) -> Option<ProjectId> {
+        self.project_id().or_else(|| {
+            self.scopes().iter().find_map(|s| match s {
+                AuthScope::ProjectAdmin(pid) | AuthScope::ProjectMember(pid) => Some(*pid),
+                _ => None,
+            })
+        })
+    }
+
     pub fn acting_agent_id(&self) -> Option<AgentId> {
         match self {
             AuthSubject::Agent(_, agent_id, _) => Some(*agent_id),

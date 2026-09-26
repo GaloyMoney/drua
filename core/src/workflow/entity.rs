@@ -9,7 +9,9 @@ use crate::primitives::*;
 use crate::skill::file::slugify;
 use crate::workflow::WORKFLOW_DOC_TYPE;
 
-use super::definition::{WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger};
+use super::definition::{
+    WorkflowChangesetDecl, WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger,
+};
 use super::yaml::{canonical_workflow_path, render_workflow_yaml};
 
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +37,10 @@ pub enum WorkflowDefinitionEvent {
         /// `WriteToRuntime` job uses it to remove the old file.
         #[serde(default)]
         original_path: Option<String>,
+        /// §9.1's `changeset:` block. `None` — most workflows write
+        /// `main` directly through their step agents' own scopes.
+        #[serde(default)]
+        changeset: Option<WorkflowChangesetDecl>,
     },
     Updated {
         name: Option<String>,
@@ -47,6 +53,9 @@ pub enum WorkflowDefinitionEvent {
         /// `None` leaves the field untouched.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_chain: Option<Option<ModelChain>>,
+        /// Same `Some(Some)`/`Some(None)`/`None` convention as `model_chain`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        changeset: Option<Option<WorkflowChangesetDecl>>,
     },
 }
 
@@ -69,6 +78,8 @@ pub struct WorkflowDefinition {
     pub model_chain: Option<ModelChain>,
     #[builder(default)]
     pub(crate) original_path: Option<String>,
+    #[builder(default)]
+    pub changeset: Option<WorkflowChangesetDecl>,
     events: EntityEvents<WorkflowDefinitionEvent>,
 }
 
@@ -109,6 +120,7 @@ impl WorkflowDefinition {
             &self.steps,
             &self.sandboxes,
             self.model_chain.as_ref(),
+            self.changeset.as_ref(),
             &self.created_at().to_rfc3339(),
             &self.updated_at().to_rfc3339(),
         )
@@ -132,6 +144,7 @@ impl WorkflowDefinition {
         steps: Option<Vec<WorkflowStepDef>>,
         sandboxes: Option<Vec<WorkflowSandboxDecl>>,
         model_chain: Option<Option<ModelChain>>,
+        changeset: Option<Option<WorkflowChangesetDecl>>,
         incoming_file_hash: GitFileHash,
     ) -> Idempotent<()> {
         if self.file_hash() == incoming_file_hash {
@@ -173,6 +186,9 @@ impl WorkflowDefinition {
         if let Some(mc) = &model_chain {
             self.model_chain = mc.clone();
         }
+        if let Some(cs) = &changeset {
+            self.changeset = cs.clone();
+        }
 
         self.events.push(WorkflowDefinitionEvent::Updated {
             name,
@@ -181,6 +197,7 @@ impl WorkflowDefinition {
             steps,
             sandboxes,
             model_chain,
+            changeset,
         });
         Idempotent::Executed(())
     }
@@ -188,6 +205,7 @@ impl WorkflowDefinition {
     /// User-driven path (no file_hash compare; that's [`Self::update_from_library`]).
     /// Webhook secrets are preserved when only `provider` changes.
     /// Returns `AlreadyApplied` only when every input is `None`.
+    #[allow(clippy::too_many_arguments)]
     pub fn update_content(
         &mut self,
         name: Option<String>,
@@ -196,6 +214,7 @@ impl WorkflowDefinition {
         steps: Option<Vec<WorkflowStepDef>>,
         sandboxes: Option<Vec<WorkflowSandboxDecl>>,
         model_chain: Option<Option<ModelChain>>,
+        changeset: Option<Option<WorkflowChangesetDecl>>,
     ) -> Idempotent<()> {
         if name.is_none()
             && description.is_none()
@@ -203,6 +222,7 @@ impl WorkflowDefinition {
             && steps.is_none()
             && sandboxes.is_none()
             && model_chain.is_none()
+            && changeset.is_none()
         {
             return Idempotent::AlreadyApplied;
         }
@@ -242,6 +262,9 @@ impl WorkflowDefinition {
         if let Some(mc) = &model_chain {
             self.model_chain = mc.clone();
         }
+        if let Some(cs) = &changeset {
+            self.changeset = cs.clone();
+        }
 
         self.events.push(WorkflowDefinitionEvent::Updated {
             name,
@@ -250,6 +273,7 @@ impl WorkflowDefinition {
             steps,
             sandboxes,
             model_chain,
+            changeset,
         });
         Idempotent::Executed(())
     }
@@ -342,6 +366,7 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     sandboxes,
                     model_chain,
                     original_path,
+                    changeset,
                     ..
                 } => {
                     builder = builder
@@ -354,7 +379,8 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                         .steps(steps.clone())
                         .sandboxes(sandboxes.clone())
                         .model_chain(model_chain.clone())
-                        .original_path(original_path.clone());
+                        .original_path(original_path.clone())
+                        .changeset(changeset.clone());
                 }
                 WorkflowDefinitionEvent::Updated {
                     name,
@@ -363,6 +389,7 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     steps,
                     sandboxes,
                     model_chain,
+                    changeset,
                     ..
                 } => {
                     if let Some(n) = name {
@@ -382,6 +409,9 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     }
                     if let Some(mc) = model_chain {
                         builder = builder.model_chain(mc.clone());
+                    }
+                    if let Some(cs) = changeset {
+                        builder = builder.changeset(cs.clone());
                     }
                 }
             }
@@ -412,6 +442,8 @@ pub struct NewWorkflowDefinition {
     pub(super) model_chain: Option<ModelChain>,
     #[builder(default, setter(into, strip_option))]
     pub(super) original_path: Option<String>,
+    #[builder(default, setter(strip_option))]
+    pub(super) changeset: Option<WorkflowChangesetDecl>,
 }
 
 impl NewWorkflowDefinition {
@@ -444,6 +476,7 @@ impl IntoEvents<WorkflowDefinitionEvent> for NewWorkflowDefinition {
                 sandboxes: self.sandboxes,
                 model_chain: self.model_chain,
                 original_path: self.original_path,
+                changeset: self.changeset,
             }],
         )
     }
@@ -576,6 +609,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(matches!(res, Idempotent::Executed(())));
         assert_eq!(
@@ -606,6 +640,7 @@ mod tests {
             Some(WorkflowTrigger::Manual {
                 condition: Some("trigger.payload.env == 'staging'".to_string()),
             }),
+            None,
             None,
             None,
             None,

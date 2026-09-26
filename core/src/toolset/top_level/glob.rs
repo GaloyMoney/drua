@@ -68,10 +68,11 @@ impl TopLevelTool for GlobTool {
     }
 
     fn description(&self) -> &str {
-        "Find files matching a glob pattern. Accepts either an in-sandbox path \
-         or a `space:<slug>/...` path that reads from the project's mounted spaces. \
-         Pass `details: true` on a `space:` path to get each file's first- and \
-         last-commit dates."
+        "Find files matching a glob pattern. Accepts either an in-sandbox path, \
+         a `space:<slug>/...` path that reads the published library, or a \
+         `draft:<slug>/...` path that reads your unpublished draft. \
+         Pass `details: true` on a `space:`/`draft:` path to get each file's \
+         first- and last-commit dates."
     }
 
     fn input_schema(&self) -> &serde_json::Value {

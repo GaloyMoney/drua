@@ -6,13 +6,15 @@ use serde::Deserialize;
 use drua_library::{Space, SPACE_DOC_TYPE};
 
 use crate::audit::Audit;
-use crate::auth::{AuthResource, AuthSubject, AuthVerb};
+use crate::auth::{AuthResource, AuthScope, AuthSubject, AuthVerb};
+use crate::changeset::{Changeset, ChangesetStatus, Changesets, TouchedFile, TouchedKind};
 use crate::library::{AuthedSearch, AuthedSpaces};
+use crate::primitives::ChangesetId;
 use crate::project::Projects;
 use crate::space_fs::SpaceFs;
 
 use super::super::error::ToolSetsError;
-use super::super::inspect::{dispatch_edit, dispatch_view, EditOp, ReadOp};
+use super::super::inspect::{dispatch_edit, dispatch_view, EditOp, ReadOp, SpaceTarget};
 use super::super::traits::TopLevelTool;
 use super::{parse_params, OutputSchema};
 
@@ -44,19 +46,29 @@ enum SpacesParams {
     },
     /// Read-only file ops on a space mounted on the caller's project.
     /// `op` selects the sub-tool; `op_args` shape depends on it.
+    /// `target` (rev3 D17) picks `main` (the published library,
+    /// default) or `draft` (the caller's own draft) — the same choice
+    /// the `space:`/`draft:` path prefix makes for the direct file
+    /// tools.
     View {
         slug: String,
         op: ReadOp,
         #[serde(default)]
         op_args: Option<JsonObject>,
+        #[serde(default)]
+        target: SpaceTarget,
     },
     /// Mutating file ops on a space mounted on the caller's project.
     /// `op` selects the sub-tool; `op_args` shape depends on it.
+    /// `target: main` (default) obeys §3's direct-write rule
+    /// (`UseDraft`/`DraftOpen`); `target: draft` always stages.
     Edit {
         slug: String,
         op: EditOp,
         #[serde(default)]
         op_args: Option<JsonObject>,
+        #[serde(default)]
+        target: SpaceTarget,
     },
     /// Hybrid FTS + semantic search restricted to a single mounted
     /// space. Mirrors `notes.search` / skill `use_skill search`, but
@@ -73,6 +85,72 @@ enum SpacesParams {
         #[serde(default = "default_search_limit")]
         limit: usize,
     },
+    /// Explicit, idempotent "begin an isolated edit session" (rev3
+    /// D2/D18) — returns the existing `Open` draft if the caller
+    /// already has one (`started: false`). Optional, since the first
+    /// `draft:` write starts one lazily anyway.
+    #[serde(rename = "start-draft")]
+    StartDraft {
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+    },
+    /// The caller's own open draft, or `{draft: null}` if none is open
+    /// yet. No `id` — this is always "mine". Replaces rev2's `draft`.
+    #[serde(rename = "draft-status")]
+    DraftStatus,
+    /// Changesets visible to the caller, newest first (rev1's
+    /// `changeset list`, folded in here per rev2 §6). Replaces rev2's
+    /// `drafts`.
+    #[serde(rename = "list-drafts")]
+    ListDrafts {
+        #[serde(default)]
+        status: Option<ChangesetStatus>,
+    },
+    /// Lands a draft on `main` directly. Requires `Update` on spaces;
+    /// `Forbidden` without it — no fallback to opening a PR (rev3
+    /// addendum A D21/D24; replaces the old authority-resolved
+    /// `publish-draft`, which is now `submit-draft` for a subject that
+    /// only holds `Propose`). `id` defaults to the caller's own open
+    /// draft; leads/admins may pass another context's draft id.
+    #[serde(rename = "publish-draft")]
+    PublishDraft {
+        #[serde(default)]
+        id: Option<ChangesetId>,
+    },
+    /// Opens a GitHub PR for a draft instead of landing it. Requires
+    /// only `Propose`, so it's reachable even by a subject that also
+    /// holds `Update` and could `publish-draft` instead (rev3 addendum
+    /// A D21). `title`/`body` are required — they go straight to the
+    /// PR, and are recorded on the changeset (`Submitted.pr_title`/
+    /// `pr_body`) without touching the draft's own `title`/
+    /// `description` (D23). `id` defaults to the caller's own open
+    /// draft.
+    #[serde(rename = "submit-draft")]
+    SubmitDraft {
+        #[serde(default)]
+        id: Option<ChangesetId>,
+        title: String,
+        body: String,
+    },
+    /// Closes a draft without landing it. `id` defaults to the
+    /// caller's own open draft. Replaces rev2's `discard`.
+    #[serde(rename = "discard-draft")]
+    DiscardDraft {
+        #[serde(default)]
+        id: Option<ChangesetId>,
+        #[serde(default)]
+        reason: Option<String>,
+    },
+    /// Moves a draft onto current `main`, squashing its commits. `id`
+    /// defaults to the caller's own open draft. Conflicts are reported
+    /// without touching the branch. Replaces rev2's `rebase`.
+    #[serde(rename = "rebase-draft")]
+    RebaseDraft {
+        #[serde(default)]
+        id: Option<ChangesetId>,
+    },
 }
 
 impl SpacesParams {
@@ -85,6 +163,13 @@ impl SpacesParams {
             Self::View { .. } => "view",
             Self::Edit { .. } => "edit",
             Self::Search { .. } => "search",
+            Self::StartDraft { .. } => "start-draft",
+            Self::DraftStatus => "draft-status",
+            Self::ListDrafts { .. } => "list-drafts",
+            Self::PublishDraft { .. } => "publish-draft",
+            Self::SubmitDraft { .. } => "submit-draft",
+            Self::DiscardDraft { .. } => "discard-draft",
+            Self::RebaseDraft { .. } => "rebase-draft",
         }
     }
 }
@@ -116,6 +201,85 @@ struct SpacesOutput {
     spaces: Option<Vec<SpaceSummary>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     results: Option<Vec<SpaceSearchHit>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    draft: Option<ChangesetSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    drafts: Option<Vec<ChangesetSummary>>,
+    /// `start-draft` only: `true` iff this call is what opened the
+    /// draft (rev3 D2) — `false` when it returned an already-open one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    started: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commits: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mergeable: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    conflicts: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    touched: Option<Vec<TouchedFileOut>>,
+    /// `publish` outcome — `"pr_opened"` or `"landed"` (rev2 D6).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pr_number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pr_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    merge_oid: Option<String>,
+}
+
+#[derive(Default, serde::Serialize, schemars::JsonSchema)]
+struct ChangesetSummary {
+    id: String,
+    title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    status: String,
+    branch: String,
+    base_oid: String,
+    head_oid: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pr_number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pr_url: Option<String>,
+}
+
+impl From<&Changeset> for ChangesetSummary {
+    fn from(cs: &Changeset) -> Self {
+        Self {
+            id: cs.id.to_string(),
+            title: cs.title.clone(),
+            description: cs.description.clone(),
+            status: format!("{:?}", cs.status).to_lowercase(),
+            branch: cs.branch(),
+            base_oid: cs.base_oid.clone(),
+            head_oid: cs.head_oid.clone(),
+            pr_number: cs.pr_number,
+            pr_url: cs.pr_url.clone(),
+        }
+    }
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct TouchedFileOut {
+    space: String,
+    path: String,
+    kind: String,
+}
+
+impl From<&TouchedFile> for TouchedFileOut {
+    fn from(t: &TouchedFile) -> Self {
+        Self {
+            space: t.space_slug.clone(),
+            path: t.path.clone(),
+            kind: match t.kind {
+                TouchedKind::Added => "added",
+                TouchedKind::Modified => "modified",
+                TouchedKind::Deleted => "deleted",
+            }
+            .to_string(),
+        }
+    }
 }
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
@@ -137,7 +301,7 @@ static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
         "properties": {
             "command": {
                 "type": "string",
-                "enum": ["create", "mount", "unmount", "list", "view", "edit", "search"],
+                "enum": ["create", "mount", "unmount", "list", "view", "edit", "search", "start-draft", "draft-status", "list-drafts", "publish-draft", "submit-draft", "discard-draft", "rebase-draft"],
                 "description": "Which spaces operation to perform."
             },
             "slug": {
@@ -146,7 +310,7 @@ static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "description": {
                 "type": "string",
-                "description": "Human-readable summary of the space's purpose. Used by create only."
+                "description": "Human-readable summary. Used by create (the space's purpose) and start-draft (optional, overrides the derived draft description)."
             },
             "all": {
                 "type": "boolean",
@@ -161,6 +325,11 @@ static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
                 "type": "object",
                 "description": "Sub-op arguments. view: read/ls take {path, ...} (ls also takes details? — append each file's first-/last-commit dates); grep/glob take {pattern, path?, ...} (glob also takes details?). edit: write {path, content}; str_replace {path, old_str, new_str}; insert {path, line, text}; delete {path}; move {from, to}."
             },
+            "target": {
+                "type": "string",
+                "enum": ["main", "draft"],
+                "description": "view/edit only: which tree to address — 'main' (default) is the published library (writes obey the direct-write rule: refused with UseDraft/DraftOpen unless you hold write authority and have no open draft); 'draft' always reads/stages your own draft, started on first write or with start-draft."
+            },
             "query": {
                 "type": "string",
                 "description": "Search query — keywords or natural language (search command)."
@@ -174,6 +343,27 @@ static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
                 "type": "integer",
                 "minimum": 1,
                 "description": "Maximum number of search results (search command, default 10)."
+            },
+            "title": {
+                "type": "string",
+                "description": "start-draft: optional title override (default: derived — 'Draft by <you>'). submit-draft: required — the PR's title, sent to GitHub as-is."
+            },
+            "body": {
+                "type": "string",
+                "description": "submit-draft only, required: the PR's body, sent to GitHub (with drua's own provenance trailers appended). Recorded on the changeset but never overrides its own title/description."
+            },
+            "id": {
+                "type": "string",
+                "description": "Changeset id (uuid). Optional for publish-draft/submit-draft/discard-draft/rebase-draft — defaults to the caller's own open draft; leads/admins may target another context's draft."
+            },
+            "status": {
+                "type": "string",
+                "enum": ["open", "submitted", "merged", "applied", "discarded", "abandoned"],
+                "description": "Optional status filter for list-drafts."
+            },
+            "reason": {
+                "type": "string",
+                "description": "Optional free-text reason. Used by discard-draft."
             }
         },
         "required": ["command"],
@@ -186,6 +376,7 @@ pub struct SpacesTool {
     projects: Arc<Projects>,
     space_fs: Arc<SpaceFs>,
     search: Arc<AuthedSearch>,
+    changesets: Arc<Changesets>,
 }
 
 impl SpacesTool {
@@ -194,13 +385,37 @@ impl SpacesTool {
         projects: Arc<Projects>,
         space_fs: Arc<SpaceFs>,
         search: Arc<AuthedSearch>,
+        changesets: Arc<Changesets>,
     ) -> Self {
         Self {
             spaces,
             projects,
             space_fs,
             search,
+            changesets,
         }
+    }
+
+    /// `id` if given; else the caller's own open draft. Shared by
+    /// `publish-draft`/`submit-draft`/`discard-draft`/`rebase-draft`
+    /// (rev2 §6.2; rev3 addendum A).
+    async fn resolve_draft_id(
+        &self,
+        sub: &AuthSubject,
+        id: Option<ChangesetId>,
+    ) -> Result<ChangesetId, ToolSetsError> {
+        if let Some(id) = id {
+            return Ok(id);
+        }
+        self.changesets
+            .open_draft_for(sub)
+            .await?
+            .map(|cs| cs.id)
+            .ok_or_else(|| {
+                ToolSetsError::InvalidArgument(
+                    "no changeset id given and the caller has no open draft".to_string(),
+                )
+            })
     }
 
     /// Validate and normalise caller-supplied path prefixes for any
@@ -251,17 +466,26 @@ impl TopLevelTool for SpacesTool {
 
     fn description(&self) -> &str {
         "Manage library spaces — bounded collaborative folders under \
-         `spaces/<slug>/` in the knowledge-base repo. Commands: \
+         `spaces/<slug>/` in the knowledge-base repo. Reads of `space:<slug>/` \
+         paths see the published library. Writes go to `draft:<slug>/` — your \
+         unpublished draft, started on first write or with `start-draft` — \
+         and are landed with `publish-draft` (requires write authority) or \
+         sent for review with `submit-draft` (opens a GitHub PR; works for \
+         everyone who can draft, including those who could also \
+         `publish-draft`). Direct writes to `space:<slug>/` are accepted only \
+         with write authority and no open draft. Commands: \
          `create` (requires `slug`, optional `description`; auto-mounts \
-         onto the caller's project), \
-         `mount` / `unmount` (requires `slug`; idempotent), \
+         onto the caller's project; leads/admins only), \
+         `mount` / `unmount` (requires `slug`; idempotent; leads/admins only), \
          `list` (defaults to spaces mounted by the caller's project; \
          pass `all: true` to discover every space in the library), \
-         `view` (read-only file ops; requires `slug`, `op`, `op_args`; \
+         `view` (read-only file ops; requires `slug`, `op`, `op_args`, \
+         optional `target` ('main' default | 'draft'); \
          op=read {path, offset?, limit?}, ls {path, details?}, \
          grep {pattern, path?, glob?, output_mode?, ...}, \
          glob {pattern, path?, details?}), \
-         `edit` (mutating file ops; requires `slug`, `op`, `op_args`; \
+         `edit` (mutating file ops; requires `slug`, `op`, `op_args`, \
+         optional `target` ('main' default | 'draft'); \
          op=write {path, content} (full overwrite), \
          str_replace {path, old_str, new_str} (old_str must occur once), \
          insert {path, line, text} (line is 1-based, insert AFTER; 0 prepends), \
@@ -270,7 +494,21 @@ impl TopLevelTool for SpacesTool {
          single mounted space; requires `slug`, `query`; optional \
          `paths` is a list of subtree prefixes (e.g. \
          [\"triggers/\", \"runbooks/\"]) — empty = whole space; \
-         optional `limit` defaults to 10). \
+         optional `limit` defaults to 10), \
+         `start-draft` (explicit, idempotent — begins an isolated edit \
+         session; optional `title`/`description`; returns the existing \
+         open draft if you already have one), \
+         `draft-status` (your own open draft, or {draft: null}), \
+         `list-drafts` (drafts you can see, newest first; optional `status` filter), \
+         `publish-draft` (lands a draft on `main` directly; requires write \
+         authority — `Forbidden` without it, no fallback; optional `id` \
+         defaults to your own open draft), \
+         `submit-draft` (opens a GitHub PR for a draft instead of landing \
+         it; requires only the authority to draft at all; required `title`, \
+         `body` go straight to the PR; optional `id` defaults to your own \
+         open draft), \
+         `discard-draft` (closes a draft without landing it; optional `id`/`reason`), \
+         `rebase-draft` (moves a draft onto current `main`, squashing; optional `id`). \
          File ops and search are gated on the slug being mounted on \
          the caller's project. Use path=\"\" for the space root."
     }
@@ -284,16 +522,32 @@ impl TopLevelTool for SpacesTool {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        // Project leads only — the tool mutates the project's
-        // `mounted_spaces` set (via create / mount / unmount), and even
-        // the `list` command is conceptually about administering what
-        // the project sees. `Update on Project(P)` matches `ProjectAdmin`
-        // (the lead-agent scope) without granting access to ordinary
-        // task agents (`ProjectMember`).
-        subject.project_id().is_some_and(|p| {
+        // Leads/admins see the whole tool (create/mount/unmount still
+        // enforce `Update` on `Project` themselves, defense in depth).
+        // rev2: also visible to any subject that can at least stage a
+        // space edit (`Propose`) — the draft/drafts/publish/discard/
+        // rebase commands are theirs to use; `call()` doesn't gate
+        // those further since `Changesets`/`SpaceFs` already do.
+        //
+        // `WorkflowScript`-marked subjects are excluded even though
+        // `ProjectMember` grants them `Propose` on `Space` — a script
+        // step gets only the direct file-manipulation tools
+        // (`can_use_agent_file_tools`), never a management tool; it has
+        // no interactive turn to run `spaces publish` from, and the
+        // executor already closes its run's draft on its behalf.
+        if subject.scopes().contains(&AuthScope::WorkflowScript) {
+            return false;
+        }
+        subject.effective_project_id().is_some_and(|p| {
             subject
                 .can(AuthVerb::Update, AuthResource::Project(Some(p)))
                 .is_ok()
+                || subject
+                    .can(AuthVerb::Propose, AuthResource::Space(None))
+                    .is_ok()
+                || subject
+                    .can(AuthVerb::Update, AuthResource::Space(None))
+                    .is_ok()
         })
     }
 
@@ -302,28 +556,42 @@ impl TopLevelTool for SpacesTool {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let project_id = subject.project_id().ok_or(ToolSetsError::Unauthorized)?;
+        let project_id = subject
+            .effective_project_id()
+            .ok_or(ToolSetsError::Unauthorized)?;
         let params: SpacesParams = parse_params(arguments)?;
         Audit::record_action(format!("spaces.{}", params.command_name()));
 
         let (text, out) = match params {
-            SpacesParams::View { slug, op, op_args } => {
+            SpacesParams::View {
+                slug,
+                op,
+                op_args,
+                target,
+            } => {
                 return dispatch_view(
                     &self.space_fs,
                     subject,
                     &slug,
                     op,
                     op_args.unwrap_or_default(),
+                    target,
                 )
                 .await;
             }
-            SpacesParams::Edit { slug, op, op_args } => {
+            SpacesParams::Edit {
+                slug,
+                op,
+                op_args,
+                target,
+            } => {
                 return dispatch_edit(
                     &self.space_fs,
                     subject,
                     &slug,
                     op,
                     op_args.unwrap_or_default(),
+                    target,
                 )
                 .await;
             }
@@ -468,6 +736,142 @@ impl TopLevelTool for SpacesTool {
                     command: "search".to_string(),
                     space: Some(SpaceSummary::from(&space)),
                     results: Some(results),
+                    ..Default::default()
+                };
+                (text, out)
+            }
+            SpacesParams::StartDraft { title, description } => {
+                let had_draft = self.changesets.open_draft_for(subject).await?.is_some();
+                let cs = self
+                    .changesets
+                    .draft_for(subject, title, description, None)
+                    .await?;
+                let started = !had_draft;
+                let text = if started {
+                    format!("Draft {} \"{}\" started.", cs.id, cs.title)
+                } else {
+                    format!("Draft {} \"{}\" already open.", cs.id, cs.title)
+                };
+                let out = SpacesOutput {
+                    command: "start-draft".to_string(),
+                    draft: Some(ChangesetSummary::from(&cs)),
+                    started: Some(started),
+                    ..Default::default()
+                };
+                (text, out)
+            }
+            SpacesParams::DraftStatus => match self.changesets.open_draft_for(subject).await? {
+                None => (
+                    "No open draft.".to_string(),
+                    SpacesOutput {
+                        command: "draft-status".to_string(),
+                        ..Default::default()
+                    },
+                ),
+                Some(draft) => {
+                    let view = self.changesets.status(subject, draft.id).await?;
+                    let touched: Vec<TouchedFileOut> =
+                        view.touched.iter().map(Into::into).collect();
+                    let text = format!(
+                        "Open draft: {} [{}] {}\n  commits: {}\n  mergeable: {}{}\n  touched: {} file(s)",
+                        draft.id,
+                        draft.branch(),
+                        draft.title,
+                        view.commits,
+                        view.mergeable,
+                        if view.mergeable {
+                            String::new()
+                        } else {
+                            format!(" (conflicts: {})", view.conflicts.join(", "))
+                        },
+                        touched.len(),
+                    );
+                    let out = SpacesOutput {
+                        command: "draft-status".to_string(),
+                        draft: Some(ChangesetSummary::from(&draft)),
+                        commits: Some(view.commits),
+                        mergeable: Some(view.mergeable),
+                        conflicts: (!view.conflicts.is_empty()).then_some(view.conflicts),
+                        touched: Some(touched),
+                        ..Default::default()
+                    };
+                    (text, out)
+                }
+            },
+            SpacesParams::ListDrafts { status } => {
+                let list = self.changesets.list(subject, status, None).await?;
+                let summaries: Vec<ChangesetSummary> = list.iter().map(Into::into).collect();
+                let text = if summaries.is_empty() {
+                    "No changesets visible to you.".to_string()
+                } else {
+                    let lines: Vec<String> = summaries
+                        .iter()
+                        .map(|c| format!("  - {} [{}] {}", c.id, c.status, c.title))
+                        .collect();
+                    format!("Changesets ({}):\n{}", summaries.len(), lines.join("\n"))
+                };
+                let out = SpacesOutput {
+                    command: "list-drafts".to_string(),
+                    drafts: Some(summaries),
+                    ..Default::default()
+                };
+                (text, out)
+            }
+            SpacesParams::PublishDraft { id } => {
+                let id = self.resolve_draft_id(subject, id).await?;
+                // rev3 addendum A D21/D24: lands only. `apply` itself
+                // enforces `Update` on `Space(None)` and fails closed
+                // (Forbidden) without it — no fallback to `submit`.
+                let (cs, merge_oid) = self.changesets.apply(subject, id).await?;
+                let text = format!("Changeset {} landed as {merge_oid}.", cs.id);
+                let out = SpacesOutput {
+                    command: "publish-draft".to_string(),
+                    draft: Some(ChangesetSummary::from(&cs)),
+                    outcome: Some("landed".to_string()),
+                    merge_oid: Some(merge_oid),
+                    ..Default::default()
+                };
+                (text, out)
+            }
+            SpacesParams::SubmitDraft { id, title, body } => {
+                let id = self.resolve_draft_id(subject, id).await?;
+                let cs = self.changesets.submit(subject, id, title, body).await?;
+                let text = format!(
+                    "Changeset {} submitted.\n  PR: {}",
+                    cs.id,
+                    cs.pr_url.as_deref().unwrap_or("(unknown)"),
+                );
+                let out = SpacesOutput {
+                    command: "submit-draft".to_string(),
+                    pr_number: cs.pr_number,
+                    pr_url: cs.pr_url.clone(),
+                    draft: Some(ChangesetSummary::from(&cs)),
+                    outcome: Some("pr_opened".to_string()),
+                    ..Default::default()
+                };
+                (text, out)
+            }
+            SpacesParams::DiscardDraft { id, reason } => {
+                let id = self.resolve_draft_id(subject, id).await?;
+                let cs = self.changesets.discard(subject, id, reason).await?;
+                let text = format!("Changeset {} discarded.", cs.id);
+                let out = SpacesOutput {
+                    command: "discard-draft".to_string(),
+                    draft: Some(ChangesetSummary::from(&cs)),
+                    ..Default::default()
+                };
+                (text, out)
+            }
+            SpacesParams::RebaseDraft { id } => {
+                let id = self.resolve_draft_id(subject, id).await?;
+                let cs = self.changesets.rebase(subject, id).await?;
+                let text = format!(
+                    "Changeset {} rebased.\n  base: {}\n  head: {}",
+                    cs.id, cs.base_oid, cs.head_oid,
+                );
+                let out = SpacesOutput {
+                    command: "rebase-draft".to_string(),
+                    draft: Some(ChangesetSummary::from(&cs)),
                     ..Default::default()
                 };
                 (text, out)

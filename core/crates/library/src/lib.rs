@@ -20,17 +20,20 @@ pub use config::LibraryConfig;
 pub use error::LibraryError;
 pub use github_app::GitHubAppTokenProvider;
 pub use importer::{DocType, GitFileHash, LibraryImporter, UpsertError};
-pub use job::{LivenessRef, WriteOp};
+pub use job::{HeadAdvancedHook, LivenessRef, WriteOp};
 pub use primitives::SpaceId;
 pub use search::{SearchHit, SearchStore, SearchableFields};
 pub use space::{NewSpace, Space, SpaceError, SpaceEvent, Spaces, SPACE_DOC_TYPE};
 pub use synced::LibrarySynced;
 
 use self::git::GitEngine;
-pub use self::git::{BlobEntries, DirEntry, PathDates, PathDatesMap};
+pub use self::git::{
+    BatchRmwFn, BlobEntries, CommitDelta, DeltaKind, DirEntry, PathDates, PathDatesMap,
+};
 use self::job::{
-    CommitTick, ImporterRegistry, LibraryEmbedConfig, LibraryEmbedJobInitializer,
-    LibrarySyncConfig, LibrarySyncJobInitializer, LibraryWriteConfig, LibraryWriteJobInitializer,
+    CommitTick, HeadAdvancedHooks, ImporterRegistry, LibraryEmbedConfig,
+    LibraryEmbedJobInitializer, LibrarySyncConfig, LibrarySyncJobInitializer, LibraryWriteConfig,
+    LibraryWriteJobInitializer,
 };
 use self::synced::{HookEntry, LibrarySyncHook};
 
@@ -45,6 +48,7 @@ pub struct Library {
     search: SearchStore,
     spaces: Spaces,
     importers: ImporterRegistry,
+    head_advanced_hooks: HeadAdvancedHooks,
     write_spawner: ::job::JobSpawner<LibraryWriteConfig>,
     embed_spawner: ::job::JobSpawner<LibraryEmbedConfig>,
     /// Fetcher task handle is wrapped in `Arc` so the `Library` itself
@@ -102,12 +106,15 @@ impl Library {
             git.commit_notify(),
         );
 
+        let head_advanced_hooks: HeadAdvancedHooks = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+
         let spawner = jobs.add_resident_initializer(LibrarySyncJobInitializer::new(
             tick_rx,
             Arc::clone(&git),
             search.clone(),
             Arc::clone(&importers),
             embed_spawner.clone(),
+            Arc::clone(&head_advanced_hooks),
         ));
         spawner.spawn(LibrarySyncConfig::default()).await?;
 
@@ -124,6 +131,7 @@ impl Library {
             search,
             spaces,
             importers,
+            head_advanced_hooks,
             write_spawner,
             embed_spawner,
             _fetcher: Arc::new(fetcher),
@@ -140,6 +148,14 @@ impl Library {
     /// ordering.
     pub async fn register_importer(&self, importer: Arc<dyn LibraryImporter>) {
         self.importers.write().await.insert(0, importer);
+    }
+
+    /// Registers a callback fired with the new head oid after each
+    /// successfully-processed sync tick (handoff §11). Post-init only,
+    /// same pattern as `register_importer` — the hook list is shared
+    /// with the already-spawned sync job via the same `Arc<RwLock<_>>`.
+    pub async fn on_head_advanced(&self, hook: HeadAdvancedHook) {
+        self.head_advanced_hooks.write().await.push(hook);
     }
 
     fn spawn_fetcher(
@@ -182,6 +198,19 @@ impl Library {
 
     pub fn search(&self) -> &SearchStore {
         &self.search
+    }
+
+    /// `None` when no GitHub App is configured (local dev, CI) —
+    /// `Changesets::submit` degrades to `ChangesetError::PrUnavailable`
+    /// rather than panicking or silently doing nothing.
+    pub fn github_app(&self) -> Option<&Arc<GitHubAppTokenProvider>> {
+        self.github_app.as_ref()
+    }
+
+    /// `(owner, repo)` when `repo_url` is a GitHub remote — see
+    /// [`LibraryConfig::github_coord`].
+    pub fn repo_coord(&self) -> Option<(String, String)> {
+        self.config.github_coord()
     }
 
     /// Bare-clone path. Callers should prefer `read_blob_at_head`,
@@ -227,6 +256,180 @@ impl Library {
         prefix: &str,
     ) -> Result<Option<Arc<PathDatesMap>>, LibraryError> {
         self.git.path_dates_at_head(prefix).await
+    }
+
+    /// Read a blob's bytes at an arbitrary commit. `Ok(None)` when the
+    /// path doesn't exist at that commit. The ref-aware counterpart of
+    /// [`Self::read_blob_at_head`] — used once a `space:` call resolves
+    /// to a changeset target.
+    pub async fn read_blob_at(
+        &self,
+        commit_oid: &str,
+        path: &str,
+    ) -> Result<Option<Vec<u8>>, LibraryError> {
+        self.git.read_blob_at(commit_oid, path).await
+    }
+
+    /// List immediate children of a tree path at an arbitrary commit.
+    /// The ref-aware counterpart of [`Self::list_dir_at_head`].
+    pub async fn list_dir_at(
+        &self,
+        commit_oid: &str,
+        dir_path: &str,
+    ) -> Result<Option<Vec<DirEntry>>, LibraryError> {
+        self.git.list_dir_at(commit_oid, dir_path).await
+    }
+
+    /// Recursively walk every blob under `dir_path` at an arbitrary
+    /// commit. The ref-aware counterpart of [`Self::walk_blobs_at_head`].
+    pub async fn walk_blobs_at(
+        &self,
+        commit_oid: &str,
+        dir_path: &str,
+    ) -> Result<Option<BlobEntries>, LibraryError> {
+        self.git.walk_blobs_at(commit_oid, dir_path).await
+    }
+
+    /// Forces an immediate fetch and returns the resulting HEAD (`main`)
+    /// oid. `Ok(None)` when the repo is unborn. Used by `Changesets::open`
+    /// to pin a changeset's `base_oid` to a fresh `main`, not whatever
+    /// the periodic fetcher last observed.
+    pub async fn fetch_and_head(&self) -> Result<Option<String>, LibraryError> {
+        self.git.fetch_and_head().await
+    }
+
+    /// Diff between two commits (`None` `from` walks all of `to`'s tree
+    /// as `Added`), each changed path with its blob content at `to` (or
+    /// the removed blob for deletes). Used by `Changesets::status`'s
+    /// touched-files computation.
+    pub async fn changes_since(
+        &self,
+        from: Option<&str>,
+        to: &str,
+    ) -> Result<Vec<CommitDelta>, LibraryError> {
+        self.git.changes_since(from, to).await
+    }
+
+    /// Current target of `refname` (e.g. `refs/heads/drua/<id>`).
+    /// `Ok(None)` when the ref doesn't exist locally.
+    pub async fn resolve_ref(&self, refname: &str) -> Result<Option<String>, LibraryError> {
+        self.git.resolve_ref(refname).await
+    }
+
+    /// Points `refname` at `oid` locally (no push). See
+    /// [`GitEngine::create_ref`].
+    pub async fn create_ref(&self, refname: &str, oid: &str) -> Result<(), LibraryError> {
+        self.git.create_ref(refname, oid).await
+    }
+
+    /// Deletes `refname` locally, and on origin too when `push` is set.
+    pub async fn delete_ref(&self, refname: &str, push: bool) -> Result<(), LibraryError> {
+        self.git.delete_ref(refname, push).await
+    }
+
+    /// Best common ancestor of `a` and `b`. `Ok(None)` when they share
+    /// no history.
+    pub async fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>, LibraryError> {
+        self.git.merge_base(a, b).await
+    }
+
+    /// Tree-level 3-way merge of `ours` onto `theirs` from `base`. See
+    /// [`GitEngine::merge_trees`].
+    pub async fn merge_trees(
+        &self,
+        base: &str,
+        ours: &str,
+        theirs: &str,
+    ) -> Result<Result<String, Vec<String>>, LibraryError> {
+        self.git.merge_trees(base, ours, theirs).await
+    }
+
+    /// Merges `changeset_tip` into `main` as a 2-parent commit. See
+    /// [`GitEngine::merge_into_main`].
+    pub async fn merge_into_main(
+        &self,
+        changeset_tip: &str,
+        message: String,
+        attribution: CommitAttribution,
+    ) -> Result<String, LibraryError> {
+        self.git
+            .merge_into_main(changeset_tip, message, attribution)
+            .await
+    }
+
+    /// Force-rewrites `refname` to a single squash commit onto `onto`.
+    /// See [`GitEngine::rebase_ref`].
+    pub async fn rebase_ref(
+        &self,
+        refname: &str,
+        onto: &str,
+        message: String,
+        attribution: CommitAttribution,
+    ) -> Result<Result<(String, String), Vec<String>>, LibraryError> {
+        self.git
+            .rebase_ref(refname, onto, message, attribution)
+            .await
+    }
+
+    /// Ref-aware counterpart of a blind-overwrite write: `target_ref`
+    /// selects the branch to commit and push to (`None` =
+    /// `refs/heads/main`). Returns the resulting commit oid, or `None`
+    /// if the write was a no-op.
+    pub async fn write_file_at(
+        &self,
+        target_ref: Option<String>,
+        path: String,
+        content: Vec<u8>,
+        commit_message: String,
+        attribution: CommitAttribution,
+    ) -> Result<Option<String>, LibraryError> {
+        self.git
+            .write_file_at(target_ref, path, content, commit_message, attribution)
+            .await
+    }
+
+    /// Ref-aware counterpart of a delete. See [`Self::write_file_at`]
+    /// for the `target_ref` contract.
+    pub async fn delete_file_at(
+        &self,
+        target_ref: Option<String>,
+        path: String,
+        commit_message: String,
+        attribution: CommitAttribution,
+    ) -> Result<Option<String>, LibraryError> {
+        self.git
+            .delete_file_at(target_ref, path, commit_message, attribution)
+            .await
+    }
+
+    /// Ref-aware read-modify-write. See [`Self::write_file_at`] for the
+    /// `target_ref` contract.
+    pub async fn update_file_at(
+        &self,
+        target_ref: Option<String>,
+        path: String,
+        update: BatchRmwFn,
+        commit_message: String,
+        attribution: CommitAttribution,
+    ) -> Result<Option<String>, LibraryError> {
+        self.git
+            .update_file_at(target_ref, path, update, commit_message, attribution)
+            .await
+    }
+
+    /// Ref-aware rename. See [`Self::write_file_at`] for the
+    /// `target_ref` contract.
+    pub async fn move_file_at(
+        &self,
+        target_ref: Option<String>,
+        from: String,
+        to: String,
+        commit_message: String,
+        attribution: CommitAttribution,
+    ) -> Result<Option<String>, LibraryError> {
+        self.git
+            .move_file_at(target_ref, from, to, commit_message, attribution)
+            .await
     }
 
     /// Per-repo `post_persist_hook` body collapses to a one-liner over

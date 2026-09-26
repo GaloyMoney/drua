@@ -114,12 +114,12 @@ async fn concurrent_writes_batch_with_per_op_results() {
         .expect("create space");
     library
         .spaces()
-        .write_file(slug, "a.md", "alpha bravo charlie\n".into(), attr())
+        .write_file(slug, "a.md", "alpha bravo charlie\n".into(), attr(), None)
         .await
         .expect("seed a.md");
     library
         .spaces()
-        .write_file(slug, "c.md", "to be deleted\n".into(), attr())
+        .write_file(slug, "c.md", "to be deleted\n".into(), attr(), None)
         .await
         .expect("seed c.md");
 
@@ -137,18 +137,27 @@ async fn concurrent_writes_batch_with_per_op_results() {
     // them into a single push. Order within the batch follows submission
     // order, so str_replace lands on a.md before insert.
     let (r1, r2, r3, r4, r5, r6) = tokio::join!(
-        async move { s1.write_file(slug, "d.md", "delta\n".into(), attr()).await },
         async move {
-            s2.str_replace(slug, "a.md", "bravo".into(), "BRAVO".into(), attr())
+            s1.write_file(slug, "d.md", "delta\n".into(), attr(), None)
                 .await
         },
         async move {
-            s3.str_replace(slug, "missing.md", "x".into(), "y".into(), attr())
+            s2.str_replace(slug, "a.md", "bravo".into(), "BRAVO".into(), attr(), None)
                 .await
         },
-        async move { s4.delete_file(slug, "c.md", attr()).await },
-        async move { s5.move_file(slug, "ghost.md", "elsewhere.md", attr()).await },
-        async move { s6.insert(slug, "a.md", 1, "appended".into(), attr()).await },
+        async move {
+            s3.str_replace(slug, "missing.md", "x".into(), "y".into(), attr(), None)
+                .await
+        },
+        async move { s4.delete_file(slug, "c.md", attr(), None).await },
+        async move {
+            s5.move_file(slug, "ghost.md", "elsewhere.md", attr(), None)
+                .await
+        },
+        async move {
+            s6.insert(slug, "a.md", 1, "appended".into(), attr(), None)
+                .await
+        },
     );
 
     r1.expect("write d.md");
