@@ -5,6 +5,9 @@
 use std::sync::Arc;
 
 use clap::Parser;
+use lana_admin_mcp::{
+    KubernetesLanaAdminMcpDiscoverer, LanaAdminMcpConfig, LanaAdminMcpController,
+};
 use mcp_upstream::parse_upstreams;
 use postgres_mcp::{PostgresMcpCloudSqlProxyConfig, PostgresMcpConfig, PostgresMcpController};
 use postgres_mcp_kubernetes::{resolve_namespace, KubernetesPostgresMcpHandler};
@@ -12,6 +15,7 @@ use postgres_mcp_postgres::SqlxPostgresSourceDiscoverer;
 use tunnel_session::run_tunnel;
 
 mod cli;
+mod lana_admin_mcp;
 mod mcp_upstream;
 mod postgres_mcp;
 mod postgres_mcp_kubernetes;
@@ -26,6 +30,7 @@ mod tunnel_session;
 
 type ManagedPostgresMcpController =
     PostgresMcpController<KubernetesPostgresMcpHandler, SqlxPostgresSourceDiscoverer>;
+type ManagedLanaAdminMcpController = LanaAdminMcpController<KubernetesLanaAdminMcpDiscoverer>;
 
 pub(crate) const INITIAL_BACKOFF: std::time::Duration = std::time::Duration::from_secs(1);
 const MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(60);
@@ -39,10 +44,19 @@ async fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
     let static_upstreams = parse_upstreams(&cli.upstreams);
     let postgres_mcp = build_postgres_mcp(&cli).await?;
+    let lana_admin_mcp = build_lana_admin_mcp(&cli).await?;
 
     let mut backoff = INITIAL_BACKOFF;
     loop {
-        match run_tunnel(&cli, &static_upstreams, postgres_mcp.as_ref(), &mut backoff).await {
+        match run_tunnel(
+            &cli,
+            &static_upstreams,
+            postgres_mcp.as_ref(),
+            lana_admin_mcp.as_ref(),
+            &mut backoff,
+        )
+        .await
+        {
             Ok(()) => tracing::info!("tunnel closed cleanly"),
             Err(e) => tracing::error!(error = %e, "tunnel session failed"),
         }
@@ -116,4 +130,35 @@ fn trim_optional(value: &Option<String>) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
+}
+
+async fn build_lana_admin_mcp(
+    cli: &cli::Cli,
+) -> anyhow::Result<Option<ManagedLanaAdminMcpController>> {
+    if !cli.lana_admin_mcp_enabled {
+        return Ok(None);
+    }
+
+    let keycloak_base_url =
+        trim_optional(&cli.lana_admin_mcp_keycloak_base_url).ok_or_else(|| {
+            anyhow::anyhow!(
+            "TUNNEL_LANA_ADMIN_MCP_KEYCLOAK_BASE_URL is required when lana admin mcp is enabled"
+        )
+        })?;
+
+    let config = LanaAdminMcpConfig {
+        sandbox_namespace: cli.lana_admin_mcp_sandbox_namespace.clone(),
+        keycloak_base_url,
+        client_id: cli.lana_admin_mcp_client_id.clone(),
+        username_template: cli.lana_admin_mcp_username_template.clone(),
+        password: cli.lana_admin_mcp_password.clone(),
+        url_template: cli.lana_admin_mcp_url_template.clone(),
+        static_instances: lana_admin_mcp::parse_static_instances(
+            &cli.lana_admin_mcp_static_instances,
+        ),
+    };
+
+    let discoverer = KubernetesLanaAdminMcpDiscoverer::try_default().await?;
+
+    Ok(Some(LanaAdminMcpController::try_new(config, discoverer)?))
 }
