@@ -467,12 +467,14 @@ impl SpaceFs {
         }
     }
 
-    /// `touched` (D10's `<n> files`) is computed here, once, right
-    /// where the hydrated entity is already in hand — never re-fetched
-    /// downstream just to render a stamp. Best-effort: a `touched_count`
-    /// failure degrades to `0` rather than failing the whole op.
-    /// `just_started` (D19/§5.3) is set only by the `draft:` write that
-    /// lazily created the draft.
+    /// `touched` (D10's `<n> files`) is computed here, right where the
+    /// hydrated entity is already in hand. Best-effort: a
+    /// `touched_count` failure degrades to `0` rather than failing the
+    /// whole op. `just_started` (D19/§5.3) is set only by the `draft:`
+    /// write that lazily created the draft. A write's own stamp is
+    /// re-derived from a fresh entity after the write lands
+    /// (`stamp_after_write`) — this is also called from `resolve()`,
+    /// where the entity is necessarily the pre-write one.
     async fn changeset_target(
         &self,
         cs: Changeset,
@@ -707,7 +709,7 @@ impl SpaceFs {
             .map_err(|e| -> ProjectError { e.into() })?;
         self.record_write(&resolved.target, oid, "write_file", &resolved.rel_path)
             .await?;
-        Ok(Some(resolved.stamp))
+        Ok(Some(self.stamp_after_write(sub, path, &resolved).await?))
     }
 
     /// `text_editor` `str_replace`. The unique-occurrence check happens
@@ -744,7 +746,7 @@ impl SpaceFs {
             .map_err(|e| -> ProjectError { e.into() })?;
         self.record_write(&resolved.target, oid, "str_replace", &resolved.rel_path)
             .await?;
-        Ok(Some(resolved.stamp))
+        Ok(Some(self.stamp_after_write(sub, path, &resolved).await?))
     }
 
     /// `text_editor` `insert`. Insertion happens at the worker against
@@ -777,7 +779,7 @@ impl SpaceFs {
             .map_err(|e| -> ProjectError { e.into() })?;
         self.record_write(&resolved.target, oid, "insert", &resolved.rel_path)
             .await?;
-        Ok(Some(resolved.stamp))
+        Ok(Some(self.stamp_after_write(sub, path, &resolved).await?))
     }
 
     /// Removes the file at `space:<slug>/<rel>`. Success even if the
@@ -806,7 +808,7 @@ impl SpaceFs {
             .map_err(|e| -> ProjectError { e.into() })?;
         self.record_write(&resolved.target, oid, "delete_file", &resolved.rel_path)
             .await?;
-        Ok(Some(resolved.stamp))
+        Ok(Some(self.stamp_after_write(sub, path, &resolved).await?))
     }
 
     /// Renames `from` → `to` within a single space. `Ok(None)` only when
@@ -890,7 +892,9 @@ impl SpaceFs {
             .map_err(|e| -> ProjectError { e.into() })?;
         self.record_write(&from_resolved.target, oid, "move_file", &to_rel)
             .await?;
-        Ok(Some(from_resolved.stamp))
+        Ok(Some(
+            self.stamp_after_write(sub, from, &from_resolved).await?,
+        ))
     }
 
     /// Glob walk across the space's tree. Pattern is the standard
@@ -1013,6 +1017,52 @@ impl SpaceFs {
             .record_commit(*id, head_oid, action, path)
             .await
             .map_err(map_changeset_err)
+    }
+
+    /// bugbot 2026-09-26 (Low): `resolved.stamp` is computed by
+    /// `resolve()` *before* the write it accompanies lands, so its
+    /// touched-file count is stale by exactly that write — every write
+    /// after the first reports the pre-write count (`0 files` right
+    /// after landing the first file, `n` after adding file `n+1`).
+    /// Re-derives the stamp from a fresh entity once `record_write` has
+    /// updated `head_oid`, for every write except the one that just
+    /// lazily created the draft — that one keeps `resolve()`'s own
+    /// "started" form, since re-resolving would see the now-open draft
+    /// and report `just_started: false` (the bug the "started" form
+    /// itself was added to fix). `path` is re-parsed rather than
+    /// carrying `typed_scheme`/`in_run` on `Resolved` — cheap, pure,
+    /// and exactly what `resolve()` used to derive them.
+    async fn stamp_after_write(
+        &self,
+        sub: &AuthSubject,
+        path: &str,
+        resolved: &Resolved,
+    ) -> Result<String, ProjectError> {
+        let Target::Changeset {
+            id,
+            just_started: false,
+            ..
+        } = &resolved.target
+        else {
+            return Ok(resolved.stamp.clone());
+        };
+        let Some(sref) = parse_space_path(path) else {
+            return Ok(resolved.stamp.clone());
+        };
+        let in_run = sub.in_workflow_run() && sref.changeset_id.is_none();
+        let cs = self
+            .changesets
+            .find_for_target(sub, *id)
+            .await
+            .map_err(map_changeset_err)?;
+        let target = self.changeset_target(cs, false).await?;
+        Ok(stamp(
+            sref.scheme,
+            &resolved.space.slug,
+            &target,
+            None,
+            in_run,
+        ))
     }
 
     /// Rejects path-traversal, absolute paths, NUL bytes, and leading `/`.

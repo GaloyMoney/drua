@@ -799,6 +799,42 @@ async fn stamp_formats_match_the_documented_forms() {
     );
 }
 
+/// bugbot 2026-09-26 (Low): a write's own returned stamp used to be
+/// computed by `resolve()` *before* that write landed, so its
+/// touched-file count was stale by exactly the write in flight — the
+/// second write of a sequence reported the count as of the first
+/// (`1 file`) instead of itself (`2 files`). `stamp_after_write`
+/// re-derives it from a fresh entity once the write (and
+/// `record_write`'s `head_oid` update) have landed.
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn write_file_returns_its_own_touched_count_not_the_prior_writes() {
+    let (app, user) = setup("stamp_own_count").await;
+    let agent = project_with_space(&app, &user, "proj-stamp-own-count", "docs").await;
+    let fs = space_fs(&app);
+
+    let started = fs
+        .write_file(&agent, "draft:docs/a.md", "one\n".into())
+        .await
+        .expect("write_file dispatch")
+        .expect("space path");
+    assert!(started.contains("started"), "got: {started}");
+
+    let second = fs
+        .write_file(&agent, "draft:docs/b.md", "two\n".into())
+        .await
+        .expect("write_file dispatch")
+        .expect("space path");
+    assert!(second.contains("2 files"), "got: {second}");
+
+    let third = fs
+        .write_file(&agent, "draft:docs/c.md", "three\n".into())
+        .await
+        .expect("write_file dispatch")
+        .expect("space path");
+    assert!(third.contains("3 files"), "got: {third}");
+}
+
 /// rev3 D9/D15: a `Propose`-only member's `space:` write is refused —
 /// loud, never a silent redirect into a draft.
 #[tokio::test]
