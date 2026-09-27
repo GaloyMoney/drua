@@ -190,6 +190,41 @@ pub enum BatchOpKind {
         base_oid: String,
         second_parent: String,
     },
+    /// Squash-rebases `target_ref`'s tip onto `onto`, refused if the
+    /// ref's tip (after a fetch) isn't `expected_tip`. Runs as its own
+    /// batch of one — see [`BatchOpKind::is_ref_level`].
+    Rebase {
+        onto: String,
+        expected_tip: String,
+    },
+    /// Deletes `target_ref` locally, and on origin if `push`. Runs as
+    /// its own batch of one.
+    DeleteRef {
+        push: bool,
+    },
+    /// Creates `target_ref` at `oid` locally, and pushes it if `push`.
+    /// Runs as its own batch of one.
+    CreateRef {
+        oid: String,
+        push: bool,
+    },
+}
+
+impl BatchOpKind {
+    /// Ref-level ops (rebase/create/delete a ref) don't fit the
+    /// "commit on top of the ref tip, fast-forward push" model that
+    /// [`GitEngine::commit_group_then_push_blocking`] implements, and
+    /// each does its own fetch/push under the write lock. `run_writer`
+    /// gives each one a solo batch instead of grouping it with
+    /// unrelated writes.
+    fn is_ref_level(&self) -> bool {
+        matches!(
+            self,
+            BatchOpKind::Rebase { .. }
+                | BatchOpKind::DeleteRef { .. }
+                | BatchOpKind::CreateRef { .. }
+        )
+    }
 }
 
 pub struct BatchOp {
@@ -971,59 +1006,35 @@ impl GitEngine {
         .map_err(|e| LibraryError::Git(format!("resolve_ref join: {e}")))?
     }
 
+    /// Creates `refname` at `oid`, pushed immediately (see
+    /// [`Self::apply_create_ref_blocking`]). Routed through the write
+    /// queue like every other ref mutation, so it shares the advisory
+    /// lock and wakes peer replicas on success.
     #[tracing::instrument(name = "library.git.create_ref", skip_all, fields(%refname, %oid))]
     pub async fn create_ref(&self, refname: &str, oid: &str) -> Result<(), LibraryError> {
-        let _guard = self.repo_mutex.lock().await;
-        let repo_path = self.repo_path.clone();
-        let refname = refname.to_string();
-        let oid = oid.to_string();
-        tokio::task::spawn_blocking(move || -> Result<(), LibraryError> {
-            let repo = git2::Repository::open_bare(&repo_path)
-                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
-            let oid = git2::Oid::from_str(&oid)
-                .map_err(|e| LibraryError::Git(format!("parse oid: {e}")))?;
-            repo.find_commit(oid)
-                .map_err(|e| LibraryError::Git(format!("find commit: {e}")))?;
-            repo.reference(&refname, oid, false, "create changeset ref")
-                .map_err(|e| LibraryError::Git(format!("create ref: {e}")))?;
-            Ok(())
+        self.enqueue(BatchOp {
+            commit_message: String::new(),
+            kind: BatchOpKind::CreateRef {
+                oid: oid.to_string(),
+                push: true,
+            },
+            attribution: CommitAttribution::library_default(),
+            target_ref: Some(refname.to_string()),
         })
         .await
-        .map_err(|e| LibraryError::Git(format!("create_ref join: {e}")))?
+        .map(|_| ())
     }
 
     #[tracing::instrument(name = "library.git.delete_ref", skip_all, fields(%refname, %push))]
     pub async fn delete_ref(&self, refname: &str, push: bool) -> Result<(), LibraryError> {
-        let _guard = self.repo_mutex.lock().await;
-        let token = if push {
-            Self::fresh_token(self.github_app.as_ref()).await
-        } else {
-            None
-        };
-        let repo_path = self.repo_path.clone();
-        let refname = refname.to_string();
-        tokio::task::spawn_blocking(move || -> Result<(), LibraryError> {
-            let repo = git2::Repository::open_bare(&repo_path)
-                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
-            if let Ok(mut r) = repo.find_reference(&refname) {
-                r.delete()
-                    .map_err(|e| LibraryError::Git(format!("delete ref: {e}")))?;
-            }
-            if push {
-                let mut remote = repo
-                    .find_remote("origin")
-                    .map_err(|e| LibraryError::Git(format!("find origin: {e}")))?;
-                let mut po = git2::PushOptions::new();
-                po.remote_callbacks(Self::remote_callbacks(token.as_deref()));
-                let spec = format!(":{refname}");
-                remote
-                    .push(&[spec], Some(&mut po))
-                    .map_err(|e| LibraryError::Git(format!("push delete: {e}")))?;
-            }
-            Ok(())
+        self.enqueue(BatchOp {
+            commit_message: String::new(),
+            kind: BatchOpKind::DeleteRef { push },
+            attribution: CommitAttribution::library_default(),
+            target_ref: Some(refname.to_string()),
         })
         .await
-        .map_err(|e| LibraryError::Git(format!("delete_ref join: {e}")))?
+        .map(|_| ())
     }
 
     #[tracing::instrument(name = "library.git.merge_base", skip_all, fields(%a, %b))]
@@ -1143,70 +1154,44 @@ impl GitEngine {
         oid.ok_or_else(|| LibraryError::Git("merge_into_main: produced no commit".into()))
     }
 
+    /// Squash-rebases `refname` onto `onto`, refused unless `refname`'s
+    /// tip is `expected_tip` (the caller's last-known head — see
+    /// [`Self::apply_rebase_blocking`]). The conflict check here runs
+    /// unlocked against whatever this replica's clone currently has, as
+    /// a fast fail; it can be stale, since the queued op re-checks the
+    /// tip and re-merges after a fetch under the write lock regardless.
     #[tracing::instrument(name = "library.git.rebase_ref", skip_all, fields(%refname, %onto))]
     pub async fn rebase_ref(
         &self,
         refname: &str,
         onto: &str,
+        expected_tip: &str,
         message: String,
         attribution: CommitAttribution,
     ) -> Result<Result<(String, String), Vec<String>>, LibraryError> {
-        let tip = self
-            .resolve_ref(refname)
-            .await?
-            .ok_or_else(|| LibraryError::Git(format!("rebase_ref: {refname} not found")))?;
-        let base = self.merge_base(&tip, onto).await?.ok_or_else(|| {
-            LibraryError::Git(format!(
-                "rebase_ref: no merge base between {refname} and {onto}"
-            ))
-        })?;
-        let tree_oid = match self.merge_trees(&base, &tip, onto).await? {
-            Ok(oid) => oid,
-            Err(conflicts) => return Ok(Err(conflicts)),
-        };
+        if let Ok(Some(base)) = self.merge_base(expected_tip, onto).await {
+            if let Ok(Err(conflicts)) = self.merge_trees(&base, expected_tip, onto).await {
+                return Ok(Err(conflicts));
+            }
+        }
 
-        let _guard = self.repo_mutex.lock().await;
-        let token = Self::fresh_token(self.github_app.as_ref()).await;
-        let repo_path = self.repo_path.clone();
-        let refname_owned = refname.to_string();
-        let onto_owned = onto.to_string();
-        let new_head = tokio::task::spawn_blocking(move || -> Result<String, LibraryError> {
-            let repo = git2::Repository::open_bare(&repo_path)
-                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
-            let onto_oid = git2::Oid::from_str(&onto_owned)
-                .map_err(|e| LibraryError::Git(format!("parse onto: {e}")))?;
-            let onto_commit = repo
-                .find_commit(onto_oid)
-                .map_err(|e| LibraryError::Git(format!("find onto commit: {e}")))?;
-            let tree_oid = git2::Oid::from_str(&tree_oid)
-                .map_err(|e| LibraryError::Git(format!("parse tree oid: {e}")))?;
-            let tree = repo
-                .find_tree(tree_oid)
-                .map_err(|e| LibraryError::Git(format!("find tree: {e}")))?;
-            let author = git2::Signature::now(&attribution.author_name, &attribution.author_email)
-                .map_err(|e| LibraryError::Git(format!("author signature: {e}")))?;
-            let committer =
-                git2::Signature::now(&attribution.committer_name, &attribution.committer_email)
-                    .map_err(|e| LibraryError::Git(format!("committer signature: {e}")))?;
-            let mut full_message = message;
-            full_message.push_str(&attribution.render_message_suffix());
-            let new_oid = repo
-                .commit(
-                    Some(&refname_owned),
-                    &author,
-                    &committer,
-                    &full_message,
-                    &tree,
-                    &[&onto_commit],
-                )
-                .map_err(|e| LibraryError::Git(format!("commit: {e}")))?;
-            Self::push_ref_force(&repo, token.as_deref(), &refname_owned)?;
-            Ok(new_oid.to_string())
-        })
-        .await
-        .map_err(|e| LibraryError::Git(format!("rebase_ref join: {e}")))??;
-
-        Ok(Ok((onto.to_string(), new_head)))
+        let result = self
+            .enqueue(BatchOp {
+                commit_message: message,
+                kind: BatchOpKind::Rebase {
+                    onto: onto.to_string(),
+                    expected_tip: expected_tip.to_string(),
+                },
+                attribution,
+                target_ref: Some(refname.to_string()),
+            })
+            .await;
+        match result {
+            Ok(Some(new_head)) => Ok(Ok((onto.to_string(), new_head))),
+            Ok(None) => Err(LibraryError::Git("rebase_ref: produced no commit".into())),
+            Err(LibraryError::Validation(msg)) => Ok(Err(vec![msg])),
+            Err(e) => Err(e),
+        }
     }
 
     /// Blind overwrite (or create) of `path`.
@@ -1449,21 +1434,42 @@ impl GitEngine {
         mut rx: mpsc::Receiver<QueuedOp>,
         pool: PgPool,
     ) {
-        while let Some(first) = rx.recv().await {
-            let mut batch = vec![first];
-            let deadline = Instant::now() + BATCH_WINDOW;
-            while batch.len() < MAX_BATCH {
-                let now = Instant::now();
-                let timeout = deadline.saturating_duration_since(now);
-                if timeout.is_zero() {
-                    break;
+        // A ref-level op that arrives mid-collection closes the batch
+        // being filled and carries over as the next batch's first op,
+        // instead of being interleaved into `batch` below — preserving
+        // queue order without a general per-op interleaving scheme.
+        let mut pending: Option<QueuedOp> = None;
+        loop {
+            let first = match pending.take() {
+                Some(op) => op,
+                None => match rx.recv().await {
+                    Some(op) => op,
+                    None => return,
+                },
+            };
+            let batch = if first.op.kind.is_ref_level() {
+                vec![first]
+            } else {
+                let mut batch = vec![first];
+                let deadline = Instant::now() + BATCH_WINDOW;
+                while batch.len() < MAX_BATCH {
+                    let now = Instant::now();
+                    let timeout = deadline.saturating_duration_since(now);
+                    if timeout.is_zero() {
+                        break;
+                    }
+                    match tokio::time::timeout(timeout, rx.recv()).await {
+                        Ok(Some(op)) if op.op.kind.is_ref_level() => {
+                            pending = Some(op);
+                            break;
+                        }
+                        Ok(Some(op)) => batch.push(op),
+                        Ok(None) => return, // channel closed
+                        Err(_) => break,    // window elapsed
+                    }
                 }
-                match tokio::time::timeout(timeout, rx.recv()).await {
-                    Ok(Some(op)) => batch.push(op),
-                    Ok(None) => return, // channel closed
-                    Err(_) => break,    // window elapsed
-                }
-            }
+                batch
+            };
             let any_ok =
                 Self::process_batch(&repo_path, github_app.as_ref(), &repo_mutex, &pool, batch)
                     .await;
@@ -1595,6 +1601,10 @@ impl GitEngine {
                     .collect();
             }
         };
+
+        if ops.len() == 1 && ops[0].kind.is_ref_level() {
+            return vec![Self::apply_ref_level_op_blocking(&repo, token, &ops[0])];
+        }
 
         let mut order: Vec<String> = Vec::new();
         let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
@@ -1736,6 +1746,171 @@ impl GitEngine {
         }
     }
 
+    /// Runs a solo ref-level op (see [`BatchOpKind::is_ref_level`]) under
+    /// the write lock. Each variant does its own fetch/push instead of
+    /// going through [`Self::commit_group_then_push_blocking`].
+    fn apply_ref_level_op_blocking(
+        repo: &git2::Repository,
+        token: Option<&str>,
+        op: &BatchOp,
+    ) -> WriteResult {
+        let refname = op
+            .target_ref
+            .as_deref()
+            .expect("ref-level op always carries target_ref");
+        match &op.kind {
+            BatchOpKind::Rebase { onto, expected_tip } => Self::apply_rebase_blocking(
+                repo,
+                token,
+                refname,
+                onto,
+                expected_tip,
+                &op.commit_message,
+                &op.attribution,
+            ),
+            BatchOpKind::DeleteRef { push } => {
+                Self::apply_delete_ref_blocking(repo, token, refname, *push)
+            }
+            BatchOpKind::CreateRef { oid, push } => {
+                Self::apply_create_ref_blocking(repo, token, refname, oid, *push)
+            }
+            _ => unreachable!("apply_ref_level_op_blocking called with a non-ref-level op"),
+        }
+    }
+
+    /// Fetches origin, refuses if `refname`'s tip differs from
+    /// `expected_tip`, then squash-rebases it onto `onto` and
+    /// force-pushes. The fetch heals a replica whose local ref is
+    /// merely behind a peer's already-acked push — after it, `refname`
+    /// resolves to `expected_tip` and the rebase proceeds against
+    /// origin's real tip rather than the stale local one. A genuine
+    /// mismatch (origin and `expected_tip` disagree) means a peer wrote
+    /// a commit this caller doesn't know about yet: surfaced as
+    /// [`LibraryError::RefChanged`] rather than retried, since there is
+    /// nothing here for a retry to fix.
+    fn apply_rebase_blocking(
+        repo: &git2::Repository,
+        token: Option<&str>,
+        refname: &str,
+        onto: &str,
+        expected_tip: &str,
+        message: &str,
+        attribution: &CommitAttribution,
+    ) -> WriteResult {
+        Self::fetch_origin(repo, token)?;
+        let actual_tip = Self::ref_oid(repo, refname)?;
+        if actual_tip.to_string() != expected_tip {
+            return Err(LibraryError::RefChanged {
+                refname: refname.to_string(),
+                expected: expected_tip.to_string(),
+                actual: actual_tip.to_string(),
+            });
+        }
+        let onto_oid =
+            git2::Oid::from_str(onto).map_err(|e| LibraryError::Git(format!("parse onto: {e}")))?;
+        let base = repo
+            .merge_base(actual_tip, onto_oid)
+            .map_err(|e| LibraryError::Git(format!("rebase merge_base: {e}")))?;
+        let tree_oid =
+            match Self::merge_trees_blocking(repo, &base.to_string(), expected_tip, onto)? {
+                Ok(oid) => oid,
+                Err(paths) => {
+                    return Err(LibraryError::Validation(format!(
+                        "merge conflicts: {}",
+                        paths.join(", ")
+                    )))
+                }
+            };
+        let onto_commit = repo
+            .find_commit(onto_oid)
+            .map_err(|e| LibraryError::Git(format!("find onto commit: {e}")))?;
+        let tree_oid = git2::Oid::from_str(&tree_oid)
+            .map_err(|e| LibraryError::Git(format!("parse tree oid: {e}")))?;
+        let tree = repo
+            .find_tree(tree_oid)
+            .map_err(|e| LibraryError::Git(format!("find tree: {e}")))?;
+        let author = git2::Signature::now(&attribution.author_name, &attribution.author_email)
+            .map_err(|e| LibraryError::Git(format!("author signature: {e}")))?;
+        let committer =
+            git2::Signature::now(&attribution.committer_name, &attribution.committer_email)
+                .map_err(|e| LibraryError::Git(format!("committer signature: {e}")))?;
+        let mut full_message = message.to_string();
+        full_message.push_str(&attribution.render_message_suffix());
+        // `update_ref: Some(refname)` would make libgit2 require the new
+        // commit's first parent to equal refname's CURRENT target — the
+        // fast-forward rule for a normal advance. A rebase deliberately
+        // replaces history under the ref, so the local ref is force-set by
+        // hand, matching the force-push below.
+        let new_oid = repo
+            .commit(
+                None,
+                &author,
+                &committer,
+                &full_message,
+                &tree,
+                &[&onto_commit],
+            )
+            .map_err(|e| LibraryError::Git(format!("commit: {e}")))?;
+        repo.reference(refname, new_oid, true, "rebase")
+            .map_err(|e| LibraryError::Git(format!("update ref after rebase: {e}")))?;
+        Self::push_ref_force(repo, token, refname)?;
+        Ok(Some(new_oid.to_string()))
+    }
+
+    fn apply_delete_ref_blocking(
+        repo: &git2::Repository,
+        token: Option<&str>,
+        refname: &str,
+        push: bool,
+    ) -> WriteResult {
+        if let Ok(mut r) = repo.find_reference(refname) {
+            r.delete()
+                .map_err(|e| LibraryError::Git(format!("delete ref: {e}")))?;
+        }
+        if push {
+            Self::push_delete_ref(repo, token, refname)?;
+        }
+        Ok(None)
+    }
+
+    /// Creates `refname` at `oid` and, if `push`, pushes it — surviving
+    /// a fetch that prunes it before this push lands (step 5 of the
+    /// hardening handoff: every draft's ref is pushed the moment it's
+    /// created). If origin already has `refname` the push is rejected
+    /// as non-fast-forward; a fetch afterwards should then resolve it
+    /// locally, and that's treated as success rather than failure.
+    fn apply_create_ref_blocking(
+        repo: &git2::Repository,
+        token: Option<&str>,
+        refname: &str,
+        oid: &str,
+        push: bool,
+    ) -> WriteResult {
+        let target_oid =
+            git2::Oid::from_str(oid).map_err(|e| LibraryError::Git(format!("parse oid: {e}")))?;
+        repo.find_commit(target_oid)
+            .map_err(|e| LibraryError::Git(format!("find commit: {e}")))?;
+        if repo.find_reference(refname).is_err() {
+            repo.reference(refname, target_oid, false, "create changeset ref")
+                .map_err(|e| LibraryError::Git(format!("create ref: {e}")))?;
+        }
+        if push {
+            if let Err(e) = Self::push_ref(repo, token, refname) {
+                tracing::info!(
+                    error = %e, %refname,
+                    "create_ref: push failed; fetching to check whether origin already has it"
+                );
+                Self::fetch_origin(repo, token)?;
+                if repo.find_reference(refname).is_err() {
+                    return Err(LibraryError::Git(format!(
+                        "create_ref: push failed and ref still absent after fetch: {e}"
+                    )));
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// `Ok(Some(oid))` = real commit; `Ok(None)` = tree unchanged;
     /// `Err(_)` = per-op validation or git failure (skip, don't advance).
     fn commit_one(
@@ -1839,6 +2014,13 @@ impl GitEngine {
                         )))
                     }
                 }
+            }
+            BatchOpKind::Rebase { .. }
+            | BatchOpKind::DeleteRef { .. }
+            | BatchOpKind::CreateRef { .. } => {
+                return Err(LibraryError::Git(
+                    "ref-level batch op routed through commit_one".into(),
+                ))
             }
         };
 
@@ -2047,6 +2229,22 @@ impl GitEngine {
         remote
             .push(&[spec], Some(&mut po))
             .map_err(|e| LibraryError::Git(format!("push: {e}")))
+    }
+
+    fn push_delete_ref(
+        repo: &git2::Repository,
+        token: Option<&str>,
+        refname: &str,
+    ) -> Result<(), LibraryError> {
+        let mut remote = repo
+            .find_remote("origin")
+            .map_err(|e| LibraryError::Git(format!("find origin: {e}")))?;
+        let mut po = git2::PushOptions::new();
+        po.remote_callbacks(Self::remote_callbacks(token));
+        let spec = format!(":{refname}");
+        remote
+            .push(&[spec], Some(&mut po))
+            .map_err(|e| LibraryError::Git(format!("push delete: {e}")))
     }
 
     fn reset_main_to_origin(repo: &git2::Repository) -> Result<(), LibraryError> {
@@ -2911,6 +3109,201 @@ mod tests {
             .target()
             .unwrap();
         assert_eq!(main_after, main_oid, "main untouched throughout");
+
+        let _ = std::fs::remove_dir_all(&origin_dir);
+        let _ = std::fs::remove_dir_all(&local_dir);
+    }
+
+    #[test]
+    fn rebase_heals_a_stale_local_ref_via_fetch_then_succeeds() {
+        let (origin_dir, local_dir, local_repo) = origin_and_clone("rebase-heal");
+        let main_oid = local_repo
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .target()
+            .unwrap();
+        local_repo
+            .reference("refs/heads/drua/heal", main_oid, false, "test create")
+            .unwrap();
+        GitEngine::push_ref(&local_repo, None, "refs/heads/drua/heal").unwrap();
+
+        // A peer replica advances the ref on origin; `local_repo` never fetches it,
+        // so its own resolve of the ref still returns the stale `main_oid`.
+        let origin_repo = git2::Repository::open_bare(&origin_dir).unwrap();
+        let peer_tip = commit_file(
+            &origin_repo,
+            Some(main_oid),
+            "peer.md",
+            b"from peer",
+            "peer@example.com",
+            "peer push",
+        );
+        origin_repo
+            .reference("refs/heads/drua/heal", peer_tip, true, "simulate peer push")
+            .unwrap();
+
+        let result = GitEngine::apply_rebase_blocking(
+            &local_repo,
+            None,
+            "refs/heads/drua/heal",
+            &main_oid.to_string(),
+            &peer_tip.to_string(),
+            "changeset: rebase",
+            &CommitAttribution::library_default(),
+        )
+        .expect("rebase against the healed tip succeeds");
+        let new_head = result.expect("real commit");
+
+        let origin_tip = origin_repo
+            .find_reference("refs/heads/drua/heal")
+            .unwrap()
+            .target()
+            .unwrap();
+        assert_eq!(origin_tip.to_string(), new_head, "the rebase was pushed");
+        let tree = origin_repo.find_commit(origin_tip).unwrap().tree().unwrap();
+        assert!(
+            tree.get_path(Path::new("peer.md")).is_ok(),
+            "rebased onto the peer's real (fetched) tip, not the stale local one"
+        );
+
+        let _ = std::fs::remove_dir_all(&origin_dir);
+        let _ = std::fs::remove_dir_all(&local_dir);
+    }
+
+    #[test]
+    fn rebase_refused_when_origin_tip_differs_from_expected() {
+        let (origin_dir, local_dir, local_repo) = origin_and_clone("rebase-mismatch");
+        let main_oid = local_repo
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .target()
+            .unwrap();
+        local_repo
+            .reference("refs/heads/drua/mismatch", main_oid, false, "test create")
+            .unwrap();
+        GitEngine::push_ref(&local_repo, None, "refs/heads/drua/mismatch").unwrap();
+
+        let origin_repo = git2::Repository::open_bare(&origin_dir).unwrap();
+        let external_tip = commit_file(
+            &origin_repo,
+            Some(main_oid),
+            "external.md",
+            b"someone else's write",
+            "human@example.com",
+            "external push",
+        );
+        origin_repo
+            .reference(
+                "refs/heads/drua/mismatch",
+                external_tip,
+                true,
+                "simulate an unrecorded external push",
+            )
+            .unwrap();
+
+        // `expected_tip` is what the caller (Postgres) believes the ref is at —
+        // stale relative to origin's real tip, and NOT the result of the fetch
+        // healing a merely-behind replica (that case is the previous test).
+        let err = GitEngine::apply_rebase_blocking(
+            &local_repo,
+            None,
+            "refs/heads/drua/mismatch",
+            &main_oid.to_string(),
+            &main_oid.to_string(),
+            "changeset: rebase",
+            &CommitAttribution::library_default(),
+        )
+        .expect_err("a real tip mismatch must be refused");
+        assert!(
+            matches!(err, LibraryError::RefChanged { .. }),
+            "expected RefChanged, got {err:?}"
+        );
+
+        let origin_tip_after = origin_repo
+            .find_reference("refs/heads/drua/mismatch")
+            .unwrap()
+            .target()
+            .unwrap();
+        assert_eq!(
+            origin_tip_after, external_tip,
+            "a refused rebase must not push"
+        );
+
+        let _ = std::fs::remove_dir_all(&origin_dir);
+        let _ = std::fs::remove_dir_all(&local_dir);
+    }
+
+    #[test]
+    fn create_ref_with_push_survives_a_pruning_fetch() {
+        let (origin_dir, local_dir, local_repo) = origin_and_clone("create-survives-prune");
+        let main_oid = local_repo
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .target()
+            .unwrap();
+
+        GitEngine::apply_create_ref_blocking(
+            &local_repo,
+            None,
+            "refs/heads/drua/fresh",
+            &main_oid.to_string(),
+            true,
+        )
+        .expect("create with push succeeds");
+
+        // The mirror-fetch prunes any local branch absent from origin (see
+        // `fetch_prune_removes_local_branch_absent_from_origin`); pushing the
+        // ref at creation time is what makes this fetch keep it.
+        GitEngine::fetch_origin(&local_repo, None).unwrap();
+
+        assert!(
+            local_repo.find_reference("refs/heads/drua/fresh").is_ok(),
+            "a ref pushed at creation survives a pruning fetch"
+        );
+        let origin_repo = git2::Repository::open_bare(&origin_dir).unwrap();
+        assert!(origin_repo.find_reference("refs/heads/drua/fresh").is_ok());
+
+        let _ = std::fs::remove_dir_all(&origin_dir);
+        let _ = std::fs::remove_dir_all(&local_dir);
+    }
+
+    #[test]
+    fn create_ref_with_push_reuses_an_existing_origin_ref_instead_of_failing() {
+        let (origin_dir, local_dir, local_repo) = origin_and_clone("create-existing");
+        let main_oid = local_repo
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .target()
+            .unwrap();
+
+        let origin_repo = git2::Repository::open_bare(&origin_dir).unwrap();
+        let already_there = commit_file(
+            &origin_repo,
+            Some(main_oid),
+            "already.md",
+            b"beat us to it",
+            "peer@example.com",
+            "peer created the ref first",
+        );
+        origin_repo
+            .reference(
+                "refs/heads/drua/race",
+                already_there,
+                false,
+                "peer created first",
+            )
+            .unwrap();
+
+        GitEngine::apply_create_ref_blocking(
+            &local_repo,
+            None,
+            "refs/heads/drua/race",
+            &main_oid.to_string(),
+            true,
+        )
+        .expect("create_ref falls back to the existing origin ref instead of erroring");
+
+        assert!(local_repo.find_reference("refs/heads/drua/race").is_ok());
 
         let _ = std::fs::remove_dir_all(&origin_dir);
         let _ = std::fs::remove_dir_all(&local_dir);

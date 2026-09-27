@@ -149,7 +149,7 @@ async fn rebase_ref_squashes_onto_moved_main() {
         .unwrap();
     let refname = "refs/heads/drua/test-changeset-3";
     library.create_ref(refname, &base).await.unwrap();
-    library
+    let changeset_tip = library
         .write_file_at(
             Some(refname.to_string()),
             "spaces/demo/changeset.md".into(),
@@ -158,7 +158,8 @@ async fn rebase_ref_squashes_onto_moved_main() {
             attr(),
         )
         .await
-        .unwrap();
+        .unwrap()
+        .expect("real commit");
 
     library
         .write_file_at(
@@ -177,7 +178,13 @@ async fn rebase_ref_squashes_onto_moved_main() {
         .unwrap();
 
     let (new_base, new_head) = library
-        .rebase_ref(refname, &new_main, "changeset: rebase".into(), attr())
+        .rebase_ref(
+            refname,
+            &new_main,
+            &changeset_tip,
+            "changeset: rebase".into(),
+            attr(),
+        )
         .await
         .expect("rebase_ref engine call")
         .expect("clean rebase, no conflicts");

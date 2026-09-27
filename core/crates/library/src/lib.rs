@@ -325,11 +325,12 @@ impl Library {
         &self,
         refname: &str,
         onto: &str,
+        expected_tip: &str,
         message: String,
         attribution: CommitAttribution,
     ) -> Result<Result<(String, String), Vec<String>>, LibraryError> {
         self.git
-            .rebase_ref(refname, onto, message, attribution)
+            .rebase_ref(refname, onto, expected_tip, message, attribution)
             .await
     }
 

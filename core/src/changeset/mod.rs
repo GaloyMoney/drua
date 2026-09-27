@@ -603,7 +603,7 @@ impl Changesets {
         let message = format!("changeset: {} (rebased)", cs.title);
         match self
             .library
-            .rebase_ref(&cs.git_ref(), &main_oid, message, attribution)
+            .rebase_ref(&cs.git_ref(), &main_oid, &cs.head_oid, message, attribution)
             .await?
         {
             Ok((new_base, new_head)) => {
