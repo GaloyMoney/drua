@@ -140,9 +140,8 @@ fn render_spaces_block(spaces: &[Space], mode: SpacesBlockMode) -> Option<String
         }
         SpacesBlockMode::WorkflowRun(_) => {
             "Use the file tools (Read, LS, Glob, Grep, Edit, Move, \
-             Delete) with paths prefixed `space:<slug>/` (or \
-             `draft:<slug>/` to always stage) to read or write their \
-             contents."
+             Delete) with paths prefixed `space:<slug>/` to read or \
+             write their contents."
         }
     };
     let header = format!(

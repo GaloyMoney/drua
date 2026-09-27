@@ -44,9 +44,8 @@ impl TopLevelTool for Grep {
     }
 
     fn description(&self) -> &str {
-        "Search file contents using ripgrep. Accepts either an in-sandbox path, \
-         a `space:<slug>/...` path that reads the published library, or a \
-         `draft:<slug>/...` path that reads your unpublished draft."
+        "Search file contents using ripgrep. Accepts either an in-sandbox path \
+         or a `space:<slug>/...` path in a mounted knowledge space."
     }
 
     fn input_schema(&self) -> &serde_json::Value {

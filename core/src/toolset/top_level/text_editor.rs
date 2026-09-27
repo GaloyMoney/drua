@@ -197,9 +197,8 @@ impl TopLevelTool for TextEditor {
         "Anthropic-compatible text editor. Commands: `view` (read file or list \
          directory), `create` (write a new file), `str_replace` (replace a \
          unique substring), `insert` (insert text at a line). Accepts \
-         in-sandbox absolute paths, `space:<slug>/...` paths (the published \
-         library), and `draft:<slug>/...` paths (your unpublished draft) — \
-         results are stamped with which. \
+         in-sandbox absolute paths or `space:<slug>/...` paths in a mounted \
+         knowledge space — results are stamped with which target they hit. \
          Notes for `str_replace`: `old_str` must match the file byte-for-byte \
          AND appear exactly once. If you don't already have the file content \
          in context, `view` it first — guessing the surrounding text will \

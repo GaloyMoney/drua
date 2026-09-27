@@ -562,6 +562,14 @@ async fn interactive_agents_are_read_only() {
                 "{label} {path}: expected ReadOnly, got: {err}"
             );
         }
+        let err = match fs.view_file(sub, "draft:docs/a.md", None).await {
+            Ok(_) => panic!("{label}'s read of draft:docs/a.md must be refused"),
+            Err(e) => e,
+        };
+        assert!(
+            matches!(err, ProjectError::Space(SpaceError::ReadOnly { ref slug }) if slug == "docs"),
+            "{label} draft:docs/a.md read: expected ReadOnly, got: {err}"
+        );
         assert!(
             app.changesets()
                 .open_draft_for(sub)

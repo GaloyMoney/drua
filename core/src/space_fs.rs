@@ -323,7 +323,10 @@ impl SpaceFs {
             SpaceScheme::Draft => {
                 if intent != Intent::Write {
                     if !sub.can_draft_spaces() {
-                        return Ok(Target::Main);
+                        return Err(SpaceError::ReadOnly {
+                            slug: space.slug.clone(),
+                        }
+                        .into());
                     }
                     return match self
                         .changesets

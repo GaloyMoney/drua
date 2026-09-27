@@ -144,12 +144,11 @@ impl TopLevelTool for Read {
     }
 
     fn description(&self) -> &str {
-        "Read a file with optional line range. Accepts either an in-sandbox path, \
-         a `space:<slug>/...` path that reads the published library, or a \
-         `draft:<slug>/...` path that reads your unpublished draft. \
+        "Read a file with optional line range. Accepts either an in-sandbox path \
+         or a `space:<slug>/...` path in a mounted knowledge space. \
          Inside compose scripts the result is the exact file text without line \
          numbers (whole-file reads are byte-exact; ranged reads are `\\n`-joined \
-         line slices), and a `space:`/`draft:` read is not subject to the 1 MiB \
+         line slices), and a `space:` read is not subject to the 1 MiB \
          cap this tool otherwise applies."
     }
 
