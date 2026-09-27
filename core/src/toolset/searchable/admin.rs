@@ -250,7 +250,7 @@ struct ProjectParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
+#[serde(rename_all = "kebab-case")]
 enum SpacesCommand {
     Create,
     List,
@@ -275,19 +275,12 @@ enum SpacesCommand {
     /// variant of the agent-tier `spaces.search` — does not require
     /// the space to be mounted on any project.
     Search,
-    #[serde(rename = "start-draft")]
     StartDraft,
-    #[serde(rename = "draft-status")]
     DraftStatus,
-    #[serde(rename = "list-drafts")]
     ListDrafts,
-    #[serde(rename = "merge-draft")]
     MergeDraft,
-    #[serde(rename = "open-pr")]
     OpenPr,
-    #[serde(rename = "discard-draft")]
     DiscardDraft,
-    #[serde(rename = "rebase-draft")]
     RebaseDraft,
 }
 
