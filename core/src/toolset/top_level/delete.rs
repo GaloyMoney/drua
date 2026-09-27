@@ -49,7 +49,7 @@ impl TopLevelTool for Delete {
 
     fn description(&self) -> &str {
         "Delete a file. Accepts an in-sandbox absolute path or a \
-         `space:<slug>/...` path in a mounted knowledge space. Idempotent — \
+         `space:<slug>/...` path from a mounted space. Idempotent — \
          succeeds even if the file is already absent."
     }
 

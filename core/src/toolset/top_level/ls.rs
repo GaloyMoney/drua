@@ -59,9 +59,9 @@ impl TopLevelTool for Ls {
 
     fn description(&self) -> &str {
         "List directory contents. Accepts either an in-sandbox path, a \
-         `space:<slug>/...` path in a mounted knowledge space, or the \
-         bare prefix `space:` (no slug) to enumerate the spaces this agent can \
-         address. Pass `details: true` on a `space:` path to get \
+         `space:<slug>/...` path that reads from the project's mounted spaces, \
+         or the bare prefix `space:` (no slug) to enumerate the spaces this \
+         agent can address. Pass `details: true` on a `space:` path to get \
          each file's first- and last-commit dates."
     }
 

@@ -137,7 +137,7 @@ static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "description": {
                 "type": "string",
-                "description": "Human-readable summary of the space's purpose. Used by create."
+                "description": "Human-readable summary of the space's purpose. Used by create only."
             },
             "all": {
                 "type": "boolean",
@@ -146,11 +146,11 @@ static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             "op": {
                 "type": "string",
                 "enum": ["read", "ls", "grep", "glob"],
-                "description": "Sub-op for view: read {path, offset?, limit?}, ls {path, details?}, grep {pattern, path?, glob?, output_mode?, ...}, glob {pattern, path?, details?}."
+                "description": "Sub-op for view (read|ls|grep|glob)."
             },
             "op_args": {
                 "type": "object",
-                "description": "Sub-op arguments — see `op`'s description."
+                "description": "Sub-op arguments. view: read/ls take {path, ...} (ls also takes details? — append each file's first-/last-commit dates); grep/glob take {pattern, path?, ...} (glob also takes details?)."
             },
             "query": {
                 "type": "string",
