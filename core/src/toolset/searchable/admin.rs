@@ -275,40 +275,18 @@ enum SpacesCommand {
     /// variant of the agent-tier `spaces.search` — does not require
     /// the space to be mounted on any project.
     Search,
-    /// rev3 D20: admin draft parity — identical verb-noun set to the
-    /// top-level `spaces` tool (D18), addressed by the admin `User`
-    /// subject rather than a project-scoped one. Explicit, idempotent
-    /// "begin an isolated edit session"; optional `title`/`description`.
     #[serde(rename = "start-draft")]
     StartDraft,
-    /// The admin's own open draft, or `{draft: null}`.
     #[serde(rename = "draft-status")]
     DraftStatus,
-    /// Changesets the admin can see, newest first; optional `status`
-    /// filter and optional `project_id` filter (rev3 OQ-21: omitted
-    /// means every changeset).
     #[serde(rename = "list-drafts")]
     ListDrafts,
-    /// Lands a draft on `main` directly (an `Admin` always holds
-    /// `Update`, so this always succeeds for one; rev3 addendum A
-    /// D21/D24 — no fallback to opening a PR; rev5 D36 renamed this
-    /// from the old authority-resolved command to name the outcome).
-    /// Optional `id` defaults to the admin's own open draft; optional
-    /// `title`/`body` (rev4 D32) override the merge commit's message.
     #[serde(rename = "merge-draft")]
     MergeDraft,
-    /// Opens a GitHub PR for a draft instead of landing it — useful
-    /// even for an admin who could `merge-draft` instead (rev3
-    /// addendum A D21; rev5 D36 renamed this to name the outcome).
-    /// Required `title`/`body` go straight to the PR (D23). Optional
-    /// `id` defaults to the admin's own open draft.
     #[serde(rename = "open-pr")]
     OpenPr,
-    /// Closes a draft without landing it. Optional `id`/`reason`.
     #[serde(rename = "discard-draft")]
     DiscardDraft,
-    /// Moves a draft onto current `main`, squashing its commits.
-    /// Optional `id`.
     #[serde(rename = "rebase-draft")]
     RebaseDraft,
 }
@@ -334,9 +312,6 @@ struct SpacesParams {
     /// Per-op arguments. See command docs for shape.
     #[serde(default)]
     op_args: Option<JsonObject>,
-    /// `view`/`edit` only: 'main' (default) or 'draft' (rev3 D17) —
-    /// same choice the `space:`/`draft:` path prefix makes for the
-    /// direct file tools.
     #[serde(default)]
     target: SpaceTarget,
 
@@ -352,28 +327,15 @@ struct SpacesParams {
     #[serde(default)]
     limit: Option<usize>,
 
-    /// `start-draft`: optional title override (default: derived).
-    /// `open-pr`: required — the PR's title, sent to GitHub as-is.
-    /// `merge-draft`: optional merge-commit title override (default:
-    /// 'changeset: <draft title>').
     #[serde(default)]
     title: Option<String>,
-    /// `open-pr`: required — the PR's body, sent to GitHub (with
-    /// drua's own provenance trailers appended); recorded on the
-    /// changeset but never overrides its own title/description.
-    /// `merge-draft`: optional merge-commit body override (default:
-    /// the draft's description).
     #[serde(default)]
     body: Option<String>,
-    /// `merge-draft`/`open-pr`/`discard-draft`/`rebase-draft`:
-    /// changeset id. Optional — defaults to the admin's own open draft.
     #[schemars(with = "Option<uuid::Uuid>")]
     #[serde(default)]
     id: Option<crate::primitives::ChangesetId>,
-    /// `list-drafts`: optional status filter.
     #[serde(default)]
     status: Option<ChangesetStatus>,
-    /// `discard-draft`: optional free-text reason.
     #[serde(default)]
     reason: Option<String>,
 }
@@ -1476,9 +1438,6 @@ impl AdminToolSet {
             SpacesCommand::MergeDraft => {
                 Audit::record_action("spaces.merge_draft");
                 let id = self.resolve_draft_id(subject, params.id).await?;
-                // rev3 addendum A D21/D24: lands only. `apply` itself
-                // enforces `Update` on `Space(None)` and fails closed
-                // (Forbidden) without it — no fallback to `open-pr`.
                 let (cs, merge_oid) = self
                     .changesets
                     .apply(subject, id, params.title, params.body)
@@ -1527,9 +1486,6 @@ impl AdminToolSet {
         }
     }
 
-    /// `id` if given; else the admin's own open draft. Shared by
-    /// `merge-draft`/`open-pr`/`discard-draft`/`rebase-draft`
-    /// (rev3 D20 — mirrors `SpacesTool::resolve_draft_id`).
     async fn resolve_draft_id(
         &self,
         sub: &AuthSubject,

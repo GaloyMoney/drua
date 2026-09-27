@@ -43,9 +43,6 @@ pub enum ProjectError {
     Note(#[from] NoteError),
     #[error("ProjectError - ProjectSecret: {0}")]
     ProjectSecret(#[from] ProjectSecretError),
-    /// Fallback for `Changeset` service failures reached through
-    /// `SpaceFs` resolution that aren't remapped into a model-facing
-    /// `SpaceError` (`Foreign` is; see `space_fs::map_changeset_err`).
     #[error("ProjectError - Changeset: {0}")]
     Changeset(#[from] ChangesetError),
 }

@@ -1,10 +1,3 @@
-//! Thin REST wrapper over the GitHub Pulls API — no octocrab, just the
-//! three calls the staged-changesets handoff needs (§10):
-//! `create_pull`/`get_pull`/`close_pull`. Reuses the crate's existing
-//! JWT → installation-token flow; each call fetches a fresh token
-//! rather than caching one, matching `generate_token`'s own "verify at
-//! startup, call fresh at use" contract.
-
 use serde::Deserialize;
 
 use crate::{GitHubAppError, GitHubAppTokenProvider};
@@ -42,10 +35,6 @@ impl From<PullResponse> for PullRequest {
 }
 
 impl GitHubAppTokenProvider {
-    /// Opens a PR `head` → `base`. `head` is a bare branch name (same
-    /// repo) — GitHub's API accepts `owner:branch` for cross-fork PRs,
-    /// which this crate has no use for since drua only pushes to its
-    /// own library repo.
     #[tracing::instrument(name = "github_app.create_pull", skip(self, title, body))]
     pub async fn create_pull(
         &self,
@@ -97,11 +86,6 @@ impl GitHubAppTokenProvider {
         parse_pull_response(resp).await
     }
 
-    /// Closes `number` without merging. `comment`, when given, is
-    /// posted as an issue comment first (the two are separate GitHub
-    /// API calls; PRs are issues for commenting purposes) — used by
-    /// `Changesets::apply`/`discard` to leave a trail explaining why a
-    /// PR closed without a merge.
     #[tracing::instrument(name = "github_app.close_pull", skip(self, comment))]
     pub async fn close_pull(
         &self,

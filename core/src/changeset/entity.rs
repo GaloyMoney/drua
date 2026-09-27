@@ -21,8 +21,6 @@ pub enum ChangesetStatus {
 }
 
 impl ChangesetStatus {
-    /// `Merged | Applied` in prose from the handoff — the tree reached
-    /// `main` one way or the other.
     pub fn is_landed(self) -> bool {
         matches!(self, ChangesetStatus::Merged | ChangesetStatus::Applied)
     }
@@ -38,8 +36,6 @@ impl ChangesetStatus {
     }
 }
 
-/// Who opened (or acted on) a changeset. Used both for `Opened.opened_by`
-/// and `Applied.applied_by`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ChangesetActor {
@@ -64,9 +60,6 @@ impl ChangesetActor {
     }
 }
 
-/// rev2 D4: the `opened_by_actor` repo column encoding — also the
-/// `draft_for` lookup key, so a schema change here needs the partial
-/// unique index (`changesets_opened_by_actor_key`) renamed to match.
 impl core::fmt::Display for ChangesetActor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -108,15 +101,12 @@ impl std::str::FromStr for ChangesetActor {
 pub enum ChangesetEvent {
     Opened {
         id: ChangesetId,
-        /// `None` for a project-less draft — a bare-`Admin` subject
-        /// has no project context (rev3 D16).
         project_id: Option<ProjectId>,
         title: String,
         description: Option<String>,
         base_oid: String,
         opened_by: ChangesetActor,
     },
-    /// One per landed git op. `head_oid` is the branch tip after the op.
     CommitRecorded {
         head_oid: String,
         action: String,
@@ -130,18 +120,12 @@ pub enum ChangesetEvent {
         head_oid: String,
         pr_number: u64,
         pr_url: String,
-        /// rev3 addendum A, D23: what `open-pr` actually sent to
-        /// GitHub — never projected onto `title`/`description`, which
-        /// stay whatever `Opened` set them to.
         pr_title: String,
         pr_body: String,
     },
     Applied {
         merge_oid: String,
         applied_by: ChangesetActor,
-        /// rev4 D32: caller-supplied merge-commit title/body — absent
-        /// for events written before rev4 (`#[serde(default)]` so they
-        /// still hydrate).
         #[serde(default)]
         commit_title: Option<String>,
         #[serde(default)]
@@ -160,9 +144,6 @@ pub enum ChangesetEvent {
 #[builder(pattern = "owned", build_fn(error = "EntityHydrationError"))]
 pub struct Changeset {
     pub id: ChangesetId,
-    /// `None` for a project-less draft (rev3 D16 — a bare-`Admin`
-    /// subject's draft; ownership and lookup are by actor, never by
-    /// project).
     pub project_id: Option<ProjectId>,
     pub title: String,
     #[builder(setter(strip_option), default)]
@@ -175,8 +156,6 @@ pub struct Changeset {
     pub pr_number: Option<u64>,
     #[builder(default)]
     pub pr_url: Option<String>,
-    /// rev3 addendum A, D23: the title/body actually sent to GitHub by
-    /// `open-pr` — distinct from `title`/`description`.
     #[builder(default)]
     pub pr_title: Option<String>,
     #[builder(default)]
@@ -185,9 +164,6 @@ pub struct Changeset {
 }
 
 impl Changeset {
-    /// Branch name for `id`, without needing a hydrated entity — lets
-    /// `SpaceFs` name a changeset's ref from just the id it parsed out
-    /// of a `space:<slug>@<id>/<rel>` path.
     pub fn branch_for(id: ChangesetId) -> String {
         format!("drua/{id}")
     }
@@ -214,8 +190,6 @@ impl Changeset {
             .expect("entity_first_persisted_at not found")
     }
 
-    /// Ops recorded since the last `Opened`/`Rebased` — i.e. against the
-    /// changeset's *current* base, not its whole history.
     pub fn commit_count(&self) -> usize {
         let mut count = 0;
         for event in self.events.iter_all().rev() {
@@ -228,11 +202,6 @@ impl Changeset {
         count
     }
 
-    /// Whether there's anything to land. Unlike `commit_count`, this
-    /// survives a rebase: a clean rebase resets `commit_count` to 0
-    /// (it only counts ops since the last `Opened`/`Rebased`) even
-    /// though `head_oid` still differs from `base_oid` for a draft
-    /// with real prior content (bugbot 2026-09-26).
     pub fn has_commits(&self) -> bool {
         self.head_oid != self.base_oid
     }
@@ -244,9 +213,6 @@ impl Changeset {
         }
     }
 
-    /// No-op (`AlreadyApplied`) if `head_oid` already matches — replaying
-    /// the same commit oid (e.g. a retried write) shouldn't grow the
-    /// event log. `Err(InvalidTransition)` unless `Open`.
     pub fn record_commit(
         &mut self,
         head_oid: String,
@@ -268,8 +234,6 @@ impl Changeset {
         Ok(Idempotent::Executed(()))
     }
 
-    /// `Open` only — moves the changeset's fork point without losing its
-    /// branch identity. No-op if `base_oid`/`head_oid` are unchanged.
     pub fn rebase(
         &mut self,
         base_oid: String,
@@ -319,10 +283,6 @@ impl Changeset {
         Ok(Idempotent::Executed(()))
     }
 
-    /// `Open` or `Submitted` — drua merges the branch into `main` itself.
-    /// `commit_title`/`commit_body` (rev4 D32) are the caller-supplied
-    /// merge-commit title/body; `None` falls back to the draft's own
-    /// title/description.
     pub fn apply(
         &mut self,
         merge_oid: String,
@@ -350,9 +310,6 @@ impl Changeset {
         Ok(Idempotent::Executed(()))
     }
 
-    /// The sync job observed the branch merged on GitHub. Valid from
-    /// `Submitted`, and from `Open` too — a human may merge a branch
-    /// that was never submitted through drua.
     pub fn mark_merged(&mut self, merge_oid: String) -> Result<Idempotent<()>, ChangesetError> {
         idempotency_guard!(
             self.events.iter_all().rev(),
@@ -369,8 +326,6 @@ impl Changeset {
         Ok(Idempotent::Executed(()))
     }
 
-    /// The sync job observed the branch gone from origin without a merge
-    /// (PR closed, branch deleted). `Submitted` only.
     pub fn mark_abandoned(&mut self) -> Result<Idempotent<()>, ChangesetError> {
         idempotency_guard!(
             self.events.iter_all().rev(),
@@ -384,7 +339,6 @@ impl Changeset {
         Ok(Idempotent::Executed(()))
     }
 
-    /// `Open` or `Submitted`.
     pub fn discard(&mut self, reason: Option<String>) -> Result<Idempotent<()>, ChangesetError> {
         idempotency_guard!(
             self.events.iter_all().rev(),
@@ -489,7 +443,6 @@ impl TryFromEvents<ChangesetEvent> for Changeset {
 pub struct NewChangeset {
     #[builder(setter(into))]
     pub(super) id: ChangesetId,
-    /// `None` for a project-less draft (rev3 D16).
     #[builder(default)]
     pub(super) project_id: Option<ProjectId>,
     #[builder(setter(into))]
@@ -506,8 +459,6 @@ impl NewChangeset {
         NewChangesetBuilder::default().id(ChangesetId::new())
     }
 
-    /// `EsRepo`'s `create(accessor = "initial_status()")` for the
-    /// `status` column — every changeset starts `Open`.
     pub(crate) fn initial_status(&self) -> ChangesetStatus {
         ChangesetStatus::Open
     }
@@ -686,7 +637,6 @@ mod tests {
             .submit("h2".into(), 2, "u2".into(), "t2".into(), "b2".into())
             .unwrap();
         assert!(matches!(outcome, Idempotent::AlreadyApplied));
-        // The first submit's values stick — a retry doesn't clobber them.
         assert_eq!(cs.pr_number, Some(1));
     }
 

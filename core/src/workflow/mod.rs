@@ -205,11 +205,6 @@ fn reject_forward_step_refs(
     Ok(())
 }
 
-/// rev5 D40/D41: applies a run's snapshotted `on_failure` (default
-/// `Keep` if somehow unset — same default as an absent `space_writes:`
-/// block) to a draft belonging to a run that did not succeed. Shared
-/// by the executor's `finish_space_writes` and `cancel_run` — a
-/// cancelled run "did not succeed" the same way a failed one didn't.
 pub(crate) async fn abandon_run_draft(
     changesets: &crate::changeset::Changesets,
     sub: &AuthSubject,
@@ -271,10 +266,6 @@ pub struct Workflows {
     /// from `ToolSets` per validation) so `validate_steps` doesn't
     /// depend on the compose tool being registered.
     script_step_limits: crate::toolset::ScriptStepLimits,
-    /// Held so `cancel_run` can close a cancelled run's draft (rev2
-    /// §7.2: the cooperatively-cancelled path now runs `on_failure`,
-    /// same as a run that failed on its own — a gap flagged and left
-    /// open in #504).
     changesets: Arc<crate::changeset::Changesets>,
     execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
     cron_spawner: ::job::JobSpawner<TriggerCronConfig>,
@@ -400,10 +391,6 @@ impl Workflows {
         }
 
         Self::validate_trigger(&trigger)?;
-        // Same check `create`/`update` run — without it, a
-        // hand-edited or externally authored YAML file could persist
-        // `mode: open_pr` with no `message` and only fail at run end,
-        // inside `finish_space_writes`, with the draft left open.
         Self::validate_space_writes(&space_writes, &steps)?;
 
         let file_hash = drua_library::GitFileHash::new(rendered);
@@ -704,11 +691,6 @@ impl Workflows {
         Ok(())
     }
 
-    /// rev5 D35/D38: per-mode requirements (§4's table) plus
-    /// `message.title`/`body` template refs. Validated against every
-    /// declared step, not just prior ones — the exit conceptually
-    /// runs after all of them (D38), so a ref to any declared step
-    /// is fine regardless of position.
     fn validate_space_writes(
         decl: &SpaceWritesDecl,
         steps: &[WorkflowStepDef],
@@ -882,8 +864,6 @@ impl Workflows {
             self.validate_steps(sub, definition.project_id, next_steps, next_sandboxes)
                 .await?;
         }
-        // rev5 D38: a step rename/removal can orphan a `space_writes.
-        // message` ref, so re-validate whenever either changes.
         if steps.is_some() || space_writes.is_some() {
             let next_space_writes = space_writes.as_ref().unwrap_or(&definition.space_writes);
             Self::validate_space_writes(next_space_writes, next_steps)?;
@@ -1451,15 +1431,6 @@ impl Workflows {
         Ok(run)
     }
 
-    /// rev2 §7.2's closed gap, rev5 D41: a cancelled run "did not
-    /// succeed", so its draft (if any) gets the same
-    /// `changeset_on_failure` treatment a failed run's does via
-    /// `abandon_run_draft` — the policy snapshotted at pre-flight open
-    /// time, not a fresh read of the (possibly since-edited)
-    /// definition. Looked up by `Changesets::open_draft_for_run` rather
-    /// than `run.changeset` (D4: no lookup depends on that field).
-    /// Best-effort: failures are logged, never surfaced — `cancel_run`
-    /// itself already committed.
     async fn close_cancelled_run_changeset(&self, run: &mut WorkflowRun) {
         let cs = match self.changesets.open_draft_for_run(run.id).await {
             Ok(Some(cs)) => cs,

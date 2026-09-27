@@ -480,16 +480,6 @@ impl WorkflowSandboxDecl {
     }
 }
 
-/// `space_writes:` top-level workflow declaration (rev5 D35; replaces
-/// rev2/rev3/rev4's `changeset:` block). What happens to a run's
-/// `space:` writes: `mode` says whether they land on `main`
-/// (`merge`, the default — backwards-compatible with pre-rev5
-/// workflows), become a PR (`open_pr`), or are refused outright
-/// (`read_only`, opening no draft at all). `on_failure` says whether a
-/// failed/cancelled run's draft is kept for a human or discarded.
-/// `message` is CEL-substituted (`${{ steps... }}`, etc.) at run end,
-/// against every step's outputs (rev5 D38) — see §4's per-mode
-/// requirements table (`Workflows::validate_space_writes`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SpaceWritesDecl {
     #[serde(default)]
@@ -505,8 +495,6 @@ impl SpaceWritesDecl {
         *self == Self::default()
     }
 
-    /// Whether the executor's pre-flight should open the run's draft
-    /// at all (rev5 D37) — `false` only for `read_only`.
     pub fn opens_draft(&self) -> bool {
         self.mode != SpaceWritesMode::ReadOnly
     }
@@ -515,15 +503,9 @@ impl SpaceWritesDecl {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SpaceWritesMode {
-    /// Lands the run's draft on `main` as one merge commit at run end
-    /// (`Changesets::apply`). The backwards-compatible default.
     #[default]
     Merge,
-    /// Opens a GitHub PR for the run's draft at run end
-    /// (`Changesets::submit`).
     OpenPr,
-    /// No draft is ever opened for this run; every `space:` write is
-    /// refused with `SpaceError::RunReadOnly`.
     ReadOnly,
 }
 
@@ -535,8 +517,6 @@ pub enum SpaceWritesFailure {
     Discard,
 }
 
-/// `title`/`body` for the `open_pr` PR or the `merge` merge commit —
-/// substituted at run end against every step's outputs (rev5 D38).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpaceWritesMessage {
     pub title: String,

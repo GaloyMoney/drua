@@ -57,13 +57,6 @@ struct WhoAmIOutput {
 static WHOAMI_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<WhoAmIOutput>);
 
-/// rev2 §6.3 (rev6-amended, D49): an external MCP agent doesn't see the
-/// in-session `<spaces>` prompt block (that's rendered only for
-/// `Agent` sessions, `Agents::cached_dynamic_blocks`) — `whoami` is
-/// the one place it learns its space write mode, since it's
-/// credential-wide rather than tied to any one project's mount list.
-/// `None` for an admin credential — `drua_admin_spaces`'s own
-/// description is where an admin learns to draft (OQ-35).
 fn space_write_mode_note(subject: &AuthSubject) -> Option<String> {
     (!subject.is_admin()).then(|| SPACE_WRITE_MODE_SENTENCE.trim().to_string())
 }

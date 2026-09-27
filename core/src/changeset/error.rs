@@ -49,8 +49,6 @@ pub enum ChangesetError {
     Foreign { id: ChangesetId },
     #[error("ChangesetError - Authorization: {0}")]
     Authorization(#[from] AuthorizationError),
-    /// Role-based checks that don't reduce to a single `AuthVerb` (e.g.
-    /// `discard`'s "bound actor, or a lead/admin" rule — §7, OQ-1).
     #[error("ChangesetError - Forbidden: subject may not {action} changeset {id}")]
     Forbidden {
         id: ChangesetId,
@@ -58,18 +56,10 @@ pub enum ChangesetError {
     },
     #[error("ChangesetError - GitHubApp: {0}")]
     GitHubApp(#[from] GitHubAppError),
-    /// `submit` on a changeset with no `CommitRecorded` events yet —
-    /// §7: "if commit_count == 0 → Empty".
     #[error("ChangesetError - Empty: changeset {id} has no commits to submit")]
     Empty { id: ChangesetId },
-    /// `submit`/`apply`/`rebase` found the changeset doesn't merge
-    /// cleanly onto `main`'s current tip; the git op is never
-    /// attempted (§7).
     #[error("ChangesetError - Conflicts: changeset {id} does not merge cleanly: {paths:?}")]
     Conflicts { id: ChangesetId, paths: Vec<String> },
-    /// `submit` when the library has no GitHub App configured (local
-    /// dev) or `repo_url` isn't a `github.com` remote — OQ-14's
-    /// default: error, not a silent degrade to `apply`.
     #[error(
         "ChangesetError - PrUnavailable: no GitHub App / GitHub remote configured for this library; use `apply` instead of `submit`"
     )]

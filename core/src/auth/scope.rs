@@ -38,13 +38,9 @@ impl AuthScope {
 
             AuthScope::ProjectAdmin(project) => {
                 // Spaces are library-wide; project admins manage the
-                // *collection* (`Create`/`Read` on `Space(None)`) but
-                // have NO blanket authority over specific spaces —
+                // *collection* (`Create`/`Read on Space(None)`) but
+                // do NOT have blanket authority over specific spaces —
                 // visibility there is decided by `Project.mounted_spaces`.
-                // rev6 D46: leads no longer get `Update`/`Propose` on a
-                // specific space — drafting authority is
-                // `AuthSubject::can_draft_spaces()` (`is_admin()` or
-                // `in_workflow_run()`), not a scope grant.
                 if matches!(
                     (verb, resource),
                     (AuthVerb::Create, AuthResource::Space(None))
@@ -94,12 +90,6 @@ impl AuthScope {
                     )
             }
 
-            // rev6 D46: neither marker grants anything through `permits`
-            // — a run's space-drafting authority comes from
-            // `AuthSubject::can_draft_spaces()` (`in_workflow_run()`),
-            // not a scope grant. Both stay as markers gating tool
-            // visibility (`submit_output`, `can_use_agent_file_tools`)
-            // and `in_workflow_run()` itself.
             AuthScope::WorkflowStepAgent | AuthScope::WorkflowScript => false,
 
             AuthScope::External(name) => {
@@ -357,9 +347,7 @@ mod tests {
     /// Project admins may create and list library-wide spaces, but
     /// have NO blanket authority over specific spaces — visibility on
     /// `Space(Some(_))` is decided by `Project.mounted_spaces`, not
-    /// the scope layer. rev6 D46: reverted to `main`'s shape — a lead's
-    /// drafting authority is `AuthSubject::can_draft_spaces()`
-    /// (`is_admin()`), not a scope grant.
+    /// the scope layer.
     #[test]
     fn project_admin_space_authz_is_collection_only() {
         use crate::primitives::SpaceId;
@@ -374,9 +362,6 @@ mod tests {
         assert!(!s.permits(AuthVerb::Delete, &AuthResource::Space(None)));
     }
 
-    /// rev6 D46: a plain project member gets no Space grants at all —
-    /// interactive agents are read-only on spaces (D44); reads pass
-    /// through the mount gate, not this scope layer.
     #[test]
     fn project_member_has_no_space_grants() {
         use crate::primitives::SpaceId;
@@ -389,10 +374,6 @@ mod tests {
         assert!(!s.permits(AuthVerb::Create, &AuthResource::Space(None)));
     }
 
-    /// rev6 D46: the `WorkflowStepAgent`/`WorkflowScript` markers grant
-    /// nothing through `permits` any more — a run's drafting authority
-    /// is `AuthSubject::can_draft_spaces()`'s `in_workflow_run()` arm,
-    /// checked directly on the subject rather than summed from scopes.
     #[test]
     fn workflow_markers_grant_nothing() {
         use crate::primitives::SpaceId;
@@ -404,11 +385,6 @@ mod tests {
         }
     }
 
-    /// rev6 D45: `can_draft_spaces()` — not `AuthSubject::can` — is now
-    /// the one predicate behind every space write and draft verb.
-    /// `User` and an `Admin`-scoped credential are admins; a
-    /// `WorkflowExecutor` or an agent carrying `WorkflowStepAgent` is a
-    /// run subject; a plain lead or member is neither.
     #[test]
     fn can_draft_spaces_is_admin_or_run() {
         use crate::auth::AuthSubject;

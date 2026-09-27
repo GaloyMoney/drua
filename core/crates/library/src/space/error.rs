@@ -49,18 +49,10 @@ pub enum SpaceError {
     ChangesetNotOpen { id: String, status: String },
     #[error("SpaceError - ChangesetForeign: changeset {id} belongs to another project")]
     ChangesetForeign { id: String },
-    /// rev6 D44: a non-admin, non-run subject's write to `space:<slug>/`
-    /// or `draft:<slug>/` — interactive agents (leads, members,
-    /// on-behalf-of, external lead/member creds) are read-only on
-    /// spaces. Names both real write paths so the agent reading this
-    /// can say what to ask for.
     #[error(
         "SpaceError - ReadOnly: space:{slug}/ is read-only for this subject — spaces are edited by workflows (`space_writes:`) or by admins (`drua_admin_spaces` with target: draft)"
     )]
     ReadOnly { slug: String },
-    /// rev3 D15 (admin-only as of rev6 D44): an admin with an open
-    /// draft may not write `space:<slug>/` directly — fail closed
-    /// rather than silently landing on `main`.
     #[error(
         "SpaceError - DraftOpen: you have an open draft {id} \"{title}\"; write draft:{slug}/<path> (or pass target: draft to drua_admin_spaces) to keep staging, or run `drua_admin_spaces merge-draft` / `discard-draft` before writing space:{slug}/ directly"
     )]
@@ -69,9 +61,6 @@ pub enum SpaceError {
         title: String,
         slug: String,
     },
-    /// rev5 D37: a workflow run whose `space_writes.mode` is `read_only`
-    /// (or whose draft a human already closed). Names the fix for the
-    /// workflow author — the step agent reading this cannot apply it.
     #[error("SpaceError - RunReadOnly: space:{slug}/ is read-only in this workflow run — set `space_writes.mode` to `merge` or `open_pr` in the workflow definition to let its steps write")]
     RunReadOnly { slug: String },
 }

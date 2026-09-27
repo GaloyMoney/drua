@@ -41,10 +41,6 @@ async fn fresh_library(test_name: &str) -> (TestRepo, Library, sqlx::PgPool) {
     (fixture, library, pool)
 }
 
-/// A changeset branch, created and written to through the full async
-/// `Library` surface (not the sync `git.rs` unit-test helpers), proving
-/// `create_ref` + `write_file_at` + `read_blob_at`/`resolve_ref` compose
-/// end to end and that `main` never moves.
 #[tokio::test]
 #[ignore = "requires postgres + writes to tests/.library; run with --ignored"]
 async fn create_ref_write_and_read_at_tip_leave_main_untouched() {
@@ -74,7 +70,6 @@ async fn create_ref_write_and_read_at_tip_leave_main_untouched() {
         .expect("write to changeset ref")
         .expect("real commit");
 
-    // Visible at the changeset tip...
     assert_eq!(
         library
             .read_blob_at(&tip, "spaces/demo/note.md")
@@ -82,7 +77,6 @@ async fn create_ref_write_and_read_at_tip_leave_main_untouched() {
             .unwrap(),
         Some(b"staged content".to_vec())
     );
-    // ...but not through main (HEAD).
     assert_eq!(
         library
             .read_blob_at_head("spaces/demo/note.md")
@@ -90,7 +84,6 @@ async fn create_ref_write_and_read_at_tip_leave_main_untouched() {
             .unwrap(),
         None
     );
-    // main's oid is exactly what it was before the changeset write.
     let main_after = library
         .resolve_ref("refs/heads/main")
         .await
@@ -99,8 +92,6 @@ async fn create_ref_write_and_read_at_tip_leave_main_untouched() {
     assert_eq!(main_after, base);
 }
 
-/// `merge_into_main` lands a changeset's tip as a 2-parent commit and
-/// its content becomes visible at HEAD.
 #[tokio::test]
 #[ignore = "requires postgres + writes to tests/.library; run with --ignored"]
 async fn merge_into_main_lands_changeset_content_at_head() {
@@ -146,8 +137,6 @@ async fn merge_into_main_lands_changeset_content_at_head() {
     assert_eq!(main_after, merge_oid);
 }
 
-/// `rebase_ref` squashes the changeset branch onto a moved `main`,
-/// carrying forward the changeset's own edit while main's edit stays.
 #[tokio::test]
 #[ignore = "requires postgres + writes to tests/.library; run with --ignored"]
 async fn rebase_ref_squashes_onto_moved_main() {
@@ -171,7 +160,6 @@ async fn rebase_ref_squashes_onto_moved_main() {
         .await
         .unwrap();
 
-    // main moves independently in the meantime.
     library
         .write_file_at(
             None,

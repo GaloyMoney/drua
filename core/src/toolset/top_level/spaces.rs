@@ -271,12 +271,6 @@ impl TopLevelTool for SpacesTool {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        // Leads/external-lead creds only — the tool mutates the
-        // project's `mounted_spaces` set (via create/mount/unmount),
-        // and even `list`/`view`/`search` are conceptually about the
-        // project's own space membership. `Update` on `Project(P)`
-        // matches `ProjectAdmin` without granting access to ordinary
-        // members. Matches `main`'s shape (rev6 D47).
         subject.effective_project_id().is_some_and(|p| {
             subject
                 .can(AuthVerb::Update, AuthResource::Project(Some(p)))
@@ -557,8 +551,6 @@ mod tests {
         );
     }
 
-    /// rev6 D47: the draft surface is gone from this tool's schema —
-    /// no `edit`, `target`, or any of the seven draft commands.
     #[test]
     fn schema_has_no_draft_commands() {
         let schema = &*SPACES_SCHEMA;

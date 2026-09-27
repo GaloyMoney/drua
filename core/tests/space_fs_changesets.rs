@@ -1,13 +1,4 @@
 #![recursion_limit = "256"]
-//! End-to-end coverage of `SpaceFs`'s changeset routing (handoff
-//! `handoff-space-changesets-2026-09-23.md` §6) through the full `App`
-//! stack: a bound write lands on the changeset branch and leaves
-//! `main` untouched, an explicit `@id` read of another project's
-//! changeset is `ChangesetForeign`, a `move` with an explicit id on
-//! only one side is `BadRequest`, and a write against a non-`Open`
-//! changeset is `ChangesetNotOpen`. Same fixture shape as
-//! `space_details.rs`/`compose_scripts.rs` — requires Postgres and a
-//! working git checkout, so every test is `#[ignore]`d.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -105,8 +96,6 @@ async fn reset_db(pool: &sqlx::PgPool) {
         .unwrap_or_else(|e| panic!("reset_db failed: {e}"));
 }
 
-/// Minimal `AgentsConfig` satisfying `validate()` — `App::init`
-/// requires `ProjectLead` + `Agent` roles and a matching model entry.
 fn agents_config_for_tests() -> AgentsConfig {
     let model = "test-model".to_string();
     let mut builtin_roles = HashMap::new();
@@ -174,9 +163,6 @@ async fn setup(test_name: &str) -> (App, AuthSubject) {
     (app, user)
 }
 
-/// Opens a project + mounted space + real lead agent, and writes an
-/// initial `main` commit through the engine (so `open` has a non-unborn
-/// HEAD to pin `base_oid` at). Returns the agent subject.
 async fn project_with_space(
     app: &App,
     user: &AuthSubject,
@@ -204,11 +190,6 @@ async fn project_with_space(
         )
         .await
         .expect("seed main");
-    // `create` already persisted a real `Agent` row for the lead —
-    // reuse its id, but build the subject with a plain `ProjectMember`
-    // scope rather than `ProjectAdmin`, so these tests exercise the
-    // same path a real chat/task agent takes: read-only on spaces
-    // (rev6 D44) — no writes at all, admin or a workflow run only.
     AuthSubject::Agent(
         project.id,
         project.lead_agent_id,
@@ -216,10 +197,6 @@ async fn project_with_space(
     )
 }
 
-/// Same as `project_with_space`, but also returns the real lead
-/// subject (`ProjectAdmin` — `Update` on spaces) alongside a
-/// `ProjectMember`-scoped one, for tests exercising rev2 §2's
-/// authority-resolved context table on both sides at once.
 async fn project_with_space_and_lead(
     app: &App,
     user: &AuthSubject,
@@ -269,14 +246,6 @@ fn space_fs(app: &App) -> drua_core::space_fs::SpaceFs {
     )
 }
 
-/// rev6: a workflow run is the one interactive-shaped actor (besides
-/// an admin) that can still open a draft (D44/D45). `Changeset.
-/// opened_by`/`Changesets::actor_key_for` FK into `workflow_runs`, so
-/// a synthetic `WorkflowRunId` alone isn't enough — this creates a
-/// minimal definition + run in `project_id` and returns the
-/// `WorkflowExecutor` subject for it. Shared by
-/// `workflow_run_subject_overlays_its_run_draft` and
-/// `explicit_read_of_foreign_project_changeset_is_rejected`.
 async fn run_subject_for(
     pool: &sqlx::PgPool,
     project_id: drua_core::primitives::ProjectId,
@@ -311,13 +280,6 @@ async fn run_subject_for(
     AuthSubject::workflow_executor(project_id, definition.id, run.id)
 }
 
-/// rev6 §6.2: the two remaining tool-level e2e tests exercise
-/// `drua_admin_spaces` directly — it's pinned, unchanged, and it's the
-/// only place a draft/PR flow is still reachable through a top-level
-/// tool call. `SearchableToolSet::call` is public, so a test can
-/// construct the toolset from `App`'s own accessors and call it
-/// without the full MCP gateway (`search_tools`/`describe_tool`/
-/// `call_tool`) in the loop.
 fn admin_tool_set(app: &App) -> drua_core::toolset::AdminToolSet {
     drua_core::toolset::AdminToolSet::new(
         Arc::new(app.agents().clone()),
@@ -338,10 +300,6 @@ fn admin_tool_set(app: &App) -> drua_core::toolset::AdminToolSet {
 #[ignore = "requires postgres + writes a working library clone; run with --ignored"]
 async fn bound_write_lands_on_changeset_branch_and_leaves_main_untouched() {
     let (app, user) = setup("bound_write").await;
-    // rev6 D44/D45: drafting is admin-or-run only — `user` (`AuthSubject::
-    // User`, admin via `has_scope`) stands in for the interactive actor
-    // that used to be a `ProjectMember`. The project/space fixture is
-    // still needed regardless of who drafts against it.
     project_with_space(&app, &user, "proj-bound-write", "docs").await;
 
     let cs = app
@@ -362,7 +320,6 @@ async fn bound_write_lands_on_changeset_branch_and_leaves_main_untouched() {
         .expect("write_file dispatch")
         .expect("space path");
 
-    // main untouched.
     let main = app
         .library()
         .spaces()
@@ -372,7 +329,6 @@ async fn bound_write_lands_on_changeset_branch_and_leaves_main_untouched() {
         .expect("a.md exists on main");
     assert_eq!(main, b"main content\n");
 
-    // the changeset's own tip has the staged content.
     let status = app.changesets().status(&user, cs.id).await.expect("status");
     assert_eq!(status.commits, 1);
     let staged = app
@@ -392,10 +348,6 @@ async fn explicit_read_of_foreign_project_changeset_is_rejected() {
     let owner_agent = project_with_space(&app, &user, "proj-owner", "docs").await;
     let owner_project_id = owner_agent.project_id().expect("owner has a project");
     let outsider = project_with_space(&app, &user, "proj-outsider", "notes").await;
-    // The mount gate (`Projects::space_for_subject`) runs before the
-    // changeset-ownership check — mount "docs" on the outsider's
-    // project too, so this test exercises `ChangesetForeign` and not
-    // just `NotMounted`.
     app.projects()
         .mount_space(
             &user,
@@ -405,11 +357,6 @@ async fn explicit_read_of_foreign_project_changeset_is_rejected() {
         .await
         .expect("mount docs onto the outsider's project");
 
-    // rev6 D44/D45: the owner is a workflow run — the only interactive-
-    // shaped actor besides an admin that can still open a draft.
-    // Reading it stays allowed for the outsider (a plain `ProjectMember`,
-    // unaffected by D44); only the cross-project ownership check matters
-    // here.
     let pool = pool().await;
     let owner = run_subject_for(&pool, owner_project_id).await;
 
@@ -491,13 +438,6 @@ async fn write_against_a_discarded_changeset_is_rejected() {
     );
 }
 
-/// rev4 D25/D26, rev5 D37: a workflow-run subject's `space:` writes
-/// are refused (`RunReadOnly`, never lazily staged) until a run draft
-/// is open, and once one is, `space:`/`draft:` both overlay it — reads
-/// and writes hit the same branch, `main` stays untouched, and the
-/// stamp says "run draft". An explicit `@<id>` write is `BadRequest`
-/// (a run writes only its own draft); an explicit `@<id>` **read**
-/// stays allowed (OQ-29).
 #[tokio::test]
 #[ignore = "requires postgres + writes a working library clone; run with --ignored"]
 async fn workflow_run_subject_overlays_its_run_draft() {
@@ -510,7 +450,6 @@ async fn workflow_run_subject_overlays_its_run_draft() {
 
     let fs = space_fs(&app);
 
-    // No run draft open yet: refused, not lazily created.
     let err = fs
         .write_file(&run_sub, "space:docs/a.md", "nope\n".into())
         .await
@@ -520,16 +459,12 @@ async fn workflow_run_subject_overlays_its_run_draft() {
         "expected RunReadOnly, got: {err}"
     );
 
-    // Stand-in for the executor's pre-flight (lands in a later rev5
-    // commit): open the run's draft by hand.
     let cs = app
         .changesets()
         .draft_for(&run_sub, Some("wf run".into()), None, None)
         .await
         .expect("open run draft");
 
-    // `space:` now overlays the run draft; the stamp names it a "run
-    // draft" and preserves the typed `space:` prefix.
     let stamp = fs
         .write_file(&run_sub, "space:docs/a.md", "staged by run\n".into())
         .await
@@ -537,7 +472,6 @@ async fn workflow_run_subject_overlays_its_run_draft() {
         .expect("space path");
     assert!(stamp.contains("space:docs · run draft"), "got: {stamp}");
 
-    // `main` is untouched.
     let main = app
         .library()
         .spaces()
@@ -547,7 +481,6 @@ async fn workflow_run_subject_overlays_its_run_draft() {
         .expect("a.md exists on main");
     assert_eq!(main, b"main content\n");
 
-    // `space:` reads the overlay, not `main`.
     let read = fs
         .view_file(&run_sub, "space:docs/a.md", None)
         .await
@@ -560,7 +493,6 @@ async fn workflow_run_subject_overlays_its_run_draft() {
         drua_core::space_fs::FileView::Dir(_) => panic!("expected a file"),
     }
 
-    // `draft:` is an accepted alias for the same overlay.
     let read = fs
         .view_file(&run_sub, "draft:docs/a.md", None)
         .await
@@ -573,8 +505,6 @@ async fn workflow_run_subject_overlays_its_run_draft() {
         drua_core::space_fs::FileView::Dir(_) => panic!("expected a file"),
     }
 
-    // An explicit `@<id>` write from a run subject is `BadRequest` —
-    // a run writes only its own draft.
     let idpath = format!("space:docs@{}/a.md", cs.id);
     let err = fs
         .write_file(&run_sub, &idpath, "explicit\n".into())
@@ -585,17 +515,12 @@ async fn workflow_run_subject_overlays_its_run_draft() {
         "expected BadRequest, got: {err}"
     );
 
-    // The same explicit `@<id>` form stays readable (OQ-29).
     fs.view_file(&run_sub, &idpath, None)
         .await
         .expect("view_file dispatch")
         .expect("explicit @id reads stay allowed for a run subject");
 }
 
-/// bugbot 2026-09-25 (Medium): `submit` already rejected a
-/// zero-commit changeset as `Empty`, but `apply` didn't — a lead
-/// `spaces publish` (or run-end `allow_land`) on a draft nobody ever
-/// wrote to would land a no-op merge commit on `main`.
 #[tokio::test]
 #[ignore = "requires postgres + writes a working library clone; run with --ignored"]
 async fn apply_on_an_empty_draft_is_rejected() {
@@ -619,14 +544,6 @@ async fn apply_on_an_empty_draft_is_rejected() {
     );
 }
 
-/// rev6 D44/D45: interactive agents (lead, member) are read-only on
-/// spaces — every `space:`/`draft:` write is refused with `ReadOnly`,
-/// no draft is ever created, and `main` never gets touched by them.
-/// `Changesets::{draft_for, apply}` fail the same way at the service
-/// layer for a subject that isn't an admin or a run. Replaces rev3's
-/// `member_lazy_draft_write_leaves_main_untouched_until_a_lead_lands_it`,
-/// `draft_scheme_stages_even_for_a_lead`, and
-/// `member_space_write_is_refused_with_use_draft`.
 #[tokio::test]
 #[ignore = "requires postgres + writes a working library clone; run with --ignored"]
 async fn interactive_agents_are_read_only() {
@@ -674,10 +591,6 @@ async fn interactive_agents_are_read_only() {
         .expect("space path");
     assert_eq!(stamp, "[space:docs · main]");
 
-    // The service layer fails the same way for `draft_for`/`apply`,
-    // regardless of which tool got there. `Changeset` isn't `Debug`, so
-    // `match` instead of `expect_err` (mirrors `apply_on_an_empty_draft_
-    // is_rejected`).
     let err = match app
         .changesets()
         .draft_for(&lead, Some("lead tries anyway".into()), None, None)
@@ -710,9 +623,6 @@ async fn interactive_agents_are_read_only() {
     );
 }
 
-/// rev2 §3 rule 3: a read against `space:` with no open draft yet has
-/// nothing to overlay, so it falls back to `main` rather than erroring
-/// or inventing a draft.
 #[tokio::test]
 #[ignore = "requires postgres + writes a working library clone; run with --ignored"]
 async fn space_read_with_no_open_draft_falls_back_to_main() {
@@ -741,12 +651,6 @@ async fn space_read_with_no_open_draft_falls_back_to_main() {
     );
 }
 
-/// D10/D19/§5.3's exact stamp formats, for the shapes reachable
-/// without a GitHub App configured: `main` (no draft), the "started"
-/// first-write form, the normal touched-count form, the `draft:`
-/// "no draft" fallback, D19's "differs" form, and the explicit
-/// `@<id>` form (exercised here still `Open`, since `status`
-/// transitions need a GitHub App this test fixture doesn't configure).
 #[tokio::test]
 #[ignore = "requires postgres + writes a working library clone; run with --ignored"]
 async fn stamp_formats_match_the_documented_forms() {
@@ -754,8 +658,6 @@ async fn stamp_formats_match_the_documented_forms() {
     let member = project_with_space(&app, &user, "proj-stamp", "docs").await;
     let fs = space_fs(&app);
 
-    // rev6 D44: a member is read-only, but a plain `space:` read still
-    // sees `main` exactly as before.
     let member_stamp = fs
         .resolved_stamp(&member, "space:docs/a.md", false)
         .await
@@ -763,9 +665,6 @@ async fn stamp_formats_match_the_documented_forms() {
         .expect("space path");
     assert_eq!(member_stamp, "[space:docs · main]");
 
-    // Every draft-shaped stamp below is now admin-only (D44/D45) — the
-    // admin `user` subject stands in for what used to be a member's
-    // `draft:` write and a lead's explicit `@<id>` read.
     let no_draft_stamp = fs
         .resolved_stamp(&user, "draft:docs/a.md", false)
         .await
@@ -773,8 +672,6 @@ async fn stamp_formats_match_the_documented_forms() {
         .expect("space path");
     assert_eq!(no_draft_stamp, "[draft:docs · no draft]");
 
-    // The write that lazily creates the draft gets "started" feedback
-    // instead of a touched-file count.
     let started_stamp = fs
         .resolved_stamp(&user, "draft:docs/a.md", true)
         .await
@@ -812,8 +709,6 @@ async fn stamp_formats_match_the_documented_forms() {
         )
     );
 
-    // D19: a `space:` read of the same path the admin's draft has
-    // touched names the draft rather than silently showing `main`.
     let differs_stamp = fs
         .resolved_stamp(&user, "space:docs/a.md", false)
         .await
@@ -830,10 +725,6 @@ async fn stamp_formats_match_the_documented_forms() {
         .await
         .expect("resolved_stamp")
         .expect("space path");
-    // `Open` via the explicit form still renders the draft-shaped
-    // stamp (only a non-`Open` status switches to the "changeset"
-    // form) — same id/title/count as the `draft:`-resolved one above,
-    // just under the `@<id>` scheme text.
     assert_eq!(
         explicit_stamp,
         format!(
@@ -843,11 +734,6 @@ async fn stamp_formats_match_the_documented_forms() {
     );
 }
 
-/// A write's own returned stamp must report its own effect, not the
-/// prior write's — the second write of a sequence should say
-/// `2 files`, not `1 file` (the count as of the first).
-/// `stamp_after_write` re-derives it from a fresh entity once the
-/// write (and `record_write`'s `head_oid` update) have landed.
 #[tokio::test]
 #[ignore = "requires postgres + writes a working library clone; run with --ignored"]
 async fn write_file_returns_its_own_touched_count_not_the_prior_writes() {
@@ -877,9 +763,6 @@ async fn write_file_returns_its_own_touched_count_not_the_prior_writes() {
     assert!(third.contains("3 files"), "got: {third}");
 }
 
-/// rev3 D15 (admin-only as of rev6 D44): an admin who holds
-/// `can_draft_spaces()` still can't write `space:` directly once a
-/// draft is open — fail closed, not a silent land.
 #[tokio::test]
 #[ignore = "requires postgres + writes a working library clone; run with --ignored"]
 async fn admin_space_write_with_open_draft_is_refused_with_draft_open() {
@@ -913,10 +796,6 @@ async fn admin_space_write_with_open_draft_is_refused_with_draft_open() {
     );
 }
 
-/// rev2 D4: two concurrent first-writes from the same actor must not
-/// create two `Open` drafts — the partial unique index on
-/// `opened_by_actor` and `draft_for`'s catch-and-re-read make this
-/// safe without a lock.
 #[tokio::test]
 #[ignore = "requires postgres + writes a working library clone; run with --ignored"]
 async fn concurrent_draft_for_calls_yield_one_changeset() {
@@ -930,8 +809,6 @@ async fn concurrent_draft_for_calls_yield_one_changeset() {
     let (a, b) = (a.expect("draft_for a"), b.expect("draft_for b"));
     assert_eq!(a.id, b.id, "both calls must resolve to the same draft");
 
-    // rev6 D48: `list` is admin-only now; the fresh-per-test DB (see
-    // `reset_db`) means this is the only changeset in existence.
     let all = app
         .changesets()
         .list(
@@ -953,13 +830,6 @@ fn text_of(res: &CallToolResult) -> String {
         .join("\n")
 }
 
-/// rev6 §6.2: rewritten against `drua_admin_spaces` (rev3 D17/D18/D19,
-/// pinned by rev6 — leads no longer have a `spaces edit`/draft surface
-/// at all) — `edit`/`view` with an explicit `target`, the verb-noun
-/// draft commands, and the D10/D19 stamp wired into the rendered text
-/// (`inspect.rs::dispatch_view`/`dispatch_edit`'s own `stamped` helper,
-/// not just `SpaceFs::resolved_stamp`). This is the only e2e coverage
-/// the pinned admin draft surface has.
 #[tokio::test]
 #[ignore = "requires postgres + writes a working library clone; run with --ignored"]
 async fn spaces_tool_target_param_and_verb_noun_commands_end_to_end() {
@@ -970,8 +840,6 @@ async fn spaces_tool_target_param_and_verb_noun_commands_end_to_end() {
         AuthSubject::ExportedAgent(UserId::new(), McpCredsId::new(), vec![AuthScope::Admin]);
     let admin_tools = admin_tool_set(&app);
 
-    // `edit target: main` (explicit) as an admin with no open draft
-    // lands directly and stamps `[space:docs · main]`.
     let res = admin_tools
         .call(
             &admin,
@@ -990,7 +858,6 @@ async fn spaces_tool_target_param_and_verb_noun_commands_end_to_end() {
     assert!(text.contains("[space:docs · main]"), "got: {text}");
     assert!(text.contains("Wrote space:docs/a.md"), "got: {text}");
 
-    // `start-draft` is explicit and idempotent.
     let res = admin_tools
         .call(
             &admin,
@@ -1018,8 +885,6 @@ async fn spaces_tool_target_param_and_verb_noun_commands_end_to_end() {
         text_of(&res)
     );
 
-    // `edit target: draft` stages; direct `edit target: main` is now
-    // refused (`DraftOpen`) even though the admin holds write authority.
     let res = admin_tools
         .call(
             &admin,
@@ -1056,8 +921,6 @@ async fn spaces_tool_target_param_and_verb_noun_commands_end_to_end() {
         .expect_err("an admin with an open draft must not write target: main directly");
     assert!(err.to_string().contains("DraftOpen"), "got: {err}");
 
-    // `list-drafts` sees it; `merge-draft` lands it; `draft-status`
-    // then reports no open draft.
     let res = admin_tools
         .call(
             &admin,
@@ -1098,7 +961,6 @@ async fn spaces_tool_target_param_and_verb_noun_commands_end_to_end() {
         .expect("draft-status");
     assert_eq!(text_of(&res), "No open draft.");
 
-    // The landed content is now on `main`.
     let landed = app
         .library()
         .spaces()
@@ -1108,8 +970,6 @@ async fn spaces_tool_target_param_and_verb_noun_commands_end_to_end() {
         .expect("b.md landed on main");
     assert_eq!(landed, b"staged\n");
 
-    // rev4 D32: `merge-draft` with an explicit `title`/`body`
-    // overrides the default `changeset: <title>` merge-commit message.
     admin_tools
         .call(
             &admin,
@@ -1166,15 +1026,6 @@ async fn spaces_tool_target_param_and_verb_noun_commands_end_to_end() {
     );
 }
 
-/// rev6 §6.2: admin variant of the deleted
-/// `member_open_pr_reaches_pr_unavailable_not_forbidden` — `open-pr` is
-/// reachable by any subject that can draft at all (D45); the local
-/// test fixture has no GitHub App configured, so it ends in
-/// `PrUnavailable`, proving `title`/`body` reached the call (a missing
-/// one would fail argument parsing first). `member_merge_draft_without_
-/// update_is_forbidden` is gone too — its assertion (a non-admin,
-/// non-run subject can't `draft_for`/`apply`) now lives in
-/// `interactive_agents_are_read_only`, at the service layer.
 #[tokio::test]
 #[ignore = "requires postgres + writes a working library clone; run with --ignored"]
 async fn admin_open_pr_reaches_pr_unavailable_not_forbidden() {
@@ -1220,9 +1071,6 @@ async fn admin_open_pr_reaches_pr_unavailable_not_forbidden() {
     );
 }
 
-/// rev6 D47: the top-level `spaces` tool no longer advertises `edit` or
-/// any draft command, and it's invisible to a plain member (only a
-/// lead, or external-lead creds, get `Update` on `Project`).
 #[tokio::test]
 #[ignore = "requires postgres + writes a working library clone; run with --ignored"]
 async fn spaces_tool_has_no_draft_commands() {

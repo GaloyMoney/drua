@@ -98,11 +98,6 @@ pub struct Executor {
     /// Used by `ToolStep` dispatch; held here rather than passed per
     /// call so the agent-step path is unchanged.
     toolsets: Arc<ToolSets>,
-    /// `None` only in test harnesses that don't stand up a `Library`
-    /// (`Changesets::new` needs one). Production always wires `Some`
-    /// (`Workflows::init` → `ExecuteRunJobInitializer`). A workflow
-    /// that declares `changeset:` against a `None` executor fails its
-    /// pre-flight rather than silently skipping the declaration.
     changesets: Option<Arc<crate::changeset::Changesets>>,
 }
 
@@ -174,13 +169,6 @@ impl Executor {
         let definition = self.definitions.find_by_id(workflow_id).await?;
         let sandbox_decls = definition.sandboxes.clone();
 
-        // rev5 D37: open the run's draft eagerly whenever `space_writes.
-        // mode != read_only` — same "fail as a synthetic <pre-flight>
-        // step" idiom as a sandbox that never comes Ready. No lazy
-        // creation any more (D26): a step's `space:` write with no run
-        // draft is refused with `RunReadOnly`. `run.changeset.is_none()`
-        // guards a resumed run (crash/restart) from pre-creating a
-        // second one — `draft_for` is idempotent per actor key anyway.
         let space_writes_decl = definition.space_writes.clone();
         if space_writes_decl.opens_draft() && run.changeset.is_none() {
             let open_result = match &self.changesets {
@@ -368,10 +356,6 @@ impl Executor {
             }
         }
 
-        // rev5 D40: the exit runs BEFORE `run_completed` — an exit
-        // failure records a synthetic `<space-writes>` step error, so
-        // `run_completed`'s classification (any_step_errored → Errored)
-        // picks it up for free.
         self.finish_space_writes(
             &mut run,
             project_id,
@@ -396,19 +380,6 @@ impl Executor {
         Ok(())
     }
 
-    /// rev5 §5.2: the run's exit. Looked up by
-    /// `Changesets::open_draft_for_run` rather than `run.changeset`
-    /// (same D4 rationale as before) — `Ok(None)` (nothing ever opened
-    /// one, or a human already closed it) is a silent no-op.
-    ///
-    /// A run that would succeed lands/opens-a-PR-for the draft
-    /// (`space_writes.mode`); an empty draft is discarded silently
-    /// (D39). A run that would not succeed is handed to
-    /// `abandon_run_draft` instead (D41's snapshotted `on_failure`). An
-    /// exit action that errors for any other reason fails the run as a
-    /// synthetic `<space-writes>` step, left for `run_completed` to
-    /// classify as `Errored` (D40) — the draft stays `Open` regardless
-    /// of `on_failure`.
     #[allow(clippy::too_many_arguments)]
     async fn finish_space_writes(
         &self,
@@ -447,13 +418,6 @@ impl Executor {
         let id = cs.id;
         let sub = AuthSubject::workflow_executor(project_id, workflow_id, run_id);
 
-        // `Workflows::cancel_run` writes `Cancelled` straight to the
-        // DB without signalling this in-flight executor's own
-        // `cancel` flag, so a cancel landing after the last step (but
-        // before this point) is invisible to `run.would_succeed()`,
-        // which only looks at step results. Reload the persisted
-        // state right before deciding whether to merge/open a PR, so
-        // that race routes to `abandon_run_draft` instead.
         let cancelled_concurrently = matches!(
             self.runs.find_by_id(run_id).await,
             Ok(fresh) if fresh.state == WorkflowRunState::Cancelled
@@ -517,7 +481,7 @@ impl Executor {
                     pr_number: cs.pr_number.unwrap_or_default(),
                     pr_url: cs.pr_url.unwrap_or_default(),
                 }),
-            SpaceWritesMode::ReadOnly => return, // no draft is ever opened in this mode
+            SpaceWritesMode::ReadOnly => return,
         };
 
         match action_result {
@@ -534,8 +498,6 @@ impl Executor {
                     }
                 }
             }
-            // rev5 D39: nothing was ever written — a benign discard,
-            // not a run failure.
             Err(ChangesetError::Empty { .. }) => {
                 match changesets
                     .discard(&sub, id, Some("no space writes".to_string()))
@@ -570,10 +532,6 @@ impl Executor {
         }
     }
 
-    /// rev5 D40: records the exit failure as a synthetic step error so
-    /// `run_completed` lands on `Errored`. The draft is left `Open`
-    /// regardless of `on_failure` — the message names the id and the
-    /// command a human can run to finish it by hand.
     async fn fail_space_writes(
         &self,
         run: &mut WorkflowRun,

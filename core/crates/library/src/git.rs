@@ -41,8 +41,6 @@ pub enum DeltaKind {
 /// `(path, content)` pairs produced by a tree walk.
 pub type BlobEntries = Vec<(String, Vec<u8>)>;
 
-/// Result of one [`BatchOp`]: the new commit oid, or `None` if the tree
-/// was unchanged.
 type WriteResult = Result<Option<String>, LibraryError>;
 
 /// One immediate child of a tree at HEAD. Returned by `list_dir_at_head`.
@@ -188,16 +186,6 @@ pub enum BatchOpKind {
     MultiFile {
         changes: Vec<(String, Option<Vec<u8>>)>,
     },
-    /// A 3-way merge committed against whatever `theirs` (the batch's
-    /// actual parent at commit time) turns out to be, with a second
-    /// parent alongside the batch's normal parent. Used by
-    /// [`GitEngine::merge_into_main`] — `base_oid` is the merge-base
-    /// computed ahead of enqueueing (stable: `main` only ever advances
-    /// past it), `second_parent` the changeset tip being merged in.
-    /// Deliberately NOT a precomputed tree: `commit_one` re-runs the
-    /// merge against the real parent tree so a `main` commit that lands
-    /// between enqueueing and commit — or a non-FF push retry — is
-    /// merged in rather than silently dropped from the resulting tree.
     MergeCommit {
         base_oid: String,
         second_parent: String,
@@ -208,10 +196,6 @@ pub struct BatchOp {
     pub commit_message: String,
     pub kind: BatchOpKind,
     pub attribution: CommitAttribution,
-    /// `refs/heads/<name>` this op commits and pushes to. `None` =
-    /// `refs/heads/main` (today's behaviour, unchanged). Ops in the same
-    /// batch are grouped by `target_ref` and each group is committed and
-    /// pushed independently — see [`GitEngine::commit_each_then_push_blocking`].
     pub target_ref: Option<String>,
 }
 
@@ -239,12 +223,6 @@ impl Drop for OwnedTaskHandle {
 
 pub struct GitEngine {
     repo_path: PathBuf,
-    /// Held by the writer for each batch and by `fetch_and_head`.
-    /// Prevents the periodic fetch's mirror refspec from racing
-    /// in-flight commits before `push_ref` lands — the invariant every
-    /// new ref-mutating method (`create_ref`, `delete_ref`, `rebase_ref`)
-    /// must also hold, since the mirror refspec force-overwrites any
-    /// local `refs/heads/*` a concurrent fetch observes.
     repo_mutex: Arc<Mutex<()>>,
     write_tx: mpsc::Sender<QueuedOp>,
     /// Wakes the fetcher. Fired by the local writer after a successful
@@ -577,10 +555,6 @@ impl GitEngine {
         .map_err(|e| LibraryError::Git(format!("read_blob_at_head join: {e}")))?
     }
 
-    /// Read the blob at `path` from `commit_oid`'s tree. `Ok(None)` when
-    /// the path doesn't exist at that commit. The ref-aware counterpart
-    /// of [`Self::read_blob_at_head`] — `SpaceFs` uses it once a call
-    /// resolves to a changeset target.
     #[tracing::instrument(name = "library.git.read_blob_at", skip_all, fields(%commit_oid, %path))]
     pub async fn read_blob_at(
         &self,
@@ -622,8 +596,6 @@ impl GitEngine {
         .map_err(|e| LibraryError::Git(format!("list_dir_at_head join: {e}")))?
     }
 
-    /// Lists immediate children of `dir_path` at `commit_oid`'s tree.
-    /// The ref-aware counterpart of [`Self::list_dir_at_head`].
     #[tracing::instrument(name = "library.git.list_dir_at", skip_all, fields(%commit_oid, %dir_path))]
     pub async fn list_dir_at(
         &self,
@@ -665,8 +637,6 @@ impl GitEngine {
         .map_err(|e| LibraryError::Git(format!("walk_blobs_at_head join: {e}")))?
     }
 
-    /// Recursively walk every blob under `dir_path` at `commit_oid`'s
-    /// tree. The ref-aware counterpart of [`Self::walk_blobs_at_head`].
     #[tracing::instrument(name = "library.git.walk_blobs_at", skip_all, fields(%commit_oid, %dir_path))]
     pub async fn walk_blobs_at(
         &self,
@@ -686,7 +656,6 @@ impl GitEngine {
         .map_err(|e| LibraryError::Git(format!("walk_blobs_at join: {e}")))?
     }
 
-    /// `Ok(None)` when HEAD is unborn.
     fn head_tree(repo: &git2::Repository) -> Result<Option<git2::Tree<'_>>, LibraryError> {
         let Ok(head) = repo.head() else {
             return Ok(None);
@@ -698,10 +667,6 @@ impl GitEngine {
         Ok(Some(tree))
     }
 
-    /// Errors (does not return `Ok(None)`) on a bad or missing oid —
-    /// unlike HEAD, a changeset's base/tip oid always names a real
-    /// commit, so a lookup failure here is a genuine error, not an
-    /// "unborn" case.
     fn commit_tree<'repo>(
         repo: &'repo git2::Repository,
         oid: &str,
@@ -988,8 +953,6 @@ impl GitEngine {
         .map_err(|e| LibraryError::Git(format!("fetch_and_head join: {e}")))?
     }
 
-    /// Current target of `refname` (e.g. `refs/heads/drua/<id>`).
-    /// `Ok(None)` when the ref doesn't exist locally.
     #[tracing::instrument(name = "library.git.resolve_ref", skip_all, fields(%refname))]
     pub async fn resolve_ref(&self, refname: &str) -> Result<Option<String>, LibraryError> {
         let repo_path = self.repo_path.clone();
@@ -1008,13 +971,6 @@ impl GitEngine {
         .map_err(|e| LibraryError::Git(format!("resolve_ref join: {e}")))?
     }
 
-    /// Points `refname` at `oid` locally (no push) — errors if it
-    /// already exists or `oid` doesn't name a commit. Held under
-    /// `repo_mutex` like every other ref mutation, matching the
-    /// invariant on [`GitEngine::repo_mutex`]. Not pushed: a changeset
-    /// branch with no commits yet has nothing for origin to hold, and
-    /// gets recreated locally on demand (see `fetch_origin`'s prune
-    /// comment).
     #[tracing::instrument(name = "library.git.create_ref", skip_all, fields(%refname, %oid))]
     pub async fn create_ref(&self, refname: &str, oid: &str) -> Result<(), LibraryError> {
         let _guard = self.repo_mutex.lock().await;
@@ -1036,9 +992,6 @@ impl GitEngine {
         .map_err(|e| LibraryError::Git(format!("create_ref join: {e}")))?
     }
 
-    /// Deletes `refname` locally, and on origin too when `push` is set
-    /// (a no-op if it was never pushed). Held under `repo_mutex` like
-    /// every other ref mutation.
     #[tracing::instrument(name = "library.git.delete_ref", skip_all, fields(%refname, %push))]
     pub async fn delete_ref(&self, refname: &str, push: bool) -> Result<(), LibraryError> {
         let _guard = self.repo_mutex.lock().await;
@@ -1073,8 +1026,6 @@ impl GitEngine {
         .map_err(|e| LibraryError::Git(format!("delete_ref join: {e}")))?
     }
 
-    /// Best common ancestor of `a` and `b`. `Ok(None)` when they share
-    /// no history.
     #[tracing::instrument(name = "library.git.merge_base", skip_all, fields(%a, %b))]
     pub async fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>, LibraryError> {
         let repo_path = self.repo_path.clone();
@@ -1097,12 +1048,6 @@ impl GitEngine {
         .map_err(|e| LibraryError::Git(format!("merge_base join: {e}")))?
     }
 
-    /// Tree-level 3-way merge of `ours` onto `theirs` from `base`.
-    /// `Ok(Ok(tree_oid))` on a clean merge; `Ok(Err(paths))` lists every
-    /// conflicting path and leaves nothing committed. Mergeability is
-    /// never stored — this is the "compute it on demand" primitive
-    /// `Changesets::status` and `submit` call for their `mergeable` /
-    /// `conflicts` fields (see handoff §2.2).
     #[tracing::instrument(name = "library.git.merge_trees", skip_all, fields(%base, %ours, %theirs))]
     pub async fn merge_trees(
         &self,
@@ -1125,9 +1070,6 @@ impl GitEngine {
         .map_err(|e| LibraryError::Git(format!("merge_trees join: {e}")))?
     }
 
-    /// Blocking body of [`Self::merge_trees`], factored out so unit
-    /// tests can exercise it against a hand-built `git2::Repository`
-    /// (mirrors `path_dates_blocking`).
     fn merge_trees_blocking(
         repo: &git2::Repository,
         base: &str,
@@ -1166,13 +1108,6 @@ impl GitEngine {
         Ok(Ok(tree_oid.to_string()))
     }
 
-    /// Merges `changeset_tip` into `main`: a 2-parent commit (`main`,
-    /// `changeset_tip`) whose tree is the clean 3-way merge from their
-    /// merge-base. Goes through the writer (`BatchOpKind::MergeCommit`)
-    /// so it takes the same `repo_mutex`/advisory-lock/retry path as
-    /// every other `main` write. `Err(Validation(_))` on conflicts —
-    /// callers should `merge_trees` first if they want conflict paths
-    /// without attempting the commit.
     #[tracing::instrument(name = "library.git.merge_into_main", skip_all, fields(%changeset_tip))]
     pub async fn merge_into_main(
         &self,
@@ -1188,14 +1123,6 @@ impl GitEngine {
             .merge_base(&main_oid, changeset_tip)
             .await?
             .ok_or_else(|| LibraryError::Git("merge_into_main: no merge base with main".into()))?;
-        // Pre-flight only — confirms there's a clean merge as of right
-        // now, so a doomed merge never reaches the write queue. The op
-        // itself carries `base` rather than this tree: `main` can (and
-        // does, under concurrent writers) advance between here and when
-        // `commit_one` actually applies the op, and a non-FF push retry
-        // can advance it further still — committing this snapshot's tree
-        // against a later parent would silently drop whatever landed on
-        // `main` in between.
         if let Err(paths) = self.merge_trees(&base, changeset_tip, &main_oid).await? {
             return Err(LibraryError::Validation(format!(
                 "merge conflicts: {}",
@@ -1216,13 +1143,6 @@ impl GitEngine {
         oid.ok_or_else(|| LibraryError::Git("merge_into_main: produced no commit".into()))
     }
 
-    /// Force-rewrites `refname` to a single new commit: tree = the clean
-    /// 3-way merge of `refname`'s current tip onto `onto` (ancestor =
-    /// their merge-base), parent = `onto` alone. A squash: `refname`'s
-    /// prior commits are discarded from the branch (not from history —
-    /// they remain reachable via the old tip until GC); the PR body
-    /// still lists the original ops. `Ok(Err(paths))` on conflict leaves
-    /// `refname` untouched.
     #[tracing::instrument(name = "library.git.rebase_ref", skip_all, fields(%refname, %onto))]
     pub async fn rebase_ref(
         &self,
@@ -1308,10 +1228,6 @@ impl GitEngine {
         .map(|_| ())
     }
 
-    /// Ref-aware counterpart of [`Self::write_file`]: `target_ref`
-    /// selects the branch to commit and push to (`None` =
-    /// `refs/heads/main`, identical to `write_file`). Returns the
-    /// resulting commit oid, or `None` if the tree was unchanged.
     #[tracing::instrument(name = "library.git.write_file_at", skip_all, fields(%path, target_ref = target_ref.as_deref().unwrap_or("refs/heads/main")))]
     pub async fn write_file_at(
         &self,
@@ -1348,8 +1264,6 @@ impl GitEngine {
         .map(|_| ())
     }
 
-    /// Ref-aware counterpart of [`Self::delete_file`]. See
-    /// [`Self::write_file_at`] for the `target_ref` contract.
     #[tracing::instrument(name = "library.git.delete_file_at", skip_all, fields(%path, target_ref = target_ref.as_deref().unwrap_or("refs/heads/main")))]
     pub async fn delete_file_at(
         &self,
@@ -1388,8 +1302,6 @@ impl GitEngine {
         .map(|_| ())
     }
 
-    /// Ref-aware counterpart of [`Self::update_file`]. See
-    /// [`Self::write_file_at`] for the `target_ref` contract.
     #[tracing::instrument(name = "library.git.update_file_at", skip_all, fields(%path, target_ref = target_ref.as_deref().unwrap_or("refs/heads/main")))]
     pub async fn update_file_at(
         &self,
@@ -1428,8 +1340,6 @@ impl GitEngine {
         .map(|_| ())
     }
 
-    /// Ref-aware counterpart of [`Self::move_file`]. See
-    /// [`Self::write_file_at`] for the `target_ref` contract.
     #[tracing::instrument(name = "library.git.move_file_at", skip_all, fields(%from, %to, target_ref = target_ref.as_deref().unwrap_or("refs/heads/main")))]
     pub async fn move_file_at(
         &self,
@@ -1516,8 +1426,6 @@ impl GitEngine {
         .map(|_| ())
     }
 
-    /// Push a single op onto the writer queue and await its result: the
-    /// resulting commit oid, or `None` if the tree was unchanged.
     /// Failure to enqueue (writer task gone) or to receive the response
     /// (response channel closed) collapses to a `Git(_)` error.
     async fn enqueue(&self, op: BatchOp) -> WriteResult {
@@ -1688,11 +1596,6 @@ impl GitEngine {
             }
         };
 
-        // Group by target ref, preserving each group's relative order.
-        // Groups are committed and pushed independently (a conflict or
-        // non-FF retry on one ref never touches another), so grouping
-        // order doesn't matter for correctness — only within-group order
-        // does, which this preserves.
         let mut order: Vec<String> = Vec::new();
         let mut groups: HashMap<String, Vec<usize>> = HashMap::new();
         for (i, op) in ops.iter().enumerate() {
@@ -1722,14 +1625,10 @@ impl GitEngine {
             .collect()
     }
 
-    /// `refs/heads/<name>` a `target_ref` resolves to. `None` = `main`.
     fn ref_name(target_ref: Option<&str>) -> String {
         target_ref.unwrap_or("refs/heads/main").to_string()
     }
 
-    /// Current tip of `refname`. `refs/heads/main` resolves via `HEAD`
-    /// (matching the pre-changesets behaviour exactly); any other ref is
-    /// looked up directly, since HEAD never points anywhere else.
     fn ref_oid(repo: &git2::Repository, refname: &str) -> Result<git2::Oid, LibraryError> {
         if refname == "refs/heads/main" {
             repo.head()
@@ -1744,13 +1643,6 @@ impl GitEngine {
         }
     }
 
-    /// One group's worth of [`Self::commit_each_then_push_blocking`]:
-    /// apply `ops` as N commits on `refname`, then push once. On non-FF
-    /// push, refetch and replay against the new tip; a second push
-    /// failure rolls `refname` back to its pre-group oid and surfaces
-    /// `Git("push failed: ...")` on every op that committed locally.
-    /// Per-op `Validation` errors don't advance the parent — the next op
-    /// layers on the previous successful commit.
     fn commit_group_then_push_blocking(
         repo: &git2::Repository,
         refname: &str,
@@ -1818,11 +1710,6 @@ impl GitEngine {
                             .map(|_| Err(LibraryError::Git(msg.clone())))
                             .collect();
                     }
-                    // `main` needs an explicit reset from
-                    // `refs/remotes/origin/main` (see `reset_main_to_origin`).
-                    // Every other ref is written directly by
-                    // `fetch_origin`'s mirror refspec, so it already
-                    // reflects origin — nothing further to reset.
                     if refname == "refs/heads/main" {
                         if let Err(re) = Self::reset_main_to_origin(repo) {
                             let msg = re.to_string();
@@ -1849,11 +1736,6 @@ impl GitEngine {
         }
     }
 
-    /// One commit step inside [`Self::commit_group_then_push_blocking`].
-    /// `update_ref` is passed straight to `git2::Repository::commit` —
-    /// `"HEAD"` for the `main` group (matching pre-changesets behaviour
-    /// exactly), the literal `refs/heads/drua/<id>` for any other group,
-    /// since `HEAD` never points anywhere but `main`.
     /// `Ok(Some(oid))` = real commit; `Ok(None)` = tree unchanged;
     /// `Err(_)` = per-op validation or git failure (skip, don't advance).
     fn commit_one(
@@ -1947,11 +1829,6 @@ impl GitEngine {
                     .find_commit(sp_oid)
                     .map_err(|e| LibraryError::Git(format!("find second parent: {e}")))?;
                 second_parent = Some(sp_commit);
-                // Recomputed against `parent_oid` — the real, current
-                // parent at commit time, not `main`'s tip when this op
-                // was enqueued — so a concurrent `main` commit (or a
-                // non-FF retry landing on a newer parent still) is
-                // merged in rather than dropped from the resulting tree.
                 match Self::merge_trees_blocking(repo, base_oid, sp, &parent_oid.to_string())? {
                     Ok(tree_oid) => git2::Oid::from_str(&tree_oid)
                         .map_err(|e| LibraryError::Git(format!("parse tree oid: {e}")))?,
@@ -1965,9 +1842,6 @@ impl GitEngine {
             }
         };
 
-        // A merge commit is real even when its tree matches the parent's
-        // (an "already contains everything" merge) — it still records
-        // the second parent, so it never no-ops.
         if second_parent.is_none() && new_tree_oid == parent_tree.id() {
             return Ok(None);
         }
@@ -2143,9 +2017,6 @@ impl GitEngine {
             .map_err(|e| LibraryError::Git(format!("tree write: {e}")))
     }
 
-    /// Fast-forward push of `refname` (used for every normal write,
-    /// `main` included — `refs/heads/main:refs/heads/main` is exactly
-    /// what the pre-changesets `push_main` sent).
     fn push_ref(
         repo: &git2::Repository,
         token: Option<&str>,
@@ -2162,9 +2033,6 @@ impl GitEngine {
             .map_err(|e| LibraryError::Git(format!("push: {e}")))
     }
 
-    /// Force push of `refname` — used only by [`Self::rebase_ref`],
-    /// whose squash commit deliberately isn't a fast-forward of the
-    /// branch's prior tip.
     fn push_ref_force(
         repo: &git2::Repository,
         token: Option<&str>,
@@ -2243,27 +2111,6 @@ impl GitEngine {
 
         let mut fo = git2::FetchOptions::new();
         fo.remote_callbacks(Self::remote_callbacks(token));
-        // Prune local `refs/heads/*` absent from origin's fetched set —
-        // needed so a changeset branch's local ref actually disappears
-        // once its PR closes and GitHub deletes the branch (the sync job
-        // reads that disappearance as `resolve_ref == None` to mark the
-        // changeset `Abandoned`; see `job::sync`). This mirror refspec's
-        // destination is `refs/heads/*` (not the usual
-        // `refs/remotes/origin/*`), so prune here operates over local
-        // branches, not remote-tracking ones — a real behaviour change
-        // from "off" (the prior default), not a no-op tweak.
-        //
-        // Safe for a *local-only, not-yet-pushed* `drua/<id>` branch
-        // (created by `create_ref` before its first write): pruning it
-        // loses nothing, because it carries no commits origin doesn't
-        // already have (it's sitting at `base_oid`), and `Changesets`
-        // already treats a missing local ref as recoverable —
-        // `ensure_ref` recreates it on next use, the same repair path a
-        // pod restart (ephemeral clone) requires anyway. Once a
-        // changeset receives its first write, the writer pushes before
-        // releasing `repo_mutex` (see the field doc on `GitEngine`), so
-        // from that point its ref always exists on origin and prune
-        // cannot remove real content.
         fo.prune(git2::FetchPrune::On);
 
         // Mirror refspec — write directly to local heads so HEAD advances
@@ -2836,12 +2683,6 @@ mod tests {
         DateTime::<Utc>::from_timestamp(commit.time().seconds(), 0).unwrap()
     }
 
-    // --- changesets: target_ref, grouped batches, merges, prune ---
-
-    /// A bare "origin" with one commit on `main`, plus a bare clone of it
-    /// (mirrors production: `GitEngine` only ever operates on a bare
-    /// clone with a remote named `origin`). No credentials are needed —
-    /// both sides are local filesystem paths.
     fn origin_and_clone(tag: &str) -> (PathBuf, PathBuf, git2::Repository) {
         let origin_dir = unique_dir(&format!("{tag}-origin"));
         {
@@ -2906,8 +2747,6 @@ mod tests {
             .unwrap();
         assert_eq!(origin_branch.to_string(), new_oid);
 
-        // read at the changeset tip sees the new file; read at main (HEAD)
-        // does not.
         let tip_tree = origin_repo
             .find_commit(origin_branch)
             .unwrap()
@@ -3015,9 +2854,6 @@ mod tests {
             .unwrap();
         GitEngine::push_ref(&local_repo, None, "refs/heads/drua/z").unwrap();
 
-        // Simulate a human pushing directly to origin: a second commit on
-        // `drua/z` the local clone has never seen. The local clone's
-        // `drua/z` ref is now stale at `main_oid`.
         let origin_repo = git2::Repository::open_bare(&origin_dir).unwrap();
         let external_oid = commit_file(
             &origin_repo,
@@ -3058,10 +2894,6 @@ mod tests {
             .unwrap();
         assert_eq!(tip.to_string(), new_oid);
         let tip_commit = origin_repo.find_commit(tip).unwrap();
-        // The replayed commit's parent is the external human commit, not
-        // the stale oid the write started from — proving the retry
-        // re-fetched and replayed on the new tip instead of force-pushing
-        // over it.
         assert_eq!(tip_commit.parent_id(0).unwrap(), external_oid);
         let tree = tip_commit.tree().unwrap();
         assert!(
@@ -3210,13 +3042,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&local_dir);
     }
 
-    /// bugbot 2026-09-25: a `MergeCommit` op built with `base_oid` (not a
-    /// precomputed tree) must merge against whatever `main`'s tip really
-    /// is when `commit_one` runs, not the tip that was current when the
-    /// op was built — otherwise a commit that lands on `main` in between
-    /// (modeled here directly: `main` moves after the op is built, before
-    /// it's applied) would silently vanish from the merged tree despite
-    /// staying reachable as parent 1.
     #[test]
     fn merge_commit_op_preserves_a_main_commit_that_lands_after_the_op_was_built() {
         let (origin_dir, local_dir, local_repo) = origin_and_clone("merge-concurrent-main");
@@ -3234,9 +3059,6 @@ mod tests {
             "changeset edit",
         );
 
-        // Simulates another writer landing on `main` after this op's
-        // `base_oid`/`second_parent` were computed but before it reaches
-        // `commit_one` — e.g. a batch delay, or a non-FF push retry.
         let concurrent_main_tip = commit_file(
             &local_repo,
             Some(base_oid),
@@ -3295,8 +3117,6 @@ mod tests {
             .unwrap()
             .target()
             .unwrap();
-        // A branch that exists locally (as `create_ref` would leave it)
-        // but was never pushed to origin.
         local_repo
             .reference("refs/heads/drua/gone", main_oid, false, "local only")
             .unwrap();

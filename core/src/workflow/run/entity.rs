@@ -172,20 +172,11 @@ pub enum WorkflowRunEvent {
         reason: Option<String>,
         cancelled_at: DateTime<Utc>,
     },
-    /// rev5 D37: the executor's pre-flight opened the run's draft
-    /// (`space_writes.mode != read_only`). `on_failure` is the policy
-    /// snapshotted from `space_writes` at that moment (D41), so a
-    /// mid-run definition edit can't change how this run's draft is
-    /// treated if it fails.
     ChangesetOpened {
         changeset_id: ChangesetId,
         #[serde(default)]
         on_failure: SpaceWritesFailure,
     },
-    /// The run's exit closed the draft (rev5 D42) — merged, opened as
-    /// a PR, or discarded. `outcome` is `None` for events written
-    /// before rev5 (old callers had nothing to record) and is always
-    /// `Some` going forward.
     ChangesetClosed {
         changeset_id: ChangesetId,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -193,9 +184,6 @@ pub enum WorkflowRunEvent {
     },
 }
 
-/// rev5 D42: what happened to a run's draft at close time — run
-/// history, not a step output (there is no step after the top-level
-/// exit to consume it; see OQ-31).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SpaceWritesOutcome {
@@ -218,18 +206,8 @@ pub struct WorkflowRun {
     pub completed_at: Option<DateTime<Utc>>,
     #[builder(default)]
     pub step_results: Vec<StepResult>,
-    /// Set by the executor's pre-flight when `space_writes.mode !=
-    /// read_only`; cleared once the run's exit closes it (merged,
-    /// opened as a PR, or discarded) — or left set if a step errored
-    /// and `on_failure: keep` left it open for a human.
-    /// `Agent.workflow_run_id` → this is how a step agent inherits the
-    /// run's draft without its own bind (`SpaceFs::resolve` overlay,
-    /// rev4 D25).
     #[builder(default)]
     pub changeset: Option<ChangesetId>,
-    /// Snapshotted from `space_writes.on_failure` on
-    /// `ChangesetOpened` (rev5 D41) — set/cleared alongside
-    /// `changeset`.
     #[builder(default)]
     pub changeset_on_failure: Option<SpaceWritesFailure>,
     events: EntityEvents<WorkflowRunEvent>,
@@ -252,10 +230,6 @@ impl WorkflowRun {
             .any(StepResult::step_reported_agent_failure)
     }
 
-    /// The classification `run_completed` would land on right now —
-    /// used by the executor's `finish_space_writes` (rev5 §5.2) to
-    /// decide whether to land/PR the run's draft or abandon it, ahead
-    /// of the `RunCompleted` event that records it.
     pub fn would_succeed(&self) -> bool {
         !self.any_step_errored() && !self.any_step_reported_failure()
     }
@@ -589,12 +563,6 @@ impl WorkflowRun {
         })
     }
 
-    /// Called once by the executor's pre-flight when `space_writes.mode
-    /// != read_only`. At most one draft per run — opened once at start
-    /// and closed once at end, so unlike `Agent::changeset_bound` this
-    /// never needs to reject a second, different id; it's simply
-    /// idempotent against retry. `on_failure` is snapshotted here
-    /// (rev5 D41) so it survives a mid-run definition edit.
     pub fn changeset_opened(
         &mut self,
         changeset_id: ChangesetId,
@@ -613,13 +581,6 @@ impl WorkflowRun {
         Idempotent::Executed(())
     }
 
-    /// Idempotent unless `changeset_id` is the one currently open —
-    /// mirrors `Agent::changeset_unbound`'s current-state check (not an
-    /// event-history scan: a retry closing the *same* id the run has
-    /// since moved past, or a stray call for an id the run never had,
-    /// must both be no-ops). `outcome` is `None` when a human closed
-    /// the draft out-of-band (rare, but the field stays optional to
-    /// allow it).
     pub fn changeset_closed(
         &mut self,
         changeset_id: ChangesetId,
@@ -1520,8 +1481,6 @@ mod tests {
         );
     }
 
-    // ── Changeset binding tests ──
-
     #[test]
     fn changeset_opened_and_closed_round_trip() {
         let mut run = fresh_run(&["a"]);
@@ -1613,9 +1572,6 @@ mod tests {
         assert!(rehydrated.changeset_on_failure.is_none());
     }
 
-    /// Old `ChangesetOpened`/`ChangesetClosed` events (pre-rev5, no
-    /// `on_failure`/`outcome`) hydrate cleanly — `on_failure` defaults
-    /// to `Keep`, `outcome` is `None`.
     #[test]
     fn pre_rev5_changeset_events_hydrate_with_defaults() {
         let id = ChangesetId::new();

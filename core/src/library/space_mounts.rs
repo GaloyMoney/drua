@@ -35,24 +35,13 @@ pub enum SpaceMountsError {
 /// truncation footer; agents enumerate the rest via the `spaces` tool.
 const SPACES_BLOCK_LIMIT: usize = 20;
 
-/// rev6 D49: interactive agents are read-only on spaces — the one
-/// sentence `render_spaces_block`'s `write_line` and `whoami`'s
-/// `space_write_mode_note` both render verbatim for every non-admin
-/// subject. Spaces are edited by a workflow (`space_writes:`) or by an
-/// admin (`drua_admin_spaces` with `target: draft`), never from here.
 pub const SPACE_WRITE_MODE_SENTENCE: &str =
     "Spaces are read-only in this session — edits to a space are made \
      by a workflow (`space_writes:`) or by an admin.\n";
 
-/// rev5 D43: which write line `render_spaces_block` renders. `None`
-/// for `WorkflowRun` — the run has no draft, so `space:` is refused.
 #[derive(Debug, Clone, Copy)]
 pub enum SpacesBlockMode {
-    /// Leads, members, `ExportedAgent`, admins — rev3's one sentence.
     Interactive,
-    /// A workflow-run step agent. `space:<slug>/` overlays the run's
-    /// draft (rev4 D25) whenever `mode != read_only`; there is no
-    /// `draft:` prefix or draft command to reach for.
     WorkflowRun(SpaceWritesMode),
 }
 
@@ -121,11 +110,7 @@ impl SpaceMounts {
     }
 
     /// Rendered `<spaces>...</spaces>` system-prompt block for an agent
-    /// in `project_id`. `Ok(None)` when no spaces are mounted. rev3
-    /// §6.3 / rev5 D43: one sentence per `mode` — `Interactive`'s
-    /// write mode never varies by authority (`space:` fails closed per
-    /// D15); a `WorkflowRun` mode instead says what happens to the
-    /// run's overlay draft.
+    /// in `project_id`. `Ok(None)` when no spaces are mounted.
     #[instrument(name = "library.space_mounts.spaces_block_for_project", skip(self))]
     pub async fn spaces_block_for_project(
         &self,
@@ -147,12 +132,6 @@ fn render_spaces_block(spaces: &[Space], mode: SpacesBlockMode) -> Option<String
         SpacesBlockMode::Interactive => SPACE_WRITE_MODE_SENTENCE.to_string(),
         SpacesBlockMode::WorkflowRun(write_mode) => workflow_run_write_line(write_mode),
     };
-    // rev6 D49: an interactive agent's file tools can only read a space
-    // (D44) — no `Edit`/`Move`/`Delete`, no `draft:` prefix. A lead
-    // (no file tools at all — `can_use_agent_file_tools` is agents-only,
-    // unchanged by this rev) reaches even reads only via `spaces view`.
-    // A run's tools still write (rev5 D25 unchanged), so its header
-    // keeps the full list and the `draft:` clause.
     let tools_line = match mode {
         SpacesBlockMode::Interactive => {
             "Use the file tools (Read, LS, Glob, Grep) — or `spaces view` \
@@ -191,10 +170,6 @@ fn render_spaces_block(spaces: &[Space], mode: SpacesBlockMode) -> Option<String
     Some(buf)
 }
 
-/// rev5 §6.3/D43: one sentence per `space_writes.mode`, so a step
-/// agent knows whether its edits will merge, become a PR, or be
-/// refused outright — the run overlays its draft (rev4 D25), so there
-/// is no `draft:` prefix or draft command to reach for either way.
 fn workflow_run_write_line(mode: SpaceWritesMode) -> String {
     match mode {
         SpaceWritesMode::Merge => "This run's edits to space:<slug>/ paths are staged in a \

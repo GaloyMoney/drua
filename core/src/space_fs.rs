@@ -52,10 +52,6 @@ pub struct DetailedEntry {
     pub dates: Option<PathDates>,
 }
 
-/// Which of the two path schemes (D9) a [`SpaceRef`] was parsed from.
-/// `space:` resolves by authority (§3 rule 3); `draft:` always targets
-/// the caller's own draft, reachable only by a subject that holds
-/// `can_draft_spaces()` (rev6 D45) — an admin or a workflow run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SpaceScheme {
     Space,
@@ -71,26 +67,15 @@ impl SpaceScheme {
     }
 }
 
-/// Parsed view of a `space:<slug>`, `space:<slug>/<rel>`,
-/// `space:<slug>@<changeset-id>/<rel>`, or `draft:<slug>/<rel>` path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct SpaceRef<'a> {
     scheme: SpaceScheme,
     slug: &'a str,
     /// Empty for the space root (`space:<slug>` or `space:<slug>/`).
     rel_path: &'a str,
-    /// Explicit `@<changeset-id>` override (§6.4) — `space:` only;
-    /// `draft:` never carries one (D9). Slugs can't contain `@`
-    /// (`validate_slug`), so splitting on the first one is unambiguous.
     changeset_id: Option<ChangesetId>,
 }
 
-/// Returns `Some(SpaceRef)` iff `path` starts with the `space:` or
-/// `draft:` prefix, has a non-empty slug, and — when an `@<id>` suffix
-/// is present — that id parses as a `ChangesetId`. Anything else
-/// returns `None` so callers can fall through to the existing sandbox
-/// dispatch (or, for a `space:`/`draft:`-prefixed path that just fails
-/// to parse, a `BadRequest` raised by the caller).
 fn parse_space_path(path: &str) -> Option<SpaceRef<'_>> {
     let (scheme, rest) = if let Some(rest) = path.strip_prefix("draft:") {
         (SpaceScheme::Draft, rest)
@@ -116,10 +101,6 @@ fn parse_space_path(path: &str) -> Option<SpaceRef<'_>> {
     })
 }
 
-/// True for slugless space URIs (`space:`, `space:/`, `draft:`, etc.);
-/// routed to `list_mounted_spaces` for runtime discovery. `draft:`
-/// alone is accepted for symmetry, even though it has nothing extra to
-/// list beyond what `space:` already shows.
 fn is_bare_space_path(path: &str) -> bool {
     let rest = path
         .strip_prefix("space:")
@@ -130,28 +111,15 @@ fn is_bare_space_path(path: &str) -> bool {
     rest.trim_matches('/').is_empty()
 }
 
-/// What a `space:` call resolves to (§2.1) — `main` directly, or the tip
-/// of an in-flight changeset branch. Reads and writes route through
-/// `Spaces`'s `at`/`target_ref` parameters accordingly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     Main,
     Changeset {
         id: ChangesetId,
-        /// Current branch tip, from `Changesets::ensure_ref` — may be
-        /// ahead of the entity's last-observed `head_oid` (e.g. a human
-        /// push landed on the branch since).
         tip: String,
         status: ChangesetStatus,
-        /// `title`, `touched`, and `just_started` are carried along
-        /// purely for the D10/D19 stamp — never used for git
-        /// addressing.
         title: String,
         touched: usize,
-        /// rev3 §5.3: true only for the `draft:` write that just
-        /// lazily created the draft — renders "started" instead of the
-        /// touched-file count, so the caller's very first write gets
-        /// explicit first-write feedback.
         just_started: bool,
     },
 }
@@ -172,26 +140,17 @@ impl Target {
     }
 }
 
-/// Whether a `resolve` call is a read or a write — a write additionally
-/// requires a `Target::Changeset` to be `Open` (§2.2: "only `Open`
-/// accepts writes"). Authorization (`can_draft_spaces()`, rev6 D45) is
-/// a separate check; unrelated to this one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Intent {
     Read,
     Write,
 }
 
-/// Auth-gated, resolved view of a `space:<slug>/<rel>` or
-/// `draft:<slug>/<rel>` path.
 struct Resolved {
     space: Space,
     /// Owned so the bundle outlives the input `&str`.
     rel_path: String,
     target: Target,
-    /// D10: the stamp line for this resolution, computed once here so
-    /// every caller (14 different file ops) gets it for free instead
-    /// of re-deriving it from `target`.
     stamp: String,
 }
 
@@ -244,17 +203,6 @@ impl SpaceFs {
         Ok(Some(bytes))
     }
 
-    /// D10: the stamp line for `path`, resolved exactly as the paired
-    /// read/write call would (`write` must match — a stamp fetched with
-    /// the wrong intent could show `main` for what's about to become a
-    /// lazily-created draft, or vice versa). Safe to call before or
-    /// after the paired op: `resolve` is idempotent per actor
-    /// (`Changesets::draft_for` returns the existing draft on a second
-    /// call), so this never creates a second draft or disagrees with
-    /// what the paired call resolved to — it costs one extra mount +
-    /// draft lookup, not a second write. `Ok(None)` for a non-
-    /// `space:`/`draft:` path, so callers can no-op the model-facing
-    /// prefix without a second branch.
     pub async fn resolved_stamp(
         &self,
         sub: &AuthSubject,
@@ -265,9 +213,6 @@ impl SpaceFs {
         Ok(self.resolve(sub, path, intent).await?.map(|r| r.stamp))
     }
 
-    /// Pure peek — does `path` start with the `space:` or `draft:`
-    /// prefix and have a non-empty slug? Useful for short-circuiting
-    /// tool dispatch before any auth or IO.
     pub fn is_space_path(path: &str) -> bool {
         let rest = path
             .strip_prefix("space:")
@@ -279,12 +224,6 @@ impl SpaceFs {
         !slug.is_empty()
     }
 
-    /// `Ok(None)` for non-`space:`/`draft:` paths (caller falls through
-    /// to sandbox). A `space:`/`draft:`-prefixed path that doesn't parse
-    /// returns `BadRequest`, so malformed input never masquerades as an
-    /// auth denial. Error precedence: bad URI → not found → not mounted
-    /// → `Unauthorized` — the mount gate (`space_for_subject`) always
-    /// runs before target resolution's write gate.
     async fn resolve(
         &self,
         sub: &AuthSubject,
@@ -311,10 +250,6 @@ impl SpaceFs {
             }
             .into());
         }
-        // rev4 D25 / rev5 D37: inside a workflow run, `space:` and
-        // `draft:` are the same draft — every step's writes and reads
-        // overlay it. `typed_scheme` is kept only for the stamp, which
-        // should echo the prefix the caller actually typed.
         let typed_scheme = sref.scheme;
         let is_run_subject = sub.in_workflow_run();
         if is_run_subject {
@@ -353,23 +288,6 @@ impl SpaceFs {
         }))
     }
 
-    /// §3's resolution rule, rev6-amended (D44/D45):
-    ///
-    /// 1. `space:<slug>@<id>` — the explicit target (§6.4). Writes
-    ///    require `can_draft_spaces()` (checked before the `Open` check
-    ///    — an unauthorized subject shouldn't learn a changeset's
-    ///    status) and an `Open` changeset.
-    /// 2. `draft:<slug>` — always `sub`'s own draft: `can_draft_spaces()`
-    ///    required, else `ReadOnly`; a write lazily creates it
-    ///    (`Changesets::draft_for`); a read with none open overlays
-    ///    nothing and falls back to `Main` (there's nothing to differ
-    ///    from yet — §5.3's "no draft" form).
-    /// 3. `space:<slug>`: a **read** always sees `Main` (D19's differs
-    ///    stamp is computed separately, in `differs_note`, never by
-    ///    overlaying). A **write** requires `can_draft_spaces()` — a
-    ///    subject without it gets `ReadOnly` (D44: every interactive
-    ///    agent). A subject that holds it but already has an open draft
-    ///    gets `DraftOpen` (D15) rather than silently landing on `main`.
     async fn resolve_target(
         &self,
         sub: &AuthSubject,
@@ -430,8 +348,6 @@ impl SpaceFs {
                     .map_err(map_changeset_err)?
                 {
                     Some(cs) => self.changeset_target(cs, false).await,
-                    // rev4 D26 / rev5 D37: no lazy creation for a run —
-                    // only the executor's pre-flight opens a run draft.
                     None if sub.in_workflow_run() => Err(SpaceError::RunReadOnly {
                         slug: space.slug.clone(),
                     }
@@ -474,14 +390,6 @@ impl SpaceFs {
         }
     }
 
-    /// `touched` (D10's `<n> files`) is computed here, right where the
-    /// hydrated entity is already in hand. Best-effort: a
-    /// `touched_count` failure degrades to `0` rather than failing the
-    /// whole op. `just_started` (D19/§5.3) is set only by the `draft:`
-    /// write that lazily created the draft. A write's own stamp is
-    /// re-derived from a fresh entity after the write lands
-    /// (`stamp_after_write`) — this is also called from `resolve()`,
-    /// where the entity is necessarily the pre-write one.
     async fn changeset_target(
         &self,
         cs: Changeset,
@@ -503,12 +411,6 @@ impl SpaceFs {
         })
     }
 
-    /// D19: for a `space:` **read** that resolved to `Main`, the short
-    /// id of the caller's open draft iff that draft has touched
-    /// `rel_path` in this same space — `None` in every other case
-    /// (`draft:` reads, writes, no open draft, or an untouched path).
-    /// Best-effort: any lookup failure degrades to `None` rather than
-    /// failing the read over a stamp.
     async fn differs_note(
         &self,
         sub: &AuthSubject,
@@ -685,9 +587,6 @@ impl SpaceFs {
         )))
     }
 
-    /// Blind overwrite of `space:<slug>/<rel>` with `content`. Returns
-    /// the D10 stamp for the write that just landed (`stamp_after_write`),
-    /// so callers never need a second `resolve` of their own.
     #[instrument(name = "library.space_fs.write_file", skip(self, sub, content))]
     pub async fn write_file(
         &self,
@@ -843,11 +742,6 @@ impl SpaceFs {
             }
             .into());
         }
-        // An explicit `@<changeset-id>` on one side and not the other,
-        // or a `space:`/`draft:` scheme mismatch, is ambiguous — which
-        // target does the move belong to? — rather than silently
-        // picking one (§5.1: the two schemes can resolve to different
-        // targets for the same slug).
         if let (Some(from_sref), Some(to_sref)) = (parse_space_path(from), parse_space_path(to)) {
             if from_sref.changeset_id.is_some() != to_sref.changeset_id.is_some() {
                 return Err(SpaceError::BadRequest {
@@ -988,23 +882,12 @@ impl SpaceFs {
         }
     }
 
-    /// Stamps `Audit::record_changeset_id` before `commit_attribution`
-    /// runs, when the target is a changeset — extends the commit's
-    /// trailer block with `Drua-Changeset` (`user/mod.rs`'s trailer
-    /// loop) for provenance through a squash-merge (§7, §10). Must run
-    /// before `commit_attribution`, not after — that's why this isn't
-    /// folded into `record_write`, which only sees the *result* of the
-    /// write.
     fn record_changeset_audit(target: &Target) {
         if let Target::Changeset { id, .. } = target {
             Audit::record_changeset_id(*id);
         }
     }
 
-    /// After a write lands on a `Target::Changeset`, records it on the
-    /// entity (`Changesets::record_commit`) so `status`'s commit count
-    /// and history stay accurate. No-op for `Target::Main` or a
-    /// no-op write (`oid: None` — the tree was unchanged).
     async fn record_write(
         &self,
         target: &Target,
@@ -1024,16 +907,6 @@ impl SpaceFs {
             .map_err(map_changeset_err)
     }
 
-    /// `resolved.stamp` is computed by `resolve()` *before* the write
-    /// it accompanies lands, so its touched-file count would
-    /// otherwise be stale by exactly that write. Re-derives the stamp
-    /// from a fresh entity once `record_write` has updated `head_oid`,
-    /// for every write except the one that just lazily created the
-    /// draft — that one keeps `resolve()`'s own "started" form, since
-    /// re-resolving would see the now-open draft and report
-    /// `just_started: false`. `path` is re-parsed rather than carrying
-    /// `typed_scheme`/`in_run` on `Resolved` — cheap, pure, and exactly
-    /// what `resolve()` used to derive them.
     async fn stamp_after_write(
         &self,
         sub: &AuthSubject,
@@ -1248,19 +1121,10 @@ fn join_dates(
         .collect()
 }
 
-/// First 8 characters of a `ChangesetId`'s string form — D10's stamp
-/// format everywhere it names an id.
 fn short_id(id: ChangesetId) -> String {
     id.to_string().chars().take(8).collect()
 }
 
-/// D10/D19/§5.3: the stamp line prepended to every `space:`/`draft:`
-/// file-tool result. `prefix` is whichever scheme the caller actually
-/// typed (`space:` or `draft:`); the two can resolve to the same
-/// `Target::Changeset`, and the stamp should say what was asked for,
-/// not just what it means. `differs` (only ever `Some` for a
-/// `space:` read resolved to `Main`) names the caller's own draft when
-/// it has touched the same path — D19's "differs in your draft" form.
 fn stamp(
     scheme: SpaceScheme,
     slug: &str,
@@ -1270,18 +1134,11 @@ fn stamp(
 ) -> String {
     let prefix = scheme.prefix();
     match target {
-        // rev3 D9: `draft:` never falls back silently to `main` — a
-        // read with no open draft says so explicitly. Never reached
-        // for a run subject (`in_run` writes are `RunReadOnly`, and a
-        // run read with no draft resolves to `Target::Main` via the
-        // normalised `Draft` scheme, caught by the next arm instead).
         Target::Main if scheme == SpaceScheme::Draft => format!("[draft:{slug} · no draft]"),
         Target::Main => match differs {
             Some(id) => format!("[space:{slug} · main · differs in your draft {id}]"),
             None => format!("[space:{slug} · main]"),
         },
-        // Reached only via the explicit `space:<slug>@<id>` form —
-        // `draft:` paths never point at a non-`Open` changeset.
         Target::Changeset {
             id, status, title, ..
         } if scheme == SpaceScheme::Space && *status != ChangesetStatus::Open => {
@@ -1290,8 +1147,6 @@ fn stamp(
                 short_id(*id)
             )
         }
-        // rev4 §7.2: a run subject's overlay draft — never
-        // `just_started` (no lazy creation for runs, D26/D37).
         Target::Changeset {
             id, title, touched, ..
         } if in_run => format!(
@@ -1299,8 +1154,6 @@ fn stamp(
             short_id(*id),
             if *touched == 1 { "" } else { "s" }
         ),
-        // rev3 §5.3: the write that lazily created the draft gets
-        // "started" instead of the touched-file count.
         Target::Changeset {
             id,
             title,
@@ -1324,13 +1177,6 @@ fn io_err(msg: String) -> SpaceError {
     SpaceError::Io(msg)
 }
 
-/// Remaps a `Changesets` service failure reached through target
-/// resolution into the model-facing `SpaceError` family where one
-/// exists (`Foreign`), and into `ProjectError::Changeset` otherwise —
-/// `UnsupportedActor`/`MainUnborn`/etc. aren't expected on this path
-/// (every subject reaching `SpaceFs` is a real actor and `main` is
-/// never unborn once a space exists), but a type-safe fallback beats a
-/// panic if one somehow surfaces.
 fn map_changeset_err(e: ChangesetError) -> ProjectError {
     match e {
         ChangesetError::Foreign { id } => {
@@ -1778,9 +1624,6 @@ mod tests {
         }
     }
 
-    /// rev4 §7.2: a run subject's overlay draft renders "run draft",
-    /// never "started" (no lazy creation for runs — `just_started` is
-    /// never `true` on a run's own target).
     #[test]
     fn stamp_run_draft_form() {
         let target = changeset_target(false);
@@ -1789,9 +1632,6 @@ mod tests {
         assert!(s.contains("2 files"), "got: {s}");
     }
 
-    /// The stamp echoes the prefix the caller actually typed
-    /// (`typed_scheme`), even though `in_workflow_run()` subjects
-    /// normalise `space:` to `draft:` internally for resolution.
     #[test]
     fn stamp_run_draft_preserves_typed_prefix() {
         let target = changeset_target(false);
@@ -1799,17 +1639,12 @@ mod tests {
         assert!(s.starts_with("[draft:docs · run draft "), "got: {s}");
     }
 
-    /// A run subject reading with no draft open sees plain `main` —
-    /// never the "started"/`just_started` form, which a run can't
-    /// reach (no lazy creation).
     #[test]
     fn stamp_run_no_draft_is_plain_main() {
         let s = stamp(SpaceScheme::Space, "docs", &Target::Main, None, true);
         assert_eq!(s, "[space:docs · main]");
     }
 
-    /// Non-run callers keep rev3's "started" form for the write that
-    /// lazily created their draft.
     #[test]
     fn stamp_non_run_just_started_form_unchanged() {
         let target = changeset_target(true);

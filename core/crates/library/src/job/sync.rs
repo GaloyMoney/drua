@@ -19,12 +19,6 @@ pub(crate) struct CommitTick {
     pub head: String,
 }
 
-/// Fired after each successfully-processed sync tick, with the new
-/// `main` head oid — `Library::on_head_advanced`'s registration type
-/// (handoff §11: `Changesets::observe_main` is the first, and so far
-/// only, consumer). Not a `LibraryImporter`: this fires once per tick
-/// regardless of whether any file changed, and carries only the head
-/// oid, not a per-file delta.
 pub type HeadAdvancedHook = Arc<
     dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
 >;

@@ -35,9 +35,6 @@ pub enum WorkflowDefinitionEvent {
         /// `WriteToRuntime` job uses it to remove the old file.
         #[serde(default)]
         original_path: Option<String>,
-        /// rev5 D35's `space_writes:` block. Absent/default — the
-        /// backwards-compatible policy (`mode: merge, on_failure:
-        /// keep`).
         #[serde(default)]
         space_writes: SpaceWritesDecl,
     },
@@ -52,7 +49,6 @@ pub enum WorkflowDefinitionEvent {
         /// `None` leaves the field untouched.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_chain: Option<Option<ModelChain>>,
-        /// `Some(_)` replaces; `None` leaves the field untouched.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         space_writes: Option<SpaceWritesDecl>,
     },

@@ -7,10 +7,6 @@ pub struct LibraryConfig {
 }
 
 impl LibraryConfig {
-    /// `(owner, repo)` when `repo_url` is a `github.com` remote (HTTPS
-    /// or SSH); `None` for a local filesystem path (dev/test fixtures)
-    /// or any other host — `Changesets::submit` treats `None` as
-    /// `ChangesetError::PrUnavailable` (handoff OQ-14).
     pub fn github_coord(&self) -> Option<(String, String)> {
         let url = self.repo_url.trim();
         let rest = url

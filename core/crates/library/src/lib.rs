@@ -150,10 +150,6 @@ impl Library {
         self.importers.write().await.insert(0, importer);
     }
 
-    /// Registers a callback fired with the new head oid after each
-    /// successfully-processed sync tick (handoff §11). Post-init only,
-    /// same pattern as `register_importer` — the hook list is shared
-    /// with the already-spawned sync job via the same `Arc<RwLock<_>>`.
     pub async fn on_head_advanced(&self, hook: HeadAdvancedHook) {
         self.head_advanced_hooks.write().await.push(hook);
     }
@@ -200,15 +196,10 @@ impl Library {
         &self.search
     }
 
-    /// `None` when no GitHub App is configured (local dev, CI) —
-    /// `Changesets::submit` degrades to `ChangesetError::PrUnavailable`
-    /// rather than panicking or silently doing nothing.
     pub fn github_app(&self) -> Option<&Arc<GitHubAppTokenProvider>> {
         self.github_app.as_ref()
     }
 
-    /// `(owner, repo)` when `repo_url` is a GitHub remote — see
-    /// [`LibraryConfig::github_coord`].
     pub fn repo_coord(&self) -> Option<(String, String)> {
         self.config.github_coord()
     }
@@ -258,10 +249,6 @@ impl Library {
         self.git.path_dates_at_head(prefix).await
     }
 
-    /// Read a blob's bytes at an arbitrary commit. `Ok(None)` when the
-    /// path doesn't exist at that commit. The ref-aware counterpart of
-    /// [`Self::read_blob_at_head`] — used once a `space:` call resolves
-    /// to a changeset target.
     pub async fn read_blob_at(
         &self,
         commit_oid: &str,
@@ -270,8 +257,6 @@ impl Library {
         self.git.read_blob_at(commit_oid, path).await
     }
 
-    /// List immediate children of a tree path at an arbitrary commit.
-    /// The ref-aware counterpart of [`Self::list_dir_at_head`].
     pub async fn list_dir_at(
         &self,
         commit_oid: &str,
@@ -280,8 +265,6 @@ impl Library {
         self.git.list_dir_at(commit_oid, dir_path).await
     }
 
-    /// Recursively walk every blob under `dir_path` at an arbitrary
-    /// commit. The ref-aware counterpart of [`Self::walk_blobs_at_head`].
     pub async fn walk_blobs_at(
         &self,
         commit_oid: &str,
@@ -290,18 +273,10 @@ impl Library {
         self.git.walk_blobs_at(commit_oid, dir_path).await
     }
 
-    /// Forces an immediate fetch and returns the resulting HEAD (`main`)
-    /// oid. `Ok(None)` when the repo is unborn. Used by `Changesets::open`
-    /// to pin a changeset's `base_oid` to a fresh `main`, not whatever
-    /// the periodic fetcher last observed.
     pub async fn fetch_and_head(&self) -> Result<Option<String>, LibraryError> {
         self.git.fetch_and_head().await
     }
 
-    /// Diff between two commits (`None` `from` walks all of `to`'s tree
-    /// as `Added`), each changed path with its blob content at `to` (or
-    /// the removed blob for deletes). Used by `Changesets::status`'s
-    /// touched-files computation.
     pub async fn changes_since(
         &self,
         from: Option<&str>,
@@ -310,31 +285,22 @@ impl Library {
         self.git.changes_since(from, to).await
     }
 
-    /// Current target of `refname` (e.g. `refs/heads/drua/<id>`).
-    /// `Ok(None)` when the ref doesn't exist locally.
     pub async fn resolve_ref(&self, refname: &str) -> Result<Option<String>, LibraryError> {
         self.git.resolve_ref(refname).await
     }
 
-    /// Points `refname` at `oid` locally (no push). See
-    /// [`GitEngine::create_ref`].
     pub async fn create_ref(&self, refname: &str, oid: &str) -> Result<(), LibraryError> {
         self.git.create_ref(refname, oid).await
     }
 
-    /// Deletes `refname` locally, and on origin too when `push` is set.
     pub async fn delete_ref(&self, refname: &str, push: bool) -> Result<(), LibraryError> {
         self.git.delete_ref(refname, push).await
     }
 
-    /// Best common ancestor of `a` and `b`. `Ok(None)` when they share
-    /// no history.
     pub async fn merge_base(&self, a: &str, b: &str) -> Result<Option<String>, LibraryError> {
         self.git.merge_base(a, b).await
     }
 
-    /// Tree-level 3-way merge of `ours` onto `theirs` from `base`. See
-    /// [`GitEngine::merge_trees`].
     pub async fn merge_trees(
         &self,
         base: &str,
@@ -344,8 +310,6 @@ impl Library {
         self.git.merge_trees(base, ours, theirs).await
     }
 
-    /// Merges `changeset_tip` into `main` as a 2-parent commit. See
-    /// [`GitEngine::merge_into_main`].
     pub async fn merge_into_main(
         &self,
         changeset_tip: &str,
@@ -357,8 +321,6 @@ impl Library {
             .await
     }
 
-    /// Force-rewrites `refname` to a single squash commit onto `onto`.
-    /// See [`GitEngine::rebase_ref`].
     pub async fn rebase_ref(
         &self,
         refname: &str,
@@ -371,10 +333,6 @@ impl Library {
             .await
     }
 
-    /// Ref-aware counterpart of a blind-overwrite write: `target_ref`
-    /// selects the branch to commit and push to (`None` =
-    /// `refs/heads/main`). Returns the resulting commit oid, or `None`
-    /// if the write was a no-op.
     pub async fn write_file_at(
         &self,
         target_ref: Option<String>,
@@ -388,8 +346,6 @@ impl Library {
             .await
     }
 
-    /// Ref-aware counterpart of a delete. See [`Self::write_file_at`]
-    /// for the `target_ref` contract.
     pub async fn delete_file_at(
         &self,
         target_ref: Option<String>,
@@ -402,8 +358,6 @@ impl Library {
             .await
     }
 
-    /// Ref-aware read-modify-write. See [`Self::write_file_at`] for the
-    /// `target_ref` contract.
     pub async fn update_file_at(
         &self,
         target_ref: Option<String>,
@@ -417,8 +371,6 @@ impl Library {
             .await
     }
 
-    /// Ref-aware rename. See [`Self::write_file_at`] for the
-    /// `target_ref` contract.
     pub async fn move_file_at(
         &self,
         target_ref: Option<String>,

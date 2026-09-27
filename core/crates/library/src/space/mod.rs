@@ -101,10 +101,6 @@ impl Spaces {
         Ok(space)
     }
 
-    /// Blind overwrite of `spaces/{slug}/{relative_path}`. `target_ref`
-    /// selects the branch to commit and push to (`None` = `main`, the
-    /// original behaviour); the resulting commit oid is `None` when the
-    /// tree was unchanged.
     #[tracing::instrument(name = "library.spaces.write_file", skip_all, fields(%slug, %relative_path, target_ref = target_ref.unwrap_or("refs/heads/main")))]
     pub async fn write_file(
         &self,
@@ -128,11 +124,6 @@ impl Spaces {
     }
 
     /// Removes `spaces/{slug}/{relative_path}`. Returns
-    /// [`SpaceError::PathNotFound`] when the path is absent at the
-    /// resolved ref (HEAD when `target_ref` is `None`) — callers (and
-    /// agents) need to learn this rather than silently succeed and walk
-    /// away thinking they deleted something. See [`Self::write_file`]
-    /// for the `target_ref` contract.
     #[tracing::instrument(name = "library.spaces.delete_file", skip_all, fields(%slug, %relative_path, target_ref = target_ref.unwrap_or("refs/heads/main")))]
     pub async fn delete_file(
         &self,
@@ -186,8 +177,6 @@ impl Spaces {
     }
 
     /// Read–modify–write substitution: errors if `old_str` doesn't appear
-    /// exactly once in the freshest disk content. See [`Self::write_file`]
-    /// for the `target_ref` contract.
     #[tracing::instrument(name = "library.spaces.str_replace", skip_all, fields(%slug, %relative_path, target_ref = target_ref.unwrap_or("refs/heads/main")))]
     pub async fn str_replace(
         &self,
@@ -242,8 +231,6 @@ impl Spaces {
     }
 
     /// Read–modify–write insert. `line_number == 0` inserts at the
-    /// beginning; out-of-range numbers append at EOF. See
-    /// [`Self::write_file`] for the `target_ref` contract.
     #[tracing::instrument(name = "library.spaces.insert", skip_all, fields(%slug, %relative_path, target_ref = target_ref.unwrap_or("refs/heads/main")))]
     pub async fn insert(
         &self,
@@ -313,9 +300,6 @@ impl Spaces {
         Ok(map.into_values().collect())
     }
 
-    /// Reads a blob at `spaces/<slug>/<rel_path>` from `at`'s tree
-    /// (`None` = HEAD's tree, the original behaviour). `Ok(None)` when
-    /// the file doesn't exist (or the repo/ref is unborn).
     #[tracing::instrument(name = "library.spaces.read_file", skip_all, fields(%slug, %rel_path, at = at.unwrap_or("HEAD")))]
     pub async fn read_file(
         &self,
@@ -332,8 +316,6 @@ impl Spaces {
     }
 
     /// Lists immediate children under `spaces/<slug>/<rel_path>` at
-    /// `at`'s tree (`None` = HEAD). `Ok(None)` when the directory
-    /// doesn't exist. Empty `rel_path` lists the space's root.
     #[tracing::instrument(name = "library.spaces.list_dir", skip_all, fields(%slug, %rel_path, at = at.unwrap_or("HEAD")))]
     pub async fn list_dir(
         &self,
@@ -353,11 +335,6 @@ impl Spaces {
         .map_err(|e| SpaceError::Git(e.to_string()))
     }
 
-    /// Recursively walks every blob under `spaces/<slug>/<rel_path>` at
-    /// `at`'s tree (`None` = HEAD). Returned paths are relative to
-    /// `spaces/<slug>/` (not the repo root). A `rel_path` naming a
-    /// single file yields just that file. `Ok(None)` when the path
-    /// doesn't exist.
     #[tracing::instrument(name = "library.spaces.walk", skip_all, fields(%slug, %rel_path, at = at.unwrap_or("HEAD")))]
     pub async fn walk(
         &self,
@@ -426,8 +403,6 @@ impl Spaces {
     }
 
     /// Renames `spaces/{slug}/{from}` → `spaces/{slug}/{to}`. Errors if
-    /// `from` is missing or `to` already exists. See [`Self::write_file`]
-    /// for the `target_ref` contract.
     #[tracing::instrument(name = "library.spaces.move_file", skip_all, fields(%slug, %from, %to, target_ref = target_ref.unwrap_or("refs/heads/main")))]
     pub async fn move_file(
         &self,

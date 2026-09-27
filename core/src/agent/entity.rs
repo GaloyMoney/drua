@@ -47,10 +47,6 @@ pub enum AgentEvent {
         /// variant size bounded — `RootSchema` is ~300 bytes.
         #[serde(default)]
         output_schema: Option<Box<OutputSchema>>,
-        /// rev5 D43: the run's `space_writes.mode` at the moment this
-        /// step agent was created — lets `<spaces>` tell the agent
-        /// whether its edits will merge, become a PR, or be refused.
-        /// `None` for non-workflow agents.
         #[serde(default)]
         space_writes_mode: Option<SpaceWritesMode>,
     },
@@ -95,7 +91,6 @@ pub struct Agent {
     /// agents.
     #[builder(default)]
     pub output_schema: Option<OutputSchema>,
-    /// rev5 D43. `None` for non-workflow agents.
     #[builder(default)]
     pub space_writes_mode: Option<SpaceWritesMode>,
     events: EntityEvents<AgentEvent>,

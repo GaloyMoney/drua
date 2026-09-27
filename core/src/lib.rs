@@ -277,11 +277,6 @@ impl App {
         toolsets.register_top_level(ProjectAgent::new(Arc::clone(&agents)));
         toolsets.register_top_level(SubmitOutputTool::new(Arc::clone(&agents)));
 
-        // Owns the `Changeset` entity/branch lifecycle. Built from a
-        // fresh `AgentRepo` handle (cheap — just wraps `pool`) rather
-        // than `Agents`' own repo, avoiding a service-on-service
-        // dependency cycle (§7 of the handoff). Built before `Workflows`
-        // so the executor can open/close a run's draft.
         let changesets = Arc::new(Changesets::new(
             pool,
             &AgentRepo::new(pool),
@@ -289,8 +284,6 @@ impl App {
             &users,
         ));
 
-        // §11: sweeps Open/Submitted changesets for merges, abandoned
-        // PRs, and external pushes after every sync tick.
         {
             let changesets = Arc::clone(&changesets);
             library

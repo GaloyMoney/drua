@@ -76,20 +76,6 @@ impl AuthSubject {
         }
     }
 
-    /// `project_id()`, falling back to the subject's own scopes for
-    /// `ExportedAgent` — its variant carries no `ProjectId` (an export
-    /// credential can in principle span projects), but in practice a
-    /// credential is provisioned for one project at a time, named by
-    /// its `ProjectMember`/`ProjectAdmin` scope. rev2 D11: this is what
-    /// lets an external MCP agent's draft (`Changeset.project_id`) and
-    /// its `space:` mount gate (`Projects::space_for_subject`) resolve
-    /// at all — without it every such subject hits `NoProject`/
-    /// `AuthenticationRequired` before reaching either.
-    ///
-    /// Still `None` for `User`/`Anonymous`: a `User` reaches
-    /// project-scoped state through its `is_admin()`/`can()` shortcuts
-    /// instead (it is never actually "in" a project), and `Anonymous`
-    /// never gets this far.
     pub fn effective_project_id(&self) -> Option<ProjectId> {
         self.project_id().or_else(|| {
             self.scopes().iter().find_map(|s| match s {
@@ -174,26 +160,15 @@ impl AuthSubject {
             || (self.is_agent() && !self.is_project_admin())
     }
 
-    /// rev4 D25: a workflow run's steps share one draft for the run's
-    /// lifetime; every `space:` path they touch resolves to it. Uses
-    /// `scopes().contains`, not `has_scope` — `User` claims every scope.
     pub fn in_workflow_run(&self) -> bool {
         matches!(self, AuthSubject::WorkflowExecutor(_, _, _, _))
             || self.scopes().contains(&AuthScope::WorkflowStepAgent)
     }
 
-    /// rev6 D45: the one predicate behind every space write and every
-    /// draft verb (`Changesets::{draft_for, submit, apply}`,
-    /// `SpaceFs::resolve_target`). Interactive agents — leads, members,
-    /// on-behalf-of, external lead/member creds — are read-only on
-    /// spaces (D44); only an admin or a workflow run may change one.
     pub fn can_draft_spaces(&self) -> bool {
         self.is_admin() || self.in_workflow_run()
     }
 
-    /// `can_draft_spaces()`'s `Result` twin for `?`-sites, naming the
-    /// same authorization failure `Changesets`/`SpaceFs` already
-    /// surfaced for a `Propose`/`Update` denial before rev6.
     pub fn require_space_drafting(&self) -> Result<(), AuthorizationError> {
         if self.can_draft_spaces() {
             return Ok(());

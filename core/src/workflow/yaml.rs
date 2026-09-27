@@ -32,12 +32,6 @@ struct WorkflowYaml {
     sandboxes: Vec<WorkflowSandboxYaml>,
     #[serde(default, skip_serializing_if = "SpaceWritesDecl::is_default")]
     space_writes: SpaceWritesDecl,
-    /// rev5 D35: rejects a pre-rev5 (`changeset:`) file rather than
-    /// silently dropping the block — `WorkflowYaml` has no
-    /// `deny_unknown_fields`, so an unrecognised key otherwise parses
-    /// clean. Never serialised; `parse_workflow_yaml` errors on `Some`.
-    #[serde(default, skip_serializing)]
-    changeset: Option<serde_yaml::Value>,
     steps: Vec<WorkflowStepYaml>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     created: String,
@@ -455,7 +449,6 @@ pub fn render_workflow_yaml(
             .map(WorkflowSandboxYaml::from_runtime)
             .collect(),
         space_writes: space_writes.clone(),
-        changeset: None,
         steps: steps.iter().map(WorkflowStepYaml::from_runtime).collect(),
         created: created_at.to_string(),
         updated: updated_at.to_string(),
@@ -494,13 +487,6 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
     }
 
     let yaml: WorkflowYaml = serde_yaml::from_str(trimmed).ok()?;
-    if yaml.changeset.is_some() {
-        tracing::warn!(
-            path,
-            "workflow YAML uses the pre-rev5 `changeset:` block, replaced by `space_writes:`; refusing to import"
-        );
-        return None;
-    }
 
     let (workflow_id, has_id) = match yaml.id {
         Some(uuid) => (WorkflowDefinitionId::from(uuid), true),
@@ -718,8 +704,6 @@ mod tests {
         ));
     }
 
-    /// rev5 D35: `space_writes:` round-trips for all three modes, with
-    /// a `message` block on the two that accept one.
     #[test]
     fn workflow_yaml_roundtrip_preserves_space_writes_block() {
         for decl in [
@@ -766,7 +750,6 @@ mod tests {
         }
     }
 
-    /// A `message` without `body` serialises without the key at all.
     #[test]
     fn workflow_yaml_message_without_body_omits_key() {
         let id = WorkflowDefinitionId::new();
@@ -793,9 +776,6 @@ mod tests {
         assert!(!content.contains("body:"), "got: {content}");
     }
 
-    /// Default `space_writes:` block (`merge`/`keep`/no message) is
-    /// omitted entirely on serialise — byte-identical round-trip for
-    /// every pre-rev5 workflow.
     #[test]
     fn workflow_yaml_omits_default_space_writes_block() {
         let id = WorkflowDefinitionId::new();
@@ -815,24 +795,6 @@ mod tests {
         let path = canonical_workflow_path("no-space-writes", None);
         let parsed = parse_workflow_yaml(&content, &path).expect("parses");
         assert!(parsed.space_writes.is_default());
-    }
-
-    /// A pre-rev5 file using the old `changeset:` block is rejected
-    /// rather than silently parsed with the block dropped.
-    #[test]
-    fn workflow_yaml_rejects_pre_rev5_changeset_block() {
-        let yaml = "\
-name: curate-dev-spaces
-trigger:
-  type: manual
-changeset:
-  title: a draft
-steps:
-  - type: agent_step
-    name: investigate
-    skill: alert-investigator
-";
-        assert!(parse_workflow_yaml(yaml, "workflows/curate-dev-spaces.yml").is_none());
     }
 
     #[test]

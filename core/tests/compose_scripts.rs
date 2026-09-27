@@ -187,11 +187,6 @@ async fn setup(test_name: &str) -> (App, AuthSubject, AuthSubject) {
 
     // Not a project admin, not a sandbox attachment — just enough to
     // pass `can_use_agent_file_tools` and mount-scoped `space:` access.
-    // rev6 D44: `ProjectMember` is read-only on spaces — this subject
-    // can `Read`/`LS`/`Glob`/`Grep` a mounted `space:` path through
-    // compose (and directly), but any write is refused with `ReadOnly`.
-    // Reuses the project's real lead `Agent` row (`project.create`
-    // already persists one) rather than a synthetic `AgentId::new()`.
     let agent = AuthSubject::Agent(
         project.id,
         project.lead_agent_id,
@@ -526,10 +521,6 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
 async fn scripts_read_exact_text_while_mcp_read_stays_numbered() {
     let (app, _user, agent) = setup("read-raw").await;
 
-    // rev6 D44: interactive agents are read-only on spaces — this test
-    // is about `Read`'s byte-exactness, not about who wrote the
-    // fixture, so seed it through the engine directly (as `setup`
-    // already does for `a.md`) and read it back as the member.
     let path = "space:docs/raw-fixture.md";
     let fixture = "# Raw\r\nUnicode: \u{1F41F} \u{2014} caf\u{E9}\r\n\r\nEnd\r\n";
     app.library()
@@ -624,8 +615,6 @@ async fn scripts_read_lifts_the_view_cap_but_mcp_read_still_enforces_it() {
     // Comfortably over MAX_VIEW_FILE_BYTES (1_048_576) so the assertion
     // survives any off-by-one at the boundary.
     const FIXTURE_LEN: usize = 1_048_576 + 200_000;
-    // rev6 D44: interactive agents are read-only on spaces — seed
-    // through the engine directly, same as the raw-text test above.
     let path = "space:docs/oversized.txt";
     app.library()
         .spaces()
@@ -971,13 +960,6 @@ return {
         assert!(prompts.try_recv().is_err(), "script requested a model turn");
     }
 
-    // rev4 D25/D37: a script step is a run subject, so `space:`
-    // overlays its run draft — and rev5 D35/D37's backwards-compatible
-    // default (`space_writes: {mode: merge}`, implied when the block
-    // is absent) means the executor's pre-flight opens that draft
-    // before this step ever runs, so the direct `space:` write lands
-    // in it rather than erroring `RunReadOnly`. The run's own exit
-    // (also default `mode: merge`) then lands the draft on `main`.
     let run_id = seed(
         &definitions,
         &runs,
@@ -1086,11 +1068,6 @@ return {
         ],
     )
     .await;
-    // rev4 D26 / rev5 D37: a run subject never lazily creates its
-    // draft any more — but the default `space_writes: {mode: merge}`
-    // block means the executor's own pre-flight opens one before this
-    // run's first step, so the script step below's `draft:` write
-    // still has somewhere to land.
     let execute = executor
         .run(run_id, Arc::new(AtomicBool::new(false)))
         .with_event_context(serde_json::from_value(json!({})).unwrap());
@@ -1101,13 +1078,6 @@ return {
             .unwrap();
         let text = format!("{:?}", request.prompt);
         assert!(text.contains("inventory.json"), "{text}");
-        // rev4 D25: a script step is a run subject, so `space:` and
-        // `draft:` both overlay the run's draft — opened by the
-        // executor's own pre-flight. The write always stages into the
-        // run's draft — never `main` directly — so this reads the
-        // draft's tip, not HEAD (the exit hasn't run yet either way;
-        // this assertion fires mid-run, from the concurrent `respond`
-        // task).
         let draft = app
             .changesets()
             .open_draft_for_run(run_id)
@@ -1208,11 +1178,6 @@ return {
     assert!(serde_json::to_string(&log)
         .unwrap()
         .contains(&run_id.to_string()));
-    // The run succeeded under the default `space_writes: {mode:
-    // merge}` block, so the executor's exit already merged the run's
-    // draft into `main` and closed it (rev5 D35/D37) — no open draft
-    // left to name; `main`'s own history now carries the original
-    // commit (and its trailers) as an ancestor of the merge.
     assert!(
         app.changesets()
             .open_draft_for_run(run_id)
@@ -1245,16 +1210,6 @@ return {
     app.shutdown().await;
 }
 
-/// bugbot 2026-09-25 (High): `check_owner_or_lead`/`check_discard_authority`
-/// used to resolve ownership via `actor_for_subject`, which keys a step
-/// agent as plain `Agent { agent_id }`. `draft_for` (via `actor_key_for`)
-/// keys that same agent's draft as `WorkflowRun { run_id }` instead (rev2
-/// D8: every step agent in one run shares a single draft) — so the two
-/// never matched, and a step agent could stage writes into its own draft
-/// but never `spaces discard`/`submit`/`apply`/`rebase` it itself. Builds
-/// a real step `Agent` row (satisfying the `agents.workflow_run_id` FK)
-/// without running the executor, since only the ownership check — not
-/// execution — is under test here.
 #[tokio::test]
 #[ignore = "requires isolated postgres + local library clone"]
 async fn step_agent_can_discard_its_own_lazily_created_draft() {
@@ -1316,11 +1271,6 @@ async fn step_agent_can_discard_its_own_lazily_created_draft() {
     op.commit().await.unwrap();
     assert_eq!(step_agent.workflow_run_id, Some(run.id));
 
-    // rev6 D45: drafting requires `can_draft_spaces()`
-    // (`is_admin() || in_workflow_run()`) — a real step agent carries
-    // the `WorkflowStepAgent` marker alongside `ProjectMember` (see
-    // `AgentRole::WorkflowStepAgent`'s `role_scopes` in `agent/mod.rs`),
-    // which is what `in_workflow_run()` actually checks.
     let step_agent_subject = AuthSubject::Agent(
         project_id,
         step_agent.id,
@@ -1350,9 +1300,6 @@ async fn step_agent_can_discard_its_own_lazily_created_draft() {
         draft.id
     );
 
-    // Before the fix: `Forbidden` — the ownership check resolved the
-    // step agent's key as `Agent`, not `WorkflowRun`, so it could never
-    // match `draft.opened_by`.
     app.changesets()
         .discard(&step_agent_subject, draft.id, Some("test".into()))
         .await

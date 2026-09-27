@@ -38,10 +38,6 @@ pub(crate) enum EditOp {
     Move,
 }
 
-/// rev3 D17: which scheme a `spaces`/`drua_admin_spaces` `view`/`edit`
-/// call addresses — the `target` field's counterpart to the
-/// `space:`/`draft:` path prefix direct file-tool callers use.
-/// Defaults to `Main` (today's behaviour) when omitted.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum SpaceTarget {
@@ -171,16 +167,6 @@ pub(crate) async fn dispatch_view(
     )]))
 }
 
-/// D10/D19/§5.3: prefixes `text` with the resolved stamp for a
-/// `view`-side `space_path`, so every `spaces`/`drua_admin_spaces`
-/// read carries it too — not just the direct file tools' own
-/// `SpaceFs::resolve`-backed callers. Read-only: `dispatch_edit`
-/// doesn't use this — its stamp comes back from the write call itself,
-/// since a second `resolve` here would see the draft a lazy write just
-/// created and under-report it (bugbot 2026-09-26). Falls back to
-/// `text` unstamped if the resolve somehow fails a second time — the
-/// op itself already succeeded, so a stamp lookup failure shouldn't
-/// turn a successful result into an error.
 async fn stamped_read(
     space_fs: &SpaceFs,
     subject: &AuthSubject,
@@ -223,10 +209,6 @@ pub(crate) async fn dispatch_edit(
             .ok_or_else(|| ToolSetsError::MissingArgument(key.to_string()))
     };
 
-    // Each arm's `stamp` is `SpaceFs`'s own post-write stamp
-    // (`stamp_after_write`) — accurate for the write that just landed,
-    // except the one that lazily created the draft, which keeps the
-    // "started" form instead (see `SpaceFs::write_file`'s doc).
     let (text, stamp) = match op {
         EditOp::Write => {
             let path = str_arg("path")?;
