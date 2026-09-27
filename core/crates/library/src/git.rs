@@ -20,9 +20,13 @@ const BATCH_WINDOW: Duration = Duration::from_millis(25);
 const MAX_BATCH: usize = 32;
 const QUEUE_CAPACITY: usize = 256;
 
-/// Cluster-wide Postgres advisory-lock key for serializing pushes to the
-/// library repo's `main`. Fixed (one library repo per deployment); `0x647275616c6962` = "drualib".
-const LIBRARY_PUSH_LOCK_KEY: i64 = 0x647275616c6962;
+/// int4 namespace for the two-argument `pg_advisory_lock(key1, key2)` form,
+/// used with `key2 = hashtext(refname)` to serialize pushes per-ref rather
+/// than across the whole repo — independent drafts (e.g. one per workflow
+/// run) no longer queue behind each other cluster-wide. Fixed (one library
+/// repo per deployment); `0x64727561` = "drua". A `hashtext` collision
+/// between two refs only costs extra serialization, never correctness.
+const LIBRARY_PUSH_LOCK_NAMESPACE: i32 = 0x6472_7561;
 
 /// PG NOTIFY channel fired after a successful push. Every replica's
 /// fetcher LISTENs on it, so a write on one replica is visible
@@ -1490,32 +1494,27 @@ impl GitEngine {
         let _guard = repo_mutex.lock().await;
         // Cluster-wide push serialization (HA): the per-pod `repo_mutex` only
         // orders writes within a pod; this advisory lock ensures at most one
-        // pod mutates `main` at a time, so divergent ephemeral clones can't
-        // race the remote into non-ff retries / lost commits.
+        // pod mutates a given ref at a time, so divergent ephemeral clones
+        // can't race the remote into non-ff retries / lost commits. Locks
+        // are per-ref (see `LIBRARY_PUSH_LOCK_NAMESPACE`) so unrelated drafts
+        // don't serialize behind each other; every ref touched by this batch
+        // is locked in sorted order, on this one connection, to avoid
+        // deadlocking against another batch locking the same refs.
         //
         // SESSION-scoped (not `xact`): the git fetch/commit/push below runs
         // with no open transaction, so `idle_in_transaction_session_timeout`
-        // can't reap it and drop the lock mid-push. Released explicitly after;
-        // a crashed/closed connection releases it server-side too. Best effort:
-        // a DB hiccup degrades to the prior unlocked behavior rather than
-        // wedging all library writes.
-        let mut lock_conn = match pool.acquire().await {
-            Ok(mut conn) => match sqlx::query("SELECT pg_advisory_lock($1)")
-                .bind(LIBRARY_PUSH_LOCK_KEY)
-                .execute(&mut *conn)
-                .await
-            {
-                Ok(_) => Some(conn),
-                Err(e) => {
-                    tracing::warn!(error = %e, "library push lock: acquire failed; proceeding unlocked");
-                    None
-                }
-            },
-            Err(e) => {
-                tracing::warn!(error = %e, "library push lock: connection failed; proceeding unlocked");
-                None
-            }
-        };
+        // can't reap it and drop the lock mid-push. Released explicitly after
+        // (once per acquisition — these stack — never `pg_advisory_unlock_all`);
+        // a crashed/closed connection releases it server-side too. Best
+        // effort: a DB hiccup degrades to the prior unlocked behavior rather
+        // than wedging all library writes.
+        let mut refnames: Vec<String> = batch
+            .iter()
+            .map(|q| Self::ref_name(q.op.target_ref.as_deref()))
+            .collect();
+        refnames.sort();
+        refnames.dedup();
+        let mut lock_conn = Self::acquire_push_locks(pool, &refnames).await;
         let token = Self::fresh_token(github_app).await;
         let path = repo_path.to_path_buf();
         let n = batch.len();
@@ -1539,18 +1538,51 @@ impl GitEngine {
         }
 
         if let Some(mut conn) = lock_conn.take() {
-            if let Err(e) = sqlx::query("SELECT pg_advisory_unlock($1)")
-                .bind(LIBRARY_PUSH_LOCK_KEY)
-                .execute(&mut *conn)
-                .await
-            {
-                tracing::warn!(error = %e, "library push lock: release failed");
+            for refname in refnames.iter().rev() {
+                if let Err(e) = sqlx::query("SELECT pg_advisory_unlock($1, hashtext($2))")
+                    .bind(LIBRARY_PUSH_LOCK_NAMESPACE)
+                    .bind(refname)
+                    .execute(&mut *conn)
+                    .await
+                {
+                    tracing::warn!(error = %e, %refname, "library push lock: release failed");
+                }
             }
         }
         for (resp, res) in responders.into_iter().zip(results) {
             let _ = resp.send(res);
         }
         any_ok
+    }
+
+    /// Acquires the per-ref advisory lock for every name in `refnames`
+    /// (already sorted) on one connection, in order. `None` — proceed
+    /// unlocked — if the pool can't hand out a connection, or if any
+    /// acquisition fails partway (the connection is dropped, which
+    /// releases whatever locks this session did take).
+    async fn acquire_push_locks(
+        pool: &PgPool,
+        refnames: &[String],
+    ) -> Option<sqlx::pool::PoolConnection<sqlx::Postgres>> {
+        let mut conn = match pool.acquire().await {
+            Ok(conn) => conn,
+            Err(e) => {
+                tracing::warn!(error = %e, "library push lock: connection failed; proceeding unlocked");
+                return None;
+            }
+        };
+        for refname in refnames {
+            if let Err(e) = sqlx::query("SELECT pg_advisory_lock($1, hashtext($2))")
+                .bind(LIBRARY_PUSH_LOCK_NAMESPACE)
+                .bind(refname)
+                .execute(&mut *conn)
+                .await
+            {
+                tracing::warn!(error = %e, %refname, "library push lock: acquire failed; proceeding unlocked");
+                return None;
+            }
+        }
+        Some(conn)
     }
 
     /// Wake peer replicas' fetchers after a successful push so
@@ -3307,6 +3339,50 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&origin_dir);
         let _ = std::fs::remove_dir_all(&local_dir);
+    }
+
+    async fn test_pool() -> PgPool {
+        let url = std::env::var("DATABASE_URL")
+            .unwrap_or_else(|_| "postgres://user:password@localhost:5432/drua".to_string());
+        PgPool::connect(&url).await.expect("connect to pg")
+    }
+
+    #[tokio::test]
+    #[ignore = "requires postgres; run with --ignored"]
+    async fn push_locks_serialize_a_ref_but_not_distinct_refs() {
+        let pool = test_pool().await;
+
+        // Distinct refs: both acquire without blocking each other.
+        let lock_a = GitEngine::acquire_push_locks(&pool, &["refs/heads/drua/lock-a".to_string()])
+            .await
+            .expect("lock a");
+        let lock_b = GitEngine::acquire_push_locks(&pool, &["refs/heads/drua/lock-b".to_string()])
+            .await
+            .expect("lock b (a different ref; must not block on a)");
+        drop(lock_a);
+        drop(lock_b);
+
+        // Same ref: held by `holder`, so a non-blocking try-lock for it must fail.
+        let refname = "refs/heads/drua/lock-c";
+        let holder = GitEngine::acquire_push_locks(&pool, &[refname.to_string()])
+            .await
+            .expect("lock c");
+        let mut probe = pool.acquire().await.expect("acquire probe conn");
+        let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1, hashtext($2))")
+            .bind(LIBRARY_PUSH_LOCK_NAMESPACE)
+            .bind(refname)
+            .fetch_one(&mut *probe)
+            .await
+            .expect("try_lock probe");
+        assert!(!acquired, "the same ref must still be locked by `holder`");
+        if acquired {
+            let _ = sqlx::query("SELECT pg_advisory_unlock($1, hashtext($2))")
+                .bind(LIBRARY_PUSH_LOCK_NAMESPACE)
+                .bind(refname)
+                .execute(&mut *probe)
+                .await;
+        }
+        drop(holder);
     }
 
     #[test]
