@@ -665,18 +665,46 @@ impl Changesets {
             }
         }
 
-        let ref_oid = self.library.resolve_ref(&cs.git_ref()).await?;
+        let mut ref_oid = self.library.resolve_ref(&cs.git_ref()).await?;
         if status == ChangesetStatus::Submitted && ref_oid.is_none() {
-            self.mark_abandoned_in_op(cs.id).await?;
-            return Ok(());
+            // Missing locally can just mean "not fetched yet" — the ref may
+            // have been pushed (e.g. by `submit`) after this tick's read of
+            // Postgres. Confirm against origin before abandoning.
+            self.library.fetch_and_head().await?;
+            ref_oid = self.library.resolve_ref(&cs.git_ref()).await?;
+            if ref_oid.is_none() {
+                self.mark_abandoned_in_op(cs.id).await?;
+                return Ok(());
+            }
         }
 
         if let Some(tip) = ref_oid {
-            if tip != cs.head_oid {
+            if tip != cs.head_oid && self.tip_advanced_past_head(&tip, &cs.head_oid).await? {
                 self.record_commit(cs.id, tip, "external", "").await?;
             }
         }
         Ok(())
+    }
+
+    /// Whether `tip` is a genuine external advance past `head_oid`,
+    /// rather than this replica merely being behind. `merge_base`
+    /// collapses "no common ancestor" and "one oid's object isn't in
+    /// this replica's clone yet" into the same `Ok(None)` — both cases
+    /// are treated the same way here: don't record, since recording a
+    /// stale `tip` would move Postgres's `head_oid` backwards. A real
+    /// external force-push (divergent histories, `merge_base` neither
+    /// oid) still gets recorded, matching `external_changes_since`'s
+    /// handling of a force-pushed `main` elsewhere in this codebase.
+    async fn tip_advanced_past_head(
+        &self,
+        tip: &str,
+        head_oid: &str,
+    ) -> Result<bool, ChangesetError> {
+        let result = self.library.merge_base(tip, head_oid).await;
+        if let Err(e) = &result {
+            tracing::debug!(error = %e, %tip, %head_oid, "observe_one: couldn't verify tip ancestry; skipping this tick");
+        }
+        Ok(is_genuine_advance(&result, tip))
     }
 
     async fn mark_merged_in_op(
@@ -801,6 +829,21 @@ impl Changesets {
     }
 }
 
+/// The decision core of [`Changesets::tip_advanced_past_head`], isolated
+/// so it's unit-testable without a `Library`. `Ok(None)` collapses two
+/// distinct `merge_base` outcomes — no common ancestor, and one oid's
+/// object missing from this replica's clone — and an `Err` (e.g. the
+/// same missing-object case surfacing as a git error instead) are all
+/// treated as "can't confirm a genuine advance", which is the safe
+/// default: recording a falsely-advanced `tip` would move Postgres's
+/// `head_oid` backwards.
+fn is_genuine_advance(
+    merge_base: &Result<Option<String>, drua_library::LibraryError>,
+    tip: &str,
+) -> bool {
+    matches!(merge_base, Ok(Some(base)) if base != tip)
+}
+
 fn split_space_path(path: &str) -> Option<(String, String)> {
     let rest = path.strip_prefix("spaces/")?;
     let (slug, rel) = rest.split_once('/')?;
@@ -902,6 +945,27 @@ mod tests {
         let cs = Changeset::try_from_events(new.into_events()).unwrap();
         let out = append_pr_trailers("body", &cs);
         assert!(out.contains(&format!("Drua-Acting-User: {user_id}")));
+    }
+
+    #[test]
+    fn is_genuine_advance_true_when_head_oid_is_a_strict_ancestor_of_tip() {
+        assert!(is_genuine_advance(&Ok(Some("head".into())), "tip"));
+    }
+
+    #[test]
+    fn is_genuine_advance_false_when_tip_is_an_ancestor_of_head_oid() {
+        assert!(!is_genuine_advance(&Ok(Some("tip".into())), "tip"));
+    }
+
+    #[test]
+    fn is_genuine_advance_false_when_merge_base_finds_no_common_ancestor() {
+        assert!(!is_genuine_advance(&Ok(None), "tip"));
+    }
+
+    #[test]
+    fn is_genuine_advance_false_when_merge_base_errors() {
+        let err = Err(drua_library::LibraryError::Git("object missing".into()));
+        assert!(!is_genuine_advance(&err, "tip"));
     }
 
     #[test]
