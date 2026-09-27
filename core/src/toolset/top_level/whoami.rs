@@ -57,16 +57,15 @@ struct WhoAmIOutput {
 static WHOAMI_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<WhoAmIOutput>);
 
-/// rev2 §6.3 (rev3-amended): an external MCP agent doesn't see the
+/// rev2 §6.3 (rev6-amended, D49): an external MCP agent doesn't see the
 /// in-session `<spaces>` prompt block (that's rendered only for
 /// `Agent` sessions, `Agents::cached_dynamic_blocks`) — `whoami` is
-/// the one place it learns its `space:`/`draft:` write mode, since
-/// it's credential-wide rather than tied to any one project's mount
-/// list. rev3: one sentence for every subject — `space:` fails closed
-/// (D15) rather than resolving differently by authority, so there's no
-/// longer a mode to branch on here.
-fn space_write_mode_note(_subject: &AuthSubject) -> String {
-    SPACE_WRITE_MODE_SENTENCE.trim().to_string()
+/// the one place it learns its space write mode, since it's
+/// credential-wide rather than tied to any one project's mount list.
+/// `None` for an admin credential — `drua_admin_spaces`'s own
+/// description is where an admin learns to draft (OQ-35).
+fn space_write_mode_note(subject: &AuthSubject) -> Option<String> {
+    (!subject.is_admin()).then(|| SPACE_WRITE_MODE_SENTENCE.trim().to_string())
 }
 
 #[async_trait::async_trait]
@@ -112,7 +111,7 @@ impl TopLevelTool for WhoAmI {
                 user_id: Some(user_id.to_string()),
                 creds_id: Some(creds_id.to_string()),
                 scopes: Some(scopes_list(scopes)),
-                note: Some(space_write_mode_note(subject)),
+                note: space_write_mode_note(subject),
                 ..Default::default()
             },
             AuthSubject::Agent(project_id, agent_id, scopes) => WhoAmIOutput {

@@ -13,8 +13,10 @@
 #   dev/space-cli --as lead ls space:docs/
 #   dev/space-cli --as lead cat space:docs/README.md
 #
-# Test both sides of a draft/publish flow by bootstrapping a second,
-# member-scoped actor: `--as member bootstrap --project <id> --member`.
+# rev6: interactive agents (lead/member) are read-only on spaces —
+# edits are made by a workflow (`space_writes:`) or an `admin` actor
+# (`bootstrap` with no --project). Bootstrap a member-scoped actor to
+# probe the read-only path: `--as member bootstrap --project <id> --member`.
 set -euo pipefail
 
 SPACE_CLI_URL="${SPACE_CLI_URL:-http://localhost:4200}"
@@ -36,10 +38,11 @@ Usage: space-cli [--json] [--as ACTOR] <command> [args...]
                                 mint (or add) a token for ACTOR (default
                                 actor: "default"), cache it. No --project:
                                 global admin scope (project/agent/workflow
-                                mgmt via `admin`). --project ID: ProjectAdmin
-                                scope (space: writes land on main). Add
-                                --member for ProjectMember instead (space:
-                                writes stage into a draft).
+                                mgmt via `admin`; the only interactive actor
+                                that can draft/edit a space). --project ID:
+                                ProjectAdmin scope (lead; read-only on
+                                spaces). Add --member for ProjectMember
+                                instead (also read-only on spaces).
   whoami                       identity + write-mode of ACTOR's token
   tools                        list every MCP tool visible to ACTOR
 
@@ -48,28 +51,16 @@ Usage: space-cli [--json] [--as ACTOR] <command> [args...]
   grep PATH PATTERN [-i] [--glob G] [--type T] [--mode content|files_with_matches|count]
                                [-A N] [-B N] [-C N] [--head-limit N]
   glob PATH PATTERN
-  write PATH (FILE|-)          create/overwrite PATH; '-' reads stdin
-  edit PATH OLD NEW            str_replace: OLD must match byte-for-byte, once
-  insert PATH LINE TEXT        insert TEXT after LINE (0 = start of file)
-  rm PATH
-  mv FROM TO
-                                 PATH is 'space:SLUG/REL' (published library;
-                                 writes need write authority and no open
-                                 draft) or 'draft:SLUG/REL' (your own draft,
-                                 started on first write or with
-                                 `spaces start-draft`).
+                                 read-only — PATH is 'space:SLUG/REL' (or
+                                 bare 'SLUG/REL'), the published library.
+                                 Spaces are edited by a workflow
+                                 (`space_writes:`) or by `admin` below, not
+                                 from here.
 
   spaces list [--all]
   spaces create SLUG [DESCRIPTION]
   spaces mount SLUG
   spaces unmount SLUG
-  spaces start-draft [TITLE] [DESCRIPTION]
-  spaces draft-status
-  spaces list-drafts [STATUS]
-  spaces merge-draft [ID] [--title T] [--body B]
-  spaces open-pr TITLE BODY [ID]
-  spaces discard-draft [ID] [REASON]
-  spaces rebase-draft [ID]
 
   admin list
   admin create SLUG [DESCRIPTION]
@@ -120,21 +111,20 @@ Usage: space-cli [--json] [--as ACTOR] <command> [args...]
 `--json` (before the command) prints the full JSON-RPC response instead
 of the tool's rendered text. `--as ACTOR` selects which cached token to
 use/create (default: "default") — bootstrap a second actor to test a
-lead/member pair. `ls`/`cat`/`grep`/`glob`/`write`/`edit`/`insert`/`rm`/
-`mv` all go through `spaces view`/`spaces edit` (an MCP-creds token
-can't see the bare LS/Read/etc. tools) with `target` set from PATH's
-prefix: `space:<slug>/<rel>` (or bare `<slug>/<rel>`) addresses the
-published library — reads always see it; writes need write authority
-(a `--project ID` bootstrap) and no open draft, else `UseDraft`/
-`DraftOpen`. `draft:<slug>/<rel>` always addresses your own draft —
-started on first write or with `spaces start-draft`; land it with
-`spaces merge-draft` (requires write authority — Forbidden without
-it, no fallback), or send it for review with `spaces open-pr`
-(opens a GitHub PR; works even if you also hold write authority). The
-space must be mounted on the token's project first
-(`spaces mount`). Env: SPACE_CLI_URL (default http://localhost:4200),
-PG_CON (bootstrap only, default postgres://user:password@localhost:5432/drua),
-SPACE_CLI_TOKEN (skips the token file).
+lead/member pair. `ls`/`cat`/`grep`/`glob` go through `spaces view`
+(an MCP-creds token can't see the bare LS/Read/etc. tools);
+`space:<slug>/<rel>` (or bare `<slug>/<rel>`) addresses the published
+library, which is all any lead/member token can ever reach — rev6:
+interactive agents are read-only on spaces, so there is no write path
+here at all, `UseDraft`/`DraftOpen` included. Use `space-cli admin`
+(an `admin`-scoped token — `bootstrap` with no `--project`) to edit a
+space directly (`write`/`edit`/`insert`/`rm`/`mv`, `start-draft` /
+`merge-draft` / `open-pr` / `discard-draft` / `rebase-draft`), or a
+workflow's `space_writes:` block. The space must be mounted on the
+token's project first (`spaces mount`). Env: SPACE_CLI_URL (default
+http://localhost:4200), PG_CON (bootstrap only, default
+postgres://user:password@localhost:5432/drua), SPACE_CLI_TOKEN (skips
+the token file).
 EOF
 }
 
@@ -245,18 +235,20 @@ SQL
 # ── file tools ───────────────────────────────────────────────────────
 #
 # An `ExportedAgent` (MCP creds) token — what `bootstrap` mints — can't
-# see the bare `LS`/`Read`/`Grep`/`Glob`/`Edit`/`Delete`/`Move` tools;
-# those gate on `can_use_agent_file_tools()`, true only for an in-session
+# see the bare `LS`/`Read`/`Grep`/`Glob` tools; those gate on
+# `can_use_agent_file_tools()`, true only for an in-session
 # `Agent`/`AgentOnBehalfOfUser` or a workflow script step (see
 # core/src/auth/subject.rs). An external MCP agent — including an admin
-# one — reaches space content only through `spaces view`/`spaces edit`
-# (core/src/toolset/inspect.rs's `dispatch_view`/`dispatch_edit`), which
-# take an explicit `target: main|draft` (rev3 D17) rather than a
-# `space:`/`draft:`-prefixed path. So every file command below is
-# `spaces view`/`spaces edit` under the hood; PATH is split into the
-# slug/rel it resolves through plus the `target` its prefix names.
+# one — reaches space content only through `spaces view`
+# (core/src/toolset/inspect.rs's `dispatch_view`). rev6 D44/D47:
+# interactive agents (lead/member) are read-only on spaces — the
+# top-level `spaces` tool has no `edit`/`target` any more, so every
+# read below always addresses the published library. Use `admin`
+# (below) to edit a space as an admin, or a workflow's `space_writes:`
+# block.
 
 # space_target PATH — "draft" for a "draft:"-prefixed PATH, else "main".
+# Only `admin` (which still has target: main|draft) consults this.
 space_target() {
   [[ "$1" == draft:* ]] && printf 'draft' || printf 'main'
 }
@@ -274,15 +266,9 @@ space_relpath() {
 }
 
 spaces_view() {
-  local slug="$1" op="$2" op_args="$3" target="${4:-main}"
-  call_tool spaces "$(jq -n --arg slug "$slug" --arg op "$op" --argjson op_args "$op_args" --arg target "$target" \
-    '{command:"view", slug:$slug, op:$op, op_args:$op_args, target:$target}')"
-}
-
-spaces_edit() {
-  local slug="$1" op="$2" op_args="$3" target="${4:-main}"
-  call_tool spaces "$(jq -n --arg slug "$slug" --arg op "$op" --argjson op_args "$op_args" --arg target "$target" \
-    '{command:"edit", slug:$slug, op:$op, op_args:$op_args, target:$target}')"
+  local slug="$1" op="$2" op_args="$3"
+  call_tool spaces "$(jq -n --arg slug "$slug" --arg op "$op" --argjson op_args "$op_args" \
+    '{command:"view", slug:$slug, op:$op, op_args:$op_args}')"
 }
 
 # build_*_args — render one op's `op_args` JSON from RELPATH + flags. Kept
@@ -367,67 +353,31 @@ build_move_args() {
 
 cmd_ls() {
   local path="${1:?usage: space-cli ls PATH [--details]}"; shift
-  spaces_view "$(space_slug "$path")" ls "$(build_ls_args "$(space_relpath "$path")" "$@")" "$(space_target "$path")"
+  spaces_view "$(space_slug "$path")" ls "$(build_ls_args "$(space_relpath "$path")" "$@")"
 }
 
 cmd_cat() {
   local path="${1:?usage: space-cli cat PATH [--offset N] [--limit N]}"; shift
-  spaces_view "$(space_slug "$path")" read "$(build_read_args "$(space_relpath "$path")" "$@")" "$(space_target "$path")"
+  spaces_view "$(space_slug "$path")" read "$(build_read_args "$(space_relpath "$path")" "$@")"
 }
 
 cmd_grep() {
   local path="${1:?usage: space-cli grep PATH PATTERN [-i] [--glob G] ...}"
   local pattern="${2:?usage: space-cli grep PATH PATTERN [-i] [--glob G] ...}"
   shift 2
-  spaces_view "$(space_slug "$path")" grep "$(build_grep_args "$(space_relpath "$path")" "$pattern" "$@")" "$(space_target "$path")"
+  spaces_view "$(space_slug "$path")" grep "$(build_grep_args "$(space_relpath "$path")" "$pattern" "$@")"
 }
 
 cmd_glob() {
   local path="${1:?usage: space-cli glob PATH PATTERN}"
   local pattern="${2:?usage: space-cli glob PATH PATTERN}"
-  spaces_view "$(space_slug "$path")" glob "$(build_glob_args "$(space_relpath "$path")" "$pattern")" "$(space_target "$path")"
-}
-
-cmd_write() {
-  local path="${1:?usage: space-cli write PATH (FILE|-)}"
-  local src="${2:?usage: space-cli write PATH (FILE|-)}"
-  local content
-  if [ "$src" = "-" ]; then content="$(cat)"; else content="$(cat "$src")"; fi
-  spaces_edit "$(space_slug "$path")" write "$(build_write_args "$(space_relpath "$path")" "$content")" "$(space_target "$path")"
-}
-
-cmd_edit() {
-  local path="${1:?usage: space-cli edit PATH OLD NEW}"
-  local old="${2:?usage: space-cli edit PATH OLD NEW}"
-  local new="${3:?usage: space-cli edit PATH OLD NEW}"
-  spaces_edit "$(space_slug "$path")" str_replace "$(build_str_replace_args "$(space_relpath "$path")" "$old" "$new")" "$(space_target "$path")"
-}
-
-cmd_insert() {
-  local path="${1:?usage: space-cli insert PATH LINE TEXT}"
-  local line="${2:?usage: space-cli insert PATH LINE TEXT}"
-  local text="${3:?usage: space-cli insert PATH LINE TEXT}"
-  spaces_edit "$(space_slug "$path")" insert "$(build_insert_args "$(space_relpath "$path")" "$line" "$text")" "$(space_target "$path")"
-}
-
-cmd_rm() {
-  local path="${1:?usage: space-cli rm PATH}"
-  spaces_edit "$(space_slug "$path")" delete "$(build_delete_args "$(space_relpath "$path")")" "$(space_target "$path")"
-}
-
-cmd_mv() {
-  local from="${1:?usage: space-cli mv FROM TO}"
-  local to="${2:?usage: space-cli mv FROM TO}"
-  local slug; slug="$(space_slug "$from")"
-  [ "$slug" = "$(space_slug "$to")" ] || die "mv: FROM and TO must be in the same space (spaces.edit move can't cross slugs)"
-  [ "$(space_target "$from")" = "$(space_target "$to")" ] || die "mv: FROM and TO must use the same scheme (space: or draft:)"
-  spaces_edit "$slug" move "$(build_move_args "$(space_relpath "$from")" "$(space_relpath "$to")")" "$(space_target "$from")"
+  spaces_view "$(space_slug "$path")" glob "$(build_glob_args "$(space_relpath "$path")" "$pattern")"
 }
 
 # ── spaces ───────────────────────────────────────────────────────────
 
 cmd_spaces() {
-  local sub="${1:?usage: space-cli spaces <list|create|mount|unmount|start-draft|draft-status|list-drafts|merge-draft|open-pr|discard-draft|rebase-draft> ...}"; shift
+  local sub="${1:?usage: space-cli spaces <list|create|mount|unmount> ...}"; shift
   local args
   case "$sub" in
     list)
@@ -444,40 +394,7 @@ cmd_spaces() {
     unmount)
       local slug="${1:?usage: space-cli spaces unmount SLUG}"
       args="$(jq -n --arg slug "$slug" '{command:"unmount", slug:$slug}')" ;;
-    start-draft)
-      local title="${1:-null}"; [ "$title" = "null" ] || title="\"$title\""
-      local desc="${2:-null}"; [ "$desc" = "null" ] || desc="\"$desc\""
-      args="$(jq -n --argjson title "$title" --argjson desc "$desc" '{command:"start-draft", title:$title, description:$desc}')" ;;
-    draft-status)
-      args='{"command":"draft-status"}' ;;
-    list-drafts)
-      local status="${1:-null}"; [ "$status" = "null" ] || status="\"$status\""
-      args="$(jq -n --argjson status "$status" '{command:"list-drafts", status:$status}')" ;;
-    merge-draft)
-      local id="null" title="null" body="null"
-      if [ $# -gt 0 ] && [ "${1#--}" = "$1" ]; then id="\"$1\""; shift; fi
-      while [ $# -gt 0 ]; do
-        case "$1" in
-          --title) title="\"$2\""; shift 2 ;;
-          --body) body="\"$2\""; shift 2 ;;
-          *) die "merge-draft: unknown flag $1" ;;
-        esac
-      done
-      args="$(jq -n --argjson id "$id" --argjson title "$title" --argjson body "$body" \
-        '{command:"merge-draft", id:$id, title:$title, body:$body}')" ;;
-    open-pr)
-      local title="${1:?usage: space-cli spaces open-pr TITLE BODY [ID]}"
-      local body="${2:?usage: space-cli spaces open-pr TITLE BODY [ID]}"
-      local id="${3:-null}"; [ "$id" = "null" ] || id="\"$id\""
-      args="$(jq -n --arg title "$title" --arg body "$body" --argjson id "$id" '{command:"open-pr", title:$title, body:$body, id:$id}')" ;;
-    discard-draft)
-      local id="${1:-null}"; [ "$id" = "null" ] || id="\"$id\""
-      local reason="${2:-null}"; [ "$reason" = "null" ] || reason="\"$reason\""
-      args="$(jq -n --argjson id "$id" --argjson reason "$reason" '{command:"discard-draft", id:$id, reason:$reason}')" ;;
-    rebase-draft)
-      local id="${1:-null}"; [ "$id" = "null" ] || id="\"$id\""
-      args="$(jq -n --argjson id "$id" '{command:"rebase-draft", id:$id}')" ;;
-    *) die "spaces: unknown subcommand $sub (view/edit/search aren't wrapped — use 'space-cli tool spaces ...')" ;;
+    *) die "spaces: unknown subcommand $sub (view/search aren't wrapped — use 'space-cli tool spaces ...'; edit/drafts moved to 'admin' — spaces is read-only, rev6)" ;;
   esac
   call_tool spaces "$args"
 }
@@ -717,11 +634,6 @@ case "$cmd" in
   cat) cmd_cat "$@" ;;
   grep) cmd_grep "$@" ;;
   glob) cmd_glob "$@" ;;
-  write) cmd_write "$@" ;;
-  edit) cmd_edit "$@" ;;
-  insert) cmd_insert "$@" ;;
-  rm) cmd_rm "$@" ;;
-  mv) cmd_mv "$@" ;;
   spaces) cmd_spaces "$@" ;;
   admin) cmd_admin "$@" ;;
   tool) cmd_tool "$@" ;;

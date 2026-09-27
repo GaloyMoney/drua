@@ -35,20 +35,14 @@ pub enum SpaceMountsError {
 /// truncation footer; agents enumerate the rest via the `spaces` tool.
 const SPACES_BLOCK_LIMIT: usize = 20;
 
-/// rev3 §6.3 (amended by addendum A): the one sentence describing
-/// `space:`/`draft:` write mode for every subject — `render_spaces_block`'s
-/// `write_line` and `whoami`'s `space_write_mode_note` both render this
-/// verbatim. There is no longer a mode to branch on: `space:` fails
-/// closed (D15) rather than resolving differently by authority.
+/// rev6 D49: interactive agents are read-only on spaces — the one
+/// sentence `render_spaces_block`'s `write_line` and `whoami`'s
+/// `space_write_mode_note` both render verbatim for every non-admin
+/// subject. Spaces are edited by a workflow (`space_writes:`) or by an
+/// admin (`drua_admin_spaces` with `target: draft`), never from here.
 pub const SPACE_WRITE_MODE_SENTENCE: &str =
-    "Reads of space:<slug>/ paths see the published library. Writes go to \
-     draft:<slug>/ — your unpublished draft, started on first write or with \
-     `spaces start-draft`. Land it with `spaces merge-draft` (requires \
-     write authority; Forbidden without it), or send it for review with \
-     `spaces open-pr` (opens a GitHub PR; works even if you also hold \
-     write authority). Direct writes to space:<slug>/ are accepted only \
-     with write authority and no open draft. On `spaces`/`drua_admin_spaces` \
-     view/edit, pass target: draft instead of the draft: prefix.\n";
+    "Spaces are read-only in this session — edits to a space are made \
+     by a workflow (`space_writes:`) or by an admin.\n";
 
 /// rev5 D43: which write line `render_spaces_block` renders. `None`
 /// for `WorkflowRun` — the run has no draft, so `space:` is refused.
@@ -153,13 +147,29 @@ fn render_spaces_block(spaces: &[Space], mode: SpacesBlockMode) -> Option<String
         SpacesBlockMode::Interactive => SPACE_WRITE_MODE_SENTENCE.to_string(),
         SpacesBlockMode::WorkflowRun(write_mode) => workflow_run_write_line(write_mode),
     };
+    // rev6 D49: an interactive agent's file tools can only read a space
+    // (D44) — no `Edit`/`Move`/`Delete`, no `draft:` prefix. A lead
+    // (no file tools at all — `can_use_agent_file_tools` is agents-only,
+    // unchanged by this rev) reaches even reads only via `spaces view`.
+    // A run's tools still write (rev5 D25 unchanged), so its header
+    // keeps the full list and the `draft:` clause.
+    let tools_line = match mode {
+        SpacesBlockMode::Interactive => {
+            "Use the file tools (Read, LS, Glob, Grep) — or `spaces view` \
+             if you are the project lead — with paths prefixed \
+             `space:<slug>/` to read their contents."
+        }
+        SpacesBlockMode::WorkflowRun(_) => {
+            "Use the file tools (Read, LS, Glob, Grep, Edit, Move, \
+             Delete) with paths prefixed `space:<slug>/` (or \
+             `draft:<slug>/` to always stage) to read or write their \
+             contents."
+        }
+    };
     let header = format!(
         "<spaces>\n\
          This project has the following knowledge spaces mounted — \
-         collaborative folders backed by a shared library. Use the \
-         file tools (Read, LS, Glob, Grep, Edit, Move, Delete) with \
-         paths prefixed `space:<slug>/` (or `draft:<slug>/` to always \
-         stage) to read or write their contents. {write_line}"
+         collaborative folders backed by a shared library. {tools_line} {write_line}"
     );
 
     let mut buf = header;
