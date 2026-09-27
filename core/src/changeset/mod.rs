@@ -258,7 +258,22 @@ impl Changesets {
         if let Some(tip) = self.library.resolve_ref(&cs.git_ref()).await? {
             return Ok(tip);
         }
-        self.library.create_ref(&cs.git_ref(), &cs.head_oid).await?;
+        if let Err(e) = self.library.create_ref(&cs.git_ref(), &cs.head_oid).await {
+            // Most likely this replica hasn't fetched cs.head_oid's commit
+            // object yet (Postgres already advanced past what this clone
+            // has). A fetch may resolve the ref outright (a peer already
+            // created it) or just bring the object in for one retry.
+            tracing::debug!(
+                error = %e,
+                changeset_id = %cs.id,
+                "ensure_ref: create_ref failed; fetching origin and retrying once"
+            );
+            self.library.fetch_and_head().await?;
+            if let Some(tip) = self.library.resolve_ref(&cs.git_ref()).await? {
+                return Ok(tip);
+            }
+            self.library.create_ref(&cs.git_ref(), &cs.head_oid).await?;
+        }
         Ok(cs.head_oid.clone())
     }
 
