@@ -182,6 +182,28 @@ impl AuthSubject {
             || self.scopes().contains(&AuthScope::WorkflowStepAgent)
     }
 
+    /// rev6 D45: the one predicate behind every space write and every
+    /// draft verb (`Changesets::{draft_for, submit, apply}`,
+    /// `SpaceFs::resolve_target`). Interactive agents — leads, members,
+    /// on-behalf-of, external lead/member creds — are read-only on
+    /// spaces (D44); only an admin or a workflow run may change one.
+    pub fn can_draft_spaces(&self) -> bool {
+        self.is_admin() || self.in_workflow_run()
+    }
+
+    /// `can_draft_spaces()`'s `Result` twin for `?`-sites, naming the
+    /// same authorization failure `Changesets`/`SpaceFs` already
+    /// surfaced for a `Propose`/`Update` denial before rev6.
+    pub fn require_space_drafting(&self) -> Result<(), AuthorizationError> {
+        if self.can_draft_spaces() {
+            return Ok(());
+        }
+        Err(AuthorizationError::Forbidden {
+            verb: AuthVerb::Update,
+            resource: AuthResource::Space(None),
+        })
+    }
+
     /// `SandboxUse` implies read; first match wins.
     pub fn readable_sandbox_id(&self) -> Option<SandboxId> {
         self.scopes().iter().find_map(|s| match s {

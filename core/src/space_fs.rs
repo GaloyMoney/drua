@@ -23,7 +23,7 @@ use tracing::instrument;
 use drua_library::{BlobEntries, PathDates, PathDatesMap, Space, SpaceError, Spaces};
 
 use crate::audit::Audit;
-use crate::auth::{AuthResource, AuthSubject, AuthVerb};
+use crate::auth::AuthSubject;
 use crate::changeset::{Changeset, ChangesetError, ChangesetStatus, Changesets};
 use crate::primitives::ChangesetId;
 use crate::project::{ProjectError, Projects};
@@ -54,7 +54,8 @@ pub struct DetailedEntry {
 
 /// Which of the two path schemes (D9) a [`SpaceRef`] was parsed from.
 /// `space:` resolves by authority (§3 rule 3); `draft:` always targets
-/// the caller's own draft, for anyone who holds `Propose`.
+/// the caller's own draft, reachable only by a subject that holds
+/// `can_draft_spaces()` (rev6 D45) — an admin or a workflow run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SpaceScheme {
     Space,
@@ -173,8 +174,8 @@ impl Target {
 
 /// Whether a `resolve` call is a read or a write — a write additionally
 /// requires a `Target::Changeset` to be `Open` (§2.2: "only `Open`
-/// accepts writes"). Read/write *authorization* (`Propose` vs `Update`)
-/// lands in PR 4 of this handoff's sequencing; unrelated to this check.
+/// accepts writes"). Authorization (`can_draft_spaces()`, rev6 D45) is
+/// a separate check; unrelated to this one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Intent {
     Read,
@@ -352,22 +353,22 @@ impl SpaceFs {
         }))
     }
 
-    /// §3's resolution rule, rev3-amended:
+    /// §3's resolution rule, rev6-amended (D44/D45):
     ///
     /// 1. `space:<slug>@<id>` — the explicit target (§6.4). Writes
-    ///    require `Propose` (checked before the `Open` check — an
-    ///    unauthorized subject shouldn't learn a changeset's status)
-    ///    and an `Open` changeset.
-    /// 2. `draft:<slug>` — always `sub`'s own draft: `Propose` required;
-    ///    a write lazily creates it (`Changesets::draft_for`); a read
-    ///    with none open overlays nothing and falls back to `Main`
-    ///    (there's nothing to differ from yet — §5.3's "no draft" form).
+    ///    require `can_draft_spaces()` (checked before the `Open` check
+    ///    — an unauthorized subject shouldn't learn a changeset's
+    ///    status) and an `Open` changeset.
+    /// 2. `draft:<slug>` — always `sub`'s own draft: `can_draft_spaces()`
+    ///    required, else `ReadOnly`; a write lazily creates it
+    ///    (`Changesets::draft_for`); a read with none open overlays
+    ///    nothing and falls back to `Main` (there's nothing to differ
+    ///    from yet — §5.3's "no draft" form).
     /// 3. `space:<slug>`: a **read** always sees `Main` (D19's differs
     ///    stamp is computed separately, in `differs_note`, never by
-    ///    overlaying). A **write** requires `Update`; a subject with
-    ///    only `Propose` gets `UseDraft` (rev3 D9/D15 — replaces rev2's
-    ///    silent redirect into a draft); neither verb is `Unauthorized`.
-    ///    A subject that holds `Update` but already has an open draft
+    ///    overlaying). A **write** requires `can_draft_spaces()` — a
+    ///    subject without it gets `ReadOnly` (D44: every interactive
+    ///    agent). A subject that holds it but already has an open draft
     ///    gets `DraftOpen` (D15) rather than silently landing on `main`.
     async fn resolve_target(
         &self,
@@ -383,7 +384,7 @@ impl SpaceFs {
                 .await
                 .map_err(map_changeset_err)?;
             if intent == Intent::Write {
-                sub.can(AuthVerb::Propose, AuthResource::Space(Some(space.id)))?;
+                sub.require_space_drafting()?;
                 if !cs.is_open() {
                     return Err(SpaceError::ChangesetNotOpen {
                         id: cs.id.to_string(),
@@ -397,8 +398,10 @@ impl SpaceFs {
 
         match sref.scheme {
             SpaceScheme::Draft => {
-                sub.can(AuthVerb::Propose, AuthResource::Space(Some(space.id)))?;
                 if intent != Intent::Write {
+                    if !sub.can_draft_spaces() {
+                        return Ok(Target::Main);
+                    }
                     return match self
                         .changesets
                         .open_draft_for(sub)
@@ -409,6 +412,7 @@ impl SpaceFs {
                         None => Ok(Target::Main),
                     };
                 }
+                sub.require_space_drafting()?;
                 match self
                     .changesets
                     .open_draft_for(sub)
@@ -436,33 +440,26 @@ impl SpaceFs {
                 if intent != Intent::Write {
                     return Ok(Target::Main);
                 }
-                if sub
-                    .can(AuthVerb::Update, AuthResource::Space(Some(space.id)))
-                    .is_ok()
+                if !sub.can_draft_spaces() {
+                    return Err(SpaceError::ReadOnly {
+                        slug: space.slug.clone(),
+                    }
+                    .into());
+                }
+                match self
+                    .changesets
+                    .open_draft_for(sub)
+                    .await
+                    .map_err(map_changeset_err)?
                 {
-                    return match self
-                        .changesets
-                        .open_draft_for(sub)
-                        .await
-                        .map_err(map_changeset_err)?
-                    {
-                        Some(cs) => Err(SpaceError::DraftOpen {
-                            id: short_id(cs.id),
-                            title: cs.title,
-                            slug: space.slug.clone(),
-                        }
-                        .into()),
-                        None => Ok(Target::Main),
-                    };
+                    Some(cs) => Err(SpaceError::DraftOpen {
+                        id: short_id(cs.id),
+                        title: cs.title,
+                        slug: space.slug.clone(),
+                    }
+                    .into()),
+                    None => Ok(Target::Main),
                 }
-                // No `Update` — a `Propose`-only subject must stage
-                // through `draft:` instead; neither verb is a plain
-                // `Unauthorized`.
-                sub.can(AuthVerb::Propose, AuthResource::Space(Some(space.id)))?;
-                Err(SpaceError::UseDraft {
-                    slug: space.slug.clone(),
-                }
-                .into())
             }
         }
     }

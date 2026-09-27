@@ -187,14 +187,11 @@ async fn setup(test_name: &str) -> (App, AuthSubject, AuthSubject) {
 
     // Not a project admin, not a sandbox attachment — just enough to
     // pass `can_use_agent_file_tools` and mount-scoped `space:` access.
-    // `ProjectMember` is what actually grants `Propose` on `space:`
-    // writes (rev2 §2/§4.2 OQ-2: members stage, they don't write
-    // `main` directly) — an empty scope set can see the file tools
-    // (`can_use_agent_file_tools` doesn't check scopes) but can never
-    // actually write through them. Reuses the project's real lead
-    // `Agent` row (`project.create` already persists one) rather than
-    // a synthetic `AgentId::new()` — a lazily created draft's
-    // `agent_id` column is a real FK against `agents`.
+    // rev6 D44: `ProjectMember` is read-only on spaces — this subject
+    // can `Read`/`LS`/`Glob`/`Grep` a mounted `space:` path through
+    // compose (and directly), but any write is refused with `ReadOnly`.
+    // Reuses the project's real lead `Agent` row (`project.create`
+    // already persists one) rather than a synthetic `AgentId::new()`.
     let agent = AuthSubject::Agent(
         project.id,
         project.lead_agent_id,
@@ -529,11 +526,23 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
 async fn scripts_read_exact_text_while_mcp_read_stays_numbered() {
     let (app, _user, agent) = setup("read-raw").await;
 
-    // rev3 D9/D15: a `ProjectMember`-scoped subject writes `draft:`;
-    // `space:` writes are refused with `UseDraft`.
-    let path = "draft:docs/raw-fixture.md";
+    // rev6 D44: interactive agents are read-only on spaces — this test
+    // is about `Read`'s byte-exactness, not about who wrote the
+    // fixture, so seed it through the engine directly (as `setup`
+    // already does for `a.md`) and read it back as the member.
+    let path = "space:docs/raw-fixture.md";
     let fixture = "# Raw\r\nUnicode: \u{1F41F} \u{2014} caf\u{E9}\r\n\r\nEnd\r\n";
-    let fixture_js = serde_json::to_string(fixture).expect("json-encode fixture");
+    app.library()
+        .spaces()
+        .write_file(
+            "docs",
+            "raw-fixture.md",
+            fixture.into(),
+            CommitAttribution::library_default(),
+            None,
+        )
+        .await
+        .unwrap();
 
     let compose = app
         .toolsets()
@@ -544,8 +553,6 @@ async fn scripts_read_exact_text_while_mcp_read_stays_numbered() {
     let script = format!(
         r#"
 const path = {path_js};
-const text = {fixture_js};
-await tools.Edit({{command: 'create', path, file_text: text}});
 const whole = await tools.Read({{path}});
 const ranged = await tools.Read({{path, offset: 0, limit: 1}});
 const viewed = await tools.Edit({{command: 'view', path}});
@@ -617,9 +624,20 @@ async fn scripts_read_lifts_the_view_cap_but_mcp_read_still_enforces_it() {
     // Comfortably over MAX_VIEW_FILE_BYTES (1_048_576) so the assertion
     // survives any off-by-one at the boundary.
     const FIXTURE_LEN: usize = 1_048_576 + 200_000;
-    // rev3 D9/D15: a `ProjectMember`-scoped subject writes `draft:`;
-    // `space:` writes are refused with `UseDraft`.
-    let path = "draft:docs/oversized.txt";
+    // rev6 D44: interactive agents are read-only on spaces — seed
+    // through the engine directly, same as the raw-text test above.
+    let path = "space:docs/oversized.txt";
+    app.library()
+        .spaces()
+        .write_file(
+            "docs",
+            "oversized.txt",
+            "x".repeat(FIXTURE_LEN),
+            CommitAttribution::library_default(),
+            None,
+        )
+        .await
+        .unwrap();
 
     let compose = app
         .toolsets()
@@ -632,8 +650,6 @@ async fn scripts_read_lifts_the_view_cap_but_mcp_read_still_enforces_it() {
     let script = format!(
         r#"
 const path = {path_js};
-const text = "x".repeat({FIXTURE_LEN});
-await tools.Edit({{command: 'create', path, file_text: text}});
 const whole = await tools.Read({{path}});
 return {{ length: whole.content.length }};
 "#,
@@ -1300,10 +1316,18 @@ async fn step_agent_can_discard_its_own_lazily_created_draft() {
     op.commit().await.unwrap();
     assert_eq!(step_agent.workflow_run_id, Some(run.id));
 
+    // rev6 D45: drafting requires `can_draft_spaces()`
+    // (`is_admin() || in_workflow_run()`) — a real step agent carries
+    // the `WorkflowStepAgent` marker alongside `ProjectMember` (see
+    // `AgentRole::WorkflowStepAgent`'s `role_scopes` in `agent/mod.rs`),
+    // which is what `in_workflow_run()` actually checks.
     let step_agent_subject = AuthSubject::Agent(
         project_id,
         step_agent.id,
-        vec![drua_core::auth::AuthScope::ProjectMember(project_id)],
+        vec![
+            drua_core::auth::AuthScope::ProjectMember(project_id),
+            drua_core::auth::AuthScope::WorkflowStepAgent,
+        ],
     );
 
     let draft = app

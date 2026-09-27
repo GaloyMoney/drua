@@ -10,7 +10,8 @@ use repo::ChangesetRepo;
 
 use crate::agent::repo::AgentRepo;
 use crate::audit::Audit;
-use crate::auth::{AuthResource, AuthScope, AuthSubject, AuthVerb};
+use crate::auth::error::AuthorizationError;
+use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::primitives::*;
 
 /// One touched path in a [`ChangesetStatusView`], repo-relative to the
@@ -211,7 +212,7 @@ impl Changesets {
         description: Option<String>,
         first_touched_path: Option<&str>,
     ) -> Result<Changeset, ChangesetError> {
-        sub.can(AuthVerb::Propose, AuthResource::Space(None))?;
+        sub.require_space_drafting()?;
         let actor = self.actor_key_for(sub).await?;
         if let Some(cs) = self.find_open_for_actor(actor).await? {
             return Ok(cs);
@@ -354,12 +355,11 @@ impl Changesets {
     }
 
     /// Changesets visible to `sub`, newest first, optionally filtered
-    /// to one `status` (§8.1's `changeset list` command; rev3 §4/§6.1
-    /// `list-drafts`). rev3 D4: a project-scoped subject sees its
-    /// project's changesets union its own (covers the edge case of an
-    /// own draft that isn't project-scoped); an `Admin` sees every
-    /// changeset, optionally narrowed to one `project_id` (rev3 OQ-21
-    /// — admin, no filter, means everything).
+    /// to one `status` (rev3 §6.1 `list-drafts`). rev6 D48: admin-only
+    /// — its only remaining caller is `drua_admin_spaces list-drafts`,
+    /// since interactive agents no longer hold drafts to list.
+    /// Optionally narrowed to one `project_id` (rev3 OQ-21 — admin, no
+    /// filter, means everything).
     #[instrument(name = "domain.changeset.list", skip(self, sub))]
     pub async fn list(
         &self,
@@ -367,24 +367,16 @@ impl Changesets {
         status: Option<ChangesetStatus>,
         project_id: Option<ProjectId>,
     ) -> Result<Vec<Changeset>, ChangesetError> {
-        let mut out = if sub.is_admin() {
-            match project_id {
-                Some(pid) => self.list_all_for_project(pid).await?,
-                None => self.list_all_unfiltered().await?,
+        if !sub.is_admin() {
+            return Err(AuthorizationError::Forbidden {
+                verb: AuthVerb::Update,
+                resource: AuthResource::Space(None),
             }
-        } else {
-            let mut acc = match sub.effective_project_id() {
-                Some(pid) => self.list_all_for_project(pid).await?,
-                None => Vec::new(),
-            };
-            if let Ok(actor) = self.actor_key_for(sub).await {
-                for cs in self.list_all_for_actor(actor).await? {
-                    if !acc.iter().any(|x| x.id == cs.id) {
-                        acc.push(cs);
-                    }
-                }
-            }
-            acc
+            .into());
+        }
+        let mut out = match project_id {
+            Some(pid) => self.list_all_for_project(pid).await?,
+            None => self.list_all_unfiltered().await?,
         };
         if let Some(status) = status {
             out.retain(|cs| cs.status == status);
@@ -424,30 +416,6 @@ impl Changesets {
             let page = self
                 .repo
                 .list_by_created_at(
-                    es_entity::PaginatedQueryArgs { first: 200, after },
-                    es_entity::ListDirection::Descending,
-                )
-                .await?;
-            out.extend(page.entities);
-            if !page.has_next_page {
-                break;
-            }
-            after = page.end_cursor;
-        }
-        Ok(out)
-    }
-
-    async fn list_all_for_actor(
-        &self,
-        actor: ChangesetActor,
-    ) -> Result<Vec<Changeset>, ChangesetError> {
-        let mut out = Vec::new();
-        let mut after = None;
-        loop {
-            let page = self
-                .repo
-                .list_for_opened_by_actor_by_created_at(
-                    actor.to_string(),
                     es_entity::PaginatedQueryArgs { first: 200, after },
                     es_entity::ListDirection::Descending,
                 )
@@ -503,7 +471,7 @@ impl Changesets {
         })
     }
 
-    /// `Open` owner, or a lead/admin closing an abandoned one;
+    /// `Open` owner, or an admin closing an abandoned one;
     /// `Submitted` closes the PR (OQ-1's default) — that push/close call
     /// lands with PR 6's GitHub client, so for now the branch is just
     /// deleted locally + on origin.
@@ -547,9 +515,9 @@ impl Changesets {
     /// no longer derives them from `cs.title`/`cs.description`
     /// (addendum A D23); drua still appends its provenance trailer
     /// block (`append_pr_trailers`) so a GitHub squash-merge doesn't
-    /// lose it. Requires `Propose` on `Space(None)` — the collection-
-    /// level twin of `apply`'s `Update` check, same reasoning: fail
-    /// before doing any work, not deep inside `check_owner_or_lead`.
+    /// lose it. Requires `can_draft_spaces()` (rev6 D45) — the same
+    /// predicate `apply` checks, same reasoning: fail before doing any
+    /// work, not deep inside `check_owner_or_admin`.
     #[instrument(name = "domain.changeset.submit", skip(self, sub, title, body))]
     pub async fn submit(
         &self,
@@ -558,11 +526,11 @@ impl Changesets {
         title: String,
         body: String,
     ) -> Result<Changeset, ChangesetError> {
-        sub.can(AuthVerb::Propose, AuthResource::Space(None))?;
+        sub.require_space_drafting()?;
         let mut op = self.repo.begin_op().await?;
         let mut cs = self.repo.find_by_id_in_op(&mut op, id).await?;
         self.check_same_project(sub, &cs)?;
-        self.check_owner_or_lead(sub, &cs, "submit").await?;
+        self.check_owner_or_admin(sub, &cs, "submit").await?;
         if !cs.is_open() {
             return Err(ChangesetError::InvalidTransition {
                 from: cs.status,
@@ -616,17 +584,15 @@ impl Changesets {
     /// Merges `cs`'s tip into `main` directly (§7; rev3 addendum A
     /// D21/D24 — this is what `merge-draft` calls, exclusively, now
     /// that `open-pr` is its own command). `Open` or
-    /// `Submitted`; requires the subject to be able to `Update`
-    /// `main` at all (per-space `Update` was already required for
-    /// every individual write that landed on `main` bypassing a
-    /// changeset — this is the collection-level twin of `draft_for`'s
-    /// `Propose`-on-`Space(None)` check, for the same "fail before
-    /// doing any work" reason). Without `Update` this already fails
-    /// closed via `ChangesetError::Authorization` (D24 — no fallback
-    /// to `submit` upstream of this call any more). Closes the PR (best-effort) if one was
-    /// open, and deletes the branch — a merge commit without the
-    /// `Drua-Projection` trailer, so the reverse-sync importer picks
-    /// it up like any human-authored commit.
+    /// `Submitted`; requires `can_draft_spaces()` (rev6 D45 — an admin
+    /// or a run subject; every individual write that lands on `main`
+    /// bypassing a changeset already requires the same). Without it
+    /// this fails closed via `ChangesetError::Authorization` (D24 — no
+    /// fallback to `submit` upstream of this call any more). Closes
+    /// the PR (best-effort) if one was open, and deletes the branch —
+    /// a merge commit without the `Drua-Projection` trailer, so the
+    /// reverse-sync importer picks it up like any human-authored
+    /// commit.
     /// Returns the entity alongside the merge commit's oid — `merge_oid`
     /// only ever lives in the `Applied` event (§3.1's `ChangesetEvent`),
     /// never projected onto a builder field, so the caller (the
@@ -642,11 +608,11 @@ impl Changesets {
         title: Option<String>,
         body: Option<String>,
     ) -> Result<(Changeset, String), ChangesetError> {
-        sub.can(AuthVerb::Update, AuthResource::Space(None))?;
+        sub.require_space_drafting()?;
         let mut op = self.repo.begin_op().await?;
         let mut cs = self.repo.find_by_id_in_op(&mut op, id).await?;
         self.check_same_project(sub, &cs)?;
-        self.check_owner_or_lead(sub, &cs, "apply").await?;
+        self.check_owner_or_admin(sub, &cs, "apply").await?;
         if !matches!(
             cs.status,
             ChangesetStatus::Open | ChangesetStatus::Submitted
@@ -656,7 +622,7 @@ impl Changesets {
                 op: "apply",
             });
         }
-        // `submit`'s own `Empty` check doesn't cover `apply`: a lead can
+        // `submit`'s own `Empty` check doesn't cover `apply`: an admin can
         // land any `Open` draft directly, and a YAML `changeset:` block
         // pre-creates the run's draft before any step writes to it — so
         // without this, an unused draft's `publish` would land a no-op
@@ -756,7 +722,7 @@ impl Changesets {
         let mut op = self.repo.begin_op().await?;
         let mut cs = self.repo.find_by_id_in_op(&mut op, id).await?;
         self.check_same_project(sub, &cs)?;
-        self.check_owner_or_lead(sub, &cs, "rebase").await?;
+        self.check_owner_or_admin(sub, &cs, "rebase").await?;
         if !cs.is_open() {
             return Err(ChangesetError::InvalidTransition {
                 from: cs.status,
@@ -927,29 +893,24 @@ impl Changesets {
             // A project-less changeset (rev3 D16: a bare-`Admin`'s
             // draft) is never "foreign" to a project-scoped subject in
             // this read-gate sense — ownership, not project, is what
-            // actually restricts it (`check_owner_or_lead`/
+            // actually restricts it (`check_owner_or_admin`/
             // `check_discard_authority`).
             (Some(_), None) => Ok(()),
             (None, _) => Ok(()),
         }
     }
 
-    /// §7/OQ-1's `discard` rule: an `Open` changeset's own owner may
-    /// discard it; a `Submitted` one (closing its PR) — or an
-    /// abandoned `Open` one its owner walked away from — needs a lead
-    /// or admin. `has_scope` treats `User` subjects as having every
-    /// scope, so this also covers "Users are omnipotent" without a
-    /// separate branch.
+    /// §7/OQ-1's `discard` rule, rev6-narrowed (D48): an `Open`
+    /// changeset's own owner may discard it; a `Submitted` one
+    /// (closing its PR) — or an abandoned `Open` one its owner walked
+    /// away from — needs an admin. Only an admin or a run ever holds a
+    /// draft now (D44), so "lead" is no longer a distinct case.
     async fn check_discard_authority(
         &self,
         sub: &AuthSubject,
         cs: &Changeset,
     ) -> Result<(), ChangesetError> {
-        if sub.is_admin()
-            || cs
-                .project_id
-                .is_some_and(|pid| sub.has_scope(&AuthScope::ProjectAdmin(pid)))
-        {
+        if sub.is_admin() {
             return Ok(());
         }
         if cs.status == ChangesetStatus::Open {
@@ -965,13 +926,14 @@ impl Changesets {
         })
     }
 
-    /// rev2 OQ-7 default: only `cs`'s owner, or a lead/admin, may
-    /// `submit`/`apply`/`rebase` it — status-independent, unlike
-    /// `discard`'s OQ-1 rule (`check_discard_authority`), since none
-    /// of these three are meaningful on an already-closed changeset
-    /// anyway (the caller's own status check catches that separately).
-    /// Renamed from rev1's `check_bound_or_lead` — there is no bind
-    /// state left to check, only ownership (D4).
+    /// rev2 OQ-7 default, rev6-narrowed (D48): only `cs`'s owner, or an
+    /// admin, may `submit`/`apply`/`rebase` it — status-independent,
+    /// unlike `discard`'s OQ-1 rule (`check_discard_authority`), since
+    /// none of these three are meaningful on an already-closed
+    /// changeset anyway (the caller's own status check catches that
+    /// separately). Renamed from rev3's `check_owner_or_lead` — only an
+    /// admin or a run ever holds a draft now (D44), so "lead" is no
+    /// longer a distinct case.
     ///
     /// Resolves the owner check through `actor_key_for`, the same
     /// lookup `draft_for` uses to key the draft — not the cheaper
@@ -980,17 +942,13 @@ impl Changesets {
     /// one draft), so `actor_for_subject`'s plain `Agent` mapping never
     /// matches `cs.opened_by` and the very agent that created the draft
     /// could never `submit`/`apply`/`rebase` it (bugbot 2026-09-25).
-    async fn check_owner_or_lead(
+    async fn check_owner_or_admin(
         &self,
         sub: &AuthSubject,
         cs: &Changeset,
         action: &'static str,
     ) -> Result<(), ChangesetError> {
-        if sub.is_admin()
-            || cs
-                .project_id
-                .is_some_and(|pid| sub.has_scope(&AuthScope::ProjectAdmin(pid)))
-        {
+        if sub.is_admin() {
             return Ok(());
         }
         if let Ok(actor) = self.actor_key_for(sub).await {

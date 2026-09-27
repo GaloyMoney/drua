@@ -49,26 +49,20 @@ pub enum SpaceError {
     ChangesetNotOpen { id: String, status: String },
     #[error("SpaceError - ChangesetForeign: changeset {id} belongs to another project")]
     ChangesetForeign { id: String },
-    /// rev3 D9/D15 rule 3: a `Propose`-only subject's direct
-    /// `space:<slug>/` write — no `Update`, so there's nothing to fall
-    /// back to but a draft; the message names both remediations (the
-    /// `draft:` path prefix for direct file-tool callers, `target:
-    /// draft` for callers whose only lever is `spaces`/
-    /// `drua_admin_spaces` `edit`, which never sees a raw `draft:`
-    /// prefix in its `path` field) so either kind of caller can
-    /// self-correct. Names `open-pr`, not `merge-draft` — the subject
-    /// reaching this only ever holds `Propose`, and `merge-draft`
-    /// requires `Update`.
+    /// rev6 D44: a non-admin, non-run subject's write to `space:<slug>/`
+    /// or `draft:<slug>/` — interactive agents (leads, members,
+    /// on-behalf-of, external lead/member creds) are read-only on
+    /// spaces. Names both real write paths so the agent reading this
+    /// can say what to ask for.
     #[error(
-        "SpaceError - UseDraft: direct edits to space:{slug}/ are not permitted for this subject; write draft:{slug}/<path> instead, or pass target: draft to spaces edit / drua_admin_spaces spaces — it is staged in your draft and sent for review with `spaces open-pr`"
+        "SpaceError - ReadOnly: space:{slug}/ is read-only for this subject — spaces are edited by workflows (`space_writes:`) or by admins (`drua_admin_spaces` with target: draft)"
     )]
-    UseDraft { slug: String },
-    /// rev3 D15: a subject with an open draft may not write
-    /// `space:<slug>/` directly — fail closed rather than silently
-    /// landing on `main`, even for a subject that holds `Update`. See
-    /// `UseDraft`'s doc for why both remediations are named.
+    ReadOnly { slug: String },
+    /// rev3 D15 (admin-only as of rev6 D44): an admin with an open
+    /// draft may not write `space:<slug>/` directly — fail closed
+    /// rather than silently landing on `main`.
     #[error(
-        "SpaceError - DraftOpen: you have an open draft {id} \"{title}\"; write draft:{slug}/<path> (or pass target: draft to spaces edit / drua_admin_spaces spaces) to keep staging, or run `spaces merge-draft` / `spaces discard-draft` before writing space:{slug}/ directly"
+        "SpaceError - DraftOpen: you have an open draft {id} \"{title}\"; write draft:{slug}/<path> (or pass target: draft to drua_admin_spaces) to keep staging, or run `drua_admin_spaces merge-draft` / `discard-draft` before writing space:{slug}/ directly"
     )]
     DraftOpen {
         id: String,
