@@ -384,7 +384,12 @@ impl SpaceFs {
                 .await
                 .map_err(map_changeset_err)?;
             if intent == Intent::Write {
-                sub.require_space_drafting()?;
+                if !sub.can_draft_spaces() {
+                    return Err(SpaceError::ReadOnly {
+                        slug: space.slug.clone(),
+                    }
+                    .into());
+                }
                 if !cs.is_open() {
                     return Err(SpaceError::ChangesetNotOpen {
                         id: cs.id.to_string(),
@@ -412,7 +417,12 @@ impl SpaceFs {
                         None => Ok(Target::Main),
                     };
                 }
-                sub.require_space_drafting()?;
+                if !sub.can_draft_spaces() {
+                    return Err(SpaceError::ReadOnly {
+                        slug: space.slug.clone(),
+                    }
+                    .into());
+                }
                 match self
                     .changesets
                     .open_draft_for(sub)
