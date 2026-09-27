@@ -18,6 +18,7 @@ pub enum ChangesetStatus {
     Applied,
     Discarded,
     Abandoned,
+    Rejected,
 }
 
 impl ChangesetStatus {
@@ -32,6 +33,7 @@ impl ChangesetStatus {
                 | ChangesetStatus::Applied
                 | ChangesetStatus::Discarded
                 | ChangesetStatus::Abandoned
+                | ChangesetStatus::Rejected
         )
     }
 }
@@ -137,6 +139,9 @@ pub enum ChangesetEvent {
     Abandoned,
     Discarded {
         reason: Option<String>,
+    },
+    Rejected {
+        pr_number: u64,
     },
 }
 
@@ -339,6 +344,19 @@ impl Changeset {
         Ok(Idempotent::Executed(()))
     }
 
+    pub fn mark_rejected(&mut self, pr_number: u64) -> Result<Idempotent<()>, ChangesetError> {
+        idempotency_guard!(
+            self.events.iter_all().rev(),
+            already_applied: ChangesetEvent::Rejected { .. },
+        );
+        if self.status != ChangesetStatus::Submitted {
+            return Err(self.invalid_transition("mark_rejected"));
+        }
+        self.status = ChangesetStatus::Rejected;
+        self.events.push(ChangesetEvent::Rejected { pr_number });
+        Ok(Idempotent::Executed(()))
+    }
+
     pub fn discard(&mut self, reason: Option<String>) -> Result<Idempotent<()>, ChangesetError> {
         idempotency_guard!(
             self.events.iter_all().rev(),
@@ -429,6 +447,9 @@ impl TryFromEvents<ChangesetEvent> for Changeset {
                 }
                 ChangesetEvent::Discarded { .. } => {
                     status = ChangesetStatus::Discarded;
+                }
+                ChangesetEvent::Rejected { .. } => {
+                    status = ChangesetStatus::Rejected;
                 }
             }
         }
@@ -795,6 +816,70 @@ mod tests {
     }
 
     #[test]
+    fn mark_rejected_from_submitted() {
+        let mut cs = open_changeset();
+        cs.submit("h".into(), 1, "u".into(), "t".into(), "b".into())
+            .unwrap()
+            .did_execute();
+        assert!(cs.mark_rejected(1).unwrap().did_execute());
+        assert_eq!(cs.status, ChangesetStatus::Rejected);
+    }
+
+    #[test]
+    fn mark_rejected_is_idempotent() {
+        let mut cs = open_changeset();
+        cs.submit("h".into(), 1, "u".into(), "t".into(), "b".into())
+            .unwrap()
+            .did_execute();
+        cs.mark_rejected(1).unwrap().did_execute();
+        let outcome = cs.mark_rejected(1).unwrap();
+        assert!(matches!(outcome, Idempotent::AlreadyApplied));
+    }
+
+    #[test]
+    fn mark_rejected_rejected_when_open() {
+        let mut cs = open_changeset();
+        let outcome = cs.mark_rejected(1);
+        assert!(matches!(
+            outcome,
+            Err(ChangesetError::InvalidTransition {
+                from: ChangesetStatus::Open,
+                op: "mark_rejected"
+            })
+        ));
+    }
+
+    #[test]
+    fn mark_rejected_rejected_from_terminal_state() {
+        let mut cs = open_changeset();
+        cs.submit("h".into(), 1, "u".into(), "t".into(), "b".into())
+            .unwrap()
+            .did_execute();
+        cs.mark_merged("merge-oid".into()).unwrap().did_execute();
+        let outcome = cs.mark_rejected(1);
+        assert!(matches!(
+            outcome,
+            Err(ChangesetError::InvalidTransition {
+                op: "mark_rejected",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn rejected_hydrates_correctly() {
+        let mut cs = open_changeset();
+        cs.submit("h".into(), 1, "u".into(), "t".into(), "b".into())
+            .unwrap()
+            .did_execute();
+        cs.mark_rejected(1).unwrap().did_execute();
+
+        let events = cs.events;
+        let rehydrated = Changeset::try_from_events(events).unwrap();
+        assert_eq!(rehydrated.status, ChangesetStatus::Rejected);
+    }
+
+    #[test]
     fn discard_from_open() {
         let mut cs = open_changeset();
         assert!(cs.discard(Some("stale".into())).unwrap().did_execute());
@@ -882,6 +967,7 @@ mod tests {
 
         assert!(ChangesetStatus::Discarded.is_terminal());
         assert!(ChangesetStatus::Abandoned.is_terminal());
+        assert!(ChangesetStatus::Rejected.is_terminal());
         assert!(!ChangesetStatus::Open.is_terminal());
         assert!(!ChangesetStatus::Submitted.is_terminal());
     }
