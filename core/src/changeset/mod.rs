@@ -2,6 +2,9 @@ pub mod entity;
 pub mod error;
 pub mod repo;
 
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 use tracing::instrument;
 
 pub use entity::*;
@@ -13,6 +16,12 @@ use crate::audit::Audit;
 use crate::auth::error::AuthorizationError;
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::primitives::*;
+
+/// Cap on [`Changesets::touched_cache`]'s size. Entries are keyed by a
+/// pair of immutable commit oids and never go stale, so eviction just
+/// bounds memory — an arbitrary entry is dropped rather than the truly
+/// least-recently-used one.
+const TOUCHED_CACHE_CAP: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TouchedFile {
@@ -49,7 +58,7 @@ pub struct ChangesetStatusView {
     pub main_oid: String,
     pub mergeable: bool,
     pub conflicts: Vec<String>,
-    pub touched: Vec<TouchedFile>,
+    pub touched: Arc<Vec<TouchedFile>>,
     pub pr_url: Option<String>,
 }
 
@@ -69,12 +78,18 @@ fn actor_for_subject(sub: &AuthSubject) -> Result<ChangesetActor, ChangesetError
     }
 }
 
+type TouchedCacheKey = (String, String);
+
 #[derive(Clone)]
 pub struct Changesets {
     repo: ChangesetRepo,
     agents: AgentRepo,
     library: drua_library::Library,
     users: crate::user::Users,
+    /// `(base_oid, head_oid) -> touched files`, so `changeset_target`
+    /// (called on every draft read and write to render the touched-file
+    /// count in the stamp) doesn't re-diff an unchanged draft each time.
+    touched_cache: Arc<Mutex<HashMap<TouchedCacheKey, Arc<Vec<TouchedFile>>>>>,
 }
 
 impl Changesets {
@@ -89,6 +104,7 @@ impl Changesets {
             agents: agents.clone(),
             library: library.clone(),
             users: users.clone(),
+            touched_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -818,13 +834,23 @@ impl Changesets {
         Ok(self
             .touched_files(cs)
             .await?
-            .into_iter()
+            .iter()
             .filter(|t| t.space_slug == slug)
-            .map(|t| t.path)
+            .map(|t| t.path.clone())
             .collect())
     }
 
-    async fn touched_files(&self, cs: &Changeset) -> Result<Vec<TouchedFile>, ChangesetError> {
+    async fn touched_files(&self, cs: &Changeset) -> Result<Arc<Vec<TouchedFile>>, ChangesetError> {
+        let key = (cs.base_oid.clone(), cs.head_oid.clone());
+        if let Some(cached) = self
+            .touched_cache
+            .lock()
+            .expect("touched cache lock poisoned")
+            .get(&key)
+        {
+            return Ok(Arc::clone(cached));
+        }
+
         let deltas = self
             .library
             .changes_since(Some(&cs.base_oid), &cs.head_oid)
@@ -840,6 +866,18 @@ impl Changesets {
                 kind: delta.kind.into(),
             });
         }
+        let out = Arc::new(out);
+
+        let mut guard = self
+            .touched_cache
+            .lock()
+            .expect("touched cache lock poisoned");
+        if guard.len() >= TOUCHED_CACHE_CAP {
+            if let Some(evict) = guard.keys().next().cloned() {
+                guard.remove(&evict);
+            }
+        }
+        guard.insert(key, Arc::clone(&out));
         Ok(out)
     }
 }

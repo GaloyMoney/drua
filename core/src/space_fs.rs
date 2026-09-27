@@ -398,12 +398,18 @@ impl SpaceFs {
         cs: Changeset,
         just_started: bool,
     ) -> Result<Target, ProjectError> {
-        let touched = self.changesets.touched_count(&cs).await.unwrap_or(0);
+        // ensure_ref first: it recovers from a not-yet-fetched base commit
+        // (changeset::ensure_ref), so touched_count's diff runs once that
+        // recovery has had a chance to bring the objects in.
         let tip = self
             .changesets
             .ensure_ref(&cs)
             .await
             .map_err(map_changeset_err)?;
+        let touched = self.changesets.touched_count(&cs).await.unwrap_or_else(|e| {
+            tracing::warn!(error = %e, changeset_id = %cs.id, "changeset_target: touched_count failed; reporting 0");
+            0
+        });
         Ok(Target::Changeset {
             id: cs.id,
             tip,
