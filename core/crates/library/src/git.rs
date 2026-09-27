@@ -217,7 +217,7 @@ pub enum BatchOpKind {
 impl BatchOpKind {
     /// Ref-level ops (rebase/create/delete a ref) don't fit the
     /// "commit on top of the ref tip, fast-forward push" model that
-    /// [`GitEngine::commit_group_then_push_blocking`] implements, and
+    /// [`GitEngine::commit_groups_then_push_once_blocking`] implements, and
     /// each does its own fetch/push under the write lock. `run_writer`
     /// gives each one a solo batch instead of grouping it with
     /// unrelated writes.
@@ -1651,20 +1651,228 @@ impl GitEngine {
                 .push(i);
         }
 
-        let mut results: Vec<Option<WriteResult>> = (0..ops.len()).map(|_| None).collect();
+        Self::commit_groups_then_push_once_blocking(&repo, &order, &groups, &ops, token)
+    }
+
+    /// Commits every group's ops on top of its own ref, then pushes every
+    /// touched ref in ONE `remote.push` call instead of one push per ref —
+    /// a batch touching K refs used to do K round trips. A multi-refspec
+    /// push isn't atomic (some refs can be accepted while others are
+    /// rejected as non-fast-forward), so rejections are read per-ref from
+    /// the `push_update_reference` callback: only the rejected refs are
+    /// refetched, recommitted on the fresh tip and retried — accepted refs
+    /// are done. `MAX_ATTEMPTS` and the pre-batch rollback on final
+    /// failure match the single-ref behaviour this replaces.
+    fn commit_groups_then_push_once_blocking(
+        repo: &git2::Repository,
+        order: &[String],
+        groups: &HashMap<String, Vec<usize>>,
+        ops: &[BatchOp],
+        token: Option<&str>,
+    ) -> Vec<WriteResult> {
+        const MAX_ATTEMPTS: u32 = 2;
+
+        let mut initial_oid: HashMap<String, git2::Oid> = HashMap::new();
         for refname in order {
-            let indices = groups.remove(&refname).expect("just inserted above");
-            let group_ops: Vec<&BatchOp> = indices.iter().map(|&i| &ops[i]).collect();
-            let group_results =
-                Self::commit_group_then_push_blocking(&repo, &refname, &group_ops, token);
-            for (idx, res) in indices.into_iter().zip(group_results) {
-                results[idx] = Some(res);
+            match Self::ref_oid(repo, refname) {
+                Ok(oid) => {
+                    initial_oid.insert(refname.clone(), oid);
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    return ops
+                        .iter()
+                        .map(|_| Err(LibraryError::Git(msg.clone())))
+                        .collect();
+                }
             }
         }
+
+        let mut results: Vec<Option<WriteResult>> = (0..ops.len()).map(|_| None).collect();
+        let mut pending: Vec<String> = order.to_vec();
+        let mut attempt: u32 = 0;
+
+        fn update_ref_for(refname: &str) -> &str {
+            if refname == "refs/heads/main" {
+                "HEAD"
+            } else {
+                refname
+            }
+        }
+
+        while !pending.is_empty() {
+            attempt += 1;
+
+            let mut per_ref: HashMap<String, Vec<WriteResult>> = HashMap::new();
+            let mut to_push: Vec<String> = Vec::new();
+            for refname in &pending {
+                let indices = &groups[refname];
+                let start_oid = match Self::ref_oid(repo, refname) {
+                    Ok(oid) => oid,
+                    Err(e) => {
+                        let msg = e.to_string();
+                        per_ref.insert(
+                            refname.clone(),
+                            indices
+                                .iter()
+                                .map(|_| Err(LibraryError::Git(msg.clone())))
+                                .collect(),
+                        );
+                        continue;
+                    }
+                };
+                let mut current = start_oid;
+                let mut per_op = Vec::with_capacity(indices.len());
+                for &i in indices {
+                    match Self::commit_one(repo, update_ref_for(refname), current, &ops[i]) {
+                        Ok(Some(new_oid)) => {
+                            per_op.push(Ok(Some(new_oid.to_string())));
+                            current = new_oid;
+                        }
+                        Ok(None) => per_op.push(Ok(None)),
+                        Err(e) => per_op.push(Err(e)),
+                    }
+                }
+                if current != start_oid {
+                    to_push.push(refname.clone());
+                }
+                per_ref.insert(refname.clone(), per_op);
+            }
+
+            if to_push.is_empty() {
+                for refname in &pending {
+                    Self::finalize_group(&mut results, &groups[refname], per_ref.remove(refname));
+                }
+                break;
+            }
+
+            let outcomes = Self::push_refs(repo, token, &to_push).unwrap_or_else(|e| {
+                let msg = e.to_string();
+                to_push
+                    .iter()
+                    .map(|r| (r.clone(), Some(msg.clone())))
+                    .collect()
+            });
+
+            let mut next_pending: Vec<String> = Vec::new();
+            for refname in &pending {
+                let indices = &groups[refname];
+                let per_op = per_ref.remove(refname);
+                if !to_push.contains(refname) {
+                    Self::finalize_group(&mut results, indices, per_op);
+                    continue;
+                }
+                match outcomes.get(refname) {
+                    None | Some(None) => Self::finalize_group(&mut results, indices, per_op),
+                    Some(Some(_)) if attempt < MAX_ATTEMPTS => next_pending.push(refname.clone()),
+                    Some(Some(status)) => {
+                        let _ = repo.reference(
+                            refname,
+                            initial_oid[refname],
+                            true,
+                            "rollback after push failure",
+                        );
+                        let msg = format!("push failed: {status}");
+                        Self::finalize_group(
+                            &mut results,
+                            indices,
+                            per_op.map(|per_op| {
+                                per_op
+                                    .into_iter()
+                                    .map(|r| match r {
+                                        Ok(_) => Err(LibraryError::Git(msg.clone())),
+                                        Err(e) => Err(e),
+                                    })
+                                    .collect()
+                            }),
+                        );
+                    }
+                }
+            }
+
+            if next_pending.is_empty() {
+                break;
+            }
+            tracing::info!(
+                attempt,
+                refs = ?next_pending,
+                "commit_groups_then_push_once: push rejected, refetching and retrying"
+            );
+            if let Err(e) = Self::fetch_origin(repo, token) {
+                let msg = e.to_string();
+                for refname in &next_pending {
+                    for &i in &groups[refname] {
+                        results[i] = Some(Err(LibraryError::Git(msg.clone())));
+                    }
+                }
+                break;
+            }
+            if next_pending.iter().any(|r| r == "refs/heads/main") {
+                if let Err(e) = Self::reset_main_to_origin(repo) {
+                    let msg = e.to_string();
+                    for &i in &groups["refs/heads/main"] {
+                        results[i] = Some(Err(LibraryError::Git(msg.clone())));
+                    }
+                    next_pending.retain(|r| r != "refs/heads/main");
+                }
+            }
+            pending = next_pending;
+        }
+
         results
             .into_iter()
             .map(|r| r.expect("every op index assigned by its group"))
             .collect()
+    }
+
+    /// Writes `per_op`'s results into `results` at `indices`, in order.
+    /// `None` (a ref resolved earlier in this same round via a different
+    /// code path — never happens today, kept for symmetry) leaves those
+    /// slots untouched.
+    fn finalize_group(
+        results: &mut [Option<WriteResult>],
+        indices: &[usize],
+        per_op: Option<Vec<WriteResult>>,
+    ) {
+        let Some(per_op) = per_op else { return };
+        for (&i, res) in indices.iter().zip(per_op) {
+            results[i] = Some(res);
+        }
+    }
+
+    /// Pushes every ref in `refnames` (as `{ref}:{ref}`, non-force) in one
+    /// `remote.push` call, returning each ref's outcome from the
+    /// `push_update_reference` callback: `None` on success, `Some(status)`
+    /// on rejection. A ref absent from the map means the transport itself
+    /// never got to negotiate it — callers treat that the same as absent
+    /// with no explicit success, i.e. not confirmed pushed.
+    fn push_refs(
+        repo: &git2::Repository,
+        token: Option<&str>,
+        refnames: &[String],
+    ) -> Result<HashMap<String, Option<String>>, LibraryError> {
+        let mut remote = repo
+            .find_remote("origin")
+            .map_err(|e| LibraryError::Git(format!("find origin: {e}")))?;
+        let outcomes = std::rc::Rc::new(std::cell::RefCell::new(HashMap::new()));
+        let outcomes_cb = std::rc::Rc::clone(&outcomes);
+        let mut cb = Self::remote_callbacks(token);
+        cb.push_update_reference(move |refname, status| {
+            outcomes_cb
+                .borrow_mut()
+                .insert(refname.to_string(), status.map(str::to_string));
+            Ok(())
+        });
+        let mut po = git2::PushOptions::new();
+        po.remote_callbacks(cb);
+        let refspecs: Vec<String> = refnames.iter().map(|r| format!("{r}:{r}")).collect();
+        remote
+            .push(&refspecs, Some(&mut po))
+            .map_err(|e| LibraryError::Git(format!("push: {e}")))?;
+        drop(remote);
+        Ok(std::rc::Rc::try_unwrap(outcomes)
+            .map(std::cell::RefCell::into_inner)
+            .unwrap_or_default())
     }
 
     fn ref_name(target_ref: Option<&str>) -> String {
@@ -1685,102 +1893,9 @@ impl GitEngine {
         }
     }
 
-    fn commit_group_then_push_blocking(
-        repo: &git2::Repository,
-        refname: &str,
-        ops: &[&BatchOp],
-        token: Option<&str>,
-    ) -> Vec<WriteResult> {
-        const MAX_ATTEMPTS: u32 = 2;
-        let update_ref = if refname == "refs/heads/main" {
-            "HEAD"
-        } else {
-            refname
-        };
-
-        let initial_oid = match Self::ref_oid(repo, refname) {
-            Ok(oid) => oid,
-            Err(e) => {
-                let msg = e.to_string();
-                return ops
-                    .iter()
-                    .map(|_| Err(LibraryError::Git(msg.clone())))
-                    .collect();
-            }
-        };
-        let mut attempt: u32 = 0;
-        loop {
-            attempt += 1;
-            let parent_oid_at_attempt_start = match Self::ref_oid(repo, refname) {
-                Ok(oid) => oid,
-                Err(e) => {
-                    let msg = e.to_string();
-                    return ops
-                        .iter()
-                        .map(|_| Err(LibraryError::Git(msg.clone())))
-                        .collect();
-                }
-            };
-            let mut current_parent_oid = parent_oid_at_attempt_start;
-            let mut per_op: Vec<WriteResult> = Vec::with_capacity(ops.len());
-            for op in ops {
-                match Self::commit_one(repo, update_ref, current_parent_oid, op) {
-                    Ok(Some(new_oid)) => {
-                        per_op.push(Ok(Some(new_oid.to_string())));
-                        current_parent_oid = new_oid;
-                    }
-                    Ok(None) => per_op.push(Ok(None)),
-                    Err(e) => per_op.push(Err(e)),
-                }
-            }
-
-            if current_parent_oid == parent_oid_at_attempt_start {
-                return per_op;
-            }
-
-            match Self::push_ref(repo, token, refname) {
-                Ok(()) => return per_op,
-                Err(e) if attempt < MAX_ATTEMPTS => {
-                    tracing::info!(
-                        error = %e, attempt, %refname,
-                        "commit_group_then_push: push failed, refetching and retrying"
-                    );
-                    if let Err(fe) = Self::fetch_origin(repo, token) {
-                        let msg = fe.to_string();
-                        return ops
-                            .iter()
-                            .map(|_| Err(LibraryError::Git(msg.clone())))
-                            .collect();
-                    }
-                    if refname == "refs/heads/main" {
-                        if let Err(re) = Self::reset_main_to_origin(repo) {
-                            let msg = re.to_string();
-                            return ops
-                                .iter()
-                                .map(|_| Err(LibraryError::Git(msg.clone())))
-                                .collect();
-                        }
-                    }
-                }
-                Err(e) => {
-                    let _ =
-                        repo.reference(refname, initial_oid, true, "rollback after push failure");
-                    let msg = format!("push failed: {e}");
-                    return per_op
-                        .into_iter()
-                        .map(|r| match r {
-                            Ok(_) => Err(LibraryError::Git(msg.clone())),
-                            Err(e) => Err(e),
-                        })
-                        .collect();
-                }
-            }
-        }
-    }
-
     /// Runs a solo ref-level op (see [`BatchOpKind::is_ref_level`]) under
     /// the write lock. Each variant does its own fetch/push instead of
-    /// going through [`Self::commit_group_then_push_blocking`].
+    /// going through [`Self::commit_groups_then_push_once_blocking`].
     fn apply_ref_level_op_blocking(
         repo: &git2::Repository,
         token: Option<&str>,
@@ -3065,6 +3180,142 @@ mod tests {
         assert!(
             branch_tree.get_path(Path::new("a.md")).is_err(),
             "branch must not see main's op"
+        );
+
+        let _ = std::fs::remove_dir_all(&origin_dir);
+        let _ = std::fs::remove_dir_all(&local_dir);
+    }
+
+    #[test]
+    fn a_rejection_on_one_ref_in_a_batch_does_not_fail_the_others() {
+        let (origin_dir, local_dir, local_repo) = origin_and_clone("multi-ref-rejection");
+        let main_oid = local_repo
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .target()
+            .unwrap();
+        local_repo
+            .reference("refs/heads/drua/clean", main_oid, false, "test create")
+            .unwrap();
+        local_repo
+            .reference("refs/heads/drua/stale", main_oid, false, "test create")
+            .unwrap();
+        GitEngine::push_ref(&local_repo, None, "refs/heads/drua/clean").unwrap();
+        GitEngine::push_ref(&local_repo, None, "refs/heads/drua/stale").unwrap();
+
+        // Advance drua/stale on origin behind this clone's back, so pushing
+        // it from `local_repo` is rejected as non-fast-forward. main and
+        // drua/clean are untouched on origin — a clean fast-forward for
+        // each once this batch commits its own op onto them.
+        let origin_repo = git2::Repository::open_bare(&origin_dir).unwrap();
+        let external_oid = commit_file(
+            &origin_repo,
+            Some(main_oid),
+            "external.md",
+            b"human",
+            "human@example.com",
+            "human push",
+        );
+        origin_repo
+            .reference(
+                "refs/heads/drua/stale",
+                external_oid,
+                true,
+                "simulate a peer's push this clone hasn't fetched",
+            )
+            .unwrap();
+
+        let op_main = BatchOp {
+            commit_message: "main: add a".into(),
+            kind: BatchOpKind::Write {
+                path: "a.md".into(),
+                content: b"a".to_vec(),
+            },
+            attribution: CommitAttribution::library_default(),
+            target_ref: None,
+        };
+        let op_clean = BatchOp {
+            commit_message: "changeset: add b".into(),
+            kind: BatchOpKind::Write {
+                path: "b.md".into(),
+                content: b"b".to_vec(),
+            },
+            attribution: CommitAttribution::library_default(),
+            target_ref: Some("refs/heads/drua/clean".into()),
+        };
+        let op_stale = BatchOp {
+            commit_message: "changeset: add c".into(),
+            kind: BatchOpKind::Write {
+                path: "c.md".into(),
+                content: b"c".to_vec(),
+            },
+            attribution: CommitAttribution::library_default(),
+            target_ref: Some("refs/heads/drua/stale".into()),
+        };
+        let mut results = GitEngine::commit_each_then_push_blocking(
+            &local_dir,
+            vec![op_main, op_clean, op_stale],
+            None,
+        );
+        let stale_oid = results
+            .remove(2)
+            .unwrap()
+            .expect("stale ref replays and lands");
+        let clean_oid = results
+            .remove(1)
+            .unwrap()
+            .expect("clean ref unaffected by the other ref's rejection");
+        let main_after_oid = results
+            .remove(0)
+            .unwrap()
+            .expect("main unaffected by the other ref's rejection");
+
+        let main_tree = origin_repo
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .peel_to_tree()
+            .unwrap();
+        assert!(main_tree.get_path(Path::new("a.md")).is_ok());
+        assert_eq!(
+            origin_repo
+                .find_reference("refs/heads/main")
+                .unwrap()
+                .target()
+                .unwrap()
+                .to_string(),
+            main_after_oid
+        );
+
+        let clean_tree = origin_repo
+            .find_reference("refs/heads/drua/clean")
+            .unwrap()
+            .peel_to_tree()
+            .unwrap();
+        assert!(clean_tree.get_path(Path::new("b.md")).is_ok());
+        assert_eq!(
+            origin_repo
+                .find_reference("refs/heads/drua/clean")
+                .unwrap()
+                .target()
+                .unwrap()
+                .to_string(),
+            clean_oid
+        );
+
+        let stale_tip = origin_repo
+            .find_reference("refs/heads/drua/stale")
+            .unwrap()
+            .target()
+            .unwrap();
+        assert_eq!(stale_tip.to_string(), stale_oid);
+        let stale_tree = origin_repo.find_commit(stale_tip).unwrap().tree().unwrap();
+        assert!(
+            stale_tree.get_path(Path::new("external.md")).is_ok(),
+            "the human's write survives the replay"
+        );
+        assert!(
+            stale_tree.get_path(Path::new("c.md")).is_ok(),
+            "this batch's write lands too, after replay"
         );
 
         let _ = std::fs::remove_dir_all(&origin_dir);
