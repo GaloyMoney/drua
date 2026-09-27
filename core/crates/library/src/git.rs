@@ -1672,24 +1672,27 @@ impl GitEngine {
     ) -> Vec<WriteResult> {
         const MAX_ATTEMPTS: u32 = 2;
 
+        let mut results: Vec<Option<WriteResult>> = (0..ops.len()).map(|_| None).collect();
         let mut initial_oid: HashMap<String, git2::Oid> = HashMap::new();
+        let mut pending: Vec<String> = Vec::new();
         for refname in order {
             match Self::ref_oid(repo, refname) {
                 Ok(oid) => {
                     initial_oid.insert(refname.clone(), oid);
+                    pending.push(refname.clone());
                 }
                 Err(e) => {
+                    // Isolated to this ref's own ops — a missing/foreign ref
+                    // (e.g. a discarded draft batched with unrelated writes
+                    // in the same 25ms window) must not fail the whole batch.
                     let msg = e.to_string();
-                    return ops
-                        .iter()
-                        .map(|_| Err(LibraryError::Git(msg.clone())))
-                        .collect();
+                    for &i in &groups[refname] {
+                        results[i] = Some(Err(LibraryError::Git(msg.clone())));
+                    }
                 }
             }
         }
 
-        let mut results: Vec<Option<WriteResult>> = (0..ops.len()).map(|_| None).collect();
-        let mut pending: Vec<String> = order.to_vec();
         let mut attempt: u32 = 0;
 
         fn update_ref_for(refname: &str) -> &str {
@@ -3323,6 +3326,56 @@ mod tests {
     }
 
     #[test]
+    fn a_missing_ref_in_a_batch_fails_only_that_refs_ops() {
+        let (origin_dir, local_dir, _local_repo) = origin_and_clone("missing-ref-batch");
+
+        let op_main = BatchOp {
+            commit_message: "main: add a".into(),
+            kind: BatchOpKind::Write {
+                path: "a.md".into(),
+                content: b"a".to_vec(),
+            },
+            attribution: CommitAttribution::library_default(),
+            target_ref: None,
+        };
+        // A discarded/never-created draft's ref, batched alongside a main
+        // write in the same 25ms window: its ops must fail in isolation.
+        let op_gone = BatchOp {
+            commit_message: "changeset: add b".into(),
+            kind: BatchOpKind::Write {
+                path: "b.md".into(),
+                content: b"b".to_vec(),
+            },
+            attribution: CommitAttribution::library_default(),
+            target_ref: Some("refs/heads/drua/never-created".into()),
+        };
+        let mut results =
+            GitEngine::commit_each_then_push_blocking(&local_dir, vec![op_main, op_gone], None);
+        let gone_result = results.remove(1);
+        let main_result = results.remove(0);
+
+        assert!(gone_result.is_err(), "the missing ref's own op fails");
+        let main_oid = main_result
+            .expect("main's op is unaffected by the other ref's failure")
+            .expect("real commit");
+
+        let origin_repo = git2::Repository::open_bare(&origin_dir).unwrap();
+        assert_eq!(
+            origin_repo
+                .find_reference("refs/heads/main")
+                .unwrap()
+                .target()
+                .unwrap()
+                .to_string(),
+            main_oid,
+            "main's write actually landed on origin"
+        );
+
+        let _ = std::fs::remove_dir_all(&origin_dir);
+        let _ = std::fs::remove_dir_all(&local_dir);
+    }
+
+    #[test]
     fn non_ff_push_to_drua_ref_replays_after_fetch() {
         let (origin_dir, local_dir, local_repo) = origin_and_clone("non-ff");
         let main_oid = local_repo
@@ -3586,7 +3639,18 @@ mod tests {
         )
         .expect("create_ref falls back to the existing origin ref instead of erroring");
 
-        assert!(local_repo.find_reference("refs/heads/drua/race").is_ok());
+        // The local ref must resolve to the peer's real oid, not the one we
+        // asked for (main_oid) — a caller trusting the requested oid instead
+        // of re-resolving would read/write against the wrong tip.
+        let resolved = local_repo
+            .find_reference("refs/heads/drua/race")
+            .unwrap()
+            .target()
+            .unwrap();
+        assert_eq!(
+            resolved, already_there,
+            "must resolve to the peer's oid, not the requested one"
+        );
 
         let _ = std::fs::remove_dir_all(&origin_dir);
         let _ = std::fs::remove_dir_all(&local_dir);

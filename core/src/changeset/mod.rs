@@ -290,7 +290,20 @@ impl Changesets {
             }
             self.library.create_ref(&cs.git_ref(), &cs.head_oid).await?;
         }
-        Ok(cs.head_oid.clone())
+        // Re-resolve rather than assuming the ref landed at cs.head_oid:
+        // create_ref's "origin already has this ref" fallback (a push
+        // rejected, then a fetch that finds it) can leave the local ref at
+        // whatever oid origin actually has, not the oid we asked for.
+        self.library
+            .resolve_ref(&cs.git_ref())
+            .await?
+            .ok_or_else(|| {
+                drua_library::LibraryError::Git(format!(
+                    "ensure_ref: {} still missing after create_ref reported success",
+                    cs.git_ref()
+                ))
+                .into()
+            })
     }
 
     pub(crate) async fn record_commit(
