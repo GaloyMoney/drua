@@ -90,7 +90,7 @@ impl TopLevelTool for Ls {
                 .space_fs
                 .view_dir_detailed(subject, &params.path)
                 .await?;
-            if let Some(entries) = space_entries {
+            if let Some((entries, _stamp)) = space_entries {
                 let filtered = filter_ignored_detailed(entries, &params.ignore);
                 let (entries, text, details) = render_detailed(filtered);
                 let out = EntriesOutput { entries, details };
@@ -103,7 +103,7 @@ impl TopLevelTool for Ls {
 
         let space_entries = self.space_fs.view_dir(subject, &params.path).await?;
 
-        if let Some(entries) = space_entries {
+        if let Some((entries, _stamp)) = space_entries {
             let filtered = filter_ignored(entries, &params.ignore);
             let text = filtered.join("\n");
             let out = EntriesOutput {

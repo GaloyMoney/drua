@@ -180,16 +180,6 @@ impl SpaceFs {
         Ok(Some(bytes))
     }
 
-    pub async fn resolved_stamp(
-        &self,
-        sub: &AuthSubject,
-        path: &str,
-        write: bool,
-    ) -> Result<Option<String>, ProjectError> {
-        let intent = if write { Intent::Write } else { Intent::Read };
-        Ok(self.resolve(sub, path, intent).await?.map(|r| r.stamp))
-    }
-
     pub fn is_space_path(path: &str) -> bool {
         let rest = path
             .strip_prefix("space:")
@@ -326,13 +316,17 @@ impl SpaceFs {
     /// from the bare clone via libgit2, no on-disk materialisation.
     /// Applies the model-facing `MAX_VIEW_FILE_BYTES` cap; use
     /// [`Self::view_file_with_cap`] to lift it.
+    ///
+    /// Returns the stamp alongside the view — both come from the same
+    /// `resolve` call, so a caller never needs a second resolve just to
+    /// render it.
     #[instrument(name = "library.space_fs.view_file", skip(self, sub))]
     pub async fn view_file(
         &self,
         sub: &AuthSubject,
         path: &str,
         view_range: Option<(i64, i64)>,
-    ) -> Result<Option<FileView>, ProjectError> {
+    ) -> Result<Option<(FileView, String)>, ProjectError> {
         self.view_file_with_cap(sub, path, view_range, Some(MAX_VIEW_FILE_BYTES))
             .await
     }
@@ -348,7 +342,7 @@ impl SpaceFs {
         path: &str,
         view_range: Option<(i64, i64)>,
         cap: Option<usize>,
-    ) -> Result<Option<FileView>, ProjectError> {
+    ) -> Result<Option<(FileView, String)>, ProjectError> {
         let Some(resolved) = self.resolve(sub, path, Intent::Read).await? else {
             return Ok(None);
         };
@@ -361,7 +355,7 @@ impl SpaceFs {
             .await
             .map_err(|e| -> ProjectError { e.into() })?
         {
-            return Ok(Some(FileView::Dir(format_dir(entries))));
+            return Ok(Some((FileView::Dir(format_dir(entries)), resolved.stamp)));
         }
 
         let bytes = self
@@ -371,7 +365,8 @@ impl SpaceFs {
             .map_err(|e| -> ProjectError { e.into() })?
             .ok_or_else(|| io_err(format!("no such file: {}", resolved.rel_path)))?;
         let content = text_from_bytes(bytes, cap)?;
-        Ok(Some(FileView::File(apply_view_range(&content, view_range))))
+        let view = FileView::File(apply_view_range(&content, view_range));
+        Ok(Some((view, resolved.stamp)))
     }
 
     /// Bare `space:` returns mounted-space slugs (see `list_mounted_spaces`).
@@ -381,9 +376,11 @@ impl SpaceFs {
         &self,
         sub: &AuthSubject,
         path: &str,
-    ) -> Result<Option<Vec<String>>, ProjectError> {
+    ) -> Result<Option<(Vec<String>, String)>, ProjectError> {
         if is_bare_space_path(path) {
-            return Ok(Some(self.list_mounted_spaces(sub).await?));
+            // No single space/draft to stamp — the bare listing spans
+            // every mounted space.
+            return Ok(Some((self.list_mounted_spaces(sub).await?, String::new())));
         }
         let Some(resolved) = self.resolve(sub, path, Intent::Read).await? else {
             return Ok(None);
@@ -394,7 +391,7 @@ impl SpaceFs {
             .await
             .map_err(|e| -> ProjectError { e.into() })?
             .unwrap_or_default();
-        Ok(Some(format_dir(entries)))
+        Ok(Some((format_dir(entries), resolved.stamp)))
     }
 
     /// `view_dir` with each file's `created`/`modified` attached. The
@@ -405,15 +402,15 @@ impl SpaceFs {
         &self,
         sub: &AuthSubject,
         path: &str,
-    ) -> Result<Option<Vec<DetailedEntry>>, ProjectError> {
+    ) -> Result<Option<(Vec<DetailedEntry>, String)>, ProjectError> {
         if is_bare_space_path(path) {
             let mounted = self.list_mounted_spaces(sub).await?;
-            return Ok(Some(
-                mounted
-                    .into_iter()
-                    .map(|entry| DetailedEntry { entry, dates: None })
-                    .collect(),
-            ));
+            let entries = mounted
+                .into_iter()
+                .map(|entry| DetailedEntry { entry, dates: None })
+                .collect();
+            // No single space/draft to stamp — see `view_dir`.
+            return Ok(Some((entries, String::new())));
         }
         let Some(resolved) = self.resolve(sub, path, Intent::Read).await? else {
             return Ok(None);
@@ -430,17 +427,14 @@ impl SpaceFs {
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
         let rel_path = resolved.rel_path;
-        Ok(Some(join_dates(
-            format_dir(entries),
-            dates.as_deref(),
-            |name| {
-                if rel_path.is_empty() {
-                    name.to_string()
-                } else {
-                    format!("{rel_path}/{name}")
-                }
-            },
-        )))
+        let joined = join_dates(format_dir(entries), dates.as_deref(), |name| {
+            if rel_path.is_empty() {
+                name.to_string()
+            } else {
+                format!("{rel_path}/{name}")
+            }
+        });
+        Ok(Some((joined, resolved.stamp)))
     }
 
     #[instrument(name = "library.space_fs.write_file", skip(self, sub, content))]
@@ -672,12 +666,13 @@ impl SpaceFs {
         sub: &AuthSubject,
         path: &str,
         pattern: &str,
-    ) -> Result<Option<Vec<String>>, ProjectError> {
+    ) -> Result<Option<(Vec<String>, String)>, ProjectError> {
         let Some(resolved) = self.resolve(sub, path, Intent::Read).await? else {
             return Ok(None);
         };
         let blobs = self.walk_search_root(&resolved).await?;
-        Ok(Some(glob_blobs(blobs, &resolved.rel_path, pattern)?))
+        let matches = glob_blobs(blobs, &resolved.rel_path, pattern)?;
+        Ok(Some((matches, resolved.stamp)))
     }
 
     /// `glob` with each match's `created`/`modified` attached. A glob
@@ -689,7 +684,7 @@ impl SpaceFs {
         sub: &AuthSubject,
         path: &str,
         pattern: &str,
-    ) -> Result<Option<Vec<DetailedEntry>>, ProjectError> {
+    ) -> Result<Option<(Vec<DetailedEntry>, String)>, ProjectError> {
         let Some(resolved) = self.resolve(sub, path, Intent::Read).await? else {
             return Ok(None);
         };
@@ -700,9 +695,8 @@ impl SpaceFs {
             .path_dates(&resolved.space.slug)
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
-        Ok(Some(join_dates(files, dates.as_deref(), |entry| {
-            entry.to_string()
-        })))
+        let joined = join_dates(files, dates.as_deref(), |entry| entry.to_string());
+        Ok(Some((joined, resolved.stamp)))
     }
 
     /// Grep walk across the space's tree. Replicates the curated subset
@@ -716,12 +710,13 @@ impl SpaceFs {
         sub: &AuthSubject,
         path: &str,
         args: &sandbox::GrepInput,
-    ) -> Result<Option<String>, ProjectError> {
+    ) -> Result<Option<(String, String)>, ProjectError> {
         let Some(resolved) = self.resolve(sub, path, Intent::Read).await? else {
             return Ok(None);
         };
         let blobs = self.walk_search_root(&resolved).await?;
-        Ok(Some(grep_blobs(blobs, &resolved.rel_path, args)?))
+        let output = grep_blobs(blobs, &resolved.rel_path, args)?;
+        Ok(Some((output, resolved.stamp)))
     }
 
     /// Blobs under an already-resolved search root. A path that names

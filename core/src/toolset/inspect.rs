@@ -103,32 +103,33 @@ pub(crate) async fn dispatch_view(
         ToolSetsError::Library(SpaceError::Io(format!("invalid space path: {space_path}")).into())
     };
 
-    let text = match op {
+    let (text, stamp) = match op {
         ReadOp::Read => {
             let view_range = parse_view_range(&op_args);
-            let view = space_fs
+            let (view, stamp) = space_fs
                 .view_file(subject, &space_path, view_range)
                 .await?
                 .ok_or_else(invalid)?;
-            match view {
+            let text = match view {
                 FileView::File(text) => text,
                 FileView::Dir(entries) => entries.join("\n"),
-            }
+            };
+            (text, stamp)
         }
         ReadOp::Ls => {
             if op_args_details(&op_args) {
-                let entries = space_fs
+                let (entries, stamp) = space_fs
                     .view_dir_detailed(subject, &space_path)
                     .await?
                     .ok_or_else(invalid)?;
                 let (_, text, _) = super::top_level::render_detailed(entries);
-                text
+                (text, stamp)
             } else {
-                let entries = space_fs
+                let (entries, stamp) = space_fs
                     .view_dir(subject, &space_path)
                     .await?
                     .ok_or_else(invalid)?;
-                entries.join("\n")
+                (entries.join("\n"), stamp)
             }
         }
         ReadOp::Glob => {
@@ -137,18 +138,18 @@ pub(crate) async fn dispatch_view(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolSetsError::MissingArgument("pattern".to_string()))?;
             if op_args_details(&op_args) {
-                let entries = space_fs
+                let (entries, stamp) = space_fs
                     .glob_detailed(subject, &space_path, pattern)
                     .await?
                     .ok_or_else(invalid)?;
                 let (_, text, _) = super::top_level::render_detailed(entries);
-                text
+                (text, stamp)
             } else {
-                let matches = space_fs
+                let (matches, stamp) = space_fs
                     .glob(subject, &space_path, pattern)
                     .await?
                     .ok_or_else(invalid)?;
-                matches.join("\n")
+                (matches.join("\n"), stamp)
             }
         }
         ReadOp::Grep => {
@@ -162,21 +163,9 @@ pub(crate) async fn dispatch_view(
         }
     };
 
-    Ok(CallToolResult::success(vec![Content::text(
-        stamped_read(space_fs, subject, &space_path, text).await,
-    )]))
-}
-
-async fn stamped_read(
-    space_fs: &SpaceFs,
-    subject: &AuthSubject,
-    space_path: &str,
-    text: String,
-) -> String {
-    match space_fs.resolved_stamp(subject, space_path, false).await {
-        Ok(Some(stamp)) => format!("{stamp}\n{text}"),
-        _ => text,
-    }
+    Ok(CallToolResult::success(vec![Content::text(format!(
+        "{stamp}\n{text}"
+    ))]))
 }
 
 /// Runs an `EditOp` against the relevant `space:<slug>/...` path(s).

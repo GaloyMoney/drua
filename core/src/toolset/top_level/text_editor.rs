@@ -77,7 +77,7 @@ impl TextEditor {
                             .view_file_with_cap(subject, &path, range, None)
                             .await?
                     };
-                    viewed.map(|view| render_view(view, for_model, view_range))
+                    viewed.map(|(view, _stamp)| render_view(view, for_model, view_range))
                 }
                 TextEditorAction::Create { path, file_text } => self
                     .space_fs

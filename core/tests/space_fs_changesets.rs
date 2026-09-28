@@ -565,7 +565,7 @@ async fn workflow_run_subject_overlays_its_run_draft() {
         .expect("a.md exists on main");
     assert_eq!(main, b"main content\n");
 
-    let read = fs
+    let (read, _stamp) = fs
         .view_file(&run_sub, "space:docs/a.md", None)
         .await
         .expect("view_file dispatch")
@@ -577,7 +577,7 @@ async fn workflow_run_subject_overlays_its_run_draft() {
         drua_core::space_fs::FileView::Dir(_) => panic!("expected a file"),
     }
 
-    let read = fs
+    let (read, _stamp) = fs
         .view_file(&run_sub, "draft:docs/a.md", None)
         .await
         .expect("view_file dispatch")
@@ -955,7 +955,8 @@ async fn glob_and_grep_match_relative_to_the_anchored_path() {
     let from_run_root = fs
         .glob(&run_sub, "space:docs/runs/r1", "draft/*--*.json")
         .await
-        .expect("glob dispatch");
+        .expect("glob dispatch")
+        .map(|(matches, _stamp)| matches);
     assert_eq!(
         from_run_root,
         Some(vec!["runs/r1/draft/a--b.json".to_string()])
@@ -964,7 +965,8 @@ async fn glob_and_grep_match_relative_to_the_anchored_path() {
     let from_space_root = fs
         .glob(&run_sub, "space:docs", "runs/r1/draft/*--*.json")
         .await
-        .expect("glob dispatch");
+        .expect("glob dispatch")
+        .map(|(matches, _stamp)| matches);
     assert_eq!(
         from_space_root,
         Some(vec!["runs/r1/draft/a--b.json".to_string()])
@@ -976,7 +978,8 @@ async fn glob_and_grep_match_relative_to_the_anchored_path() {
     let from_main = fs
         .glob(&user, "space:docs", "runs/r1/draft/*--*.json")
         .await
-        .expect("glob dispatch");
+        .expect("glob dispatch")
+        .map(|(matches, _stamp)| matches);
     assert_eq!(from_main, Some(Vec::new()));
 }
 
@@ -1028,10 +1031,10 @@ async fn interactive_agents_are_read_only() {
         "a refused write must not touch main"
     );
 
-    let stamp = fs
-        .resolved_stamp(&member, "space:docs/a.md", false)
+    let (_, stamp) = fs
+        .view_file(&member, "space:docs/a.md", None)
         .await
-        .expect("resolved_stamp")
+        .expect("view_file dispatch")
         .expect("space path");
     assert_eq!(stamp, "[space:docs · main]");
 
@@ -1074,7 +1077,7 @@ async fn space_read_with_no_open_draft_falls_back_to_main() {
     let agent = project_with_space(&app, &user, "proj-read-fallback", "docs").await;
     let fs = space_fs(&app);
 
-    let view = fs
+    let (view, _stamp) = fs
         .view_file(&agent, "space:docs/a.md", None)
         .await
         .expect("view_file dispatch")
@@ -1102,26 +1105,26 @@ async fn stamp_formats_match_the_documented_forms() {
     let member = project_with_space(&app, &user, "proj-stamp", "docs").await;
     let fs = space_fs(&app);
 
-    let member_stamp = fs
-        .resolved_stamp(&member, "space:docs/a.md", false)
+    let (_, member_stamp) = fs
+        .view_file(&member, "space:docs/a.md", None)
         .await
-        .expect("resolved_stamp")
+        .expect("view_file dispatch")
         .expect("space path");
     assert_eq!(member_stamp, "[space:docs · main]");
 
-    let no_draft_stamp = fs
-        .resolved_stamp(&user, "draft:docs/a.md", false)
+    let (_, no_draft_stamp) = fs
+        .view_file(&user, "draft:docs/a.md", None)
         .await
-        .expect("resolved_stamp")
+        .expect("view_file dispatch")
         .expect("space path");
     assert_eq!(no_draft_stamp, "[draft:docs · no draft]");
 
+    // The draft is created by this very write, so the write's own
+    // returned stamp *is* the "started" stamp — `stamp_after_write`
+    // keeps the pre-write render for a draft's first commit instead of
+    // refreshing it into a touched-file count.
     let started_stamp = fs
-        .resolved_stamp(&user, "draft:docs/a.md", true)
-        .await
-        .expect("resolved_stamp")
-        .expect("space path");
-    fs.write_file(&user, "draft:docs/a.md", "staged\n".into())
+        .write_file(&user, "draft:docs/a.md", "staged\n".into())
         .await
         .expect("write_file dispatch")
         .expect("space path");
@@ -1140,10 +1143,10 @@ async fn stamp_formats_match_the_documented_forms() {
         )
     );
 
-    let draft_scheme_stamp = fs
-        .resolved_stamp(&user, "draft:docs/a.md", false)
+    let (_, draft_scheme_stamp) = fs
+        .view_file(&user, "draft:docs/a.md", None)
         .await
-        .expect("resolved_stamp")
+        .expect("view_file dispatch")
         .expect("space path");
     assert_eq!(
         draft_scheme_stamp,
@@ -1153,10 +1156,10 @@ async fn stamp_formats_match_the_documented_forms() {
         )
     );
 
-    let differs_stamp = fs
-        .resolved_stamp(&user, "space:docs/a.md", false)
+    let (_, differs_stamp) = fs
+        .view_file(&user, "space:docs/a.md", None)
         .await
-        .expect("resolved_stamp")
+        .expect("view_file dispatch")
         .expect("space path");
     assert_eq!(
         differs_stamp,
@@ -1164,10 +1167,10 @@ async fn stamp_formats_match_the_documented_forms() {
     );
 
     let explicit_path = format!("space:docs@{}/a.md", draft.id);
-    let explicit_stamp = fs
-        .resolved_stamp(&user, &explicit_path, false)
+    let (_, explicit_stamp) = fs
+        .view_file(&user, &explicit_path, None)
         .await
-        .expect("resolved_stamp")
+        .expect("view_file dispatch")
         .expect("space path");
     assert_eq!(
         explicit_stamp,
