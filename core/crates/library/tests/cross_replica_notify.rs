@@ -8,8 +8,9 @@ use drua_library::{CommitAttribution, Library, LibraryConfig};
 
 const PG_CON: &str = "postgres://user:password@localhost:5432/drua";
 
-/// Ticker effectively disabled: convergence can only come from the
-/// cross-replica `library_head_changed` PG NOTIFY wake-up.
+/// Ticker effectively disabled: background convergence can only come from the
+/// cross-replica `library_head_changed` PG NOTIFY wake-up. Correct reads must
+/// not depend on either mechanism being scheduled before the request arrives.
 const FETCH_INTERVAL_MS: u64 = 3_600_000;
 
 async fn pool() -> sqlx::PgPool {
@@ -50,6 +51,51 @@ async fn init_replica(
 
 #[tokio::test]
 #[ignore = "requires postgres + writes to tests/.library; run with --ignored"]
+async fn acknowledged_write_is_immediately_visible_on_peer() {
+    let test_name = "acknowledged_write_is_immediately_visible_on_peer";
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter("drua_library=debug,info")
+        .try_init();
+    let fixture = TestRepo::init(&[("README.md", "init\n")]);
+    let pool = pool().await;
+    reset_library_db_state(&pool).await;
+
+    // B has no job poller and the ticker is effectively disabled. The read
+    // happens immediately after A's write future resolves: no sleep, retry,
+    // polling loop, or waiting for the NOTIFY-driven fetcher is allowed.
+    let repo_url = fixture.path().to_string_lossy().to_string();
+    let (replica_a, _jobs_a) = init_replica(test_name, "a", &repo_url, &pool, true).await;
+    let (replica_b, _jobs_b) = init_replica(test_name, "b", &repo_url, &pool, false).await;
+
+    let slug = "read-your-write";
+    replica_a
+        .spaces()
+        .create(slug.into(), None, CommitAttribution::library_default())
+        .await
+        .expect("create space");
+    replica_a
+        .spaces()
+        .write_file(
+            slug,
+            "doc.md",
+            "alpha bravo\n".into(),
+            CommitAttribution::library_default(),
+        )
+        .await
+        .expect("write ack");
+
+    let content = replica_b
+        .spaces()
+        .read_file(slug, "doc.md")
+        .await
+        .expect("peer read")
+        .expect("written file must exist immediately after write ack");
+
+    assert_eq!(content, b"alpha bravo\n");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres + writes to tests/.library; run with --ignored"]
 async fn write_on_one_replica_is_visible_on_peer_without_ticker() {
     let test_name = "write_on_one_replica_is_visible_on_peer_without_ticker";
     let _ = tracing_subscriber::fmt()
@@ -59,9 +105,9 @@ async fn write_on_one_replica_is_visible_on_peer_without_ticker() {
     let pool = pool().await;
     reset_library_db_state(&pool).await;
 
-    // Only replica A polls jobs, so A is guaranteed to execute the
-    // library.write job; B has no poller and a disabled ticker, so it
-    // can only converge via the `library_head_changed` PG NOTIFY.
+    // This retains the original liveness assertion independently of the
+    // stronger request-time read barrier above: NOTIFY should still make a
+    // passive replica converge even when no read forces a refresh.
     let repo_url = fixture.path().to_string_lossy().to_string();
     let (replica_a, _jobs_a) = init_replica(test_name, "a", &repo_url, &pool, true).await;
     let (replica_b, _jobs_b) = init_replica(test_name, "b", &repo_url, &pool, false).await;
