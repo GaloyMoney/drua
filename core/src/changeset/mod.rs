@@ -738,6 +738,13 @@ impl Changesets {
             self.library.fetch_and_head().await?;
             ref_oid = self.library.resolve_ref(&cs.git_ref()).await?;
             if ref_oid.is_none() {
+                if poll_owns_missing_ref(self.library.github_app().is_some(), cs.pr_number) {
+                    // The PR poll reads GitHub directly and will mark this
+                    // Rejected (or Merged, for a squash/rebase merge) on its
+                    // own schedule. Racing it here with a git-only guess
+                    // risks Abandoned winning over the correct outcome.
+                    return Ok(());
+                }
                 self.mark_abandoned_in_op(cs.id).await?;
                 return Ok(());
             }
@@ -1020,6 +1027,16 @@ impl Changesets {
 /// treated as "can't confirm a genuine advance", which is the safe
 /// default: recording a falsely-advanced `tip` would move Postgres's
 /// `head_oid` backwards.
+/// Whether a missing changeset ref should be left for the PR poll to
+/// resolve (via [`Changesets::reconcile_pr_state`]) rather than guessed
+/// at here as Abandoned. True only when both a GitHub App is configured
+/// and this changeset actually has a PR to poll — otherwise (e.g. a
+/// `file://` remote in tests) the git-only guess is the only signal
+/// available and must run as before.
+fn poll_owns_missing_ref(has_github_app: bool, pr_number: Option<u64>) -> bool {
+    has_github_app && pr_number.is_some()
+}
+
 fn is_genuine_advance(
     merge_base: &Result<Option<String>, drua_library::LibraryError>,
     tip: &str,
@@ -1128,6 +1145,14 @@ mod tests {
         let cs = Changeset::try_from_events(new.into_events()).unwrap();
         let out = append_pr_trailers("body", &cs);
         assert!(out.contains(&format!("Drua-Acting-User: {user_id}")));
+    }
+
+    #[test]
+    fn poll_owns_missing_ref_only_when_github_app_and_pr_number_both_present() {
+        assert!(poll_owns_missing_ref(true, Some(1)));
+        assert!(!poll_owns_missing_ref(true, None));
+        assert!(!poll_owns_missing_ref(false, Some(1)));
+        assert!(!poll_owns_missing_ref(false, None));
     }
 
     #[test]
