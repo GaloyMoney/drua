@@ -58,6 +58,55 @@ async fn build_stack(
     AuthSubject,
     mpsc::Receiver<PromptRequest>,
 ) {
+    build_stack_inner(pool, chain, breaker, None).await
+}
+
+/// Same as [`build_stack`], but wires a real `Audit` into the toolset so
+/// tool-call dispatch records rows to `audit_entries` — needed to assert
+/// on the audit row a step agent's tool call produces.
+async fn build_stack_with_audit(
+    pool: &sqlx::PgPool,
+    chain: ModelChain,
+    breaker: BreakerConfig,
+) -> (
+    Executor,
+    WorkflowDefinitionRepo,
+    WorkflowRunRepo,
+    Arc<Skills>,
+    ProjectId,
+    AuthSubject,
+    mpsc::Receiver<PromptRequest>,
+    Arc<drua_core::audit::Audit>,
+) {
+    let audit = Arc::new(drua_core::audit::Audit::new(pool));
+    let (executor, definitions, runs, skills, project_id, sub, prompt_rx) =
+        build_stack_inner(pool, chain, breaker, Some(Arc::clone(&audit))).await;
+    (
+        executor,
+        definitions,
+        runs,
+        skills,
+        project_id,
+        sub,
+        prompt_rx,
+        audit,
+    )
+}
+
+async fn build_stack_inner(
+    pool: &sqlx::PgPool,
+    chain: ModelChain,
+    breaker: BreakerConfig,
+    audit: Option<Arc<drua_core::audit::Audit>>,
+) -> (
+    Executor,
+    WorkflowDefinitionRepo,
+    WorkflowRunRepo,
+    Arc<Skills>,
+    ProjectId,
+    AuthSubject,
+    mpsc::Receiver<PromptRequest>,
+) {
     let (prompt_tx, prompt_rx) = mpsc::channel::<PromptRequest>(64);
 
     let mut builtin_roles = HashMap::new();
@@ -104,7 +153,7 @@ async fn build_stack(
     };
 
     let toolsets = Arc::new(
-        ToolSets::init(ToolSetsConfig::default(), None, None, None)
+        ToolSets::init(ToolSetsConfig::default(), audit, None, None)
             .await
             .expect("init toolsets"),
     );
@@ -360,6 +409,97 @@ async fn run_agent_step_prompt_carries_run_context() {
     assert_eq!(
         run.step_results[0].output,
         Some(serde_json::json!({"success": true, "output": "hi"}))
+    );
+}
+
+/// Handoff §3.2: a tool call made by a workflow step agent must be
+/// stamped with `workflow_run_id` and `resource_ids.workflow_step`, not
+/// just the entries the executor itself writes. `submit_output` is
+/// dispatched through the same `fan_out_tool_calls` -> `call_top_level_tool`
+/// path as any other agent tool call, so it doubles as the tool call
+/// under test here.
+///
+/// Demonstrated RED against the pre-fix `drive_session_loop`: its
+/// `tokio::spawn` started the tool-dispatch task with a fresh, empty
+/// `EventContext` (task-locals never cross an un-wrapped `tokio::spawn`
+/// boundary), so `workflow_run_id` / `workflow_step` — recorded by
+/// `Executor::run` and `send_message_with_choice` on the CALLING task —
+/// were invisible to `call_top_level_instance`'s audit context. The
+/// query below returned zero rows.
+#[tokio::test]
+async fn agent_step_tool_call_is_stamped_with_run_and_step() {
+    let pool = pool().await;
+    let primary = "claude-haiku-4-5-20251001".to_string();
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx, audit) =
+        build_stack_with_audit(
+            &pool,
+            ModelChain::new(primary.clone()),
+            BreakerConfig::default(),
+        )
+        .await;
+
+    let (run_id, _) = seed_one_step_run(
+        &skills,
+        &definitions,
+        &runs,
+        &sub,
+        project_id,
+        ModelChain::new(primary),
+        "Say hi.",
+    )
+    .await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move { executor.run(run_id, cancel).await });
+
+    let request = recv_prompt(&mut prompt_rx, "first prompt request").await;
+    request
+        .response_channel
+        .send(Ok(PromptResult::Complete(submit_output_response(
+            "tu_1",
+            serde_json::json!({"success": true, "output": "hi"}),
+        ))))
+        .expect("send response");
+
+    handle.await.expect("join").expect("run succeeds");
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(run.state, WorkflowRunState::Succeeded);
+
+    // `Audit::record_from_context` persists fire-and-forget (a detached
+    // `tokio::spawn`), so poll briefly rather than assuming the row has
+    // landed the instant the run future resolves.
+    let query = drua_core::audit::primitives::AuditLogQuery {
+        workflow_run_id: Some(run_id),
+        workflow_step: Some("step".to_string()),
+        entrypoint: Some("mcp: submit_output".to_string()),
+        limit: 10,
+        ..Default::default()
+    };
+    let entries = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let entries = audit.find(&query).await.expect("query audit_entries");
+            if !entries.is_empty() {
+                return entries;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for the submit_output audit row");
+
+    assert_eq!(
+        entries.len(),
+        1,
+        "exactly one submit_output tool call: {entries:?}"
+    );
+    let entry = &entries[0];
+    assert_eq!(entry.workflow_run_id, Some(run_id));
+    assert_eq!(
+        entry.resource_id("workflow_step"),
+        Some("step"),
+        "resource_ids: {:?}",
+        entry.resource_ids
     );
 }
 

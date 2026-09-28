@@ -250,7 +250,6 @@ impl Executor {
 
         for step in &steps {
             let step_name = step.name().to_string();
-            crate::audit::Audit::record_workflow_step(&step_name);
 
             if run.step_already_terminal(&step_name) {
                 continue;
@@ -771,6 +770,13 @@ impl Executor {
         borrowed_preexisting: &mut HashSet<SandboxId>,
         definition: &super::entity::WorkflowDefinition,
     ) -> Result<serde_json::Value, WorkflowError> {
+        // Recorded here rather than by the caller: this call runs inside
+        // the `.with_event_context(step_context)` scope the caller wraps
+        // this future in, which is what makes the write actually persist
+        // in the ambient `EventContext` for everything downstream (tool
+        // calls included) to see. A bare call on the caller's own
+        // unwrapped context is thrown away the instant it returns.
+        crate::audit::Audit::record_workflow_step(step.name());
         match step {
             WorkflowStepDef::AgentStep {
                 name,
