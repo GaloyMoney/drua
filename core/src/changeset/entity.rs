@@ -169,20 +169,12 @@ pub struct Changeset {
 }
 
 impl Changeset {
-    pub fn branch_for(id: ChangesetId) -> String {
-        format!("drua/{id}")
-    }
-
-    pub fn git_ref_for(id: ChangesetId) -> String {
-        format!("refs/heads/{}", Self::branch_for(id))
+    pub fn draft_name(&self) -> drua_library::DraftName {
+        drua_library::DraftName::from(uuid::Uuid::from(self.id))
     }
 
     pub fn branch(&self) -> String {
-        Self::branch_for(self.id)
-    }
-
-    pub fn git_ref(&self) -> String {
-        Self::git_ref_for(self.id)
+        self.draft_name().branch()
     }
 
     pub fn is_open(&self) -> bool {
@@ -936,7 +928,7 @@ mod tests {
     fn git_ref_and_branch_are_id_scoped() {
         let cs = open_changeset();
         assert_eq!(cs.branch(), format!("drua/{}", cs.id));
-        assert_eq!(cs.git_ref(), format!("refs/heads/drua/{}", cs.id));
+        assert_eq!(cs.draft_name().uuid(), uuid::Uuid::from(cs.id));
     }
 
     #[test]

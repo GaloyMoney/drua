@@ -43,8 +43,6 @@ pub enum ChangesetError {
     },
     #[error("ChangesetError - UnsupportedActor: subject cannot open or act on a changeset")]
     UnsupportedActor,
-    #[error("ChangesetError - MainUnborn: library repo has no commits on main yet")]
-    MainUnborn,
     #[error("ChangesetError - Foreign: changeset {id} belongs to another project")]
     Foreign { id: ChangesetId },
     #[error("ChangesetError - Authorization: {0}")]

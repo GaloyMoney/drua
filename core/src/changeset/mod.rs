@@ -12,11 +12,13 @@ pub use entity::*;
 pub use error::ChangesetError;
 use repo::ChangesetRepo;
 
+use drua_library::{ApplyOutcome, DraftObservation, Mergeability, RebaseOutcome};
+
 use crate::agent::repo::AgentRepo;
 use crate::audit::Audit;
 use crate::auth::error::AuthorizationError;
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
-use crate::github_app::PullRequest;
+use crate::github_app::{GitHubAppTokenProvider, PullRequest};
 use crate::primitives::*;
 
 /// Cap on [`Changesets::touched_cache`]'s size. Entries are keyed by a
@@ -24,9 +26,6 @@ use crate::primitives::*;
 /// bounds memory — an arbitrary entry is dropped rather than the truly
 /// least-recently-used one.
 const TOUCHED_CACHE_CAP: usize = 1024;
-
-/// Prefix of every changeset draft ref, matching [`Changeset::git_ref_for`].
-const DRUA_REF_PREFIX: &str = "refs/heads/drua/";
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct ChangesetConfig {
@@ -108,8 +107,10 @@ type TouchedCacheKey = (String, String);
 pub struct Changesets {
     repo: ChangesetRepo,
     agents: AgentRepo,
-    library: drua_library::Library,
+    drafts: drua_library::Drafts,
     users: crate::user::Users,
+    github: Option<Arc<GitHubAppTokenProvider>>,
+    repo_coord: Option<(String, String)>,
     /// `(base_oid, head_oid) -> touched files`, so `changeset_target`
     /// (called on every draft read and write to render the touched-file
     /// count in the stamp) doesn't re-diff an unchanged draft each time.
@@ -122,12 +123,16 @@ impl Changesets {
         agents: &AgentRepo,
         library: &drua_library::Library,
         users: &crate::user::Users,
+        github: Option<Arc<GitHubAppTokenProvider>>,
+        repo_coord: Option<(String, String)>,
     ) -> Self {
         Self {
             repo: ChangesetRepo::new(pool),
             agents: agents.clone(),
-            library: library.clone(),
+            drafts: library.drafts().clone(),
             users: users.clone(),
+            github,
+            repo_coord,
             touched_cache: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -204,11 +209,7 @@ impl Changesets {
         }
 
         let project_id = sub.effective_project_id();
-        let base_oid = self
-            .library
-            .fetch_and_head()
-            .await?
-            .ok_or(ChangesetError::MainUnborn)?;
+        let base_oid = self.drafts.fresh_base().await?;
         let title = match title {
             Some(t) => t,
             None => self.derive_draft_title(actor, first_touched_path).await,
@@ -240,15 +241,11 @@ impl Changesets {
         };
         op.commit().await?;
 
-        if let Err(e) = self
-            .library
-            .create_ref(&changeset.git_ref(), &base_oid)
-            .await
-        {
+        if let Err(e) = self.drafts.open(changeset.draft_name(), &base_oid).await {
             tracing::warn!(
                 error = %e,
                 changeset_id = %changeset.id,
-                "changeset.draft_for: create_ref failed; ensure_ref will repair it on first use"
+                "changeset.draft_for: open failed; ensure_ref will repair it on first use"
             );
         }
 
@@ -298,14 +295,7 @@ impl Changesets {
         &self,
         cs: &Changeset,
     ) -> Result<drua_library::DraftHandle, ChangesetError> {
-        Ok(self
-            .library
-            .drafts()
-            .handle(
-                drua_library::DraftName::from(uuid::Uuid::from(cs.id)),
-                &cs.head_oid,
-            )
-            .await?)
+        Ok(self.drafts.handle(cs.draft_name(), &cs.head_oid).await?)
     }
 
     pub(crate) async fn record_commit(
@@ -402,19 +392,12 @@ impl Changesets {
         let cs = self.repo.find_by_id(id).await?;
         self.check_same_project(sub, &cs)?;
 
-        let main_oid = self
-            .library
-            .resolve_ref("refs/heads/main")
-            .await?
-            .ok_or(ChangesetError::MainUnborn)?;
-        let (mergeable, conflicts) = match self
-            .library
-            .merge_trees(&cs.base_oid, &cs.head_oid, &main_oid)
-            .await?
-        {
-            Ok(_) => (true, Vec::new()),
-            Err(paths) => (false, paths),
-        };
+        let main_oid = self.drafts.current_main().await?;
+        let (mergeable, conflicts) =
+            match self.drafts.mergeability(&cs.base_oid, &cs.head_oid).await? {
+                Mergeability::Clean => (true, Vec::new()),
+                Mergeability::Conflicts(paths) => (false, paths),
+            };
         let touched = self.touched_files(&cs).await?;
 
         Ok(ChangesetStatusView {
@@ -449,7 +432,7 @@ impl Changesets {
         }
         op.commit().await?;
 
-        if let Err(e) = self.library.delete_ref(&cs.git_ref(), true).await {
+        if let Err(e) = self.drafts.close(cs.draft_name()).await {
             tracing::warn!(
                 error = %e,
                 changeset_id = %id,
@@ -485,27 +468,16 @@ impl Changesets {
             return Err(ChangesetError::Empty { id });
         }
 
-        let main_oid = self
-            .library
-            .resolve_ref("refs/heads/main")
-            .await?
-            .ok_or(ChangesetError::MainUnborn)?;
-        if let Err(paths) = self
-            .library
-            .merge_trees(&cs.base_oid, &cs.head_oid, &main_oid)
-            .await?
-        {
-            return Err(ChangesetError::Conflicts { id, paths });
+        match self.drafts.mergeability(&cs.base_oid, &cs.head_oid).await? {
+            Mergeability::Clean => {}
+            Mergeability::Conflicts(paths) => return Err(ChangesetError::Conflicts { id, paths }),
         }
 
         let (owner, repo) = self
-            .library
-            .repo_coord()
+            .repo_coord
+            .clone()
             .ok_or(ChangesetError::PrUnavailable)?;
-        let github = self
-            .library
-            .github_app()
-            .ok_or(ChangesetError::PrUnavailable)?;
+        let github = self.github.as_ref().ok_or(ChangesetError::PrUnavailable)?;
         let full_body = append_pr_trailers(&body, &cs);
         let pr = github
             .create_pull(&owner, &repo, &cs.branch(), "main", &title, &full_body)
@@ -551,19 +523,6 @@ impl Changesets {
             return Err(ChangesetError::Empty { id });
         }
 
-        let main_oid = self
-            .library
-            .resolve_ref("refs/heads/main")
-            .await?
-            .ok_or(ChangesetError::MainUnborn)?;
-        if let Err(paths) = self
-            .library
-            .merge_trees(&cs.base_oid, &cs.head_oid, &main_oid)
-            .await?
-        {
-            return Err(ChangesetError::Conflicts { id, paths });
-        }
-
         let actor = actor_for_subject(sub)?;
         let attribution = self.users.commit_attribution().await;
         let message = format!(
@@ -575,10 +534,14 @@ impl Changesets {
                 .or_else(|| cs.description.clone())
                 .unwrap_or_default(),
         );
-        let merge_oid = self
-            .library
-            .merge_into_main(&cs.head_oid, message, attribution)
-            .await?;
+        let merge_oid = match self
+            .drafts
+            .apply(&cs.head_oid, message, attribution)
+            .await?
+        {
+            ApplyOutcome::Merged { merge_oid } => merge_oid,
+            ApplyOutcome::Conflicts(paths) => return Err(ChangesetError::Conflicts { id, paths }),
+        };
 
         let pr_number = cs.pr_number;
         if cs
@@ -589,11 +552,9 @@ impl Changesets {
         }
         op.commit().await?;
 
-        if let (Some(pr_number), Some(github), Some((owner, repo))) = (
-            pr_number,
-            self.library.github_app(),
-            self.library.repo_coord(),
-        ) {
+        if let (Some(pr_number), Some(github), Some((owner, repo))) =
+            (pr_number, self.github.as_ref(), self.repo_coord.clone())
+        {
             if let Err(e) = github
                 .close_pull(
                     &owner,
@@ -610,7 +571,7 @@ impl Changesets {
                 );
             }
         }
-        if let Err(e) = self.library.delete_ref(&cs.git_ref(), true).await {
+        if let Err(e) = self.drafts.close(cs.draft_name()).await {
             tracing::warn!(
                 error = %e,
                 changeset_id = %id,
@@ -640,20 +601,15 @@ impl Changesets {
             });
         }
 
-        let main_oid = self
-            .library
-            .resolve_ref("refs/heads/main")
-            .await?
-            .ok_or(ChangesetError::MainUnborn)?;
         let attribution = self.users.commit_attribution().await;
         let message = format!("changeset: {} (rebased)", cs.title);
         match self
-            .library
-            .rebase_ref(&cs.git_ref(), &main_oid, &cs.head_oid, message, attribution)
+            .drafts
+            .rebase(cs.draft_name(), &cs.head_oid, message, attribution)
             .await?
         {
-            Ok((new_base, new_head)) => {
-                if cs.rebase(new_base, new_head)?.did_execute() {
+            RebaseOutcome::Rebased { base_oid, head_oid } => {
+                if cs.rebase(base_oid, head_oid)?.did_execute() {
                     self.repo.update_in_op(&mut op, &mut cs).await?;
                 }
                 op.commit().await?;
@@ -661,7 +617,7 @@ impl Changesets {
                 Audit::record_changeset_id(id);
                 Ok(cs)
             }
-            Err(paths) => Err(ChangesetError::Conflicts { id, paths }),
+            RebaseOutcome::Conflicts(paths) => Err(ChangesetError::Conflicts { id, paths }),
         }
     }
 
@@ -702,62 +658,29 @@ impl Changesets {
         main_oid: &str,
         status: ChangesetStatus,
     ) -> Result<(), ChangesetError> {
-        if cs.head_oid != cs.base_oid {
-            if let Some(base) = self.library.merge_base(main_oid, &cs.head_oid).await? {
-                if base == cs.head_oid {
-                    self.mark_merged_in_op(cs.id, main_oid).await?;
-                    return Ok(());
-                }
+        match self
+            .drafts
+            .observe(cs.draft_name(), &cs.base_oid, &cs.head_oid, main_oid)
+            .await?
+        {
+            DraftObservation::MergedInto { main_oid } => {
+                self.mark_merged_in_op(cs.id, &main_oid).await
             }
-        }
-
-        let mut ref_oid = self.library.resolve_ref(&cs.git_ref()).await?;
-        if status == ChangesetStatus::Submitted && ref_oid.is_none() {
-            // Missing locally can just mean "not fetched yet" — the ref may
-            // have been pushed (e.g. by `submit`) after this tick's read of
-            // Postgres. Confirm against origin before abandoning.
-            self.library.fetch_and_head().await?;
-            ref_oid = self.library.resolve_ref(&cs.git_ref()).await?;
-            if ref_oid.is_none() {
-                if poll_owns_missing_ref(self.library.github_app().is_some(), cs.pr_number) {
-                    // The PR poll reads GitHub directly and will mark this
-                    // Rejected (or Merged, for a squash/rebase merge) on its
-                    // own schedule. Racing it here with a git-only guess
-                    // risks Abandoned winning over the correct outcome.
-                    return Ok(());
-                }
-                self.mark_abandoned_in_op(cs.id).await?;
-                return Ok(());
+            DraftObservation::Advanced { tip } => {
+                self.record_commit(cs.id, tip, "external", "").await
             }
-        }
-
-        if let Some(tip) = ref_oid {
-            if tip != cs.head_oid && self.tip_advanced_past_head(&tip, &cs.head_oid).await? {
-                self.record_commit(cs.id, tip, "external", "").await?;
+            // The PR poll reads GitHub directly and will mark this
+            // Rejected (or Merged, for a squash/rebase merge) on its own
+            // schedule. Racing it here with a git-only guess risks
+            // Abandoned winning over the correct outcome.
+            DraftObservation::Missing
+                if status == ChangesetStatus::Submitted
+                    && !poll_owns_missing_ref(self.github.is_some(), cs.pr_number) =>
+            {
+                self.mark_abandoned_in_op(cs.id).await
             }
+            DraftObservation::Missing | DraftObservation::Unchanged => Ok(()),
         }
-        Ok(())
-    }
-
-    /// Whether `tip` is a genuine external advance past `head_oid`,
-    /// rather than this replica merely being behind. `merge_base`
-    /// collapses "no common ancestor" and "one oid's object isn't in
-    /// this replica's clone yet" into the same `Ok(None)` — both cases
-    /// are treated the same way here: don't record, since recording a
-    /// stale `tip` would move Postgres's `head_oid` backwards. A real
-    /// external force-push (divergent histories, `merge_base` neither
-    /// oid) still gets recorded, matching `external_changes_since`'s
-    /// handling of a force-pushed `main` elsewhere in this codebase.
-    async fn tip_advanced_past_head(
-        &self,
-        tip: &str,
-        head_oid: &str,
-    ) -> Result<bool, ChangesetError> {
-        let result = self.library.merge_base(tip, head_oid).await;
-        if let Err(e) = &result {
-            tracing::debug!(error = %e, %tip, %head_oid, "observe_one: couldn't verify tip ancestry; skipping this tick");
-        }
-        Ok(is_genuine_advance(&result, tip))
     }
 
     async fn mark_merged_in_op(
@@ -772,7 +695,7 @@ impl Changesets {
         }
         op.commit().await?;
 
-        if let Err(e) = self.library.delete_ref(&cs.git_ref(), true).await {
+        if let Err(e) = self.drafts.close(cs.draft_name()).await {
             tracing::warn!(
                 error = %e,
                 changeset_id = %id,
@@ -868,7 +791,7 @@ impl Changesets {
         }
         op.commit().await?;
 
-        if let Err(e) = self.library.delete_ref(&cs.git_ref(), true).await {
+        if let Err(e) = self.drafts.close(cs.draft_name()).await {
             tracing::warn!(
                 error = %e,
                 changeset_id = %id,
@@ -881,33 +804,22 @@ impl Changesets {
     }
 
     /// Deletes the ref of every finished (terminal-status) changeset still
-    /// found under [`DRUA_REF_PREFIX`]. Driven by the refs that exist,
-    /// rather than by scanning every finished changeset — the backstop
-    /// for the best-effort `delete_ref` calls in `mark_rejected_in_op`,
-    /// `mark_merged_in_op`, `discard` and `apply`, any of which can leave
-    /// a ref behind if the delete itself fails.
+    /// found among the library's draft refs. Driven by the refs that
+    /// exist, rather than by scanning every finished changeset — the
+    /// backstop for the best-effort `delete_ref` calls in
+    /// `mark_rejected_in_op`, `mark_merged_in_op`, `discard` and `apply`,
+    /// any of which can leave a ref behind if the delete itself fails.
     #[instrument(name = "domain.changeset.sweep_finished_refs", skip(self))]
     pub async fn sweep_finished_refs(&self) -> Result<(), ChangesetError> {
-        self.library.fetch_and_head().await?;
-        let refs = self.library.list_refs(DRUA_REF_PREFIX).await?;
+        let names = self.drafts.list().await?;
         let mut deleted = 0usize;
-        for (refname, _oid) in refs {
-            let Some(id_str) = refname.strip_prefix(DRUA_REF_PREFIX) else {
-                continue;
-            };
-            let Ok(id) = id_str.parse::<ChangesetId>() else {
-                tracing::debug!(
-                    %refname,
-                    "sweep_finished_refs: ref name doesn't parse as a changeset id; skipping"
-                );
-                continue;
-            };
+        for name in names {
+            let id = ChangesetId::from(name.uuid());
             let cs = match self.repo.find_by_id(id).await {
                 Ok(cs) => cs,
                 Err(e) if e.was_not_found() => {
                     tracing::warn!(
                         changeset_id = %id,
-                        %refname,
                         "sweep_finished_refs: no changeset row for this ref; leaving it alone"
                     );
                     continue;
@@ -924,11 +836,10 @@ impl Changesets {
             if !cs.status.is_terminal() {
                 continue;
             }
-            if let Err(e) = self.library.delete_ref(&refname, true).await {
+            if let Err(e) = self.drafts.close(name).await {
                 tracing::warn!(
                     error = %e,
                     changeset_id = %id,
-                    %refname,
                     "sweep_finished_refs: delete_ref failed; will retry next tick"
                 );
                 continue;
@@ -1033,21 +944,15 @@ impl Changesets {
             return Ok(Arc::clone(cached));
         }
 
-        let deltas = self
-            .library
-            .changes_since(Some(&cs.base_oid), &cs.head_oid)
-            .await?;
-        let mut out = Vec::with_capacity(deltas.len());
-        for delta in deltas {
-            let Some((space_slug, path)) = split_space_path(&delta.path) else {
-                continue;
-            };
-            out.push(TouchedFile {
-                space_slug,
-                path,
-                kind: delta.kind.into(),
-            });
-        }
+        let touched = self.drafts.touched(&cs.base_oid, &cs.head_oid).await?;
+        let out: Vec<TouchedFile> = touched
+            .into_iter()
+            .map(|t| TouchedFile {
+                space_slug: t.space_slug,
+                path: t.rel_path,
+                kind: t.kind.into(),
+            })
+            .collect();
         let out = Arc::new(out);
 
         let mut guard = self
@@ -1064,14 +969,6 @@ impl Changesets {
     }
 }
 
-/// The decision core of [`Changesets::tip_advanced_past_head`], isolated
-/// so it's unit-testable without a `Library`. `Ok(None)` collapses two
-/// distinct `merge_base` outcomes — no common ancestor, and one oid's
-/// object missing from this replica's clone — and an `Err` (e.g. the
-/// same missing-object case surfacing as a git error instead) are all
-/// treated as "can't confirm a genuine advance", which is the safe
-/// default: recording a falsely-advanced `tip` would move Postgres's
-/// `head_oid` backwards.
 /// Whether a missing changeset ref should be left for the PR poll to
 /// resolve (via [`Changesets::reconcile_pr_state`]) rather than guessed
 /// at here as Abandoned. True only when both a GitHub App is configured
@@ -1080,19 +977,6 @@ impl Changesets {
 /// available and must run as before.
 fn poll_owns_missing_ref(has_github_app: bool, pr_number: Option<u64>) -> bool {
     has_github_app && pr_number.is_some()
-}
-
-fn is_genuine_advance(
-    merge_base: &Result<Option<String>, drua_library::LibraryError>,
-    tip: &str,
-) -> bool {
-    matches!(merge_base, Ok(Some(base)) if base != tip)
-}
-
-fn split_space_path(path: &str) -> Option<(String, String)> {
-    let rest = path.strip_prefix("spaces/")?;
-    let (slug, rel) = rest.split_once('/')?;
-    Some((slug.to_string(), rel.to_string()))
 }
 
 fn describe_actor(actor: &ChangesetActor) -> String {
@@ -1198,42 +1082,6 @@ mod tests {
         assert!(!poll_owns_missing_ref(true, None));
         assert!(!poll_owns_missing_ref(false, Some(1)));
         assert!(!poll_owns_missing_ref(false, None));
-    }
-
-    #[test]
-    fn is_genuine_advance_true_when_head_oid_is_a_strict_ancestor_of_tip() {
-        assert!(is_genuine_advance(&Ok(Some("head".into())), "tip"));
-    }
-
-    #[test]
-    fn is_genuine_advance_false_when_tip_is_an_ancestor_of_head_oid() {
-        assert!(!is_genuine_advance(&Ok(Some("tip".into())), "tip"));
-    }
-
-    #[test]
-    fn is_genuine_advance_false_when_merge_base_finds_no_common_ancestor() {
-        assert!(!is_genuine_advance(&Ok(None), "tip"));
-    }
-
-    #[test]
-    fn is_genuine_advance_false_when_merge_base_errors() {
-        let err = Err(drua_library::LibraryError::Git("object missing".into()));
-        assert!(!is_genuine_advance(&err, "tip"));
-    }
-
-    #[test]
-    fn split_space_path_extracts_slug_and_rel() {
-        assert_eq!(
-            split_space_path("spaces/drua-dev/efforts/x/a.md"),
-            Some(("drua-dev".to_string(), "efforts/x/a.md".to_string()))
-        );
-    }
-
-    #[test]
-    fn split_space_path_rejects_non_space_paths() {
-        assert_eq!(split_space_path("other/thing.md"), None);
-        assert_eq!(split_space_path("spaces/only-slug"), None);
-        assert_eq!(split_space_path(""), None);
     }
 
     #[test]

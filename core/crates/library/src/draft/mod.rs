@@ -82,16 +82,21 @@ impl Drafts {
         Ok(DraftHandle { name, tip })
     }
 
+    /// Main's current tip, for a caller that needs to report it
+    /// alongside (rather than only feed it into) a mergeability check.
+    pub async fn current_main(&self) -> Result<String, LibraryError> {
+        self.git
+            .resolve_ref("refs/heads/main")
+            .await?
+            .ok_or(LibraryError::MainUnborn)
+    }
+
     pub async fn mergeability(
         &self,
         base_oid: &str,
         head_oid: &str,
     ) -> Result<Mergeability, LibraryError> {
-        let main_oid = self
-            .git
-            .resolve_ref("refs/heads/main")
-            .await?
-            .ok_or(LibraryError::MainUnborn)?;
+        let main_oid = self.current_main().await?;
         match self.git.merge_trees(base_oid, head_oid, &main_oid).await? {
             Ok(_) => Ok(Mergeability::Clean),
             Err(paths) => Ok(Mergeability::Conflicts(paths)),

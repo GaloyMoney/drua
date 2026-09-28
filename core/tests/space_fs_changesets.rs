@@ -8,7 +8,7 @@ use std::sync::Arc;
 use drua_core::agent::{AgentRole, AgentsConfig, ModelDefaults, RoleConfig};
 use drua_core::auth::AuthScope;
 use drua_core::changeset::repo::ChangesetRepo;
-use drua_core::changeset::ChangesetStatus;
+use drua_core::changeset::{Changeset, ChangesetStatus};
 use drua_core::github_app::PullRequest;
 use drua_core::library::LibraryConfig;
 use drua_core::primitives::{AuthSubject, ChangesetId, McpCredsId, UserId};
@@ -308,6 +308,13 @@ async fn force_submit(pool: &sqlx::PgPool, id: ChangesetId, pr_number: u64) {
         .await
         .expect("update changeset");
     op.commit().await.expect("commit op");
+}
+
+/// A changeset's draft ref name, for tests that assert on raw git state.
+/// `Changeset` no longer exposes this directly — the library owns ref
+/// naming — but `branch()` is still public.
+fn git_ref(cs: &Changeset) -> String {
+    format!("refs/heads/{}", cs.branch())
 }
 
 fn open_pr(number: u64) -> PullRequest {
@@ -665,7 +672,7 @@ async fn reconcile_pr_state_closed_unmerged_pr_rejects_and_deletes_ref() {
 
     let ref_after = app
         .library()
-        .resolve_ref(&cs.git_ref())
+        .resolve_ref(&git_ref(&cs))
         .await
         .expect("resolve ref");
     assert!(ref_after.is_none(), "ref must be deleted after rejection");
@@ -701,7 +708,7 @@ async fn reconcile_pr_state_merged_pr_marks_merged_and_deletes_ref() {
 
     let ref_after = app
         .library()
-        .resolve_ref(&cs.git_ref())
+        .resolve_ref(&git_ref(&cs))
         .await
         .expect("resolve ref");
     assert!(ref_after.is_none(), "ref must be deleted after merge");
@@ -814,7 +821,7 @@ async fn sweep_finished_refs_deletes_the_ref_of_a_rejected_changeset_whose_ref_s
 
     let before = app
         .library()
-        .resolve_ref(&cs.git_ref())
+        .resolve_ref(&git_ref(&cs))
         .await
         .expect("resolve ref");
     assert!(before.is_some(), "ref must still exist before the sweep");
@@ -823,7 +830,7 @@ async fn sweep_finished_refs_deletes_the_ref_of_a_rejected_changeset_whose_ref_s
 
     let after = app
         .library()
-        .resolve_ref(&cs.git_ref())
+        .resolve_ref(&git_ref(&cs))
         .await
         .expect("resolve ref");
     assert!(after.is_none(), "sweep must delete the leftover ref");
@@ -868,7 +875,7 @@ async fn sweep_finished_refs_leaves_open_and_submitted_changesets_alone() {
 
     assert!(
         app.library()
-            .resolve_ref(&open_cs.git_ref())
+            .resolve_ref(&git_ref(&open_cs))
             .await
             .expect("resolve ref")
             .is_some(),
@@ -876,7 +883,7 @@ async fn sweep_finished_refs_leaves_open_and_submitted_changesets_alone() {
     );
     assert!(
         app.library()
-            .resolve_ref(&submitted_cs.git_ref())
+            .resolve_ref(&git_ref(&submitted_cs))
             .await
             .expect("resolve ref")
             .is_some(),
