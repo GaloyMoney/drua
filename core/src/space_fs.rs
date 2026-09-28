@@ -20,11 +20,11 @@ use std::sync::Arc;
 
 use tracing::instrument;
 
-use drua_library::{BlobEntries, PathDates, PathDatesMap, Space, SpaceError, Spaces};
+use drua_library::{BlobEntries, PathDates, PathDatesMap, Space, SpaceError, SpaceTarget, Spaces};
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
-use crate::changeset::{Changeset, ChangesetError, ChangesetStatus, Changesets};
+use crate::changeset::{ChangesetStatus, Changesets, DraftInfo, SpaceAddress, SpaceIntent};
 use crate::primitives::ChangesetId;
 use crate::project::{ProjectError, Projects};
 use crate::user::Users;
@@ -111,39 +111,27 @@ fn is_bare_space_path(path: &str) -> bool {
     rest.trim_matches('/').is_empty()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Target {
-    Main,
-    Changeset {
-        id: ChangesetId,
-        handle: drua_library::DraftHandle,
-        status: ChangesetStatus,
-        title: String,
-        touched: usize,
-        just_started: bool,
-    },
-}
-
-impl Target {
-    fn space_target(&self) -> drua_library::SpaceTarget {
-        match self {
-            Target::Main => drua_library::SpaceTarget::Main,
-            Target::Changeset { handle, .. } => drua_library::SpaceTarget::Draft(handle.clone()),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Intent {
     Read,
     Write,
 }
 
+impl From<Intent> for SpaceIntent {
+    fn from(intent: Intent) -> Self {
+        match intent {
+            Intent::Read => SpaceIntent::Read,
+            Intent::Write => SpaceIntent::Write,
+        }
+    }
+}
+
 struct Resolved {
     space: Space,
     /// Owned so the bundle outlives the input `&str`.
     rel_path: String,
-    target: Target,
+    target: SpaceTarget,
+    draft: Option<DraftInfo>,
     stamp: String,
 }
 
@@ -183,11 +171,7 @@ impl SpaceFs {
         };
         let bytes = self
             .spaces
-            .read_file(
-                &resolved.space.slug,
-                &resolved.rel_path,
-                &resolved.target.space_target(),
-            )
+            .read_file(&resolved.space.slug, &resolved.rel_path, &resolved.target)
             .await?
             .ok_or_else(|| SpaceError::PathNotFound {
                 slug: resolved.space.slug.clone(),
@@ -262,155 +246,34 @@ impl SpaceFs {
         let space = self.projects.space_for_subject(sub, sref.slug).await?;
         let rel_path = normalize_rel_path(sref.rel_path);
         Self::validate_rel_path(&rel_path)?;
-        let target = self.resolve_target(sub, &space, &sref, intent).await?;
+
+        let address = match sref.changeset_id {
+            Some(id) => SpaceAddress::Changeset(id),
+            None if sref.scheme == SpaceScheme::Draft => SpaceAddress::OwnDraft,
+            None => SpaceAddress::Published,
+        };
+        let resolved_target = self
+            .changesets
+            .target_for(sub, sref.slug, address, intent.into(), Some(sref.rel_path))
+            .await?;
+
         let differs = self
-            .differs_note(sub, &sref, &rel_path, &target, intent)
+            .differs_note(sub, &sref, &rel_path, &resolved_target.target, intent)
             .await;
         let stamp = stamp(
             typed_scheme,
             &space.slug,
-            &target,
+            resolved_target.draft.as_ref(),
             differs.as_deref(),
             in_run,
         );
         Ok(Some(Resolved {
             space,
             rel_path,
-            target,
+            target: resolved_target.target,
+            draft: resolved_target.draft,
             stamp,
         }))
-    }
-
-    async fn resolve_target(
-        &self,
-        sub: &AuthSubject,
-        space: &Space,
-        sref: &SpaceRef<'_>,
-        intent: Intent,
-    ) -> Result<Target, ProjectError> {
-        if let Some(id) = sref.changeset_id {
-            let cs = self
-                .changesets
-                .find_for_target(sub, id)
-                .await
-                .map_err(map_changeset_err)?;
-            if intent == Intent::Write {
-                if !sub.can_draft_spaces() {
-                    return Err(SpaceError::ReadOnly {
-                        slug: space.slug.clone(),
-                    }
-                    .into());
-                }
-                if !cs.is_open() {
-                    return Err(SpaceError::ChangesetNotOpen {
-                        id: cs.id.to_string(),
-                        status: format!("{:?}", cs.status),
-                    }
-                    .into());
-                }
-            }
-            return self.changeset_target(cs, false).await;
-        }
-
-        match sref.scheme {
-            SpaceScheme::Draft => {
-                if intent != Intent::Write {
-                    if !sub.can_draft_spaces() {
-                        return Err(SpaceError::ReadOnly {
-                            slug: space.slug.clone(),
-                        }
-                        .into());
-                    }
-                    return match self
-                        .changesets
-                        .open_draft_for(sub)
-                        .await
-                        .map_err(map_changeset_err)?
-                    {
-                        Some(cs) => self.changeset_target(cs, false).await,
-                        None => Ok(Target::Main),
-                    };
-                }
-                if !sub.can_draft_spaces() {
-                    return Err(SpaceError::ReadOnly {
-                        slug: space.slug.clone(),
-                    }
-                    .into());
-                }
-                match self
-                    .changesets
-                    .open_draft_for(sub)
-                    .await
-                    .map_err(map_changeset_err)?
-                {
-                    Some(cs) => self.changeset_target(cs, false).await,
-                    None if sub.in_workflow_run() => Err(SpaceError::RunReadOnly {
-                        slug: space.slug.clone(),
-                    }
-                    .into()),
-                    None => {
-                        let cs = self
-                            .changesets
-                            .draft_for(sub, None, None, Some(sref.rel_path))
-                            .await
-                            .map_err(map_changeset_err)?;
-                        self.changeset_target(cs, true).await
-                    }
-                }
-            }
-            SpaceScheme::Space => {
-                if intent != Intent::Write {
-                    return Ok(Target::Main);
-                }
-                if !sub.can_draft_spaces() {
-                    return Err(SpaceError::ReadOnly {
-                        slug: space.slug.clone(),
-                    }
-                    .into());
-                }
-                match self
-                    .changesets
-                    .open_draft_for(sub)
-                    .await
-                    .map_err(map_changeset_err)?
-                {
-                    Some(cs) => Err(SpaceError::DraftOpen {
-                        id: short_id(cs.id),
-                        title: cs.title,
-                        slug: space.slug.clone(),
-                    }
-                    .into()),
-                    None => Ok(Target::Main),
-                }
-            }
-        }
-    }
-
-    async fn changeset_target(
-        &self,
-        cs: Changeset,
-        just_started: bool,
-    ) -> Result<Target, ProjectError> {
-        // ensure_ref first: it recovers from a not-yet-fetched base commit
-        // (changeset::ensure_ref), so touched_count's diff runs once that
-        // recovery has had a chance to bring the objects in.
-        let handle = self
-            .changesets
-            .ensure_ref(&cs)
-            .await
-            .map_err(map_changeset_err)?;
-        let touched = self.changesets.touched_count(&cs).await.unwrap_or_else(|e| {
-            tracing::warn!(error = %e, changeset_id = %cs.id, "changeset_target: touched_count failed; reporting 0");
-            0
-        });
-        Ok(Target::Changeset {
-            id: cs.id,
-            handle,
-            status: cs.status,
-            title: cs.title,
-            touched,
-            just_started,
-        })
     }
 
     async fn differs_note(
@@ -418,12 +281,12 @@ impl SpaceFs {
         sub: &AuthSubject,
         sref: &SpaceRef<'_>,
         rel_path: &str,
-        target: &Target,
+        target: &SpaceTarget,
         intent: Intent,
     ) -> Option<String> {
         if intent != Intent::Read
             || sref.scheme != SpaceScheme::Space
-            || !matches!(target, Target::Main)
+            || !matches!(target, SpaceTarget::Main)
         {
             return None;
         }
@@ -436,7 +299,7 @@ impl SpaceFs {
         touched
             .iter()
             .any(|p| p == rel_path)
-            .then_some(short_id(draft.id))
+            .then_some(crate::changeset::short_id(draft.id))
     }
 
     /// Slugs of every space the subject can address — admins see all
@@ -489,13 +352,12 @@ impl SpaceFs {
         let Some(resolved) = self.resolve(sub, path, Intent::Read).await? else {
             return Ok(None);
         };
-        let target = resolved.target.space_target();
 
         // Try as a directory first; if it's a tree, list it. If not a
         // tree, fall through to a blob read.
         if let Some(entries) = self
             .spaces
-            .list_dir(&resolved.space.slug, &resolved.rel_path, &target)
+            .list_dir(&resolved.space.slug, &resolved.rel_path, &resolved.target)
             .await
             .map_err(|e| -> ProjectError { e.into() })?
         {
@@ -504,7 +366,7 @@ impl SpaceFs {
 
         let bytes = self
             .spaces
-            .read_file(&resolved.space.slug, &resolved.rel_path, &target)
+            .read_file(&resolved.space.slug, &resolved.rel_path, &resolved.target)
             .await
             .map_err(|e| -> ProjectError { e.into() })?
             .ok_or_else(|| io_err(format!("no such file: {}", resolved.rel_path)))?;
@@ -528,11 +390,7 @@ impl SpaceFs {
         };
         let entries = self
             .spaces
-            .list_dir(
-                &resolved.space.slug,
-                &resolved.rel_path,
-                &resolved.target.space_target(),
-            )
+            .list_dir(&resolved.space.slug, &resolved.rel_path, &resolved.target)
             .await
             .map_err(|e| -> ProjectError { e.into() })?
             .unwrap_or_default();
@@ -562,11 +420,7 @@ impl SpaceFs {
         };
         let entries = self
             .spaces
-            .list_dir(
-                &resolved.space.slug,
-                &resolved.rel_path,
-                &resolved.target.space_target(),
-            )
+            .list_dir(&resolved.space.slug, &resolved.rel_path, &resolved.target)
             .await
             .map_err(|e| -> ProjectError { e.into() })?
             .unwrap_or_default();
@@ -600,7 +454,7 @@ impl SpaceFs {
             return Ok(None);
         };
         Audit::record_action_if_unset("space.write_file");
-        Self::record_changeset_audit(&resolved.target);
+        Self::record_changeset_audit(resolved.draft.as_ref());
         let attribution = self.users.commit_attribution().await;
         let oid = self
             .spaces
@@ -609,13 +463,15 @@ impl SpaceFs {
                 &resolved.rel_path,
                 content,
                 attribution,
-                &resolved.target.space_target(),
+                &resolved.target,
             )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
-        self.record_write(&resolved.target, oid, "write_file", &resolved.rel_path)
+        let rel_path = resolved.rel_path.clone();
+        let stamp = self
+            .stamp_after_write(sub, path, &resolved, oid, "write_file", &rel_path)
             .await?;
-        Ok(Some(self.stamp_after_write(sub, path, &resolved).await?))
+        Ok(Some(stamp))
     }
 
     /// `text_editor` `str_replace`. The unique-occurrence check happens
@@ -636,7 +492,7 @@ impl SpaceFs {
             return Ok(None);
         };
         Audit::record_action_if_unset("space.str_replace");
-        Self::record_changeset_audit(&resolved.target);
+        Self::record_changeset_audit(resolved.draft.as_ref());
         let attribution = self.users.commit_attribution().await;
         let oid = self
             .spaces
@@ -646,13 +502,15 @@ impl SpaceFs {
                 old_str,
                 new_str,
                 attribution,
-                &resolved.target.space_target(),
+                &resolved.target,
             )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
-        self.record_write(&resolved.target, oid, "str_replace", &resolved.rel_path)
+        let rel_path = resolved.rel_path.clone();
+        let stamp = self
+            .stamp_after_write(sub, path, &resolved, oid, "str_replace", &rel_path)
             .await?;
-        Ok(Some(self.stamp_after_write(sub, path, &resolved).await?))
+        Ok(Some(stamp))
     }
 
     /// `text_editor` `insert`. Insertion happens at the worker against
@@ -669,7 +527,7 @@ impl SpaceFs {
             return Ok(None);
         };
         Audit::record_action_if_unset("space.insert");
-        Self::record_changeset_audit(&resolved.target);
+        Self::record_changeset_audit(resolved.draft.as_ref());
         let attribution = self.users.commit_attribution().await;
         let oid = self
             .spaces
@@ -679,13 +537,15 @@ impl SpaceFs {
                 line_number,
                 text,
                 attribution,
-                &resolved.target.space_target(),
+                &resolved.target,
             )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
-        self.record_write(&resolved.target, oid, "insert", &resolved.rel_path)
+        let rel_path = resolved.rel_path.clone();
+        let stamp = self
+            .stamp_after_write(sub, path, &resolved, oid, "insert", &rel_path)
             .await?;
-        Ok(Some(self.stamp_after_write(sub, path, &resolved).await?))
+        Ok(Some(stamp))
     }
 
     /// Removes the file at `space:<slug>/<rel>`. Success even if the
@@ -700,7 +560,7 @@ impl SpaceFs {
             return Ok(None);
         };
         Audit::record_action_if_unset("space.delete_file");
-        Self::record_changeset_audit(&resolved.target);
+        Self::record_changeset_audit(resolved.draft.as_ref());
         let attribution = self.users.commit_attribution().await;
         let oid = self
             .spaces
@@ -708,13 +568,15 @@ impl SpaceFs {
                 &resolved.space.slug,
                 &resolved.rel_path,
                 attribution,
-                &resolved.target.space_target(),
+                &resolved.target,
             )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
-        self.record_write(&resolved.target, oid, "delete_file", &resolved.rel_path)
+        let rel_path = resolved.rel_path.clone();
+        let stamp = self
+            .stamp_after_write(sub, path, &resolved, oid, "delete_file", &rel_path)
             .await?;
-        Ok(Some(self.stamp_after_write(sub, path, &resolved).await?))
+        Ok(Some(stamp))
     }
 
     /// Renames `from` → `to` within a single space. `Ok(None)` only when
@@ -778,7 +640,7 @@ impl SpaceFs {
         let to_rel = normalize_rel_path(to_ref.rel_path);
         Self::validate_rel_path(&to_rel)?;
         Audit::record_action_if_unset("space.move_file");
-        Self::record_changeset_audit(&from_resolved.target);
+        Self::record_changeset_audit(from_resolved.draft.as_ref());
         let attribution = self.users.commit_attribution().await;
         let oid = self
             .spaces
@@ -787,15 +649,14 @@ impl SpaceFs {
                 &from_resolved.rel_path,
                 &to_rel,
                 attribution,
-                &from_resolved.target.space_target(),
+                &from_resolved.target,
             )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
-        self.record_write(&from_resolved.target, oid, "move_file", &to_rel)
+        let stamp = self
+            .stamp_after_write(sub, from, &from_resolved, oid, "move_file", &to_rel)
             .await?;
-        Ok(Some(
-            self.stamp_after_write(sub, from, &from_resolved).await?,
-        ))
+        Ok(Some(stamp))
     }
 
     /// Glob walk across the space's tree. Pattern is the standard
@@ -870,11 +731,7 @@ impl SpaceFs {
     async fn walk_search_root(&self, resolved: &Resolved) -> Result<BlobEntries, ProjectError> {
         match self
             .spaces
-            .walk(
-                &resolved.space.slug,
-                &resolved.rel_path,
-                &resolved.target.space_target(),
-            )
+            .walk(&resolved.space.slug, &resolved.rel_path, &resolved.target)
             .await
             .map_err(|e| -> ProjectError { e.into() })?
         {
@@ -886,59 +743,52 @@ impl SpaceFs {
         }
     }
 
-    fn record_changeset_audit(target: &Target) {
-        if let Target::Changeset { id, .. } = target {
-            Audit::record_changeset_id(*id);
+    fn record_changeset_audit(draft: Option<&DraftInfo>) {
+        if let Some(draft) = draft {
+            Audit::record_changeset_id(draft.id);
         }
     }
 
-    async fn record_write(
-        &self,
-        target: &Target,
-        oid: Option<String>,
-        action: &str,
-        path: &str,
-    ) -> Result<(), ProjectError> {
-        let Target::Changeset { id, .. } = target else {
-            return Ok(());
-        };
-        let Some(head_oid) = oid else {
-            return Ok(());
-        };
-        self.changesets
-            .record_commit(*id, head_oid, action, path)
-            .await
-            .map_err(map_changeset_err)
-    }
-
+    /// Records the commit on the draft (when there is one and the write
+    /// wasn't a no-op) and renders a fresh stamp from it. `record_path`
+    /// is the path `commit_recorded` attributes the edit to — the
+    /// destination for `move_file`, `rel_path` otherwise.
+    ///
+    /// The commit is recorded unconditionally whenever there's a draft
+    /// and a real oid — even on a draft's first write — but the
+    /// re-rendered stamp is discarded in favour of the pre-write one
+    /// when the draft just started, since that one already says
+    /// "started" rather than a touched-file count.
     async fn stamp_after_write(
         &self,
         sub: &AuthSubject,
         path: &str,
         resolved: &Resolved,
+        oid: Option<String>,
+        action: &str,
+        record_path: &str,
     ) -> Result<String, ProjectError> {
-        let Target::Changeset {
-            id,
-            just_started: false,
-            ..
-        } = &resolved.target
-        else {
+        let Some(draft) = &resolved.draft else {
             return Ok(resolved.stamp.clone());
         };
+        let Some(head_oid) = oid else {
+            return Ok(resolved.stamp.clone());
+        };
+        let refreshed = self
+            .changesets
+            .commit_recorded(draft.id, head_oid, action, record_path)
+            .await?;
+        if draft.just_started {
+            return Ok(resolved.stamp.clone());
+        }
         let Some(sref) = parse_space_path(path) else {
             return Ok(resolved.stamp.clone());
         };
         let in_run = sub.in_workflow_run() && sref.changeset_id.is_none();
-        let cs = self
-            .changesets
-            .find_for_target(sub, *id)
-            .await
-            .map_err(map_changeset_err)?;
-        let target = self.changeset_target(cs, false).await?;
         Ok(stamp(
             sref.scheme,
             &resolved.space.slug,
-            &target,
+            Some(&refreshed),
             None,
             in_run,
         ))
@@ -1152,53 +1002,49 @@ fn join_dates(
         .collect()
 }
 
-fn short_id(id: ChangesetId) -> String {
-    id.to_string().chars().take(8).collect()
-}
-
 fn stamp(
     scheme: SpaceScheme,
     slug: &str,
-    target: &Target,
+    draft: Option<&DraftInfo>,
     differs: Option<&str>,
     in_run: bool,
 ) -> String {
     let prefix = scheme.prefix();
-    match target {
-        Target::Main if scheme == SpaceScheme::Draft => format!("[draft:{slug} · no draft]"),
-        Target::Main => match differs {
+    match draft {
+        None if scheme == SpaceScheme::Draft => format!("[draft:{slug} · no draft]"),
+        None => match differs {
             Some(id) => format!("[space:{slug} · main · differs in your draft {id}]"),
             None => format!("[space:{slug} · main]"),
         },
-        Target::Changeset {
+        Some(DraftInfo {
             id, status, title, ..
-        } if scheme == SpaceScheme::Space && *status != ChangesetStatus::Open => {
+        }) if scheme == SpaceScheme::Space && *status != ChangesetStatus::Open => {
             format!(
                 "[space:{slug}@{} · changeset \"{title}\" · {status:?}]",
-                short_id(*id)
+                crate::changeset::short_id(*id)
             )
         }
-        Target::Changeset {
+        Some(DraftInfo {
             id, title, touched, ..
-        } if in_run => format!(
+        }) if in_run => format!(
             "[{prefix}:{slug} · run draft {} \"{title}\" · {touched} file{}]",
-            short_id(*id),
+            crate::changeset::short_id(*id),
             if *touched == 1 { "" } else { "s" }
         ),
-        Target::Changeset {
+        Some(DraftInfo {
             id,
             title,
             just_started: true,
             ..
-        } => format!(
+        }) => format!(
             "[{prefix}:{slug} · draft {} \"{title}\" · started]",
-            short_id(*id)
+            crate::changeset::short_id(*id)
         ),
-        Target::Changeset {
+        Some(DraftInfo {
             id, title, touched, ..
-        } => format!(
+        }) => format!(
             "[{prefix}:{slug} · draft {} \"{title}\" · {touched} file{}]",
-            short_id(*id),
+            crate::changeset::short_id(*id),
             if *touched == 1 { "" } else { "s" }
         ),
     }
@@ -1206,15 +1052,6 @@ fn stamp(
 
 fn io_err(msg: String) -> SpaceError {
     SpaceError::Io(msg)
-}
-
-fn map_changeset_err(e: ChangesetError) -> ProjectError {
-    match e {
-        ChangesetError::Foreign { id } => {
-            SpaceError::ChangesetForeign { id: id.to_string() }.into()
-        }
-        other => ProjectError::Changeset(other),
-    }
 }
 
 /// Enforces `cap` (when set) and decodes to UTF-8 — the single place
@@ -1359,51 +1196,6 @@ mod tests {
     fn parse_rejects_bad_changeset_id() {
         assert!(parse_space_path("space:oncall@not-a-uuid/foo.md").is_none());
         assert!(parse_space_path("space:oncall@/foo.md").is_none());
-    }
-
-    #[test]
-    fn target_main_has_no_draft_space_target() {
-        assert_eq!(Target::Main.space_target(), drua_library::SpaceTarget::Main);
-    }
-
-    #[test]
-    fn target_changeset_space_target_carries_its_handle() {
-        let id = ChangesetId::new();
-        let handle = drua_library::DraftHandle::new(
-            drua_library::DraftName::from(uuid::Uuid::from(id)),
-            "deadbeef",
-        );
-        let target = Target::Changeset {
-            id,
-            handle: handle.clone(),
-            status: ChangesetStatus::Open,
-            title: "a draft".to_string(),
-            touched: 1,
-            just_started: false,
-        };
-        assert_eq!(
-            target.space_target(),
-            drua_library::SpaceTarget::Draft(handle)
-        );
-    }
-
-    #[test]
-    fn map_changeset_err_translates_foreign_into_space_error() {
-        let id = ChangesetId::new();
-        let mapped = map_changeset_err(ChangesetError::Foreign { id });
-        assert!(matches!(
-            mapped,
-            ProjectError::Space(SpaceError::ChangesetForeign { id: ref s }) if *s == id.to_string()
-        ));
-    }
-
-    #[test]
-    fn map_changeset_err_falls_back_to_project_changeset_variant() {
-        let mapped = map_changeset_err(ChangesetError::UnsupportedActor);
-        assert!(matches!(
-            mapped,
-            ProjectError::Changeset(ChangesetError::UnsupportedActor)
-        ));
     }
 
     #[test]
@@ -1726,14 +1518,9 @@ mod tests {
         assert!(err.contains("non-utf8"), "got: {err}");
     }
 
-    fn changeset_target(just_started: bool) -> Target {
-        let id = ChangesetId::new();
-        Target::Changeset {
-            id,
-            handle: drua_library::DraftHandle::new(
-                drua_library::DraftName::from(uuid::Uuid::from(id)),
-                "deadbeef",
-            ),
+    fn draft_info(just_started: bool) -> DraftInfo {
+        DraftInfo {
+            id: ChangesetId::new(),
             status: ChangesetStatus::Open,
             title: "workflow-fix-typos run ab12cd34".to_string(),
             touched: 2,
@@ -1743,29 +1530,29 @@ mod tests {
 
     #[test]
     fn stamp_run_draft_form() {
-        let target = changeset_target(false);
-        let s = stamp(SpaceScheme::Space, "docs", &target, None, true);
+        let draft = draft_info(false);
+        let s = stamp(SpaceScheme::Space, "docs", Some(&draft), None, true);
         assert!(s.contains("space:docs · run draft "), "got: {s}");
         assert!(s.contains("2 files"), "got: {s}");
     }
 
     #[test]
     fn stamp_run_draft_preserves_typed_prefix() {
-        let target = changeset_target(false);
-        let s = stamp(SpaceScheme::Draft, "docs", &target, None, true);
+        let draft = draft_info(false);
+        let s = stamp(SpaceScheme::Draft, "docs", Some(&draft), None, true);
         assert!(s.starts_with("[draft:docs · run draft "), "got: {s}");
     }
 
     #[test]
     fn stamp_run_no_draft_is_plain_main() {
-        let s = stamp(SpaceScheme::Space, "docs", &Target::Main, None, true);
+        let s = stamp(SpaceScheme::Space, "docs", None, None, true);
         assert_eq!(s, "[space:docs · main]");
     }
 
     #[test]
     fn stamp_non_run_just_started_form_unchanged() {
-        let target = changeset_target(true);
-        let s = stamp(SpaceScheme::Draft, "docs", &target, None, false);
+        let draft = draft_info(true);
+        let s = stamp(SpaceScheme::Draft, "docs", Some(&draft), None, false);
         assert!(s.contains("started"), "got: {s}");
         assert!(!s.contains("run draft"), "got: {s}");
     }

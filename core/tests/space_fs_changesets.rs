@@ -8,7 +8,7 @@ use std::sync::Arc;
 use drua_core::agent::{AgentRole, AgentsConfig, ModelDefaults, RoleConfig};
 use drua_core::auth::AuthScope;
 use drua_core::changeset::repo::ChangesetRepo;
-use drua_core::changeset::{Changeset, ChangesetStatus};
+use drua_core::changeset::{Changeset, ChangesetError, ChangesetStatus};
 use drua_core::github_app::PullRequest;
 use drua_core::library::LibraryConfig;
 use drua_core::primitives::{AuthSubject, ChangesetId, McpCredsId, UserId};
@@ -444,11 +444,8 @@ async fn explicit_read_of_foreign_project_changeset_is_rejected() {
         panic!("outsider must not read owner's changeset");
     };
     assert!(
-        matches!(
-            err,
-            ProjectError::Space(SpaceError::ChangesetForeign { .. })
-        ),
-        "expected ChangesetForeign, got: {err}"
+        matches!(err, ProjectError::Changeset(ChangesetError::Foreign { .. })),
+        "expected Foreign, got: {err}"
     );
 }
 
@@ -503,7 +500,7 @@ async fn write_against_a_discarded_changeset_is_rejected() {
     assert!(
         matches!(
             err,
-            ProjectError::Space(SpaceError::ChangesetNotOpen { .. })
+            ProjectError::Changeset(ChangesetError::ChangesetNotOpen { .. })
         ),
         "expected ChangesetNotOpen, got: {err}"
     );
@@ -526,7 +523,10 @@ async fn workflow_run_subject_overlays_its_run_draft() {
         .await
         .expect_err("a run subject must not lazily create its draft");
     assert!(
-        matches!(err, ProjectError::Space(SpaceError::RunReadOnly { .. })),
+        matches!(
+            err,
+            ProjectError::Changeset(ChangesetError::RunReadOnly { .. })
+        ),
         "expected RunReadOnly, got: {err}"
     );
 
@@ -776,7 +776,7 @@ async fn write_against_a_rejected_changeset_is_rejected() {
         .write_file(&user, &path, "too late\n".into())
         .await
         .expect_err("a rejected changeset must not accept writes");
-    let ProjectError::Space(SpaceError::ChangesetNotOpen { status, .. }) = &err else {
+    let ProjectError::Changeset(ChangesetError::ChangesetNotOpen { status, .. }) = &err else {
         panic!("expected ChangesetNotOpen, got: {err}");
     };
     assert_eq!(status, "Rejected");
@@ -1002,7 +1002,7 @@ async fn interactive_agents_are_read_only() {
                 .await
                 .expect_err(&format!("{label}'s write to {path} must be refused"));
             assert!(
-                matches!(err, ProjectError::Space(SpaceError::ReadOnly { ref slug }) if slug == "docs"),
+                matches!(err, ProjectError::Changeset(ChangesetError::ReadOnly { ref slug }) if slug == "docs"),
                 "{label} {path}: expected ReadOnly, got: {err}"
             );
         }
@@ -1011,7 +1011,7 @@ async fn interactive_agents_are_read_only() {
             Err(e) => e,
         };
         assert!(
-            matches!(err, ProjectError::Space(SpaceError::ReadOnly { ref slug }) if slug == "docs"),
+            matches!(err, ProjectError::Changeset(ChangesetError::ReadOnly { ref slug }) if slug == "docs"),
             "{label} draft:docs/a.md read: expected ReadOnly, got: {err}"
         );
         assert!(
@@ -1241,7 +1241,7 @@ async fn admin_space_write_with_open_draft_is_refused_with_draft_open() {
     assert!(
         matches!(
             err,
-            ProjectError::Space(SpaceError::DraftOpen { ref id, ref slug, .. })
+            ProjectError::Changeset(ChangesetError::DraftOpen { ref id, ref slug, .. })
                 if *id == short_id && slug == "docs"
         ),
         "expected DraftOpen, got: {err}"

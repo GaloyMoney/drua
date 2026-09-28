@@ -85,6 +85,47 @@ pub struct ChangesetStatusView {
     pub pr_url: Option<String>,
 }
 
+/// What a `space:`/`draft:` path addresses, once path parsing and any
+/// run-subject redirect have already settled on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceAddress {
+    /// The published tree — `space:<slug>/...` outside a draft.
+    Published,
+    /// The caller's own open draft — `draft:<slug>/...`, or a run
+    /// subject's `space:<slug>/...` (redirected upstream in `SpaceFs`).
+    OwnDraft,
+    /// An explicit `space:<slug>@<id>/...`.
+    Changeset(ChangesetId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpaceIntent {
+    Read,
+    Write,
+}
+
+/// Everything about a draft a caller needs to render a stamp or decide
+/// what happened, without touching git or Postgres again.
+#[derive(Debug, Clone)]
+pub struct DraftInfo {
+    pub id: ChangesetId,
+    pub status: ChangesetStatus,
+    pub title: String,
+    pub touched: usize,
+    pub just_started: bool,
+}
+
+/// What a space read or write should be addressed against, plus the
+/// draft it came from (if any) for stamp rendering.
+pub struct ResolvedTarget {
+    pub target: drua_library::SpaceTarget,
+    pub draft: Option<DraftInfo>,
+}
+
+pub(crate) fn short_id(id: ChangesetId) -> String {
+    id.to_string().chars().take(8).collect()
+}
+
 fn actor_for_subject(sub: &AuthSubject) -> Result<ChangesetActor, ChangesetError> {
     match sub {
         AuthSubject::Agent(_, agent_id, _)
@@ -312,6 +353,146 @@ impl Changesets {
         }
         op.commit().await?;
         Ok(())
+    }
+
+    /// Resolves what a `space:`/`draft:` read or write should be
+    /// addressed against, applying draft policy: whether this subject
+    /// may write at all, whether an explicit changeset is open, whether
+    /// an own-draft write opens a new one, and whether a direct write
+    /// to the published tree is blocked by an open draft.
+    #[instrument(name = "domain.changeset.target_for", skip(self, sub))]
+    pub async fn target_for(
+        &self,
+        sub: &AuthSubject,
+        slug: &str,
+        address: SpaceAddress,
+        intent: SpaceIntent,
+        first_touched_path: Option<&str>,
+    ) -> Result<ResolvedTarget, ChangesetError> {
+        match address {
+            SpaceAddress::Changeset(id) => {
+                let cs = self.find_for_target(sub, id).await?;
+                if intent == SpaceIntent::Write {
+                    if !sub.can_draft_spaces() {
+                        return Err(ChangesetError::ReadOnly {
+                            slug: slug.to_string(),
+                        });
+                    }
+                    if !cs.is_open() {
+                        return Err(ChangesetError::ChangesetNotOpen {
+                            id: cs.id.to_string(),
+                            status: format!("{:?}", cs.status),
+                        });
+                    }
+                }
+                self.resolved_for_changeset(cs, false).await
+            }
+            SpaceAddress::OwnDraft => {
+                if intent == SpaceIntent::Read {
+                    if !sub.can_draft_spaces() {
+                        return Err(ChangesetError::ReadOnly {
+                            slug: slug.to_string(),
+                        });
+                    }
+                    return match self.open_draft_for(sub).await? {
+                        Some(cs) => self.resolved_for_changeset(cs, false).await,
+                        None => Ok(ResolvedTarget {
+                            target: drua_library::SpaceTarget::Main,
+                            draft: None,
+                        }),
+                    };
+                }
+                if !sub.can_draft_spaces() {
+                    return Err(ChangesetError::ReadOnly {
+                        slug: slug.to_string(),
+                    });
+                }
+                match self.open_draft_for(sub).await? {
+                    Some(cs) => self.resolved_for_changeset(cs, false).await,
+                    None if sub.in_workflow_run() => Err(ChangesetError::RunReadOnly {
+                        slug: slug.to_string(),
+                    }),
+                    None => {
+                        let cs = self.draft_for(sub, None, None, first_touched_path).await?;
+                        self.resolved_for_changeset(cs, true).await
+                    }
+                }
+            }
+            SpaceAddress::Published => {
+                if intent != SpaceIntent::Write {
+                    return Ok(ResolvedTarget {
+                        target: drua_library::SpaceTarget::Main,
+                        draft: None,
+                    });
+                }
+                if !sub.can_draft_spaces() {
+                    return Err(ChangesetError::ReadOnly {
+                        slug: slug.to_string(),
+                    });
+                }
+                match self.open_draft_for(sub).await? {
+                    Some(cs) => Err(ChangesetError::DraftOpen {
+                        id: short_id(cs.id),
+                        title: cs.title,
+                        slug: slug.to_string(),
+                    }),
+                    None => Ok(ResolvedTarget {
+                        target: drua_library::SpaceTarget::Main,
+                        draft: None,
+                    }),
+                }
+            }
+        }
+    }
+
+    async fn resolved_for_changeset(
+        &self,
+        cs: Changeset,
+        just_started: bool,
+    ) -> Result<ResolvedTarget, ChangesetError> {
+        // ensure_ref first: it recovers from a not-yet-fetched base commit,
+        // so touched_count's diff runs once that recovery has had a
+        // chance to bring the objects in.
+        let handle = self.ensure_ref(&cs).await?;
+        let touched = self.touched_count(&cs).await.unwrap_or_else(|e| {
+            tracing::warn!(error = %e, changeset_id = %cs.id, "resolved_for_changeset: touched_count failed; reporting 0");
+            0
+        });
+        Ok(ResolvedTarget {
+            target: drua_library::SpaceTarget::Draft(handle),
+            draft: Some(DraftInfo {
+                id: cs.id,
+                status: cs.status,
+                title: cs.title,
+                touched,
+                just_started,
+            }),
+        })
+    }
+
+    /// Records a write against `id`'s draft and returns its refreshed
+    /// [`DraftInfo`] — the touched-file count reflects `head_oid`.
+    #[instrument(name = "domain.changeset.commit_recorded", skip(self))]
+    pub async fn commit_recorded(
+        &self,
+        id: ChangesetId,
+        head_oid: String,
+        action: &str,
+        path: &str,
+    ) -> Result<DraftInfo, ChangesetError> {
+        self.record_commit(id, head_oid, action, path).await?;
+        let cs = self.repo.find_by_id(id).await?;
+        let touched = self.touched_count(&cs).await.unwrap_or_else(|e| {
+            tracing::warn!(error = %e, changeset_id = %cs.id, "commit_recorded: touched_count failed; reporting 0");
+            0
+        });
+        Ok(DraftInfo {
+            id: cs.id,
+            status: cs.status,
+            title: cs.title,
+            touched,
+            just_started: false,
+        })
     }
 
     #[instrument(name = "domain.changeset.list", skip(self, sub))]

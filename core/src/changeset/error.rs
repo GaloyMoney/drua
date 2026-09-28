@@ -62,4 +62,20 @@ pub enum ChangesetError {
         "ChangesetError - PrUnavailable: no GitHub App / GitHub remote configured for this library; use `apply` instead of `submit`"
     )]
     PrUnavailable,
+    #[error("ChangesetError - ChangesetNotOpen: changeset {id} is {status}; only open changesets accept edits")]
+    ChangesetNotOpen { id: String, status: String },
+    #[error(
+        "ChangesetError - ReadOnly: space:{slug}/ is read-only for this subject — spaces are edited by workflows (`space_writes:`) or by admins (`drua_admin_spaces` with target: draft)"
+    )]
+    ReadOnly { slug: String },
+    #[error(
+        "ChangesetError - DraftOpen: you have an open draft {id} \"{title}\"; write draft:{slug}/<path> (or pass target: draft to drua_admin_spaces) to keep staging, or run `drua_admin_spaces merge-draft` / `discard-draft` before writing space:{slug}/ directly"
+    )]
+    DraftOpen {
+        id: String,
+        title: String,
+        slug: String,
+    },
+    #[error("ChangesetError - RunReadOnly: space:{slug}/ is read-only in this workflow run — set `space_writes.mode` to `merge` or `open_pr` in the workflow definition to let its steps write")]
+    RunReadOnly { slug: String },
 }

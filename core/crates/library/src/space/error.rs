@@ -45,24 +45,6 @@ pub enum SpaceError {
     /// the caller knows about no longer points anywhere.
     #[error("SpaceError - PathNotFound: {path:?} does not exist at HEAD in space {slug:?}")]
     PathNotFound { slug: String, path: String },
-    #[error("SpaceError - ChangesetNotOpen: changeset {id} is {status}; only open changesets accept edits")]
-    ChangesetNotOpen { id: String, status: String },
-    #[error("SpaceError - ChangesetForeign: changeset {id} belongs to another project")]
-    ChangesetForeign { id: String },
-    #[error(
-        "SpaceError - ReadOnly: space:{slug}/ is read-only for this subject — spaces are edited by workflows (`space_writes:`) or by admins (`drua_admin_spaces` with target: draft)"
-    )]
-    ReadOnly { slug: String },
-    #[error(
-        "SpaceError - DraftOpen: you have an open draft {id} \"{title}\"; write draft:{slug}/<path> (or pass target: draft to drua_admin_spaces) to keep staging, or run `drua_admin_spaces merge-draft` / `discard-draft` before writing space:{slug}/ directly"
-    )]
-    DraftOpen {
-        id: String,
-        title: String,
-        slug: String,
-    },
-    #[error("SpaceError - RunReadOnly: space:{slug}/ is read-only in this workflow run — set `space_writes.mode` to `merge` or `open_pr` in the workflow definition to let its steps write")]
-    RunReadOnly { slug: String },
 }
 
 impl From<derive_builder::UninitializedFieldError> for SpaceError {
