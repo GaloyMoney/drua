@@ -1,11 +1,8 @@
 use thiserror::Error;
 
-use crate::agent::error::AgentError;
-use crate::agent::repo::{AgentFindError, AgentModifyError};
 use crate::auth::error::AuthorizationError;
 use crate::github_app::GitHubAppError;
 use crate::primitives::ChangesetId;
-use crate::workflow::run::repo::{WorkflowRunFindError, WorkflowRunModifyError};
 
 use super::entity::ChangesetStatus;
 use super::repo::{
@@ -26,16 +23,6 @@ pub enum ChangesetError {
     Query(#[from] ChangesetQueryError),
     #[error("ChangesetError - Library: {0}")]
     Library(#[from] drua_library::LibraryError),
-    #[error("ChangesetError - Agent: {0}")]
-    Agent(#[from] AgentError),
-    #[error("ChangesetError - AgentFind: {0}")]
-    AgentFind(#[from] AgentFindError),
-    #[error("ChangesetError - AgentModify: {0}")]
-    AgentModify(#[from] AgentModifyError),
-    #[error("ChangesetError - WorkflowRunFind: {0}")]
-    WorkflowRunFind(#[from] WorkflowRunFindError),
-    #[error("ChangesetError - WorkflowRunModify: {0}")]
-    WorkflowRunModify(#[from] WorkflowRunModifyError),
     #[error("ChangesetError - InvalidTransition: {op} is not valid from {from:?}")]
     InvalidTransition {
         from: ChangesetStatus,
