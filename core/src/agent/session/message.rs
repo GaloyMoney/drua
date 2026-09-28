@@ -228,6 +228,11 @@ impl From<Prompt> for llm::Prompt {
                 .into_iter()
                 .map(llm::prompt::Message::from)
                 .collect(),
+            // Populated by `Agents::drive_session_loop` right before
+            // dispatch — this conversion has no agent/run identity to
+            // give them.
+            trace_agent_id: None,
+            trace_run_id: None,
         }
     }
 }

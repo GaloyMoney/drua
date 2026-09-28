@@ -9,8 +9,9 @@ use crate::primitives::{WorkflowDefinitionId, WorkflowRunId};
 use crate::project::Projects;
 use crate::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
 use crate::workflow::{
-    StepResult, WorkflowDefinition, WorkflowRun, WorkflowRunState, WorkflowSandboxDecl,
-    WorkflowStepDef, WorkflowTrigger, Workflows,
+    SpaceWritesDecl, SpaceWritesFailure, SpaceWritesMode, StepResult, WorkflowDefinition,
+    WorkflowRun, WorkflowRunState, WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger,
+    Workflows,
 };
 
 use super::super::error::ToolSetsError;
@@ -55,6 +56,10 @@ enum WorkflowParams {
         /// role/config default when unset.
         #[serde(default)]
         model_chain: Option<llm::ModelChain>,
+        /// How run output gets written back to the space filesystem.
+        /// Omit for `{mode: merge, on_failure: keep}`.
+        #[serde(default)]
+        space_writes: Option<SpaceWritesDecl>,
     },
     List,
     Get {
@@ -111,6 +116,13 @@ enum WorkflowParams {
         model_chain: Option<llm::ModelChain>,
         #[serde(default)]
         clear_model_chain: bool,
+        /// When `update_space_writes` and this is omitted, resets to
+        /// `{mode: merge, on_failure: keep}` — that default IS the
+        /// clear; there's no separate clear flag.
+        #[serde(default)]
+        space_writes: Option<SpaceWritesDecl>,
+        #[serde(default)]
+        update_space_writes: bool,
     },
     Delete {
         definition_id: WorkflowDefinitionId,
@@ -407,6 +419,9 @@ struct WorkflowDefinitionOutput {
     next_run_at: Option<String>,
     steps: Vec<WorkflowStepOutput>,
     sandboxes: Vec<WorkflowSandboxOutput>,
+    /// Always present, including the silent `merge` default — see I1
+    /// in handoff-space-changesets-followups-2026-09-28.md.
+    space_writes: SpaceWritesDecl,
 }
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
@@ -461,6 +476,28 @@ struct WorkflowRunOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     completed_at: Option<String>,
     step_results: Vec<StepResultOutput>,
+    /// The run's `space_writes` draft, if it ever opened one — present
+    /// while the run has one still open, and left in place after it
+    /// closes so the final run output reports what happened to it
+    /// (OQ-12, handoff-space-changesets-followups-2026-09-28.md).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    changeset: Option<WorkflowRunChangesetOutput>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct WorkflowRunChangesetOutput {
+    id: String,
+    /// `open` (still open, run in flight), `merged`, `pr_opened`, or
+    /// `discarded`.
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pr_number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pr_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    merge_oid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
 }
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
@@ -522,6 +559,31 @@ fn item_schema_for<T: schemars::JsonSchema>() -> serde_json::Value {
         obj.remove("$schema");
     }
     value
+}
+
+/// `item_schema_for::<SpaceWritesDecl>()` plus a hand-written
+/// `description`, since (unlike `steps`/`sandboxes`) this is a
+/// single-object field, not an array `items:` slot.
+fn space_writes_schema() -> serde_json::Value {
+    let mut schema = item_schema_for::<SpaceWritesDecl>();
+    if let Some(obj) = schema.as_object_mut() {
+        obj.insert(
+            "description".to_string(),
+            serde_json::Value::String(
+                "How run output gets written back to the space filesystem: mode `merge` \
+                 (default, writes straight to a draft merged on success), `open_pr` (opens \
+                 a GitHub PR instead; requires `message.title`), or `read_only` (no draft \
+                 opened; `message` must be absent). `on_failure` (`keep` default, or \
+                 `discard`) controls what happens to an open draft when the run fails. On \
+                 create, omitting this uses `{mode: merge, on_failure: keep}`. On update, \
+                 applies only when `update_space_writes` is true; omitting `space_writes` \
+                 while `update_space_writes` is true resets to that same default (there's \
+                 no separate clear flag)."
+                    .to_string(),
+            ),
+        );
+    }
+    schema
 }
 
 static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
@@ -623,6 +685,11 @@ static WORKFLOW_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             "clear_model_chain": {
                 "type": "boolean",
                 "description": "Update only: clears `model_chain` to null. Ignored when false."
+            },
+            "space_writes": space_writes_schema(),
+            "update_space_writes": {
+                "type": "boolean",
+                "description": "Update only: apply `space_writes` (replacing it, or resetting to the merge/keep default if omitted)."
             }
         },
         "required": ["command"],
@@ -674,16 +741,21 @@ impl TopLevelTool for WorkflowTool {
          each step's skill via `$ARGUMENTS`. Commands: `create` (requires \
          `name`; either `steps` array or single-step shorthand `skill`; \
          optional `provider`, `trigger_condition`, `sandboxes`, `manual`, \
-         `model_chain`), \
-         `list`, `get` (requires `definition_id`), `trigger` (requires \
-         `definition_id`, optional `payload`; returns immediately with \
-         the spawned run), `runs` (requires `definition_id`; truncated step \
-         outputs), `run` (requires `run_id`; full per-step outputs), \
+         `model_chain`, `space_writes` — defaults to `{mode: merge, \
+         on_failure: keep}`), \
+         `list`, `get` (requires `definition_id`; always reports \
+         `space_writes`, including the silent `merge` default), `trigger` \
+         (requires `definition_id`, optional `payload`; returns immediately \
+         with the spawned run), `runs` (requires `definition_id`; truncated \
+         step outputs), `run` (requires `run_id`; full per-step outputs), \
          `update` (requires `definition_id`; optional `name`, \
          `description`+`clear_description`, `steps`+`update_steps`, \
          `sandboxes`+`update_sandboxes`, \
          `provider`/`manual`/`trigger_condition`+`update_trigger`, \
-         `model_chain`+`clear_model_chain`), \
+         `model_chain`+`clear_model_chain`, \
+         `space_writes`+`update_space_writes` — omitting `space_writes` \
+         while `update_space_writes: true` resets it to the `merge`/`keep` \
+         default), \
          `delete` (requires `definition_id`; cascades to runs and queues \
          a `DeleteFile` on the canonical YAML), \
          `cancel` (requires `run_id`, optional `reason`; aborts an \
@@ -734,6 +806,7 @@ impl TopLevelTool for WorkflowTool {
                 timeout_seconds,
                 sandboxes,
                 model_chain,
+                space_writes,
             } => {
                 let trigger = if manual {
                     WorkflowTrigger::Manual {
@@ -792,7 +865,7 @@ impl TopLevelTool for WorkflowTool {
                         resolved_steps,
                         sandbox_decls,
                         model_chain,
-                        crate::workflow::SpaceWritesDecl::default(),
+                        space_writes.unwrap_or_default(),
                     )
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
@@ -917,6 +990,8 @@ impl TopLevelTool for WorkflowTool {
                 trigger_condition,
                 model_chain,
                 clear_model_chain,
+                space_writes,
+                update_space_writes,
             } => {
                 let description: Option<Option<String>> = if clear_description {
                     Some(None)
@@ -955,6 +1030,8 @@ impl TopLevelTool for WorkflowTool {
                 } else {
                     model_chain.map(Some)
                 };
+                let space_writes_arg =
+                    update_space_writes.then(|| space_writes.unwrap_or_default());
 
                 let definition = self
                     .workflows
@@ -967,7 +1044,7 @@ impl TopLevelTool for WorkflowTool {
                         steps_arg,
                         sandboxes_arg,
                         model_chain_arg,
-                        None,
+                        space_writes_arg,
                     )
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
@@ -1054,6 +1131,7 @@ fn definition_to_output(d: &WorkflowDefinition) -> WorkflowDefinitionOutput {
         next_run_at,
         steps: d.steps.iter().map(step_to_output).collect(),
         sandboxes: d.sandboxes.iter().map(sandbox_to_output).collect(),
+        space_writes: d.space_writes.clone(),
     }
 }
 
@@ -1177,6 +1255,86 @@ fn run_to_output(r: &WorkflowRun) -> WorkflowRunOutput {
         started_at: r.started_at().to_rfc3339(),
         completed_at: r.completed_at.map(|t| t.to_rfc3339()),
         step_results: r.step_results.iter().map(step_result_to_output).collect(),
+        changeset: run_changeset_to_output(r),
+    }
+}
+
+fn run_changeset_to_output(r: &WorkflowRun) -> Option<WorkflowRunChangesetOutput> {
+    if let Some(id) = r.changeset {
+        return Some(WorkflowRunChangesetOutput {
+            id: id.to_string(),
+            status: "open".to_string(),
+            pr_number: None,
+            pr_url: None,
+            merge_oid: None,
+            reason: None,
+        });
+    }
+    let id = r.last_changeset_id?;
+    let out = match r.last_changeset_outcome.as_ref() {
+        Some(crate::workflow::SpaceWritesOutcome::Merged { merge_oid }) => {
+            WorkflowRunChangesetOutput {
+                id: id.to_string(),
+                status: "merged".to_string(),
+                pr_number: None,
+                pr_url: None,
+                merge_oid: Some(merge_oid.clone()),
+                reason: None,
+            }
+        }
+        Some(crate::workflow::SpaceWritesOutcome::PrOpened { pr_number, pr_url }) => {
+            WorkflowRunChangesetOutput {
+                id: id.to_string(),
+                status: "pr_opened".to_string(),
+                pr_number: Some(*pr_number),
+                pr_url: Some(pr_url.clone()),
+                merge_oid: None,
+                reason: None,
+            }
+        }
+        Some(crate::workflow::SpaceWritesOutcome::Discarded { reason }) => {
+            WorkflowRunChangesetOutput {
+                id: id.to_string(),
+                status: "discarded".to_string(),
+                pr_number: None,
+                pr_url: None,
+                merge_oid: None,
+                reason: Some(reason.clone()),
+            }
+        }
+        None => return None,
+    };
+    Some(out)
+}
+
+fn format_run_changeset_text(cs: &WorkflowRunChangesetOutput) -> String {
+    match cs.status.as_str() {
+        "merged" => format!(
+            "{} (merged{})",
+            cs.id,
+            cs.merge_oid
+                .as_deref()
+                .map(|oid| format!(" {oid}"))
+                .unwrap_or_default()
+        ),
+        "pr_opened" => {
+            let number = cs.pr_number.map(|n| format!(" #{n}")).unwrap_or_default();
+            let url = cs
+                .pr_url
+                .as_deref()
+                .map(|u| format!(" {u}"))
+                .unwrap_or_default();
+            format!("{} (pr_opened{number}{url})", cs.id)
+        }
+        "discarded" => format!(
+            "{} (discarded{})",
+            cs.id,
+            cs.reason
+                .as_deref()
+                .map(|r| format!(": {r}"))
+                .unwrap_or_default()
+        ),
+        other => format!("{} ({other})", cs.id),
     }
 }
 
@@ -1328,6 +1486,10 @@ fn format_get_text(d: &WorkflowDefinition) -> String {
         out.push_str(&format!("description: {desc}\n"));
     }
     out.push_str(&format!("trigger:     {trigger}\n"));
+    out.push_str(&format!(
+        "space_writes: {}\n",
+        format_space_writes(&d.space_writes)
+    ));
     if !d.sandboxes.is_empty() {
         out.push_str(&format!("sandboxes:   {}\n", d.sandboxes.len()));
         for sb in &d.sandboxes {
@@ -1451,6 +1613,15 @@ fn format_run_text(r: &WorkflowRun) -> String {
     if let Some(t) = r.completed_at {
         out.push_str(&format!("completed_at:  {}\n", t.to_rfc3339()));
     }
+    // OQ-12 (handoff-space-changesets-followups-2026-09-28.md): the
+    // structured `changeset` output field already carries this; skills
+    // reading only the text channel need it too.
+    if let Some(cs) = run_changeset_to_output(r) {
+        out.push_str(&format!(
+            "changeset:     {}\n",
+            format_run_changeset_text(&cs)
+        ));
+    }
     out.push('\n');
     if matches!(
         r.state,
@@ -1501,6 +1672,26 @@ fn format_run_text(r: &WorkflowRun) -> String {
     out
 }
 
+/// Always rendered (never hidden behind `is_default()`): `merge` is the
+/// silent default a workflow runs with when nobody sets `space_writes`,
+/// and that invisibility is exactly what I1 exists to fix — see
+/// handoff-space-changesets-followups-2026-09-28.md.
+fn format_space_writes(sw: &SpaceWritesDecl) -> String {
+    let mode = match sw.mode {
+        SpaceWritesMode::Merge => "merge",
+        SpaceWritesMode::OpenPr => "open_pr",
+        SpaceWritesMode::ReadOnly => "read_only",
+    };
+    let on_failure = match sw.on_failure {
+        SpaceWritesFailure::Keep => "keep",
+        SpaceWritesFailure::Discard => "discard",
+    };
+    match &sw.message {
+        Some(m) => format!("{mode} (on_failure: {on_failure}, title: {})", m.title),
+        None => format!("{mode} (on_failure: {on_failure})"),
+    }
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -1526,5 +1717,335 @@ mod script_step_tests {
         assert_eq!(output["entry"], "inventory");
         assert_eq!(output["args"]["date"], "${{ run.date }}");
         assert_eq!(output["max_tool_calls"], 1500);
+    }
+}
+
+#[cfg(test)]
+mod space_writes_tests {
+    use super::*;
+
+    #[test]
+    fn create_parses_space_writes() {
+        let p: WorkflowParams = serde_json::from_value(serde_json::json!({
+            "command": "create",
+            "name": "curator",
+            "manual": true,
+            "skill": "audit",
+            "space_writes": {
+                "mode": "open_pr",
+                "on_failure": "discard",
+                "message": { "title": "chore: curate" },
+            },
+        }))
+        .unwrap();
+        let WorkflowParams::Create { space_writes, .. } = p else {
+            panic!("expected Create");
+        };
+        let sw = space_writes.expect("space_writes present");
+        assert_eq!(sw.mode, SpaceWritesMode::OpenPr);
+        assert_eq!(sw.on_failure, SpaceWritesFailure::Discard);
+        assert_eq!(sw.message.expect("message").title, "chore: curate");
+    }
+
+    #[test]
+    fn create_defaults_space_writes_to_none_which_maps_to_merge() {
+        let p: WorkflowParams = serde_json::from_value(serde_json::json!({
+            "command": "create",
+            "name": "curator",
+            "manual": true,
+            "skill": "audit",
+        }))
+        .unwrap();
+        let WorkflowParams::Create { space_writes, .. } = p else {
+            panic!("expected Create");
+        };
+        assert!(space_writes.is_none());
+        assert_eq!(space_writes.unwrap_or_default(), SpaceWritesDecl::default());
+    }
+
+    #[test]
+    fn update_parses_space_writes_and_flag() {
+        let definition_id = WorkflowDefinitionId::new();
+        let p: WorkflowParams = serde_json::from_value(serde_json::json!({
+            "command": "update",
+            "definition_id": uuid::Uuid::from(definition_id),
+            "update_space_writes": true,
+            "space_writes": { "mode": "read_only" },
+        }))
+        .unwrap();
+        let WorkflowParams::Update {
+            space_writes,
+            update_space_writes,
+            ..
+        } = p
+        else {
+            panic!("expected Update");
+        };
+        assert!(update_space_writes);
+        assert_eq!(
+            space_writes.expect("space_writes present").mode,
+            SpaceWritesMode::ReadOnly
+        );
+    }
+
+    #[test]
+    fn update_space_writes_flag_defaults_to_false() {
+        let definition_id = WorkflowDefinitionId::new();
+        let p: WorkflowParams = serde_json::from_value(serde_json::json!({
+            "command": "update",
+            "definition_id": uuid::Uuid::from(definition_id),
+        }))
+        .unwrap();
+        let WorkflowParams::Update {
+            update_space_writes,
+            ..
+        } = p
+        else {
+            panic!("expected Update");
+        };
+        assert!(!update_space_writes);
+    }
+
+    #[test]
+    fn schema_declares_space_writes_and_update_flag() {
+        let s = serde_json::to_string(&*WORKFLOW_SCHEMA).unwrap();
+        assert!(s.contains("\"space_writes\""));
+        assert!(s.contains("\"update_space_writes\""));
+        // All three modes must be reachable through the derived
+        // subschema, not just the ones exercised by other tests.
+        assert!(s.contains("\"merge\""));
+        assert!(s.contains("\"open_pr\""));
+        assert!(s.contains("\"read_only\""));
+        assert!(s.contains("\"keep\""));
+        assert!(s.contains("\"discard\""));
+    }
+
+    fn build_definition(space_writes: SpaceWritesDecl) -> WorkflowDefinition {
+        use crate::primitives::ProjectId;
+        use crate::workflow::WorkflowDefinitionEvent;
+        use es_entity::{EntityEvents, TryFromEvents as _};
+
+        let id = WorkflowDefinitionId::new();
+        let events = EntityEvents::init(
+            id,
+            [WorkflowDefinitionEvent::Initialized {
+                id,
+                project_id: ProjectId::new(),
+                project_name: None,
+                name: "curator".to_string(),
+                description: None,
+                trigger: WorkflowTrigger::Manual { condition: None },
+                steps: vec![WorkflowStepDef::AgentStep {
+                    name: "s1".to_string(),
+                    skill: "audit".to_string(),
+                    sandbox: None,
+                    sandbox_mode: None,
+                    timeout_seconds: None,
+                    model_chain: None,
+                    output_schema: Box::new(crate::workflow::default_output_schema()),
+                    condition: None,
+                }],
+                sandboxes: vec![],
+                model_chain: None,
+                original_path: None,
+                space_writes,
+            }],
+        );
+        WorkflowDefinition::try_from_events(events).expect("hydrate")
+    }
+
+    #[test]
+    fn get_text_always_shows_space_writes_at_the_silent_default() {
+        let d = build_definition(SpaceWritesDecl::default());
+        let text = format_get_text(&d);
+        assert!(
+            text.contains("space_writes: merge (on_failure: discard)"),
+            "the merge default must be visible: {text}"
+        );
+    }
+
+    #[test]
+    fn get_text_shows_read_only_and_discard() {
+        let d = build_definition(SpaceWritesDecl {
+            mode: SpaceWritesMode::ReadOnly,
+            on_failure: SpaceWritesFailure::Discard,
+            message: None,
+        });
+        let text = format_get_text(&d);
+        assert!(
+            text.contains("space_writes: read_only (on_failure: discard)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn typed_output_includes_space_writes() {
+        let d = build_definition(SpaceWritesDecl {
+            mode: SpaceWritesMode::OpenPr,
+            on_failure: SpaceWritesFailure::Keep,
+            message: Some(crate::workflow::SpaceWritesMessage {
+                title: "chore: curate".to_string(),
+                body: None,
+            }),
+        });
+        let out = definition_to_output(&d);
+        assert_eq!(out.space_writes.mode, SpaceWritesMode::OpenPr);
+        let value = serde_json::to_value(&out).unwrap();
+        assert_eq!(value["space_writes"]["mode"], "open_pr");
+        assert_eq!(value["space_writes"]["message"]["title"], "chore: curate");
+    }
+
+    #[test]
+    fn definition_update_content_round_trips_space_writes_and_ignores_none() {
+        let mut d = build_definition(SpaceWritesDecl::default());
+        assert!(format_get_text(&d).contains("space_writes: merge (on_failure: discard)"));
+
+        let new_decl = SpaceWritesDecl {
+            mode: SpaceWritesMode::OpenPr,
+            on_failure: SpaceWritesFailure::Discard,
+            message: Some(crate::workflow::SpaceWritesMessage {
+                title: "chore: curate".to_string(),
+                body: None,
+            }),
+        };
+        let _ = d.update_content(None, None, None, None, None, None, Some(new_decl.clone()));
+        assert_eq!(d.space_writes, new_decl);
+        assert!(format_get_text(&d).contains("space_writes: open_pr"));
+
+        // `update_space_writes: false` on the tool maps to `None` here —
+        // must leave the prior value untouched.
+        let _ = d.update_content(None, None, None, None, None, None, None);
+        assert_eq!(d.space_writes, new_decl);
+    }
+
+    fn build_run() -> WorkflowRun {
+        use crate::workflow::run::NewWorkflowRun;
+        use es_entity::{IntoEvents as _, TryFromEvents as _};
+
+        let new = NewWorkflowRun::builder()
+            .definition_id(WorkflowDefinitionId::new())
+            .project_id(crate::primitives::ProjectId::new())
+            .trigger_context(serde_json::json!({}))
+            .steps_snapshot(vec![WorkflowStepDef::AgentStep {
+                name: "s1".to_string(),
+                skill: "audit".to_string(),
+                sandbox: None,
+                sandbox_mode: None,
+                timeout_seconds: None,
+                model_chain: None,
+                output_schema: Box::new(crate::workflow::default_output_schema()),
+                condition: None,
+            }])
+            .build()
+            .unwrap();
+        WorkflowRun::try_from_events(new.into_events()).unwrap()
+    }
+
+    // These exercise `run_changeset_to_output` (the piece `run_to_output`
+    // delegates to for the `changeset` field) directly, rather than
+    // `run_to_output` itself — the latter also calls `r.started_at()`,
+    // which needs `entity_first_persisted_at`, only set by an actual DB
+    // persist (not available to an entity built via `TryFromEvents` in a
+    // unit test, per the rest of this codebase's convention for such
+    // tests — see e.g. `project::entity::tests`).
+
+    #[test]
+    fn run_output_omits_changeset_when_none_was_ever_opened() {
+        let run = build_run();
+        assert!(run_changeset_to_output(&run).is_none());
+    }
+
+    #[test]
+    fn run_output_shows_open_changeset() {
+        let mut run = build_run();
+        let id = crate::primitives::ChangesetId::new();
+        let _ = run.changeset_opened(id, SpaceWritesFailure::Discard);
+        let cs = run_changeset_to_output(&run).expect("changeset present");
+        assert_eq!(cs.id, id.to_string());
+        assert_eq!(cs.status, "open");
+    }
+
+    #[test]
+    fn run_output_shows_outcome_after_close_oq12() {
+        // OQ-12 (handoff-space-changesets-followups-2026-09-28.md,
+        // originally from #504's OQ table): the run's final structured
+        // output must surface the changeset's outcome once it closes.
+        let mut run = build_run();
+        let id = crate::primitives::ChangesetId::new();
+        let _ = run.changeset_opened(id, SpaceWritesFailure::Discard);
+        let _ = run.changeset_closed(
+            id,
+            Some(crate::workflow::SpaceWritesOutcome::Merged {
+                merge_oid: "abc123".to_string(),
+            }),
+        );
+        let cs = run_changeset_to_output(&run).expect("changeset present");
+        assert_eq!(cs.id, id.to_string());
+        assert_eq!(cs.status, "merged");
+        assert_eq!(cs.merge_oid.as_deref(), Some("abc123"));
+
+        let value = serde_json::to_value(&cs).unwrap();
+        assert_eq!(value["status"], "merged");
+        assert_eq!(value["merge_oid"], "abc123");
+    }
+
+    #[test]
+    fn format_run_text_includes_changeset_outcome() {
+        // Cursor Bugbot flagged that format_run_text (unlike format_run in
+        // admin.rs and the structured `changeset` output field) omitted the
+        // changeset outcome entirely — skills reading only the workflow
+        // tool's text channel never saw it. format_run_text also calls
+        // r.started_at(), which needs entity_first_persisted_at to be set —
+        // build_run() alone doesn't do that (matches the rest of this
+        // codebase's TryFromEvents-based unit tests, which avoid
+        // started_at()), so mark the events persisted explicitly here.
+        use crate::workflow::run::NewWorkflowRun;
+        use es_entity::{IntoEvents as _, TryFromEvents as _};
+
+        let new = NewWorkflowRun::builder()
+            .definition_id(WorkflowDefinitionId::new())
+            .project_id(crate::primitives::ProjectId::new())
+            .trigger_context(serde_json::json!({}))
+            .steps_snapshot(vec![])
+            .build()
+            .unwrap();
+        let mut events = new.into_events();
+        events.mark_new_events_persisted_at(chrono::Utc::now());
+        let mut run = WorkflowRun::try_from_events(events).unwrap();
+
+        let id = crate::primitives::ChangesetId::new();
+        let _ = run.changeset_opened(id, SpaceWritesFailure::Discard);
+        let _ = run.changeset_closed(
+            id,
+            Some(crate::workflow::SpaceWritesOutcome::Merged {
+                merge_oid: "abc123".to_string(),
+            }),
+        );
+
+        let text = format_run_text(&run);
+        assert!(
+            text.contains(&format!("changeset:     {id} (merged abc123)")),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn format_run_text_omits_changeset_line_when_none_was_ever_opened() {
+        use crate::workflow::run::NewWorkflowRun;
+        use es_entity::{IntoEvents as _, TryFromEvents as _};
+
+        let new = NewWorkflowRun::builder()
+            .definition_id(WorkflowDefinitionId::new())
+            .project_id(crate::primitives::ProjectId::new())
+            .trigger_context(serde_json::json!({}))
+            .steps_snapshot(vec![])
+            .build()
+            .unwrap();
+        let mut events = new.into_events();
+        events.mark_new_events_persisted_at(chrono::Utc::now());
+        let run = WorkflowRun::try_from_events(events).unwrap();
+
+        let text = format_run_text(&run);
+        assert!(!text.contains("changeset:"), "{text}");
     }
 }

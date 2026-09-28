@@ -1433,7 +1433,7 @@ impl Agents {
             prompt_state.tool_choice = Some(choice);
         }
 
-        self.drive_session_loop(id, agent_subject, tx, prompt_state)
+        self.drive_session_loop(id, agent_subject, tx, prompt_state, agent.workflow_run_id)
             .await?;
 
         Ok(rx)
@@ -1498,7 +1498,7 @@ impl Agents {
         };
 
         let (tx, rx) = tokio::sync::mpsc::channel::<ChatOutputEvent>(64);
-        self.drive_session_loop(id, agent_subject, tx, prompt_state)
+        self.drive_session_loop(id, agent_subject, tx, prompt_state, agent.workflow_run_id)
             .await?;
         Ok(Some(rx))
     }
@@ -1508,14 +1508,23 @@ impl Agents {
     /// [`Self::resume_message`] (retried turn from a persisted `PromptSent`).
     /// The chain travels inside `prompt_state` itself — the session
     /// is the only source of truth for which chain to dispatch with.
+    ///
+    /// `workflow_run_id` (the caller's already-loaded `Agent.workflow_run_id`
+    /// — `None` for a non-workflow agent) and `id` are stamped onto every
+    /// dispatched `llm::Prompt` as `trace_agent_id`/`trace_run_id` so the
+    /// provider clients can record them on their request/stream spans. See
+    /// `review-curation-live-run4-2026-09-28.md` R5(a).
     async fn drive_session_loop(
         &self,
         id: AgentId,
         agent_subject: AuthSubject,
         tx: tokio::sync::mpsc::Sender<ChatOutputEvent>,
-        prompt_state: llm::Prompt,
+        mut prompt_state: llm::Prompt,
+        workflow_run_id: Option<WorkflowRunId>,
     ) -> Result<(), AgentError> {
         let model_name = prompt_state.chain.primary.name.clone();
+        prompt_state.trace_agent_id = Some(id.to_string());
+        prompt_state.trace_run_id = workflow_run_id.map(|r| r.to_string());
         let (request, response_rx) = llm::PromptRequest::new(prompt_state);
         self.prompt_requests
             .send(request)
@@ -1589,7 +1598,7 @@ impl Agents {
                     forward_response(response, &tx);
                 }
 
-                let next_prompt = match session_response {
+                let mut next_prompt = match session_response {
                     session::AgentSessionResponse::Done => break,
                     session::AgentSessionResponse::ToolUseRequest(tool_uses) => {
                         let tool_calls: Vec<llm::RequestToolUse> = tool_uses
@@ -1655,6 +1664,8 @@ impl Agents {
                 };
 
                 current_model = next_prompt.chain.primary.name.clone();
+                next_prompt.trace_agent_id = Some(id.to_string());
+                next_prompt.trace_run_id = workflow_run_id.map(|r| r.to_string());
                 let (request, rx_next) = llm::PromptRequest::new(next_prompt);
                 if prompt_requests.send(request).await.is_err() {
                     emit_event(

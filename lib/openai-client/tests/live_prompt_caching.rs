@@ -53,6 +53,8 @@ fn build_prompt(
         tool_choice: None,
         max_tokens: Some(64),
         cache_key: Some(cache_key.to_string()),
+        trace_agent_id: None,
+        trace_run_id: None,
     }
 }
 

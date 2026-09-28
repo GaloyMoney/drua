@@ -19,6 +19,7 @@ use crate::skill::name_from_filename;
 use super::definition::{SpaceWritesDecl, WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger};
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
+#[serde(deny_unknown_fields)]
 struct WorkflowYaml {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     id: Option<uuid::Uuid>,
@@ -40,7 +41,7 @@ struct WorkflowYaml {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum WorkflowSandboxYaml {
     Scratch {
         name: String,
@@ -59,6 +60,7 @@ enum WorkflowSandboxYaml {
 }
 
 #[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ScratchYamlConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     cpu: Option<String>,
@@ -82,6 +84,7 @@ impl ScratchYamlConfig {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RepoYamlConfig {
     repo_url: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -175,7 +178,7 @@ impl WorkflowSandboxYaml {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum WorkflowTriggerYaml {
     Manual {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -230,7 +233,7 @@ impl WorkflowTriggerYaml {
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 enum WorkflowStepYaml {
     AgentStep {
         name: String,
@@ -486,7 +489,13 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
         return None;
     }
 
-    let yaml: WorkflowYaml = serde_yaml::from_str(trimmed).ok()?;
+    let yaml: WorkflowYaml = match serde_yaml::from_str(trimmed) {
+        Ok(yaml) => yaml,
+        Err(e) => {
+            tracing::warn!(path, error = %e, "workflow yaml did not parse; skipped");
+            return None;
+        }
+    };
 
     let (workflow_id, has_id) = match yaml.id {
         Some(uuid) => (WorkflowDefinitionId::from(uuid), true),
@@ -1029,6 +1038,129 @@ steps:
             &parsed.sandboxes[0],
             WorkflowSandboxDecl::Preexisting { name } if name == "investigation"
         ));
+    }
+
+    // I2-a: `deny_unknown_fields` on the YAML-only mirror types. Each
+    // internally-tagged enum gets a pair of tests: the discriminator
+    // (`type:`) plus a valid body still parses, and an unknown key
+    // inside a variant body is rejected rather than silently dropped.
+
+    #[test]
+    fn workflow_yaml_rejects_unknown_top_level_key() {
+        let content = "\
+name: simple-flow
+trigger:
+  type: manual
+unknown_top_level_key: true
+steps:
+  - type: agent_step
+    name: step
+    skill: my-skill
+";
+        assert!(
+            serde_yaml::from_str::<WorkflowYaml>(content).is_err(),
+            "unexpected top-level key must be rejected, not silently dropped"
+        );
+    }
+
+    #[test]
+    fn workflow_sandbox_yaml_valid_variants_parse() {
+        for yaml in [
+            "type: scratch\nname: investigation\n",
+            "type: scratch\nname: investigation\nconfig:\n  cpu: \"1\"\n  memory: 1Gi\n  disk_size: 10Gi\n",
+            "type: repo\nname: build\nconfig:\n  repo_url: https://github.com/GaloyMoney/drua\n",
+            "type: preexisting\nname: oncall-shell\n",
+        ] {
+            assert!(
+                serde_yaml::from_str::<WorkflowSandboxYaml>(yaml).is_ok(),
+                "valid sandbox yaml must still parse: {yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_sandbox_yaml_rejects_unknown_key_in_body() {
+        for yaml in [
+            "type: scratch\nname: investigation\nbogus: true\n",
+            "type: repo\nname: build\nconfig:\n  repo_url: https://x\n  bogus: true\n",
+            "type: preexisting\nname: shell\nbogus: true\n",
+        ] {
+            assert!(
+                serde_yaml::from_str::<WorkflowSandboxYaml>(yaml).is_err(),
+                "unknown key must be rejected: {yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_trigger_yaml_valid_variants_parse() {
+        for yaml in [
+            "type: manual\n",
+            "type: manual\ncondition: \"trigger.x == 1\"\n",
+            "type: webhook\nprovider: honeycomb\n",
+            "type: cron\nschedule: \"0 */6 * * * *\"\ntimezone: UTC\n",
+        ] {
+            assert!(
+                serde_yaml::from_str::<WorkflowTriggerYaml>(yaml).is_ok(),
+                "valid trigger yaml must still parse: {yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_trigger_yaml_rejects_unknown_key_in_body() {
+        for yaml in [
+            "type: manual\nbogus: true\n",
+            "type: webhook\nprovider: honeycomb\nbogus: true\n",
+            "type: cron\nschedule: \"0 */6 * * * *\"\nbogus: true\n",
+        ] {
+            assert!(
+                serde_yaml::from_str::<WorkflowTriggerYaml>(yaml).is_err(),
+                "unknown key must be rejected: {yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_step_yaml_valid_variants_parse() {
+        for yaml in [
+            "type: agent_step\nname: step\nskill: my-skill\n",
+            "type: tool_step\nname: step\ntool: whoami\n",
+            "type: script_step\nname: step\nscript: space:docs/x.js\n",
+            "type: wait\nname: step\nprovider: concourse\nresume_condition: \"true\"\n",
+        ] {
+            assert!(
+                serde_yaml::from_str::<WorkflowStepYaml>(yaml).is_ok(),
+                "valid step yaml must still parse: {yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn workflow_step_yaml_rejects_unknown_key_in_body() {
+        for yaml in [
+            "type: agent_step\nname: step\nskill: my-skill\nbogus: true\n",
+            "type: tool_step\nname: step\ntool: whoami\nbogus: true\n",
+            "type: script_step\nname: step\nscript: space:docs/x.js\nbogus: true\n",
+            "type: wait\nname: step\nprovider: concourse\nresume_condition: \"true\"\nbogus: true\n",
+        ] {
+            assert!(
+                serde_yaml::from_str::<WorkflowStepYaml>(yaml).is_err(),
+                "unknown key must be rejected: {yaml}"
+            );
+        }
+    }
+
+    #[test]
+    fn scratch_yaml_config_rejects_unknown_key() {
+        assert!(serde_yaml::from_str::<ScratchYamlConfig>("cpu: \"1\"\nbogus: true\n").is_err());
+    }
+
+    #[test]
+    fn repo_yaml_config_rejects_unknown_key() {
+        assert!(
+            serde_yaml::from_str::<RepoYamlConfig>("repo_url: https://x\nbogus: true\n").is_err()
+        );
     }
 }
 

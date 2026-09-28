@@ -431,6 +431,8 @@ mod tests {
             tool_choice: None,
             max_tokens: Some(1024),
             cache_key: None,
+            trace_agent_id: None,
+            trace_run_id: None,
         }
     }
 

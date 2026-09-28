@@ -480,7 +480,7 @@ impl WorkflowSandboxDecl {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct SpaceWritesDecl {
     #[serde(default)]
     pub mode: SpaceWritesMode,
@@ -500,7 +500,9 @@ impl SpaceWritesDecl {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SpaceWritesMode {
     #[default]
@@ -509,15 +511,17 @@ pub enum SpaceWritesMode {
     ReadOnly,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SpaceWritesFailure {
-    #[default]
     Keep,
+    #[default]
     Discard,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SpaceWritesMessage {
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -19,6 +19,17 @@ pub struct Prompt {
     pub effort: Option<ReasoningEffort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_key: Option<String>,
+    /// Tracing-only attribution, never sent to a provider — a provider
+    /// client records these onto its own request/stream spans (e.g.
+    /// `openai_client.send_prompt_streaming`) so Honeycomb can filter LLM
+    /// spans by the agent/run that issued them without an ancestor-span
+    /// join. See `review-curation-live-run4-2026-09-28.md` R5(a): today
+    /// these spans carry no such attribute, so an environment-wide query
+    /// mixes every concurrent agent's turns together.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_run_id: Option<String>,
 }
 
 impl Default for Prompt {
@@ -32,6 +43,8 @@ impl Default for Prompt {
             max_tokens: None,
             effort: None,
             cache_key: None,
+            trace_agent_id: None,
+            trace_run_id: None,
         }
     }
 }
@@ -261,6 +274,8 @@ mod tests {
             max_tokens: Some(1024),
             effort: None,
             cache_key: None,
+            trace_agent_id: None,
+            trace_run_id: None,
         }
     }
 
@@ -305,6 +320,8 @@ mod tests {
             max_tokens: None,
             effort: None,
             cache_key: None,
+            trace_agent_id: None,
+            trace_run_id: None,
         };
 
         assert_eq!(make(input_a).hash(), make(input_b).hash());

@@ -48,6 +48,8 @@ fn build_prompt(model: &str, system_text: String, user_text: impl Into<String>) 
         tool_choice: None,
         max_tokens: Some(64),
         cache_key: None,
+        trace_agent_id: None,
+        trace_run_id: None,
     }
 }
 
