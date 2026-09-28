@@ -169,6 +169,15 @@ impl TestRepo {
         );
         git(&self.work, &["push", "--quiet", "origin", "main"]);
     }
+
+    /// Creates `refname` directly on the bare upstream, at `oid` — for
+    /// tests that need a ref the library's own API can't produce (e.g.
+    /// one whose name isn't a valid `Drafts` uuid). Bypasses the work
+    /// clone entirely, so it lands on origin immediately and survives a
+    /// replica's prune-on-fetch.
+    pub fn create_ref(&self, refname: &str, oid: &str) {
+        git(&self.upstream, &["update-ref", refname, oid]);
+    }
 }
 
 fn write_files(root: &Path, files: &[(&str, &str)]) {

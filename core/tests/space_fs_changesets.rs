@@ -8,7 +8,7 @@ use std::sync::Arc;
 use drua_core::agent::{AgentRole, AgentsConfig, ModelDefaults, RoleConfig};
 use drua_core::auth::AuthScope;
 use drua_core::changeset::repo::ChangesetRepo;
-use drua_core::changeset::{Changeset, ChangesetError, ChangesetStatus};
+use drua_core::changeset::{ChangesetError, ChangesetStatus};
 use drua_core::github_app::PullRequest;
 use drua_core::library::LibraryConfig;
 use drua_core::primitives::{AuthSubject, ChangesetId, McpCredsId, UserId};
@@ -54,6 +54,18 @@ fn git(cwd: &Path, args: &[&str]) {
         .status()
         .expect("spawn git");
     assert!(status.success(), "git {args:?} failed in {cwd:?}");
+}
+
+/// Whether `refname` currently exists in the bare repo at `cwd` — for
+/// refs a `DraftName` can't represent (an unparseable name), so
+/// `Drafts::list` can't be used to check them either.
+fn ref_exists(cwd: &Path, refname: &str) -> bool {
+    Command::new("git")
+        .args(["show-ref", "--verify", "--quiet", refname])
+        .current_dir(cwd)
+        .status()
+        .expect("spawn git")
+        .success()
 }
 
 fn init_bare_upstream() -> PathBuf {
@@ -144,6 +156,14 @@ fn agents_config_for_tests() -> AgentsConfig {
 }
 
 async fn setup(test_name: &str) -> (App, AuthSubject) {
+    let (app, user, _upstream) = setup_with_upstream(test_name).await;
+    (app, user)
+}
+
+/// Like `setup`, but also hands back the bare upstream's path — for
+/// tests that need to manipulate origin directly (a ref library's own
+/// API can't produce, for instance) rather than through the app.
+async fn setup_with_upstream(test_name: &str) -> (App, AuthSubject, PathBuf) {
     let pool = pool().await;
     reset_db(&pool).await;
 
@@ -163,7 +183,7 @@ async fn setup(test_name: &str) -> (App, AuthSubject) {
         .await
         .expect("App::init");
     let user = AuthSubject::User(UserId::new());
-    (app, user)
+    (app, user, upstream)
 }
 
 async fn project_with_space(
@@ -308,13 +328,6 @@ async fn force_submit(pool: &sqlx::PgPool, id: ChangesetId, pr_number: u64) {
         .await
         .expect("update changeset");
     op.commit().await.expect("commit op");
-}
-
-/// A changeset's draft ref name, for tests that assert on raw git state.
-/// `Changeset` no longer exposes this directly — the library owns ref
-/// naming — but `branch()` is still public.
-fn git_ref(cs: &Changeset) -> String {
-    format!("refs/heads/{}", cs.branch())
 }
 
 fn open_pr(number: u64) -> PullRequest {
@@ -670,12 +683,11 @@ async fn reconcile_pr_state_closed_unmerged_pr_rejects_and_deletes_ref() {
     let refreshed = app.changesets().status(&user, cs.id).await.expect("status");
     assert_eq!(refreshed.status, ChangesetStatus::Rejected);
 
-    let ref_after = app
-        .library()
-        .resolve_ref(&git_ref(&cs))
-        .await
-        .expect("resolve ref");
-    assert!(ref_after.is_none(), "ref must be deleted after rejection");
+    let refs_after = app.library().drafts().list().await.expect("list refs");
+    assert!(
+        !refs_after.contains(&cs.draft_name()),
+        "ref must be deleted after rejection"
+    );
 }
 
 #[tokio::test]
@@ -706,12 +718,11 @@ async fn reconcile_pr_state_merged_pr_marks_merged_and_deletes_ref() {
     let refreshed = app.changesets().status(&user, cs.id).await.expect("status");
     assert_eq!(refreshed.status, ChangesetStatus::Merged);
 
-    let ref_after = app
-        .library()
-        .resolve_ref(&git_ref(&cs))
-        .await
-        .expect("resolve ref");
-    assert!(ref_after.is_none(), "ref must be deleted after merge");
+    let refs_after = app.library().drafts().list().await.expect("list refs");
+    assert!(
+        !refs_after.contains(&cs.draft_name()),
+        "ref must be deleted after merge"
+    );
 }
 
 #[tokio::test]
@@ -819,21 +830,19 @@ async fn sweep_finished_refs_deletes_the_ref_of_a_rejected_changeset_whose_ref_s
         .expect("update changeset");
     op.commit().await.expect("commit op");
 
-    let before = app
-        .library()
-        .resolve_ref(&git_ref(&cs))
-        .await
-        .expect("resolve ref");
-    assert!(before.is_some(), "ref must still exist before the sweep");
+    let before = app.library().drafts().list().await.expect("list refs");
+    assert!(
+        before.contains(&cs.draft_name()),
+        "ref must still exist before the sweep"
+    );
 
     app.changesets().sweep_finished_refs().await.expect("sweep");
 
-    let after = app
-        .library()
-        .resolve_ref(&git_ref(&cs))
-        .await
-        .expect("resolve ref");
-    assert!(after.is_none(), "sweep must delete the leftover ref");
+    let after = app.library().drafts().list().await.expect("list refs");
+    assert!(
+        !after.contains(&cs.draft_name()),
+        "sweep must delete the leftover ref"
+    );
 }
 
 #[tokio::test]
@@ -873,20 +882,13 @@ async fn sweep_finished_refs_leaves_open_and_submitted_changesets_alone() {
 
     app.changesets().sweep_finished_refs().await.expect("sweep");
 
+    let refs_after = app.library().drafts().list().await.expect("list refs");
     assert!(
-        app.library()
-            .resolve_ref(&git_ref(&open_cs))
-            .await
-            .expect("resolve ref")
-            .is_some(),
+        refs_after.contains(&open_cs.draft_name()),
         "sweep must leave an Open changeset's ref alone"
     );
     assert!(
-        app.library()
-            .resolve_ref(&git_ref(&submitted_cs))
-            .await
-            .expect("resolve ref")
-            .is_some(),
+        refs_after.contains(&submitted_cs.draft_name()),
         "sweep must leave a Submitted changeset's ref alone"
     );
 }
@@ -894,43 +896,33 @@ async fn sweep_finished_refs_leaves_open_and_submitted_changesets_alone() {
 #[tokio::test]
 #[ignore = "requires postgres + writes a working library clone; run with --ignored"]
 async fn sweep_finished_refs_leaves_unaccounted_and_unparseable_refs_alone() {
-    let (app, user) = setup("sweep_unaccounted").await;
+    let (app, user, upstream) = setup_with_upstream("sweep_unaccounted").await;
     project_with_space(&app, &user, "proj-sweep-unaccounted", "docs").await;
 
-    let main_oid = app
-        .library()
-        .resolve_ref("refs/heads/main")
-        .await
-        .expect("resolve main")
-        .expect("main exists");
+    let main_oid = app.library().drafts().current_main().await.expect("main");
 
-    let no_row_ref = "refs/heads/drua/00000000-0000-0000-0000-000000000000";
-    let unparseable_ref = "refs/heads/drua/not-a-uuid";
+    // No changeset row exists for this id, but the name is still a real
+    // uuid — `Drafts::open` can create it directly.
+    let no_row_name = drua_library::DraftName::from(uuid::Uuid::nil());
     app.library()
-        .create_ref(no_row_ref, &main_oid)
+        .drafts()
+        .open(no_row_name, &main_oid)
         .await
         .expect("create ref with no changeset row");
-    app.library()
-        .create_ref(unparseable_ref, &main_oid)
-        .await
-        .expect("create ref with an unparseable name");
+    // A name that isn't a uuid at all can't go through `Drafts` — it has
+    // to be pushed to the upstream directly.
+    let unparseable_ref = "refs/heads/drua/not-a-uuid";
+    git(&upstream, &["update-ref", unparseable_ref, &main_oid]);
 
     app.changesets().sweep_finished_refs().await.expect("sweep");
 
+    let refs_after = app.library().drafts().list().await.expect("list refs");
     assert!(
-        app.library()
-            .resolve_ref(no_row_ref)
-            .await
-            .expect("resolve ref")
-            .is_some(),
+        refs_after.contains(&no_row_name),
         "sweep must not delete a drua/ ref with no changeset row"
     );
     assert!(
-        app.library()
-            .resolve_ref(unparseable_ref)
-            .await
-            .expect("resolve ref")
-            .is_some(),
+        ref_exists(&upstream, unparseable_ref),
         "sweep must not delete a drua/ ref whose name doesn't parse"
     );
 }

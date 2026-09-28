@@ -278,7 +278,7 @@ impl App {
         toolsets.register_top_level(SubmitOutputTool::new(Arc::clone(&agents)));
 
         let changeset_github_app = library.github_app().cloned();
-        let changeset_repo_coord = library.repo_coord();
+        let changeset_repo_coord = drua_config.github_coord();
         let changesets = Arc::new(Changesets::new(
             pool,
             &AgentRepo::new(pool),

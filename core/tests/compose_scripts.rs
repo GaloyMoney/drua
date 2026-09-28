@@ -1084,11 +1084,17 @@ return {
             .await
             .unwrap()
             .expect("the pre-flight's draft is still open mid-run");
+        let draft_target = drua_library::SpaceTarget::Draft(drua_library::DraftHandle::new(
+            draft.draft_name(),
+            draft.head_oid.clone(),
+        ));
         let file = app
             .library()
-            .read_blob_at(
-                &draft.head_oid,
-                &format!("spaces/docs/runs/{run_id}/inventory.json"),
+            .spaces()
+            .read_file(
+                "docs",
+                &format!("runs/{run_id}/inventory.json"),
+                &draft_target,
             )
             .await
             .unwrap()
