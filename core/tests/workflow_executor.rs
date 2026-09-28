@@ -315,6 +315,7 @@ fn max_tokens_response() -> PromptResponse {
         usage: Usage::default(),
         stop_reason: Some(StopReason::MaxTokens),
         model_used: None,
+        upstream_provider: None,
     }
 }
 
@@ -324,6 +325,7 @@ fn empty_stop_response() -> PromptResponse {
         usage: Usage::default(),
         stop_reason: Some(StopReason::EndTurn),
         model_used: None,
+        upstream_provider: None,
     }
 }
 
@@ -341,6 +343,7 @@ fn thinking_only_response() -> PromptResponse {
         usage: Usage::default(),
         stop_reason: Some(StopReason::EndTurn),
         model_used: None,
+        upstream_provider: None,
     }
 }
 
@@ -354,6 +357,7 @@ fn submit_output_response(id: &str, args: serde_json::Value) -> PromptResponse {
         usage: Usage::default(),
         stop_reason: Some(StopReason::ToolUse),
         model_used: None,
+        upstream_provider: None,
     }
 }
 
@@ -832,6 +836,7 @@ async fn end_turn_without_submit_output_still_triggers_forced_nudge() {
             usage: Usage::default(),
             stop_reason: Some(StopReason::EndTurn),
             model_used: None,
+            upstream_provider: None,
         })))
         .expect("send response");
 

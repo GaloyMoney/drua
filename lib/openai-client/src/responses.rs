@@ -775,6 +775,9 @@ impl ResponsesDeltaSynthesizer {
                 reasoning_output_tokens,
                 cost_usd,
                 upstream_inference_cost_usd,
+                // The Responses API is direct OpenAI, never OpenRouter —
+                // no upstream-provider concept applies here.
+                upstream_provider: None,
             },
             StreamDelta::Done {
                 stop_reason: Some(self.stop_reason()),

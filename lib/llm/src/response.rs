@@ -13,6 +13,10 @@ pub struct PromptResponse {
     pub stop_reason: Option<StopReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_used: Option<String>,
+    /// Upstream provider that actually served this turn (e.g. OpenRouter's
+    /// per-chunk `provider`). `None` when the client didn't report one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_provider: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]

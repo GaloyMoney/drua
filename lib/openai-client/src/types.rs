@@ -125,6 +125,12 @@ pub(crate) struct OpenAiStreamChunk {
     pub choices: Vec<OpenAiChoice>,
     #[serde(default)]
     pub usage: Option<OpenAiUsage>,
+    /// OpenRouter sends this on (at least) the chunk carrying `usage` —
+    /// the name of the upstream provider that actually served the
+    /// request (e.g. `"Anthropic"`). Absent from direct OpenAI and from
+    /// providers OpenRouter doesn't report for.
+    #[serde(default)]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

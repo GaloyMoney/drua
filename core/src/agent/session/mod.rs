@@ -239,6 +239,7 @@ impl Sessions {
         }
         let mut metadata = AssistantResponseMetadata::from(response.usage);
         metadata.model = model;
+        metadata.upstream_provider = response.upstream_provider;
 
         let result =
             session.assistant_response_received(thread_id, content, stop_reason, None, metadata);
@@ -276,6 +277,7 @@ impl Sessions {
                 reasoning: 0,
             },
             cost: Cost::default(),
+            upstream_provider: None,
         };
 
         let result = session.assistant_response_received(
