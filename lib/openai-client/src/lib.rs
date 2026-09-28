@@ -37,6 +37,15 @@ const DEFAULT_RETRY_DELAY_SECS: u64 = 1;
 /// times out. Retrying once usually succeeds.
 const MAX_EMPTY_COMPLETION_RETRIES: u32 = 1;
 
+/// Maximum number of retries when the SSE byte stream itself breaks
+/// (connection drop, body-decode failure) before any delta from that
+/// attempt reached the consumer — safe to retry since nothing has leaked
+/// into the caller's session log yet. See
+/// `review-curation-live-run4-2026-09-28.md` R1: previously a model chain
+/// with a single entry had no recovery from a mid-stream transient error
+/// at all, once past the first request.
+const MAX_TRANSIENT_STREAM_RETRIES: u32 = 1;
+
 fn reasoning_dialect_for_base_url(base_url: &str) -> ReasoningDialect {
     if base_url.to_ascii_lowercase().contains("openrouter.ai") {
         ReasoningDialect::OpenRouter
@@ -206,6 +215,7 @@ impl OpenAiClient {
             parent: tracing::Span::current(),
             "openai_client.stream_processing",
             empty_completion_retries = tracing::field::Empty,
+            transient_stream_retries = tracing::field::Empty,
             usage.input_tokens = tracing::field::Empty,
             usage.output_tokens = tracing::field::Empty,
             usage.cache_read_input_tokens = tracing::field::Empty,
@@ -229,13 +239,24 @@ impl OpenAiClient {
 }
 
 /// Drains the SSE response, forwarding every delta to `tx` in real time.
+///
 /// On `EMPTY_COMPLETION_ERR`, re-issues the HTTP request (up to
 /// `MAX_EMPTY_COMPLETION_RETRIES` times) and resumes streaming from the
 /// new response without forwarding anything from the failed attempt — the
 /// synthesizer holds usage internally and discards it on the empty path.
 ///
-/// Records `empty_completion_retries`, `usage.*`, and `stream.delta_count`
-/// on `Span::current()` (the `stream_processing` span).
+/// On a mid-stream transport failure (`SseError::Http` — connection drop,
+/// body-decode error) that happened before this attempt forwarded any
+/// delta to `tx`, re-issues the request the same way (up to
+/// `MAX_TRANSIENT_STREAM_RETRIES` times). Gated on "no delta forwarded
+/// yet" for the same reason as `router::walk`'s fallback is gated on
+/// never having opened a stream: once a delta has reached the consumer,
+/// retrying would duplicate it there — see `review-curation-live-run4-2026-09-28.md`
+/// R1.
+///
+/// Records `empty_completion_retries`, `transient_stream_retries`,
+/// `usage.*`, and `stream.delta_count` on `Span::current()` (the
+/// `stream_processing` span).
 async fn drive_stream_with_retry(
     client: OpenAiClient,
     body: Arc<Vec<u8>>,
@@ -245,6 +266,7 @@ async fn drive_stream_with_retry(
     let span = tracing::Span::current();
     let mut current_resp = initial_resp;
     let mut empty_retries: u32 = 0;
+    let mut transient_retries: u32 = 0;
     let mut delta_count: u64 = 0;
     let mut usage_seen: Option<UsageSnapshot> = None;
 
@@ -253,6 +275,7 @@ async fn drive_stream_with_retry(
         let mut synthesizer = DeltaSynthesizer::new();
         let mut empty_completion_seen = false;
         let mut other_processing_err: Option<String> = None;
+        let deltas_before_attempt = delta_count;
 
         let parse_result = parse_sse_stream(byte_stream, |event| {
             match synthesizer.process_chunk(&event.data) {
@@ -314,6 +337,35 @@ async fn drive_stream_with_retry(
             }
         }
 
+        let forwarded_this_attempt = delta_count > deltas_before_attempt;
+        if should_retry_transient_stream_error(
+            &parse_result,
+            forwarded_this_attempt,
+            transient_retries,
+        ) {
+            transient_retries += 1;
+            let error = parse_result
+                .as_ref()
+                .err()
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            tracing::warn!(
+                retry = transient_retries,
+                %error,
+                "openai-client: transient stream error before any delta was forwarded, retrying"
+            );
+            match client.send_request(&body).await {
+                Ok(new_resp) => {
+                    current_resp = new_resp;
+                    continue;
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e)).await;
+                    break;
+                }
+            }
+        }
+
         if let Some(msg) = other_processing_err {
             let _ = tx.send(Err(OpenAiChatCompletionsError::Stream(msg))).await;
         } else if empty_completion_seen {
@@ -329,6 +381,7 @@ async fn drive_stream_with_retry(
     }
 
     span.record("empty_completion_retries", empty_retries);
+    span.record("transient_stream_retries", transient_retries);
     span.record("stream.delta_count", delta_count);
     if let Some(u) = usage_seen {
         span.record("usage.input_tokens", u.input_tokens);
@@ -357,6 +410,24 @@ struct UsageSnapshot {
     reasoning_output_tokens: u32,
     cost_usd: Option<f64>,
     upstream_inference_cost_usd: Option<f64>,
+}
+
+/// Gate for the mid-stream transient-error retry in
+/// `drive_stream_with_retry`: only a transport-level failure
+/// (`SseError::Http` — connection drop, body-decode error), only before
+/// this attempt has forwarded anything to the consumer, and only within
+/// the retry budget. A `SseError::Processing` failure (malformed event,
+/// or the consumer channel itself closed) is never retried here — the
+/// former may have already forwarded partial content that a retry would
+/// duplicate, the latter means retrying is pointless.
+fn should_retry_transient_stream_error(
+    parse_result: &Result<(), SseError>,
+    forwarded_this_attempt: bool,
+    retries_so_far: u32,
+) -> bool {
+    !forwarded_this_attempt
+        && retries_so_far < MAX_TRANSIENT_STREAM_RETRIES
+        && matches!(parse_result, Err(SseError::Http(_)))
 }
 
 /// Best-effort scrape of `error.metadata.retry_after_seconds` from an
@@ -425,7 +496,60 @@ impl LlmProvider for OpenAiClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_retry_after_seconds, reasoning_dialect_for_base_url, ReasoningDialect};
+    use super::{
+        parse_retry_after_seconds, reasoning_dialect_for_base_url,
+        should_retry_transient_stream_error, ReasoningDialect, SseError,
+        MAX_TRANSIENT_STREAM_RETRIES,
+    };
+
+    /// A genuine `reqwest::Error` (connection refused — no real network
+    /// needed, nothing listens on the loopback port) to build a real
+    /// `SseError::Http`. `reqwest::Error` has no public constructor, so
+    /// this is the only reliable way to get one for a test.
+    async fn connection_refused_error() -> reqwest::Error {
+        reqwest::get("http://127.0.0.1:1/")
+            .await
+            .expect_err("nothing listens on 127.0.0.1:1")
+    }
+
+    #[tokio::test]
+    async fn transient_stream_retry_allowed_before_any_delta_forwarded() {
+        let result: Result<(), SseError> = Err(SseError::Http(connection_refused_error().await));
+        assert!(should_retry_transient_stream_error(&result, false, 0));
+    }
+
+    #[tokio::test]
+    async fn transient_stream_retry_refused_once_a_delta_already_forwarded() {
+        // A retry here would duplicate content already handed to the
+        // consumer — must never happen, regardless of budget.
+        let result: Result<(), SseError> = Err(SseError::Http(connection_refused_error().await));
+        assert!(!should_retry_transient_stream_error(&result, true, 0));
+    }
+
+    #[tokio::test]
+    async fn transient_stream_retry_refused_once_budget_exhausted() {
+        let result: Result<(), SseError> = Err(SseError::Http(connection_refused_error().await));
+        assert!(!should_retry_transient_stream_error(
+            &result,
+            false,
+            MAX_TRANSIENT_STREAM_RETRIES
+        ));
+    }
+
+    #[test]
+    fn transient_stream_retry_refused_for_processing_errors() {
+        // A decode/processing error (as opposed to a transport failure)
+        // is not retried by this path — see EMPTY_COMPLETION_ERR's own
+        // dedicated retry for the one processing error that IS retried.
+        let result: Result<(), SseError> = Err(SseError::Processing("bad json".to_string()));
+        assert!(!should_retry_transient_stream_error(&result, false, 0));
+    }
+
+    #[test]
+    fn transient_stream_retry_refused_when_there_was_no_error() {
+        let result: Result<(), SseError> = Ok(());
+        assert!(!should_retry_transient_stream_error(&result, false, 0));
+    }
 
     #[test]
     fn parses_openrouter_429_metadata() {
