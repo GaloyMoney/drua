@@ -13,6 +13,11 @@ use super::SpaceError;
 const LIBRARY_HEAD_EVENT_TYPE: EphemeralEventType =
     EphemeralEventType::new("drua_library_head");
 
+/// Separate from the Git writer's push lock. This lock serializes the
+/// post-push remote-head snapshot + durable fence publication across replicas.
+/// `0x64727561666e63` = "druafnc".
+const LIBRARY_HEAD_FENCE_LOCK_KEY: i64 = 0x64727561666e63;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct LibraryHeadFence {
     head: String,
@@ -26,9 +31,9 @@ struct LibraryHeadFence {
 /// local clone does not contain the required head, the read synchronously
 /// fetches origin before serving data.
 ///
-/// The obix NOTIFY/LISTEN machinery remains an acceleration mechanism; the
-/// persisted row is the correctness boundary. This matters because a wake-up
-/// can arrive before another replica has actually advanced its local HEAD.
+/// Notifications remain an acceleration mechanism; the persisted obix row is
+/// the correctness boundary. This matters because a wake-up can arrive before
+/// another replica has actually advanced its local HEAD.
 #[derive(Clone)]
 pub(super) struct HeadFence {
     git: Arc<GitEngine>,
@@ -52,19 +57,54 @@ impl HeadFence {
                 let config = MailboxConfig::builder()
                     .build()
                     .map_err(|e| SpaceError::Git(format!("obix mailbox config: {e}")))?;
-                let outbox = Outbox::<LibraryHeadFence>::init(&self.pool, config).await?;
+                let outbox = Outbox::<LibraryHeadFence>::init(&self.pool, config)
+                    .await
+                    .map_err(|e| SpaceError::Git(format!("obix outbox init: {e}")))?;
                 return Ok(outbox);
             })
             .await;
     }
 
-    /// Publish the pushed remote head as the durable visibility fence.
+    /// Publish the newest pushed remote head as the durable visibility fence.
     ///
-    /// `fetch_and_head` deliberately takes the GitEngine repo mutex. If another
-    /// local batch starts immediately after our write, this call waits for that
-    /// batch and records the same or a newer *remote* head; it never snapshots
-    /// an unpushed local commit.
+    /// Fence publication is serialized cluster-wide. The lock is deliberately
+    /// distinct from the Git push lock: taking the push lock here would invert
+    /// the writer's `repo_mutex -> push_lock` order and could deadlock with the
+    /// next local batch. Under the fence lock we fetch origin, so a late
+    /// publisher can only publish the same or a newer remote head than an
+    /// earlier publisher.
     pub(super) async fn after_write(&self) -> Result<(), SpaceError> {
+        // Initialize before holding a database session lock so an outbox that
+        // needs a connection cannot contend with the lock connection during
+        // first-use setup.
+        let _ = self.outbox().await?;
+
+        let mut lock_conn = self.pool.acquire().await?;
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(LIBRARY_HEAD_FENCE_LOCK_KEY)
+            .execute(&mut *lock_conn)
+            .await?;
+
+        let publish_result = self.publish_remote_head().await;
+        let unlock_result = sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(LIBRARY_HEAD_FENCE_LOCK_KEY)
+            .execute(&mut *lock_conn)
+            .await;
+
+        if let Err(error) = unlock_result {
+            tracing::error!(
+                error = %error,
+                "library head fence: failed to release advisory lock"
+            );
+            if publish_result.is_ok() {
+                return Err(SpaceError::Sqlx(error));
+            }
+        }
+
+        return publish_result;
+    }
+
+    async fn publish_remote_head(&self) -> Result<(), SpaceError> {
         let head = self
             .git
             .fetch_and_head()
@@ -78,7 +118,8 @@ impl HeadFence {
                 LIBRARY_HEAD_EVENT_TYPE.clone(),
                 LibraryHeadFence { head },
             )
-            .await?;
+            .await
+            .map_err(|e| SpaceError::Git(format!("publish library head fence: {e}")))?;
 
         return Ok(());
     }
@@ -95,7 +136,7 @@ impl HeadFence {
             return Ok(());
         }
 
-        // The fence is durable and was published only after a successful push.
+        // The fence is durable and is published only after a successful push.
         // If origin is temporarily unreachable, fail the read rather than serve
         // data known to be stale. A successful fetch makes origin authoritative;
         // this also handles a legitimate force-push that replaced the fenced
