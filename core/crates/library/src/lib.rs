@@ -1,5 +1,6 @@
 pub mod attribution;
 mod config;
+mod draft;
 mod error;
 mod git;
 mod importer;
@@ -17,6 +18,10 @@ use tokio::sync::mpsc;
 
 pub use attribution::{CommitAttribution, CommitSubjectKind};
 pub use config::LibraryConfig;
+pub use draft::{
+    ApplyOutcome, DraftHandle, DraftName, DraftObservation, Drafts, Mergeability, RebaseOutcome,
+    SpaceTarget, TouchedPath,
+};
 pub use error::LibraryError;
 pub use github_app::GitHubAppTokenProvider;
 pub use importer::{DocType, GitFileHash, LibraryImporter, UpsertError};
@@ -47,6 +52,7 @@ pub struct Library {
     git: Arc<GitEngine>,
     search: SearchStore,
     spaces: Spaces,
+    drafts: Drafts,
     importers: ImporterRegistry,
     head_advanced_hooks: HeadAdvancedHooks,
     write_spawner: ::job::JobSpawner<LibraryWriteConfig>,
@@ -78,6 +84,7 @@ impl Library {
 
         let search = SearchStore::new(pool, Arc::clone(&embedder));
         let spaces = Spaces::new(&git, pool);
+        let drafts = Drafts::new(&git);
 
         let embed_spawner = jobs.add_initializer(LibraryEmbedJobInitializer::new(
             search.clone(),
@@ -130,6 +137,7 @@ impl Library {
             git,
             search,
             spaces,
+            drafts,
             importers,
             head_advanced_hooks,
             write_spawner,
@@ -190,6 +198,10 @@ impl Library {
 
     pub fn spaces(&self) -> &Spaces {
         &self.spaces
+    }
+
+    pub fn drafts(&self) -> &Drafts {
+        &self.drafts
     }
 
     pub fn search(&self) -> &SearchStore {
