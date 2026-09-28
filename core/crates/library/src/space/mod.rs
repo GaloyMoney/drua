@@ -1,5 +1,6 @@
 mod entity;
 pub mod error;
+mod head_fence;
 pub(crate) mod repo;
 
 use std::sync::Arc;
@@ -7,6 +8,7 @@ use std::sync::Arc;
 pub use entity::{NewSpace, Space, SpaceEvent};
 pub use error::*;
 
+use self::head_fence::HeadFence;
 use self::repo::SpaceRepo;
 use crate::attribution::CommitAttribution;
 use crate::git::GitEngine;
@@ -24,14 +26,16 @@ const SPACE_DOC_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
 pub struct Spaces {
     git: Arc<GitEngine>,
     repo: SpaceRepo,
+    head_fence: HeadFence,
 }
 
 impl Spaces {
     pub fn new(git: &Arc<GitEngine>, pool: &sqlx::PgPool) -> Self {
-        Self {
+        return Self {
             git: Arc::clone(git),
             repo: SpaceRepo::new(pool),
-        }
+            head_fence: HeadFence::new(git, pool),
+        };
     }
 
     #[tracing::instrument(name = "library.spaces.create", skip_all, fields(%slug))]
@@ -46,7 +50,7 @@ impl Spaces {
             .create_in_op(&mut op, slug, description, attribution)
             .await?;
         op.commit().await?;
-        Ok(space)
+        return Ok(space);
     }
 
     #[tracing::instrument(name = "library.spaces.create_in_op", skip_all, fields(%slug))]
@@ -73,8 +77,9 @@ impl Spaces {
             )
             .await
             .map_err(|e| SpaceError::Git(e.to_string()))?;
+        self.head_fence.after_write().await?;
 
-        Ok(space)
+        return Ok(space);
     }
 
     /// Blind overwrite of `spaces/{slug}/{relative_path}`.
@@ -95,7 +100,9 @@ impl Spaces {
                 attribution,
             )
             .await
-            .map_err(|e| SpaceError::Git(e.to_string()))
+            .map_err(|e| SpaceError::Git(e.to_string()))?;
+        self.head_fence.after_write().await?;
+        return Ok(());
     }
 
     /// Removes `spaces/{slug}/{relative_path}`. Returns
@@ -110,6 +117,7 @@ impl Spaces {
         attribution: CommitAttribution,
     ) -> Result<(), SpaceError> {
         let path = format!("spaces/{slug}/{relative_path}");
+        self.head_fence.before_read().await?;
         if self
             .git
             .read_blob_at_head(&path)
@@ -129,7 +137,9 @@ impl Spaces {
                 attribution,
             )
             .await
-            .map_err(|e| SpaceError::Git(e.to_string()))
+            .map_err(|e| SpaceError::Git(e.to_string()))?;
+        self.head_fence.after_write().await?;
+        return Ok(());
     }
 
     /// Read–modify–write substitution: errors if `old_str` doesn't appear
@@ -167,9 +177,9 @@ impl Spaces {
                     "str_replace: old_str appears {count} times in {path_for_err}; must be unique"
                 )));
             }
-            Ok(Some(
+            return Ok(Some(
                 current_str.replacen(&old_str, &new_str, 1).into_bytes(),
-            ))
+            ));
         });
         self.git
             .update_file(
@@ -182,7 +192,9 @@ impl Spaces {
             .map_err(|e| match e {
                 crate::LibraryError::Validation(msg) => SpaceError::Validation(msg),
                 other => SpaceError::Git(other.to_string()),
-            })
+            })?;
+        self.head_fence.after_write().await?;
+        return Ok(());
     }
 
     /// Read–modify–write insert. `line_number == 0` inserts at the
@@ -218,7 +230,7 @@ impl Spaces {
             if current_str.ends_with('\n') {
                 new_content.push('\n');
             }
-            Ok(Some(new_content.into_bytes()))
+            return Ok(Some(new_content.into_bytes()));
         });
         self.git
             .update_file(
@@ -231,13 +243,15 @@ impl Spaces {
             .map_err(|e| match e {
                 crate::LibraryError::Validation(msg) => SpaceError::Validation(msg),
                 other => SpaceError::Git(other.to_string()),
-            })
+            })?;
+        self.head_fence.after_write().await?;
+        return Ok(());
     }
 
     /// Lookup by slug; soft-deleted entries drop out at the SQL layer.
     #[tracing::instrument(name = "library.spaces.maybe_find_by_slug", skip_all, fields(%slug))]
     pub async fn maybe_find_by_slug(&self, slug: &str) -> Result<Option<Space>, SpaceError> {
-        Ok(self.repo.maybe_find_by_slug(slug).await?)
+        return Ok(self.repo.maybe_find_by_slug(slug).await?);
     }
 
     /// Bulk hydration. Soft-deleted ids silently drop out. Order of the
@@ -251,7 +265,7 @@ impl Spaces {
             return Ok(Vec::new());
         }
         let map = self.repo.find_all::<Space>(ids).await?;
-        Ok(map.into_values().collect())
+        return Ok(map.into_values().collect());
     }
 
     /// Reads a blob at `spaces/<slug>/<rel_path>` from HEAD's tree.
@@ -262,11 +276,13 @@ impl Spaces {
         slug: &str,
         rel_path: &str,
     ) -> Result<Option<Vec<u8>>, SpaceError> {
+        self.head_fence.before_read().await?;
         let path = format!("spaces/{slug}/{rel_path}");
-        self.git
+        return self
+            .git
             .read_blob_at_head(&path)
             .await
-            .map_err(|e| SpaceError::Git(e.to_string()))
+            .map_err(|e| SpaceError::Git(e.to_string()));
     }
 
     /// Lists immediate children under `spaces/<slug>/<rel_path>` at
@@ -278,15 +294,17 @@ impl Spaces {
         slug: &str,
         rel_path: &str,
     ) -> Result<Option<Vec<crate::git::DirEntry>>, SpaceError> {
+        self.head_fence.before_read().await?;
         let path = if rel_path.is_empty() {
             format!("spaces/{slug}")
         } else {
             format!("spaces/{slug}/{rel_path}")
         };
-        self.git
+        return self
+            .git
             .list_dir_at_head(&path)
             .await
-            .map_err(|e| SpaceError::Git(e.to_string()))
+            .map_err(|e| SpaceError::Git(e.to_string()));
     }
 
     /// Recursively walks every blob under `spaces/<slug>/<rel_path>`.
@@ -297,6 +315,7 @@ impl Spaces {
         slug: &str,
         rel_path: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, SpaceError> {
+        self.head_fence.before_read().await?;
         let path = if rel_path.is_empty() {
             format!("spaces/{slug}")
         } else {
@@ -313,7 +332,7 @@ impl Spaces {
                 *p = rest.to_string();
             }
         }
-        Ok(blobs)
+        return Ok(blobs);
     }
 
     /// Lists every space, paginated through the `slug` list_by index.
@@ -336,7 +355,7 @@ impl Spaces {
             }
             after = page.end_cursor;
         }
-        Ok(out)
+        return Ok(out);
     }
 
     /// Renames `spaces/{slug}/{from}` → `spaces/{slug}/{to}`. Errors if
@@ -362,19 +381,23 @@ impl Spaces {
             .map_err(|e| match e {
                 crate::LibraryError::Validation(msg) => SpaceError::Validation(msg),
                 other => SpaceError::Git(other.to_string()),
-            })
+            })?;
+        self.head_fence.after_write().await?;
+        return Ok(());
     }
 }
 
 #[async_trait::async_trait]
 impl LibraryImporter for Spaces {
     fn matches(&self, path: &str) -> bool {
-        let mut parts = path.splitn(3, '/');
-        parts.next() == Some("spaces") && parts.next().is_some() && parts.next().is_some()
+        return {
+            let mut parts = path.splitn(3, '/');
+            parts.next() == Some("spaces") && parts.next().is_some() && parts.next().is_some()
+        };
     }
 
     fn doc_type(&self) -> DocType {
-        SPACE_DOC_TYPE
+        return SPACE_DOC_TYPE;
     }
 
     async fn upsert_in_op(
@@ -424,7 +447,7 @@ impl LibraryImporter for Spaces {
             format!("{}/{}", space.slug, rel).as_bytes(),
         );
 
-        Ok(Some(SearchableFields {
+        return Ok(Some(SearchableFields {
             doc_id,
             doc_type: SPACE_DOC_TYPE,
             scope_id: Some(space.id.into()),
@@ -432,7 +455,7 @@ impl LibraryImporter for Spaces {
             name,
             path: Some(rel.to_string()),
             content: content_str,
-        }))
+        }));
     }
 
     async fn delete_in_op(
@@ -453,9 +476,9 @@ impl LibraryImporter for Spaces {
             .next()
             .ok_or_else(|| UpsertError::Parse(format!("bad space path: {path}")))?;
 
-        Ok(Some(uuid::Uuid::new_v5(
+        return Ok(Some(uuid::Uuid::new_v5(
             &SPACE_DOC_NAMESPACE,
             format!("{slug}/{rel}").as_bytes(),
-        )))
+        )));
     }
 }
