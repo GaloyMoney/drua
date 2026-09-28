@@ -47,13 +47,6 @@ pub enum ChangesetActor {
 }
 
 impl ChangesetActor {
-    pub fn agent_id(&self) -> Option<AgentId> {
-        match self {
-            ChangesetActor::Agent { agent_id } => Some(*agent_id),
-            _ => None,
-        }
-    }
-
     pub fn workflow_run_id(&self) -> Option<WorkflowRunId> {
         match self {
             ChangesetActor::WorkflowRun { run_id } => Some(*run_id),
@@ -935,18 +928,15 @@ mod tests {
     fn changeset_actor_id_accessors() {
         let agent_id = AgentId::new();
         let a = ChangesetActor::Agent { agent_id };
-        assert_eq!(a.agent_id(), Some(agent_id));
         assert_eq!(a.workflow_run_id(), None);
 
         let run_id = WorkflowRunId::new();
         let w = ChangesetActor::WorkflowRun { run_id };
         assert_eq!(w.workflow_run_id(), Some(run_id));
-        assert_eq!(w.agent_id(), None);
 
         let u = ChangesetActor::User {
             user_id: UserId::new(),
         };
-        assert_eq!(u.agent_id(), None);
         assert_eq!(u.workflow_run_id(), None);
     }
 

@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT pg_try_advisory_xact_lock(hashtextextended('persistent_outbox_events_gap_fill', 0)) AS \"locked!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "locked!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "57cd8373b4b81f55cc438c4c785c75a1095618dd05c59c0186a9aeb7e679340f"
+}

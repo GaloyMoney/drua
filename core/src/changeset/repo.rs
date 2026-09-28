@@ -23,18 +23,6 @@ use super::entity::*;
             create(accessor = "opened_by.to_string()"),
             update(persist = false)
         ),
-        agent_id(
-            ty = "Option<AgentId>",
-            list_for(by(created_at)),
-            create(accessor = "opened_by.agent_id()"),
-            update(persist = false)
-        ),
-        workflow_run_id(
-            ty = "Option<WorkflowRunId>",
-            list_for(by(created_at)),
-            create(accessor = "opened_by.workflow_run_id()"),
-            update(persist = false)
-        ),
     ),
     delete = "soft_without_queries"
 )]
