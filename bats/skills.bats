@@ -52,7 +52,8 @@ write_skill_to_space() {
     command: "edit",
     slug: $slug,
     edit_op: "write",
-    op_args: { path: $path, content: $content }
+    op_args: { path: $path, content: $content },
+    target: "main"
   }')"
 }
 
@@ -312,7 +313,8 @@ wait_for_skill_row_gone() {
   #    the row + search row.
   run admin_call "spaces" "$(jq -nc --arg s "$space_slug" '{
     command: "edit", slug: $s, edit_op: "delete",
-    op_args: { path: "skills/goodbye-world.md" }
+    op_args: { path: "skills/goodbye-world.md" },
+    target: "main"
   }')"
   echo "$output"
   # spaces edit op=delete on a present file succeeds — assert on the
@@ -330,7 +332,8 @@ wait_for_skill_row_gone() {
   #    the manual test (silent no-op when path differs from canonical).
   run admin_call "spaces" "$(jq -nc --arg s "$space_slug" '{
     command: "edit", slug: $s, edit_op: "delete",
-    op_args: { path: "skills/goodbye-world.md" }
+    op_args: { path: "skills/goodbye-world.md" },
+    target: "main"
   }')"
   echo "$output"
   [[ "$output" == *"PathNotFound"* ]] || [[ "$output" == *"does not exist"* ]]
