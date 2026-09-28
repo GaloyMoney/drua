@@ -294,40 +294,18 @@ impl Changesets {
         Ok(cs)
     }
 
-    pub(crate) async fn ensure_ref(&self, cs: &Changeset) -> Result<String, ChangesetError> {
-        if let Some(tip) = self.library.resolve_ref(&cs.git_ref()).await? {
-            return Ok(tip);
-        }
-        if let Err(e) = self.library.create_ref(&cs.git_ref(), &cs.head_oid).await {
-            // Most likely this replica hasn't fetched cs.head_oid's commit
-            // object yet (Postgres already advanced past what this clone
-            // has). A fetch may resolve the ref outright (a peer already
-            // created it) or just bring the object in for one retry.
-            tracing::debug!(
-                error = %e,
-                changeset_id = %cs.id,
-                "ensure_ref: create_ref failed; fetching origin and retrying once"
-            );
-            self.library.fetch_and_head().await?;
-            if let Some(tip) = self.library.resolve_ref(&cs.git_ref()).await? {
-                return Ok(tip);
-            }
-            self.library.create_ref(&cs.git_ref(), &cs.head_oid).await?;
-        }
-        // Re-resolve rather than assuming the ref landed at cs.head_oid:
-        // create_ref's "origin already has this ref" fallback (a push
-        // rejected, then a fetch that finds it) can leave the local ref at
-        // whatever oid origin actually has, not the oid we asked for.
-        self.library
-            .resolve_ref(&cs.git_ref())
-            .await?
-            .ok_or_else(|| {
-                drua_library::LibraryError::Git(format!(
-                    "ensure_ref: {} still missing after create_ref reported success",
-                    cs.git_ref()
-                ))
-                .into()
-            })
+    pub(crate) async fn ensure_ref(
+        &self,
+        cs: &Changeset,
+    ) -> Result<drua_library::DraftHandle, ChangesetError> {
+        Ok(self
+            .library
+            .drafts()
+            .handle(
+                drua_library::DraftName::from(uuid::Uuid::from(cs.id)),
+                &cs.head_oid,
+            )
+            .await?)
     }
 
     pub(crate) async fn record_commit(

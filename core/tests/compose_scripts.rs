@@ -180,7 +180,7 @@ async fn setup(test_name: &str) -> (App, AuthSubject, AuthSubject) {
             "a.md",
             "hello\n".into(),
             CommitAttribution::library_default(),
-            None,
+            &drua_library::SpaceTarget::Main,
         )
         .await
         .expect("write a.md");
@@ -271,7 +271,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "helper.js",
             "return {relative: (a,b) => a + b};".into(),
             CommitAttribution::library_default(),
-            None,
+            &drua_library::SpaceTarget::Main,
         )
         .await
         .unwrap();
@@ -287,7 +287,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "helper.js",
             "return 7;".into(),
             CommitAttribution::library_default(),
-            None,
+            &drua_library::SpaceTarget::Main,
         )
         .await
         .unwrap();
@@ -297,7 +297,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "dependency.js",
             "return await loadScript('space:private/helper.js');".into(),
             CommitAttribution::library_default(),
-            None,
+            &drua_library::SpaceTarget::Main,
         )
         .await
         .unwrap();
@@ -308,7 +308,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "caller.js",
             "return {run: async () => await tools.caller_probe({})};".into(),
             CommitAttribution::library_default(),
-            None,
+            &drua_library::SpaceTarget::Main,
         )
         .await
         .unwrap();
@@ -377,7 +377,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
         async {
             let resume = changes.recv().await.unwrap();
             for path in ["helper.js", "fresh.js"] {
-                spaces.write_file("docs", path, "return {version: 2};".into(), CommitAttribution::library_default(), None).await.unwrap();
+                spaces.write_file("docs", path, "return {version: 2};".into(), CommitAttribution::library_default(), &drua_library::SpaceTarget::Main).await.unwrap();
             }
             resume.send(()).unwrap();
         }
@@ -405,7 +405,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "dir.js/child",
             "child".into(),
             CommitAttribution::library_default(),
-            None,
+            &drua_library::SpaceTarget::Main,
         )
         .await
         .unwrap();
@@ -426,7 +426,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "failure.js",
             "throw new Error('attributed failure');".into(),
             CommitAttribution::library_default(),
-            None,
+            &drua_library::SpaceTarget::Main,
         )
         .await
         .unwrap();
@@ -530,7 +530,7 @@ async fn scripts_read_exact_text_while_mcp_read_stays_numbered() {
             "raw-fixture.md",
             fixture.into(),
             CommitAttribution::library_default(),
-            None,
+            &drua_library::SpaceTarget::Main,
         )
         .await
         .unwrap();
@@ -623,7 +623,7 @@ async fn scripts_read_lifts_the_view_cap_but_mcp_read_still_enforces_it() {
             "oversized.txt",
             "x".repeat(FIXTURE_LEN),
             CommitAttribution::library_default(),
-            None,
+            &drua_library::SpaceTarget::Main,
         )
         .await
         .unwrap();
@@ -869,7 +869,7 @@ return {
             "tasks.js",
             source.into(),
             CommitAttribution::library_default(),
-            None,
+            &drua_library::SpaceTarget::Main,
         )
         .await
         .unwrap();
@@ -889,7 +889,7 @@ return {
             "private.js",
             "return {};".into(),
             CommitAttribution::library_default(),
-            None,
+            &drua_library::SpaceTarget::Main,
         )
         .await
         .unwrap();
@@ -983,7 +983,7 @@ return {
     let landed = app
         .library()
         .spaces()
-        .read_file("docs", "direct.json", None)
+        .read_file("docs", "direct.json", &drua_library::SpaceTarget::Main)
         .await
         .unwrap()
         .expect("direct.json landed on main via the default merge exit");

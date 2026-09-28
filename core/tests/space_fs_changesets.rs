@@ -189,7 +189,7 @@ async fn project_with_space(
             "a.md",
             "main content\n".into(),
             CommitAttribution::library_default(),
-            None,
+            &drua_library::SpaceTarget::Main,
         )
         .await
         .expect("seed main");
@@ -223,7 +223,7 @@ async fn project_with_space_and_lead(
             "a.md",
             "main content\n".into(),
             CommitAttribution::library_default(),
-            None,
+            &drua_library::SpaceTarget::Main,
         )
         .await
         .expect("seed main");
@@ -383,7 +383,7 @@ async fn bound_write_lands_on_changeset_branch_and_leaves_main_untouched() {
     let main = app
         .library()
         .spaces()
-        .read_file("docs", "a.md", None)
+        .read_file("docs", "a.md", &drua_library::SpaceTarget::Main)
         .await
         .expect("read main")
         .expect("a.md exists on main");
@@ -391,10 +391,14 @@ async fn bound_write_lands_on_changeset_branch_and_leaves_main_untouched() {
 
     let status = app.changesets().status(&user, cs.id).await.expect("status");
     assert_eq!(status.commits, 1);
+    let at_tip = drua_library::SpaceTarget::Draft(drua_library::DraftHandle::new(
+        drua_library::DraftName::from(uuid::Uuid::from(cs.id)),
+        status.head_oid.clone(),
+    ));
     let staged = app
         .library()
         .spaces()
-        .read_file("docs", "a.md", Some(&status.head_oid))
+        .read_file("docs", "a.md", &at_tip)
         .await
         .expect("read at tip")
         .expect("a.md exists on the branch");
@@ -535,7 +539,7 @@ async fn workflow_run_subject_overlays_its_run_draft() {
     let main = app
         .library()
         .spaces()
-        .read_file("docs", "a.md", None)
+        .read_file("docs", "a.md", &drua_library::SpaceTarget::Main)
         .await
         .expect("read main")
         .expect("a.md exists on main");
@@ -1016,7 +1020,7 @@ async fn interactive_agents_are_read_only() {
     let main = app
         .library()
         .spaces()
-        .read_file("docs", "a.md", None)
+        .read_file("docs", "a.md", &drua_library::SpaceTarget::Main)
         .await
         .expect("read main")
         .expect("a.md exists on main");
@@ -1405,7 +1409,7 @@ async fn spaces_tool_target_param_and_verb_noun_commands_end_to_end() {
     let landed = app
         .library()
         .spaces()
-        .read_file("docs", "b.md", None)
+        .read_file("docs", "b.md", &drua_library::SpaceTarget::Main)
         .await
         .expect("read main")
         .expect("b.md landed on main");

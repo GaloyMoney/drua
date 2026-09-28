@@ -114,12 +114,24 @@ async fn concurrent_writes_batch_with_per_op_results() {
         .expect("create space");
     library
         .spaces()
-        .write_file(slug, "a.md", "alpha bravo charlie\n".into(), attr(), None)
+        .write_file(
+            slug,
+            "a.md",
+            "alpha bravo charlie\n".into(),
+            attr(),
+            &drua_library::SpaceTarget::Main,
+        )
         .await
         .expect("seed a.md");
     library
         .spaces()
-        .write_file(slug, "c.md", "to be deleted\n".into(), attr(), None)
+        .write_file(
+            slug,
+            "c.md",
+            "to be deleted\n".into(),
+            attr(),
+            &drua_library::SpaceTarget::Main,
+        )
         .await
         .expect("seed c.md");
 
@@ -138,25 +150,61 @@ async fn concurrent_writes_batch_with_per_op_results() {
     // order, so str_replace lands on a.md before insert.
     let (r1, r2, r3, r4, r5, r6) = tokio::join!(
         async move {
-            s1.write_file(slug, "d.md", "delta\n".into(), attr(), None)
+            s1.write_file(
+                slug,
+                "d.md",
+                "delta\n".into(),
+                attr(),
+                &drua_library::SpaceTarget::Main,
+            )
+            .await
+        },
+        async move {
+            s2.str_replace(
+                slug,
+                "a.md",
+                "bravo".into(),
+                "BRAVO".into(),
+                attr(),
+                &drua_library::SpaceTarget::Main,
+            )
+            .await
+        },
+        async move {
+            s3.str_replace(
+                slug,
+                "missing.md",
+                "x".into(),
+                "y".into(),
+                attr(),
+                &drua_library::SpaceTarget::Main,
+            )
+            .await
+        },
+        async move {
+            s4.delete_file(slug, "c.md", attr(), &drua_library::SpaceTarget::Main)
                 .await
         },
         async move {
-            s2.str_replace(slug, "a.md", "bravo".into(), "BRAVO".into(), attr(), None)
-                .await
+            s5.move_file(
+                slug,
+                "ghost.md",
+                "elsewhere.md",
+                attr(),
+                &drua_library::SpaceTarget::Main,
+            )
+            .await
         },
         async move {
-            s3.str_replace(slug, "missing.md", "x".into(), "y".into(), attr(), None)
-                .await
-        },
-        async move { s4.delete_file(slug, "c.md", attr(), None).await },
-        async move {
-            s5.move_file(slug, "ghost.md", "elsewhere.md", attr(), None)
-                .await
-        },
-        async move {
-            s6.insert(slug, "a.md", 1, "appended".into(), attr(), None)
-                .await
+            s6.insert(
+                slug,
+                "a.md",
+                1,
+                "appended".into(),
+                attr(),
+                &drua_library::SpaceTarget::Main,
+            )
+            .await
         },
     );
 

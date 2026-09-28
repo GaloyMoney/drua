@@ -9,9 +9,26 @@ pub use error::*;
 
 use self::repo::SpaceRepo;
 use crate::attribution::CommitAttribution;
+use crate::draft::SpaceTarget;
 use crate::git::GitEngine;
 use crate::importer::{DocType, GitFileHash, LibraryImporter, UpsertError};
 use crate::SearchableFields;
+
+/// The refname to write against: `None` (main) or the draft's branch.
+fn target_ref(target: &SpaceTarget) -> Option<String> {
+    match target {
+        SpaceTarget::Main => None,
+        SpaceTarget::Draft(handle) => Some(handle.name().git_ref()),
+    }
+}
+
+/// The oid to read at: `None` (HEAD) or the draft's last-known tip.
+fn target_at(target: &SpaceTarget) -> Option<&str> {
+    match target {
+        SpaceTarget::Main => None,
+        SpaceTarget::Draft(handle) => Some(handle.tip()),
+    }
+}
 
 pub const SPACE_DOC_TYPE: DocType = DocType::new("space_file");
 
@@ -101,19 +118,19 @@ impl Spaces {
         Ok(space)
     }
 
-    #[tracing::instrument(name = "library.spaces.write_file", skip_all, fields(%slug, %relative_path, target_ref = target_ref.unwrap_or("refs/heads/main")))]
+    #[tracing::instrument(name = "library.spaces.write_file", skip_all, fields(%slug, %relative_path, target = ?target))]
     pub async fn write_file(
         &self,
         slug: &str,
         relative_path: &str,
         content: String,
         attribution: CommitAttribution,
-        target_ref: Option<&str>,
+        target: &SpaceTarget,
     ) -> Result<Option<String>, SpaceError> {
         let path = format!("spaces/{slug}/{relative_path}");
         self.git
             .write_file_at(
-                target_ref.map(str::to_string),
+                target_ref(target),
                 path,
                 content.into_bytes(),
                 format!("space:{slug}: write {relative_path}"),
@@ -124,20 +141,23 @@ impl Spaces {
     }
 
     /// Removes `spaces/{slug}/{relative_path}`. Returns
-    #[tracing::instrument(name = "library.spaces.delete_file", skip_all, fields(%slug, %relative_path, target_ref = target_ref.unwrap_or("refs/heads/main")))]
+    #[tracing::instrument(name = "library.spaces.delete_file", skip_all, fields(%slug, %relative_path, target = ?target))]
     pub async fn delete_file(
         &self,
         slug: &str,
         relative_path: &str,
         attribution: CommitAttribution,
-        target_ref: Option<&str>,
+        target: &SpaceTarget,
     ) -> Result<Option<String>, SpaceError> {
         let path = format!("spaces/{slug}/{relative_path}");
-        let exists = match target_ref {
+        // Existence is checked against the ref's CURRENT tip, not a
+        // caller-supplied oid — a draft handle resolved earlier in the
+        // request may already be stale by the time this runs.
+        let exists = match target_ref(target) {
             Some(refname) => {
                 let Some(oid) = self
                     .git
-                    .resolve_ref(refname)
+                    .resolve_ref(&refname)
                     .await
                     .map_err(|e| SpaceError::Git(e.to_string()))?
                 else {
@@ -167,7 +187,7 @@ impl Spaces {
         }
         self.git
             .delete_file_at(
-                target_ref.map(str::to_string),
+                target_ref(target),
                 path,
                 format!("space:{slug}: delete {relative_path}"),
                 attribution,
@@ -177,7 +197,7 @@ impl Spaces {
     }
 
     /// Read–modify–write substitution: errors if `old_str` doesn't appear
-    #[tracing::instrument(name = "library.spaces.str_replace", skip_all, fields(%slug, %relative_path, target_ref = target_ref.unwrap_or("refs/heads/main")))]
+    #[tracing::instrument(name = "library.spaces.str_replace", skip_all, fields(%slug, %relative_path, target = ?target))]
     pub async fn str_replace(
         &self,
         slug: &str,
@@ -185,7 +205,7 @@ impl Spaces {
         old_str: String,
         new_str: String,
         attribution: CommitAttribution,
-        target_ref: Option<&str>,
+        target: &SpaceTarget,
     ) -> Result<Option<String>, SpaceError> {
         let path = format!("spaces/{slug}/{relative_path}");
         let path_for_err = path.clone();
@@ -217,7 +237,7 @@ impl Spaces {
         });
         self.git
             .update_file_at(
-                target_ref.map(str::to_string),
+                target_ref(target),
                 path,
                 update,
                 format!("space:{slug}: edit {relative_path}"),
@@ -231,7 +251,7 @@ impl Spaces {
     }
 
     /// Read–modify–write insert. `line_number == 0` inserts at the
-    #[tracing::instrument(name = "library.spaces.insert", skip_all, fields(%slug, %relative_path, target_ref = target_ref.unwrap_or("refs/heads/main")))]
+    #[tracing::instrument(name = "library.spaces.insert", skip_all, fields(%slug, %relative_path, target = ?target))]
     pub async fn insert(
         &self,
         slug: &str,
@@ -239,7 +259,7 @@ impl Spaces {
         line_number: usize,
         text: String,
         attribution: CommitAttribution,
-        target_ref: Option<&str>,
+        target: &SpaceTarget,
     ) -> Result<Option<String>, SpaceError> {
         let path = format!("spaces/{slug}/{relative_path}");
         let path_for_err = path.clone();
@@ -267,7 +287,7 @@ impl Spaces {
         });
         self.git
             .update_file_at(
-                target_ref.map(str::to_string),
+                target_ref(target),
                 path,
                 update,
                 format!("space:{slug}: insert {relative_path}"),
@@ -300,15 +320,15 @@ impl Spaces {
         Ok(map.into_values().collect())
     }
 
-    #[tracing::instrument(name = "library.spaces.read_file", skip_all, fields(%slug, %rel_path, at = at.unwrap_or("HEAD")))]
+    #[tracing::instrument(name = "library.spaces.read_file", skip_all, fields(%slug, %rel_path, target = ?target))]
     pub async fn read_file(
         &self,
         slug: &str,
         rel_path: &str,
-        at: Option<&str>,
+        target: &SpaceTarget,
     ) -> Result<Option<Vec<u8>>, SpaceError> {
         let path = format!("spaces/{slug}/{rel_path}");
-        match at {
+        match target_at(target) {
             Some(oid) => self.git.read_blob_at(oid, &path).await,
             None => self.git.read_blob_at_head(&path).await,
         }
@@ -316,31 +336,31 @@ impl Spaces {
     }
 
     /// Lists immediate children under `spaces/<slug>/<rel_path>` at
-    #[tracing::instrument(name = "library.spaces.list_dir", skip_all, fields(%slug, %rel_path, at = at.unwrap_or("HEAD")))]
+    #[tracing::instrument(name = "library.spaces.list_dir", skip_all, fields(%slug, %rel_path, target = ?target))]
     pub async fn list_dir(
         &self,
         slug: &str,
         rel_path: &str,
-        at: Option<&str>,
+        target: &SpaceTarget,
     ) -> Result<Option<Vec<crate::git::DirEntry>>, SpaceError> {
         let path = if rel_path.is_empty() {
             format!("spaces/{slug}")
         } else {
             format!("spaces/{slug}/{rel_path}")
         };
-        match at {
+        match target_at(target) {
             Some(oid) => self.git.list_dir_at(oid, &path).await,
             None => self.git.list_dir_at_head(&path).await,
         }
         .map_err(|e| SpaceError::Git(e.to_string()))
     }
 
-    #[tracing::instrument(name = "library.spaces.walk", skip_all, fields(%slug, %rel_path, at = at.unwrap_or("HEAD")))]
+    #[tracing::instrument(name = "library.spaces.walk", skip_all, fields(%slug, %rel_path, target = ?target))]
     pub async fn walk(
         &self,
         slug: &str,
         rel_path: &str,
-        at: Option<&str>,
+        target: &SpaceTarget,
     ) -> Result<Option<crate::git::BlobEntries>, SpaceError> {
         let path = if rel_path.is_empty() {
             format!("spaces/{slug}")
@@ -348,7 +368,7 @@ impl Spaces {
             format!("spaces/{slug}/{rel_path}")
         };
         let strip = format!("spaces/{slug}/");
-        let walked = match at {
+        let walked = match target_at(target) {
             Some(oid) => self.git.walk_blobs_at(oid, &path).await,
             None => self.git.walk_blobs_at_head(&path).await,
         }
@@ -403,20 +423,20 @@ impl Spaces {
     }
 
     /// Renames `spaces/{slug}/{from}` → `spaces/{slug}/{to}`. Errors if
-    #[tracing::instrument(name = "library.spaces.move_file", skip_all, fields(%slug, %from, %to, target_ref = target_ref.unwrap_or("refs/heads/main")))]
+    #[tracing::instrument(name = "library.spaces.move_file", skip_all, fields(%slug, %from, %to, target = ?target))]
     pub async fn move_file(
         &self,
         slug: &str,
         from: &str,
         to: &str,
         attribution: CommitAttribution,
-        target_ref: Option<&str>,
+        target: &SpaceTarget,
     ) -> Result<Option<String>, SpaceError> {
         let from_path = format!("spaces/{slug}/{from}");
         let to_path = format!("spaces/{slug}/{to}");
         self.git
             .move_file_at(
-                target_ref.map(str::to_string),
+                target_ref(target),
                 from_path,
                 to_path,
                 format!("space:{slug}: move {from} -> {to}"),

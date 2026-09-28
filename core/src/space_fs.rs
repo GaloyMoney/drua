@@ -116,7 +116,7 @@ pub enum Target {
     Main,
     Changeset {
         id: ChangesetId,
-        tip: String,
+        handle: drua_library::DraftHandle,
         status: ChangesetStatus,
         title: String,
         touched: usize,
@@ -125,17 +125,10 @@ pub enum Target {
 }
 
 impl Target {
-    fn git_ref(&self) -> Option<String> {
+    fn space_target(&self) -> drua_library::SpaceTarget {
         match self {
-            Target::Main => None,
-            Target::Changeset { id, .. } => Some(Changeset::git_ref_for(*id)),
-        }
-    }
-
-    fn at(&self) -> Option<&str> {
-        match self {
-            Target::Main => None,
-            Target::Changeset { tip, .. } => Some(tip.as_str()),
+            Target::Main => drua_library::SpaceTarget::Main,
+            Target::Changeset { handle, .. } => drua_library::SpaceTarget::Draft(handle.clone()),
         }
     }
 }
@@ -193,7 +186,7 @@ impl SpaceFs {
             .read_file(
                 &resolved.space.slug,
                 &resolved.rel_path,
-                resolved.target.at(),
+                &resolved.target.space_target(),
             )
             .await?
             .ok_or_else(|| SpaceError::PathNotFound {
@@ -401,7 +394,7 @@ impl SpaceFs {
         // ensure_ref first: it recovers from a not-yet-fetched base commit
         // (changeset::ensure_ref), so touched_count's diff runs once that
         // recovery has had a chance to bring the objects in.
-        let tip = self
+        let handle = self
             .changesets
             .ensure_ref(&cs)
             .await
@@ -412,7 +405,7 @@ impl SpaceFs {
         });
         Ok(Target::Changeset {
             id: cs.id,
-            tip,
+            handle,
             status: cs.status,
             title: cs.title,
             touched,
@@ -496,13 +489,13 @@ impl SpaceFs {
         let Some(resolved) = self.resolve(sub, path, Intent::Read).await? else {
             return Ok(None);
         };
-        let at = resolved.target.at();
+        let target = resolved.target.space_target();
 
         // Try as a directory first; if it's a tree, list it. If not a
         // tree, fall through to a blob read.
         if let Some(entries) = self
             .spaces
-            .list_dir(&resolved.space.slug, &resolved.rel_path, at)
+            .list_dir(&resolved.space.slug, &resolved.rel_path, &target)
             .await
             .map_err(|e| -> ProjectError { e.into() })?
         {
@@ -511,7 +504,7 @@ impl SpaceFs {
 
         let bytes = self
             .spaces
-            .read_file(&resolved.space.slug, &resolved.rel_path, at)
+            .read_file(&resolved.space.slug, &resolved.rel_path, &target)
             .await
             .map_err(|e| -> ProjectError { e.into() })?
             .ok_or_else(|| io_err(format!("no such file: {}", resolved.rel_path)))?;
@@ -538,7 +531,7 @@ impl SpaceFs {
             .list_dir(
                 &resolved.space.slug,
                 &resolved.rel_path,
-                resolved.target.at(),
+                &resolved.target.space_target(),
             )
             .await
             .map_err(|e| -> ProjectError { e.into() })?
@@ -572,7 +565,7 @@ impl SpaceFs {
             .list_dir(
                 &resolved.space.slug,
                 &resolved.rel_path,
-                resolved.target.at(),
+                &resolved.target.space_target(),
             )
             .await
             .map_err(|e| -> ProjectError { e.into() })?
@@ -616,7 +609,7 @@ impl SpaceFs {
                 &resolved.rel_path,
                 content,
                 attribution,
-                resolved.target.git_ref().as_deref(),
+                &resolved.target.space_target(),
             )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
@@ -653,7 +646,7 @@ impl SpaceFs {
                 old_str,
                 new_str,
                 attribution,
-                resolved.target.git_ref().as_deref(),
+                &resolved.target.space_target(),
             )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
@@ -686,7 +679,7 @@ impl SpaceFs {
                 line_number,
                 text,
                 attribution,
-                resolved.target.git_ref().as_deref(),
+                &resolved.target.space_target(),
             )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
@@ -715,7 +708,7 @@ impl SpaceFs {
                 &resolved.space.slug,
                 &resolved.rel_path,
                 attribution,
-                resolved.target.git_ref().as_deref(),
+                &resolved.target.space_target(),
             )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
@@ -794,7 +787,7 @@ impl SpaceFs {
                 &from_resolved.rel_path,
                 &to_rel,
                 attribution,
-                from_resolved.target.git_ref().as_deref(),
+                &from_resolved.target.space_target(),
             )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
@@ -880,7 +873,7 @@ impl SpaceFs {
             .walk(
                 &resolved.space.slug,
                 &resolved.rel_path,
-                resolved.target.at(),
+                &resolved.target.space_target(),
             )
             .await
             .map_err(|e| -> ProjectError { e.into() })?
@@ -1369,24 +1362,29 @@ mod tests {
     }
 
     #[test]
-    fn target_main_has_no_git_ref_or_at() {
-        assert_eq!(Target::Main.git_ref(), None);
-        assert_eq!(Target::Main.at(), None);
+    fn target_main_has_no_draft_space_target() {
+        assert_eq!(Target::Main.space_target(), drua_library::SpaceTarget::Main);
     }
 
     #[test]
-    fn target_changeset_names_its_branch_ref_and_tip() {
+    fn target_changeset_space_target_carries_its_handle() {
         let id = ChangesetId::new();
+        let handle = drua_library::DraftHandle::new(
+            drua_library::DraftName::from(uuid::Uuid::from(id)),
+            "deadbeef",
+        );
         let target = Target::Changeset {
             id,
-            tip: "deadbeef".to_string(),
+            handle: handle.clone(),
             status: ChangesetStatus::Open,
             title: "a draft".to_string(),
             touched: 1,
             just_started: false,
         };
-        assert_eq!(target.git_ref(), Some(format!("refs/heads/drua/{id}")));
-        assert_eq!(target.at(), Some("deadbeef"));
+        assert_eq!(
+            target.space_target(),
+            drua_library::SpaceTarget::Draft(handle)
+        );
     }
 
     #[test]
@@ -1729,9 +1727,13 @@ mod tests {
     }
 
     fn changeset_target(just_started: bool) -> Target {
+        let id = ChangesetId::new();
         Target::Changeset {
-            id: ChangesetId::new(),
-            tip: "deadbeef".to_string(),
+            id,
+            handle: drua_library::DraftHandle::new(
+                drua_library::DraftName::from(uuid::Uuid::from(id)),
+                "deadbeef",
+            ),
             status: ChangesetStatus::Open,
             title: "workflow-fix-typos run ab12cd34".to_string(),
             touched: 2,

@@ -38,6 +38,18 @@ pub struct DraftHandle {
 }
 
 impl DraftHandle {
+    /// Constructs a handle from an already-known name and tip, without
+    /// resolving anything. Callers that need a handle guaranteed to
+    /// reflect the ref's actual current state should call
+    /// [`super::Drafts::handle`] instead; this exists for callers (and
+    /// tests) outside the library crate that already hold both pieces.
+    pub fn new(name: DraftName, tip: impl Into<String>) -> Self {
+        Self {
+            name,
+            tip: tip.into(),
+        }
+    }
+
     pub fn name(&self) -> DraftName {
         self.name
     }
