@@ -25,23 +25,20 @@ impl Default for ChangesetPrPollConfig {
 
 pub(crate) struct ChangesetPrPollJobInitializer {
     changesets: Arc<Changesets>,
-    github: Arc<GitHubAppTokenProvider>,
-    owner: String,
-    repo: String,
+    github: Option<Arc<GitHubAppTokenProvider>>,
+    repo_coord: Option<(String, String)>,
 }
 
 impl ChangesetPrPollJobInitializer {
     pub fn new(
         changesets: Arc<Changesets>,
-        github: Arc<GitHubAppTokenProvider>,
-        owner: String,
-        repo: String,
+        github: Option<Arc<GitHubAppTokenProvider>>,
+        repo_coord: Option<(String, String)>,
     ) -> Self {
         Self {
             changesets,
             github,
-            owner,
-            repo,
+            repo_coord,
         }
     }
 }
@@ -57,9 +54,8 @@ impl ResidentJobInitializer for ChangesetPrPollJobInitializer {
         let config: ChangesetPrPollConfig = job.config()?;
         Ok(Box::new(ChangesetPrPollRunner {
             changesets: Arc::clone(&self.changesets),
-            github: Arc::clone(&self.github),
-            owner: self.owner.clone(),
-            repo: self.repo.clone(),
+            github: self.github.clone(),
+            repo_coord: self.repo_coord.clone(),
             interval: Duration::from_secs(config.interval_secs.max(1)),
         }))
     }
@@ -67,9 +63,8 @@ impl ResidentJobInitializer for ChangesetPrPollJobInitializer {
 
 struct ChangesetPrPollRunner {
     changesets: Arc<Changesets>,
-    github: Arc<GitHubAppTokenProvider>,
-    owner: String,
-    repo: String,
+    github: Option<Arc<GitHubAppTokenProvider>>,
+    repo_coord: Option<(String, String)>,
     interval: Duration,
 }
 
@@ -89,6 +84,25 @@ impl ResidentJobRunner for ChangesetPrPollRunner {
 
 impl ChangesetPrPollRunner {
     async fn poll_once(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if let (Some(github), Some((owner, repo))) = (&self.github, &self.repo_coord) {
+            self.reconcile_submitted(github, owner, repo).await?;
+        }
+        // Runs regardless of a GitHub App: it's the backstop for the
+        // best-effort `delete_ref` in `mark_merged_in_op`,
+        // `mark_rejected_in_op`, `discard` and `apply`, none of which
+        // need GitHub.
+        if let Err(e) = self.changesets.sweep_finished_refs().await {
+            tracing::warn!(error = %e, "changeset.pr_poll: sweep_finished_refs failed; will retry next tick");
+        }
+        Ok(())
+    }
+
+    async fn reconcile_submitted(
+        &self,
+        github: &GitHubAppTokenProvider,
+        owner: &str,
+        repo: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let due = self.changesets.list_submitted_with_pr().await?;
         tracing::debug!(
             count = due.len(),
@@ -98,11 +112,7 @@ impl ChangesetPrPollRunner {
             let Some(pr_number) = cs.pr_number else {
                 continue;
             };
-            let pr = match self
-                .github
-                .get_pull(&self.owner, &self.repo, pr_number)
-                .await
-            {
+            let pr = match github.get_pull(owner, repo, pr_number).await {
                 Ok(pr) => pr,
                 Err(e) => {
                     tracing::warn!(
@@ -122,9 +132,6 @@ impl ChangesetPrPollRunner {
                     "changeset.pr_poll: reconcile failed; will retry next tick"
                 );
             }
-        }
-        if let Err(e) = self.changesets.sweep_finished_refs().await {
-            tracing::warn!(error = %e, "changeset.pr_poll: sweep_finished_refs failed; will retry next tick");
         }
         Ok(())
     }

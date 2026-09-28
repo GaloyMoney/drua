@@ -299,24 +299,23 @@ impl App {
         }
 
         // A closed-but-unmerged PR never moves `main`, so `observe_main`
-        // (fired from `on_head_advanced`) can't see it. This poll owns
-        // that outcome instead; skipped entirely without a GitHub App,
-        // matching how `submit` itself requires one.
-        if let (Some(github), Some((owner, repo))) = (library.github_app(), library.repo_coord()) {
-            let spawner =
-                jobs.add_resident_initializer(changeset::job::ChangesetPrPollJobInitializer::new(
-                    Arc::clone(&changesets),
-                    Arc::clone(github),
-                    owner,
-                    repo,
-                ));
-            spawner
-                .spawn(changeset::job::ChangesetPrPollConfig {
-                    interval_secs: config.changeset.pr_poll_interval_secs,
-                })
-                .await
-                .map_err(|e| AppError::Job(e.to_string()))?;
-        }
+        // (fired from `on_head_advanced`) can't see it; this poll owns
+        // that outcome instead, and always sweeps leftover refs of
+        // finished changesets regardless of a GitHub App — that backstop
+        // doesn't need GitHub. Only the PR-reconcile half is skipped
+        // without one, matching how `submit` itself requires it.
+        let spawner =
+            jobs.add_resident_initializer(changeset::job::ChangesetPrPollJobInitializer::new(
+                Arc::clone(&changesets),
+                library.github_app().cloned(),
+                library.repo_coord(),
+            ));
+        spawner
+            .spawn(changeset::job::ChangesetPrPollConfig {
+                interval_secs: config.changeset.pr_poll_interval_secs,
+            })
+            .await
+            .map_err(|e| AppError::Job(e.to_string()))?;
 
         let workflows = Arc::new(Workflows::init(
             pool,
