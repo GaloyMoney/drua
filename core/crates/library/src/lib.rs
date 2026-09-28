@@ -184,6 +184,19 @@ impl Library {
         &self.search
     }
 
+    /// Establish a request-time freshness barrier against the authoritative
+    /// git remote before serving content from this replica's bare clone.
+    ///
+    /// A successful library write is acknowledged only after `push_main`
+    /// succeeds. Therefore a fetch that starts after that acknowledgement
+    /// must observe that commit or a descendant. The PG NOTIFY/ticker path is
+    /// still useful for eager background convergence, but it is only a hint:
+    /// read correctness must never depend on its scheduling or delivery.
+    async fn refresh_head_for_read(&self) -> Result<(), LibraryError> {
+        self.git.fetch_and_head().await?;
+        return Ok(());
+    }
+
     /// Bare-clone path. Callers should prefer `read_blob_at_head`,
     /// `list_dir_at_head`, and `walk_blobs_at_head` over poking at the
     /// filesystem directly — bare clones don't materialise files.
@@ -194,7 +207,8 @@ impl Library {
     /// Read a blob's bytes at HEAD. `Ok(None)` when the path doesn't
     /// exist (or HEAD is unborn).
     pub async fn read_blob_at_head(&self, path: &str) -> Result<Option<Vec<u8>>, LibraryError> {
-        self.git.read_blob_at_head(path).await
+        self.refresh_head_for_read().await?;
+        return self.git.read_blob_at_head(path).await;
     }
 
     /// List immediate children of a tree path at HEAD. `Ok(None)` when
@@ -204,7 +218,8 @@ impl Library {
         &self,
         dir_path: &str,
     ) -> Result<Option<Vec<DirEntry>>, LibraryError> {
-        self.git.list_dir_at_head(dir_path).await
+        self.refresh_head_for_read().await?;
+        return self.git.list_dir_at_head(dir_path).await;
     }
 
     /// Recursively walk every blob under `dir_path` at HEAD. Returns
@@ -213,7 +228,8 @@ impl Library {
         &self,
         dir_path: &str,
     ) -> Result<Vec<(String, Vec<u8>)>, LibraryError> {
-        self.git.walk_blobs_at_head(dir_path).await
+        self.refresh_head_for_read().await?;
+        return self.git.walk_blobs_at_head(dir_path).await;
     }
 
     /// Per-repo `post_persist_hook` body collapses to a one-liner over
