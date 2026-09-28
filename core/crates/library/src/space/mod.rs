@@ -34,6 +34,18 @@ impl Spaces {
         }
     }
 
+    /// Establish a read barrier against the authoritative git remote before
+    /// serving space content from this replica's bare clone. Background
+    /// NOTIFY/ticker convergence is intentionally not part of the correctness
+    /// contract because either can run after a request has already arrived.
+    async fn refresh_head_for_read(&self) -> Result<(), SpaceError> {
+        self.git
+            .fetch_and_head()
+            .await
+            .map_err(|e| SpaceError::Git(e.to_string()))?;
+        return Ok(());
+    }
+
     #[tracing::instrument(name = "library.spaces.create", skip_all, fields(%slug))]
     pub async fn create(
         &self,
@@ -110,6 +122,7 @@ impl Spaces {
         attribution: CommitAttribution,
     ) -> Result<(), SpaceError> {
         let path = format!("spaces/{slug}/{relative_path}");
+        self.refresh_head_for_read().await?;
         if self
             .git
             .read_blob_at_head(&path)
@@ -263,10 +276,12 @@ impl Spaces {
         rel_path: &str,
     ) -> Result<Option<Vec<u8>>, SpaceError> {
         let path = format!("spaces/{slug}/{rel_path}");
-        self.git
+        self.refresh_head_for_read().await?;
+        return self
+            .git
             .read_blob_at_head(&path)
             .await
-            .map_err(|e| SpaceError::Git(e.to_string()))
+            .map_err(|e| SpaceError::Git(e.to_string()));
     }
 
     /// Lists immediate children under `spaces/<slug>/<rel_path>` at
@@ -283,10 +298,12 @@ impl Spaces {
         } else {
             format!("spaces/{slug}/{rel_path}")
         };
-        self.git
+        self.refresh_head_for_read().await?;
+        return self
+            .git
             .list_dir_at_head(&path)
             .await
-            .map_err(|e| SpaceError::Git(e.to_string()))
+            .map_err(|e| SpaceError::Git(e.to_string()));
     }
 
     /// Recursively walks every blob under `spaces/<slug>/<rel_path>`.
@@ -303,6 +320,7 @@ impl Spaces {
             format!("spaces/{slug}/{rel_path}")
         };
         let strip = format!("spaces/{slug}/");
+        self.refresh_head_for_read().await?;
         let mut blobs = self
             .git
             .walk_blobs_at_head(&path)
@@ -313,7 +331,7 @@ impl Spaces {
                 *p = rest.to_string();
             }
         }
-        Ok(blobs)
+        return Ok(blobs);
     }
 
     /// Lists every space, paginated through the `slug` list_by index.
