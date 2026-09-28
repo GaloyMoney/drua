@@ -6,17 +6,26 @@ use drua_library::{
 
 use crate::library::AuthedSpaces;
 use crate::project::Projects;
-use crate::skill::file::parse_skill_markdown;
+use crate::skill::file::{parse_skill_markdown, SKILL_DIR_FILE};
 use crate::skill::{ImportScope, Skills};
 
 /// Adapter that lets the drua_library reverse-sync job route
-/// skill markdown paths into the Skills service. Three layouts:
+/// skill markdown paths into the Skills service. Three scopes:
 ///
-/// - `runtime/skills/*.md` — global
-/// - `runtime/projects/{project}/skills/*.md` — project-scoped
-/// - `spaces/{slug}/skills/*.md` — space-scoped (the spaces tree
+/// - `runtime/skills/` — global
+/// - `runtime/projects/{project}/skills/` — project-scoped
+/// - `spaces/{slug}/skills/` — space-scoped (the spaces tree
 ///   intentionally lives at the repo root, not under `runtime/`; see
 ///   `library::Spaces::write_file`)
+///
+/// Each scope accepts two file layouts under `skills/`:
+///
+/// - flat: `<name>.md`
+/// - directory: `<name>/SKILL.md` (the Anthropic Agent Skills layout
+///   the sandbox already scans from `.claude/skills/`). Only the
+///   `SKILL.md` is a skill; sibling files such as `references/*.md`
+///   or `scripts/*` are not claimed here and, in a space, fall
+///   through to the `Spaces` catch-all as ordinary space files.
 ///
 /// Built post-`Library::init` (Skills, Projects, and Spaces already
 /// exist) and registered via `Library::register_importer`.
@@ -36,19 +45,26 @@ impl SkillsImporter {
     }
 }
 
+pub(crate) fn claims_path(path: &str) -> bool {
+    if !path.ends_with(".md") {
+        return false;
+    }
+    let parts: Vec<&str> = path.split('/').collect();
+    matches!(
+        parts.as_slice(),
+        ["runtime", "skills", _]
+            | ["runtime", "projects", _, "skills", _]
+            | ["spaces", _, "skills", _]
+            | ["runtime", "skills", _, SKILL_DIR_FILE]
+            | ["runtime", "projects", _, "skills", _, SKILL_DIR_FILE]
+            | ["spaces", _, "skills", _, SKILL_DIR_FILE]
+    )
+}
+
 #[async_trait::async_trait]
 impl LibraryImporter for SkillsImporter {
     fn matches(&self, path: &str) -> bool {
-        if !path.ends_with(".md") {
-            return false;
-        }
-        let parts: Vec<&str> = path.split('/').collect();
-        matches!(
-            parts.as_slice(),
-            ["runtime", "skills", _]
-                | ["runtime", "projects", _, "skills", _]
-                | ["spaces", _, "skills", _]
-        )
+        claims_path(path)
     }
 
     fn doc_type(&self) -> DruaDocType {
@@ -148,5 +164,53 @@ impl LibraryImporter for SkillsImporter {
             .await
             .map_err(|e| UpsertError::Other(format!("skill reverse-delete: {e}")))?;
         Ok(deleted.map(uuid::Uuid::from))
+    }
+}
+
+#[cfg(test)]
+mod path_claim_tests {
+    use super::claims_path;
+
+    #[test]
+    fn flat_layout_in_each_scope() {
+        assert!(claims_path("runtime/skills/deploy.md"));
+        assert!(claims_path("runtime/projects/alpha/skills/deploy.md"));
+        assert!(claims_path("spaces/mkt/skills/write-blog-post.md"));
+    }
+
+    #[test]
+    fn dir_layout_in_each_scope() {
+        assert!(claims_path("runtime/skills/deploy/SKILL.md"));
+        assert!(claims_path("runtime/projects/alpha/skills/deploy/SKILL.md"));
+        assert!(claims_path("spaces/mkt/skills/write-blog-post/SKILL.md"));
+    }
+
+    #[test]
+    fn dir_layout_claims_only_the_skill_file() {
+        // Sibling material beside a SKILL.md is not a skill. In a
+        // space it falls through to the Spaces catch-all.
+        assert!(!claims_path("spaces/mkt/skills/write-blog-post/README.md"));
+        assert!(!claims_path(
+            "spaces/mkt/skills/write-blog-post/references/voice.md"
+        ));
+        assert!(!claims_path(
+            "spaces/mkt/skills/write-blog-post/scripts/build.sh"
+        ));
+        // Case matters: the convention is `SKILL.md`.
+        assert!(!claims_path("spaces/mkt/skills/write-blog-post/skill.md"));
+    }
+
+    #[test]
+    fn nesting_deeper_than_one_directory_is_not_a_skill() {
+        assert!(!claims_path("spaces/mkt/skills/a/b/SKILL.md"));
+        assert!(!claims_path("runtime/skills/a/b/SKILL.md"));
+    }
+
+    #[test]
+    fn other_subtrees_untouched() {
+        assert!(!claims_path("spaces/mkt/notes/foo.md"));
+        assert!(!claims_path("spaces/mkt/_shared/galoy-context.md"));
+        assert!(!claims_path("runtime/workflows/daily.yml"));
+        assert!(!claims_path("runtime/spaces/mkt/skills/foo.md"));
     }
 }
