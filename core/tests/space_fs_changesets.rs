@@ -829,7 +829,14 @@ async fn sweep_finished_refs_deletes_the_ref_of_a_rejected_changeset_whose_ref_s
 #[ignore = "requires postgres + writes a working library clone; run with --ignored"]
 async fn sweep_finished_refs_leaves_open_and_submitted_changesets_alone() {
     let (app, user) = setup("sweep_live").await;
-    project_with_space(&app, &user, "proj-sweep-live", "docs").await;
+    let agent = project_with_space(&app, &user, "proj-sweep-live", "docs").await;
+    let project_id = agent.project_id().expect("agent has a project");
+
+    let pool = pool().await;
+    // Two distinct actors, so each keeps its own open draft — `draft_for`
+    // returns the caller's existing open draft rather than opening a
+    // second one for the same actor.
+    let run_sub = run_subject_for(&pool, project_id).await;
 
     let open_cs = app
         .changesets()
@@ -838,7 +845,7 @@ async fn sweep_finished_refs_leaves_open_and_submitted_changesets_alone() {
         .expect("open changeset");
     let submitted_cs = app
         .changesets()
-        .draft_for(&user, Some("still submitted".into()), None, None)
+        .draft_for(&run_sub, Some("still submitted".into()), None, None)
         .await
         .expect("open changeset");
     let fs = space_fs(&app);
@@ -846,16 +853,11 @@ async fn sweep_finished_refs_leaves_open_and_submitted_changesets_alone() {
         .await
         .expect("write_file dispatch")
         .expect("space path");
-    fs.write_file(
-        &user,
-        &format!("space:docs@{}/a.md", submitted_cs.id),
-        "submitted work\n".into(),
-    )
-    .await
-    .expect("write_file dispatch")
-    .expect("space path");
+    fs.write_file(&run_sub, "space:docs/a.md", "submitted work\n".into())
+        .await
+        .expect("write_file dispatch")
+        .expect("space path");
 
-    let pool = pool().await;
     force_submit(&pool, submitted_cs.id, 707).await;
 
     app.changesets().sweep_finished_refs().await.expect("sweep");
