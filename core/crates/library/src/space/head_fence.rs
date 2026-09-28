@@ -67,44 +67,29 @@ impl HeadFence {
 
     /// Publish the newest pushed remote head as the durable visibility fence.
     ///
-    /// Fence publication is serialized cluster-wide. The lock is deliberately
-    /// distinct from the Git push lock: taking the push lock here would invert
-    /// the writer's `repo_mutex -> push_lock` order and could deadlock with the
-    /// next local batch. Under the fence lock we fetch origin, so a late
-    /// publisher can only publish the same or a newer remote head than an
-    /// earlier publisher.
+    /// Fence publication is serialized cluster-wide with a transaction-scoped
+    /// advisory lock. The same transaction persists the obix event, so the lock
+    /// holder never needs a second pool connection while waiters are blocked.
+    /// Transaction scope also makes lock release cancellation-safe: dropping the
+    /// future rolls the transaction back and Postgres releases the lock.
+    ///
+    /// The fence lock is deliberately distinct from the Git push lock: taking
+    /// the push lock here would invert the writer's `repo_mutex -> push_lock`
+    /// order and could deadlock with the next local batch. Under the fence lock
+    /// we fetch origin, so a late publisher can only publish the same or a newer
+    /// remote head than an earlier publisher.
     pub(super) async fn after_write(&self) -> Result<(), SpaceError> {
-        // Initialize before holding a database session lock so an outbox that
-        // needs a connection cannot contend with the lock connection during
-        // first-use setup.
-        let _ = self.outbox().await?;
+        // Initialize before opening the fence transaction. Obix initialization
+        // may need pool connections of its own and must never run while holding
+        // the advisory lock.
+        let outbox = self.outbox().await?;
 
-        let mut lock_conn = self.pool.acquire().await?;
-        sqlx::query("SELECT pg_advisory_lock($1)")
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
             .bind(LIBRARY_HEAD_FENCE_LOCK_KEY)
-            .execute(&mut *lock_conn)
+            .execute(&mut *tx)
             .await?;
 
-        let publish_result = self.publish_remote_head().await;
-        let unlock_result = sqlx::query("SELECT pg_advisory_unlock($1)")
-            .bind(LIBRARY_HEAD_FENCE_LOCK_KEY)
-            .execute(&mut *lock_conn)
-            .await;
-
-        if let Err(error) = unlock_result {
-            tracing::error!(
-                error = %error,
-                "library head fence: failed to release advisory lock"
-            );
-            if publish_result.is_ok() {
-                return Err(SpaceError::Sqlx(error));
-            }
-        }
-
-        return publish_result;
-    }
-
-    async fn publish_remote_head(&self) -> Result<(), SpaceError> {
         let head = self
             .git
             .fetch_and_head()
@@ -112,15 +97,16 @@ impl HeadFence {
             .map_err(|e| SpaceError::Git(e.to_string()))?
             .ok_or_else(|| SpaceError::Git("library head missing after successful write".into()))?;
 
-        self.outbox()
-            .await?
-            .publish_ephemeral(
+        outbox
+            .publish_ephemeral_in_op(
+                &mut tx,
                 LIBRARY_HEAD_EVENT_TYPE.clone(),
                 LibraryHeadFence { head },
             )
             .await
             .map_err(|e| SpaceError::Git(format!("publish library head fence: {e}")))?;
 
+        tx.commit().await?;
         return Ok(());
     }
 
