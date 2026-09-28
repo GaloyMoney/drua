@@ -1070,6 +1070,8 @@ mod tests {
             tool_choice: None,
             max_tokens: Some(1234),
             cache_key: None,
+            trace_agent_id: None,
+            trace_run_id: None,
         }
     }
 
@@ -1237,5 +1239,25 @@ mod tests {
             value["prompt_cache_key"],
             serde_json::json!("agent-session:test")
         );
+    }
+
+    #[test]
+    fn responses_request_never_leaks_trace_ids_to_the_provider() {
+        let mut prompt = sample_prompt();
+        prompt.trace_agent_id = Some("01a0e837-agent".to_string());
+        prompt.trace_run_id = Some("01a0e837-run".to_string());
+
+        let request = prompt_to_responses_request(
+            &prompt,
+            &OpenAiResponsesAuth::ApiKey {
+                api_key: "sk-test".to_string(),
+            },
+        );
+
+        let json = serde_json::to_value(request)
+            .expect("request serializes")
+            .to_string();
+        assert!(!json.contains("01a0e837-agent"), "{json}");
+        assert!(!json.contains("01a0e837-run"), "{json}");
     }
 }

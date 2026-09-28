@@ -189,6 +189,9 @@ impl OpenAiClient {
         fields(
             http.status_code = tracing::field::Empty,
             http.attempts = tracing::field::Empty,
+            agent_id = tracing::field::Empty,
+            run_id = tracing::field::Empty,
+            model_used = tracing::field::Empty,
         )
     )]
     async fn send_prompt_streaming_internal(
@@ -198,6 +201,20 @@ impl OpenAiClient {
         tokio::sync::mpsc::Receiver<Result<StreamDelta, OpenAiChatCompletionsError>>,
         OpenAiChatCompletionsError,
     > {
+        // R5(a), review-curation-live-run4-2026-09-28.md: without these,
+        // an environment-wide Honeycomb query over this span mixes every
+        // concurrent agent/workflow-run's turns together. `trace_agent_id`
+        // / `trace_run_id` are plumbed through from `Agents::drive_session_loop`
+        // and never sent to the provider (see `llm::Prompt`'s doc comment).
+        let span = tracing::Span::current();
+        if let Some(agent_id) = &prompt.trace_agent_id {
+            span.record("agent_id", agent_id.as_str());
+        }
+        if let Some(run_id) = &prompt.trace_run_id {
+            span.record("run_id", run_id.as_str());
+        }
+        span.record("model_used", prompt.chain.primary.name.as_str());
+
         let request_body = prompt_to_request(prompt, self.reasoning_dialect);
         let body_bytes = Arc::new(
             serde_json::to_vec(&request_body)
@@ -205,7 +222,10 @@ impl OpenAiClient {
         );
 
         // Issue first request synchronously so an outright failure surfaces
-        // before any receiver is handed out.
+        // before any receiver is handed out. Timed from here (not from
+        // function entry) so `ttfb_ms` reflects wire time, not queueing
+        // ahead of the request.
+        let request_start = std::time::Instant::now();
         let resp = self.send_request(&body_bytes).await?;
 
         let (tx, rx) =
@@ -214,6 +234,10 @@ impl OpenAiClient {
         let stream_span = tracing::info_span!(
             parent: tracing::Span::current(),
             "openai_client.stream_processing",
+            agent_id = tracing::field::Empty,
+            run_id = tracing::field::Empty,
+            model_used = tracing::field::Empty,
+            ttfb_ms = tracing::field::Empty,
             empty_completion_retries = tracing::field::Empty,
             transient_stream_retries = tracing::field::Empty,
             usage.input_tokens = tracing::field::Empty,
@@ -225,11 +249,18 @@ impl OpenAiClient {
             usage.upstream_inference_cost_usd = tracing::field::Empty,
             stream.delta_count = tracing::field::Empty,
         );
+        if let Some(agent_id) = &prompt.trace_agent_id {
+            stream_span.record("agent_id", agent_id.as_str());
+        }
+        if let Some(run_id) = &prompt.trace_run_id {
+            stream_span.record("run_id", run_id.as_str());
+        }
+        stream_span.record("model_used", prompt.chain.primary.name.as_str());
 
         let client = self.clone();
         tokio::spawn(
             async move {
-                drive_stream_with_retry(client, body_bytes, resp, tx).await;
+                drive_stream_with_retry(client, body_bytes, resp, tx, request_start).await;
             }
             .instrument(stream_span),
         );
@@ -262,6 +293,7 @@ async fn drive_stream_with_retry(
     body: Arc<Vec<u8>>,
     initial_resp: reqwest::Response,
     tx: tokio::sync::mpsc::Sender<Result<StreamDelta, OpenAiChatCompletionsError>>,
+    request_start: std::time::Instant,
 ) {
     let span = tracing::Span::current();
     let mut current_resp = initial_resp;
@@ -269,6 +301,7 @@ async fn drive_stream_with_retry(
     let mut transient_retries: u32 = 0;
     let mut delta_count: u64 = 0;
     let mut usage_seen: Option<UsageSnapshot> = None;
+    let mut ttfb_recorded = false;
 
     loop {
         let byte_stream = current_resp.bytes_stream();
@@ -282,6 +315,10 @@ async fn drive_stream_with_retry(
                 Ok(deltas) => {
                     for delta in deltas {
                         delta_count += 1;
+                        if !ttfb_recorded {
+                            ttfb_recorded = true;
+                            span.record("ttfb_ms", request_start.elapsed().as_millis() as u64);
+                        }
                         if let StreamDelta::Usage {
                             input_tokens,
                             output_tokens,

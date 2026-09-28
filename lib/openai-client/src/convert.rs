@@ -472,6 +472,8 @@ mod tests {
             tool_choice: None,
             max_tokens: Some(1024),
             cache_key: None,
+            trace_agent_id: None,
+            trace_run_id: None,
         }
     }
 
@@ -544,6 +546,25 @@ mod tests {
     }
 
     #[test]
+    fn prompt_to_request_never_leaks_trace_ids_to_the_provider() {
+        // trace_agent_id / trace_run_id (R5(a),
+        // review-curation-live-run4-2026-09-28.md) are tracing-only —
+        // asserting they never reach the actual API request body,
+        // regardless of how prompt_to_request evolves.
+        let mut prompt = sample_prompt();
+        prompt.trace_agent_id = Some("01a0e837-agent".to_string());
+        prompt.trace_run_id = Some("01a0e837-run".to_string());
+
+        let req = prompt_to_request(&prompt, ReasoningDialect::OpenAi);
+        let value = serde_json::to_value(&req).unwrap();
+        let json = value.to_string();
+        assert!(!json.contains("01a0e837-agent"), "{json}");
+        assert!(!json.contains("01a0e837-run"), "{json}");
+        assert!(!json.contains("trace_agent_id"), "{json}");
+        assert!(!json.contains("trace_run_id"), "{json}");
+    }
+
+    #[test]
     fn prompt_with_tool_results() {
         let prompt = llm::Prompt {
             chain: llm::ModelChain::new("gpt-4o"),
@@ -571,6 +592,8 @@ mod tests {
             tool_choice: None,
             max_tokens: None,
             cache_key: None,
+            trace_agent_id: None,
+            trace_run_id: None,
         };
 
         let req = prompt_to_request(&prompt, ReasoningDialect::OpenAi);
@@ -603,6 +626,8 @@ mod tests {
             tool_choice: None,
             max_tokens: None,
             cache_key: None,
+            trace_agent_id: None,
+            trace_run_id: None,
         };
 
         let req = prompt_to_request(&prompt, ReasoningDialect::OpenAi);
@@ -928,6 +953,8 @@ mod tests {
             tool_choice: None,
             max_tokens: Some(1024),
             cache_key: None,
+            trace_agent_id: None,
+            trace_run_id: None,
         }
     }
 

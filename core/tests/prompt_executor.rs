@@ -37,6 +37,8 @@ async fn anthropic_round_trip_via_executor() {
         max_tokens: None, // executor should fill this in from default_max_tokens
         effort: None,
         cache_key: None,
+        trace_agent_id: None,
+        trace_run_id: None,
     };
 
     let (request, response_rx) = PromptRequest::new(prompt);
