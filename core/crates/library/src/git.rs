@@ -1172,10 +1172,7 @@ impl GitEngine {
             .await?
             .ok_or_else(|| LibraryError::Git("merge_into_main: no merge base with main".into()))?;
         if let Err(paths) = self.merge_trees(&base, changeset_tip, &main_oid).await? {
-            return Err(LibraryError::Validation(format!(
-                "merge conflicts: {}",
-                paths.join(", ")
-            )));
+            return Err(LibraryError::MergeConflicts { paths });
         }
         let oid = self
             .enqueue(BatchOp {
@@ -1226,7 +1223,7 @@ impl GitEngine {
         match result {
             Ok(Some(new_head)) => Ok(Ok((onto.to_string(), new_head))),
             Ok(None) => Err(LibraryError::Git("rebase_ref: produced no commit".into())),
-            Err(LibraryError::Validation(msg)) => Ok(Err(vec![msg])),
+            Err(LibraryError::MergeConflicts { paths }) => Ok(Err(paths)),
             Err(e) => Err(e),
         }
     }
@@ -1997,12 +1994,7 @@ impl GitEngine {
         let tree_oid =
             match Self::merge_trees_blocking(repo, &base.to_string(), expected_tip, onto)? {
                 Ok(oid) => oid,
-                Err(paths) => {
-                    return Err(LibraryError::Validation(format!(
-                        "merge conflicts: {}",
-                        paths.join(", ")
-                    )))
-                }
+                Err(paths) => return Err(LibraryError::MergeConflicts { paths }),
             };
         let onto_commit = repo
             .find_commit(onto_oid)
@@ -2190,12 +2182,7 @@ impl GitEngine {
                 match Self::merge_trees_blocking(repo, base_oid, sp, &parent_oid.to_string())? {
                     Ok(tree_oid) => git2::Oid::from_str(&tree_oid)
                         .map_err(|e| LibraryError::Git(format!("parse tree oid: {e}")))?,
-                    Err(paths) => {
-                        return Err(LibraryError::Validation(format!(
-                            "merge conflicts: {}",
-                            paths.join(", ")
-                        )))
-                    }
+                    Err(paths) => return Err(LibraryError::MergeConflicts { paths }),
                 }
             }
             BatchOpKind::Rebase { .. }
@@ -3603,6 +3590,58 @@ mod tests {
     }
 
     #[test]
+    fn apply_rebase_blocking_reports_conflicts_as_a_typed_error() {
+        let (origin_dir, local_dir, local_repo) = origin_and_clone("rebase-conflict");
+        let main_oid = local_repo
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .target()
+            .unwrap();
+        let draft_tip = commit_file(
+            &local_repo,
+            Some(main_oid),
+            "shared.md",
+            b"draft version\n",
+            "agent@example.com",
+            "draft edit",
+        );
+        local_repo
+            .reference("refs/heads/drua/conflict", draft_tip, false, "test create")
+            .unwrap();
+        GitEngine::push_ref(&local_repo, None, "refs/heads/drua/conflict").unwrap();
+
+        let new_main_tip = commit_file(
+            &local_repo,
+            Some(main_oid),
+            "shared.md",
+            b"main version\n",
+            "human@example.com",
+            "conflicting main edit",
+        );
+        local_repo
+            .reference("refs/heads/main", new_main_tip, true, "advance main")
+            .unwrap();
+
+        let err = GitEngine::apply_rebase_blocking(
+            &local_repo,
+            None,
+            "refs/heads/drua/conflict",
+            &new_main_tip.to_string(),
+            &draft_tip.to_string(),
+            "changeset: rebase",
+            &CommitAttribution::library_default(),
+        )
+        .expect_err("a conflicting rebase must fail");
+        assert!(
+            matches!(&err, LibraryError::MergeConflicts { paths } if paths == &vec!["shared.md".to_string()]),
+            "expected MergeConflicts([\"shared.md\"]), got: {err:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&origin_dir);
+        let _ = std::fs::remove_dir_all(&local_dir);
+    }
+
+    #[test]
     fn create_ref_with_push_survives_a_pruning_fetch() {
         let (origin_dir, local_dir, local_repo) = origin_and_clone("create-survives-prune");
         let main_oid = local_repo
@@ -3960,6 +3999,59 @@ mod tests {
         assert!(
             tree.get_path(Path::new("concurrent.md")).is_ok(),
             "a main commit that landed after the op was built must survive the merge, not be dropped"
+        );
+
+        let _ = std::fs::remove_dir_all(&origin_dir);
+        let _ = std::fs::remove_dir_all(&local_dir);
+    }
+
+    #[test]
+    fn merge_commit_op_reports_conflicts_as_a_typed_error() {
+        let (origin_dir, local_dir, local_repo) = origin_and_clone("merge-into-main-conflict");
+        let base_oid = local_repo
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .target()
+            .unwrap();
+        let changeset_tip = commit_file(
+            &local_repo,
+            Some(base_oid),
+            "feature.md",
+            b"changeset version\n",
+            "agent@example.com",
+            "changeset edit",
+        );
+        let main_tip = commit_file(
+            &local_repo,
+            Some(base_oid),
+            "feature.md",
+            b"main version\n",
+            "other-writer@example.com",
+            "conflicting main edit",
+        );
+        local_repo
+            .reference(
+                "refs/heads/main",
+                main_tip,
+                true,
+                "advance main past base_oid",
+            )
+            .unwrap();
+
+        let op = BatchOp {
+            commit_message: "changeset: land feature".into(),
+            kind: BatchOpKind::MergeCommit {
+                base_oid: base_oid.to_string(),
+                second_parent: changeset_tip.to_string(),
+            },
+            attribution: CommitAttribution::library_default(),
+            target_ref: None,
+        };
+        let mut results = GitEngine::commit_each_then_push_blocking(&local_dir, vec![op], None);
+        let err = results.remove(0).expect_err("conflicting merge must fail");
+        assert!(
+            matches!(&err, LibraryError::MergeConflicts { paths } if paths == &vec!["feature.md".to_string()]),
+            "expected MergeConflicts([\"feature.md\"]), got: {err:?}"
         );
 
         let _ = std::fs::remove_dir_all(&origin_dir);

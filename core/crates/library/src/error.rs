@@ -16,6 +16,10 @@ pub enum LibraryError {
         expected: String,
         actual: String,
     },
+    #[error("merge conflicts: {paths:?}")]
+    MergeConflicts { paths: Vec<String> },
+    #[error("main has no commits yet")]
+    MainUnborn,
     #[error("job: {0}")]
     Job(#[from] job::error::JobError),
     #[error("sqlx: {0}")]
