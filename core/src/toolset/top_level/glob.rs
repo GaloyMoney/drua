@@ -29,7 +29,9 @@ use super::{parse_params, render_detailed, schema_for, FilesOutput, OutputSchema
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct GlobParams {
-    /// Glob pattern to match files (e.g. `**/*.rs`, `src/**/*.ts`).
+    /// Glob pattern to match files (e.g. `**/*.rs`, `src/**/*.ts`),
+    /// matched relative to `path`; for `space:` paths results are
+    /// relative to the space root.
     pattern: String,
 
     /// Directory to search in. Defaults to workspace root, or use

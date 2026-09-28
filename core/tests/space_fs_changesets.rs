@@ -773,6 +773,59 @@ async fn write_against_a_rejected_changeset_is_rejected() {
 
 #[tokio::test]
 #[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn glob_and_grep_match_relative_to_the_anchored_path() {
+    let (app, user) = setup("glob_anchor").await;
+    let agent = project_with_space(&app, &user, "proj-glob-anchor", "docs").await;
+    let project_id = agent.project_id().expect("agent has a project");
+
+    let pool = pool().await;
+    let run_sub = run_subject_for(&pool, project_id).await;
+    let fs = space_fs(&app);
+
+    app.changesets()
+        .draft_for(&run_sub, Some("glob anchor".into()), None, None)
+        .await
+        .expect("open run draft");
+
+    fs.write_file(&run_sub, "space:docs/runs/r1/draft/run.json", "{}".into())
+        .await
+        .expect("write_file dispatch")
+        .expect("space path");
+    fs.write_file(&run_sub, "space:docs/runs/r1/draft/a--b.json", "{}".into())
+        .await
+        .expect("write_file dispatch")
+        .expect("space path");
+
+    let from_run_root = fs
+        .glob(&run_sub, "space:docs/runs/r1", "draft/*--*.json")
+        .await
+        .expect("glob dispatch");
+    assert_eq!(
+        from_run_root,
+        Some(vec!["runs/r1/draft/a--b.json".to_string()])
+    );
+
+    let from_space_root = fs
+        .glob(&run_sub, "space:docs", "runs/r1/draft/*--*.json")
+        .await
+        .expect("glob dispatch");
+    assert_eq!(
+        from_space_root,
+        Some(vec!["runs/r1/draft/a--b.json".to_string()])
+    );
+
+    // A non-run subject's `space:` read is never overlaid with the run's
+    // draft — it sees main, which never got these files (the space root
+    // itself exists on main, so this is an empty match, not a NotFound).
+    let from_main = fs
+        .glob(&user, "space:docs", "runs/r1/draft/*--*.json")
+        .await
+        .expect("glob dispatch");
+    assert_eq!(from_main, Some(Vec::new()));
+}
+
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
 async fn interactive_agents_are_read_only() {
     let (app, user) = setup("interactive_read_only").await;
     let (member, lead) = project_with_space_and_lead(&app, &user, "proj-read-only", "docs").await;

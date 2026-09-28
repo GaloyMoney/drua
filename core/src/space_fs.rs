@@ -806,10 +806,12 @@ impl SpaceFs {
     }
 
     /// Glob walk across the space's tree. Pattern is the standard
-    /// glob syntax (`*`, `**`, `?`); matches against the relative
-    /// path inside `spaces/<slug>/`. `path`'s rel-component anchors
-    /// the search root — a directory, or a single file; naming neither
-    /// is an error.
+    /// glob syntax (`*`, `**`, `?`), matched against each blob's path
+    /// relative to `path`'s rel-component (the space root for
+    /// `space:<slug>`), mirroring the sandbox `rg --files --glob`
+    /// backend; results are `spaces/<slug>/`-relative. `path`'s
+    /// rel-component anchors the search root — a directory, or a
+    /// single file; naming neither is an error.
     #[instrument(name = "library.space_fs.glob", skip(self, sub))]
     pub async fn glob(
         &self,
@@ -821,7 +823,7 @@ impl SpaceFs {
             return Ok(None);
         };
         let blobs = self.walk_search_root(&resolved).await?;
-        Ok(Some(glob_blobs(blobs, pattern)?))
+        Ok(Some(glob_blobs(blobs, &resolved.rel_path, pattern)?))
     }
 
     /// `glob` with each match's `created`/`modified` attached. A glob
@@ -838,7 +840,7 @@ impl SpaceFs {
             return Ok(None);
         };
         let blobs = self.walk_search_root(&resolved).await?;
-        let files = glob_blobs(blobs, pattern)?;
+        let files = glob_blobs(blobs, &resolved.rel_path, pattern)?;
         let dates = self
             .spaces
             .path_dates(&resolved.space.slug)
@@ -865,7 +867,7 @@ impl SpaceFs {
             return Ok(None);
         };
         let blobs = self.walk_search_root(&resolved).await?;
-        Ok(Some(grep_blobs(blobs, args)?))
+        Ok(Some(grep_blobs(blobs, &resolved.rel_path, args)?))
     }
 
     /// Blobs under an already-resolved search root. A path that names
@@ -978,24 +980,50 @@ fn normalize_rel_path(rel: &str) -> String {
         .join("/")
 }
 
-/// Filter `blobs` (rel-path, bytes) by a glob pattern and return the
-/// matching paths, sorted.
-fn glob_blobs(blobs: Vec<(String, Vec<u8>)>, pattern: &str) -> Result<Vec<String>, SpaceError> {
+/// `path` relative to `root` (both `spaces/<slug>/`-relative), or
+/// `None` when `path` doesn't live under `root` at all. `root` empty
+/// means "the space root" — unchanged, so every root-anchored caller
+/// keeps working. `path == root` means root names a single file, which
+/// matches against its own basename (as `rg` does). Blobs outside
+/// `root` are never produced by `walk_search_root` in practice; `None`
+/// here is belt-and-suspenders so a `**` pattern still can't cross into
+/// a sibling directory if that ever changes.
+fn root_relative<'a>(root: &str, path: &'a str) -> Option<&'a str> {
+    if root.is_empty() {
+        return Some(path);
+    }
+    if path == root {
+        return Some(path.rsplit('/').next().unwrap_or(path));
+    }
+    path.strip_prefix(root).and_then(|r| r.strip_prefix('/'))
+}
+
+/// Filter `blobs` (rel-path, bytes) by a glob pattern — matched against
+/// each path relative to `root` — and return the matching paths (still
+/// `spaces/<slug>/`-relative), sorted.
+fn glob_blobs(
+    blobs: Vec<(String, Vec<u8>)>,
+    root: &str,
+    pattern: &str,
+) -> Result<Vec<String>, SpaceError> {
     let regex = glob_to_regex(pattern)
         .map_err(|e| io_err(format!("invalid glob pattern '{pattern}': {e}")))?;
     let mut out: Vec<String> = blobs
         .into_iter()
         .map(|(p, _)| p)
-        .filter(|p| regex.is_match(p))
+        .filter(|p| matches!(root_relative(root, p), Some(rel) if regex.is_match(rel)))
         .collect();
     out.sort();
     Ok(out)
 }
 
 /// Run `grep` over already-walked blobs. Mirrors the curated subset of
-/// flags the `Grep` top-level tool accepts.
+/// flags the `Grep` top-level tool accepts. `glob` filters are matched
+/// against each path relative to `root`; printed match paths stay
+/// `spaces/<slug>/`-relative.
 fn grep_blobs(
     blobs: Vec<(String, Vec<u8>)>,
+    root: &str,
     args: &sandbox::GrepInput,
 ) -> Result<String, SpaceError> {
     let mode = args.output_mode.unwrap_or_default();
@@ -1026,8 +1054,9 @@ fn grep_blobs(
     let mut output_lines: Vec<String> = Vec::new();
     for (rel, bytes) in blobs {
         if let Some(g) = glob_filter.as_ref() {
-            if !g.is_match(&rel) {
-                continue;
+            match root_relative(root, &rel) {
+                Some(r) if g.is_match(r) => {}
+                _ => continue,
             }
         }
         let Ok(content) = std::str::from_utf8(&bytes) else {
@@ -1529,6 +1558,83 @@ mod tests {
         let r = glob_to_regex("?.md").unwrap();
         assert!(r.is_match("a.md"));
         assert!(!r.is_match("ab.md"));
+    }
+
+    fn blobs(paths: &[&str]) -> Vec<(String, Vec<u8>)> {
+        paths.iter().map(|p| (p.to_string(), Vec::new())).collect()
+    }
+
+    #[test]
+    fn glob_blobs_matches_relative_to_root() {
+        let b = blobs(&[
+            "runs/r1/draft/run.json",
+            "runs/r1/draft/a--b.json",
+            "runs/r1/checks.json",
+            "state.json",
+        ]);
+        assert_eq!(
+            glob_blobs(b.clone(), "runs/r1", "draft/*--*.json").unwrap(),
+            vec!["runs/r1/draft/a--b.json"]
+        );
+        assert_eq!(
+            glob_blobs(b.clone(), "runs/r1/draft", "*.json").unwrap(),
+            vec!["runs/r1/draft/a--b.json", "runs/r1/draft/run.json"]
+        );
+        assert_eq!(
+            glob_blobs(b, "runs/r1", "*.json").unwrap(),
+            vec!["runs/r1/checks.json"]
+        );
+    }
+
+    #[test]
+    fn glob_blobs_root_empty_is_unchanged() {
+        let b = blobs(&["runs/r1/draft/a--b.json", "lib/x.js"]);
+        assert_eq!(
+            glob_blobs(b.clone(), "", "runs/r1/draft/*--*.json").unwrap(),
+            vec!["runs/r1/draft/a--b.json"]
+        );
+        assert_eq!(
+            glob_blobs(b, "", "*.js").unwrap(),
+            Vec::<String>::new(),
+            "`*` still does not cross `/`"
+        );
+    }
+
+    #[test]
+    fn glob_blobs_double_star_under_root() {
+        let b = blobs(&["runs/r1/draft/a--b.json", "runs/r2/draft/c--d.json"]);
+        assert_eq!(
+            glob_blobs(b, "runs/r1", "**/*.json").unwrap(),
+            vec!["runs/r1/draft/a--b.json"]
+        );
+    }
+
+    #[test]
+    fn glob_blobs_root_is_a_file_matches_its_basename() {
+        let b = blobs(&["lib/runtime.js"]);
+        assert_eq!(
+            glob_blobs(b.clone(), "lib/runtime.js", "*.js").unwrap(),
+            vec!["lib/runtime.js"]
+        );
+        assert_eq!(
+            glob_blobs(b, "lib/runtime.js", "*.md").unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn grep_blobs_glob_filter_matches_relative_to_root() {
+        let b = vec![
+            ("docs/a.md".to_string(), b"hello\n".to_vec()),
+            ("docs/a.txt".to_string(), b"hello\n".to_vec()),
+        ];
+        let args = sandbox::GrepInput {
+            pattern: "hello".into(),
+            glob: Some("*.md".into()),
+            ..Default::default()
+        };
+        let out = grep_blobs(b, "docs", &args).unwrap();
+        assert_eq!(out, "docs/a.md");
     }
 
     fn dated(secs: i64) -> PathDates {
