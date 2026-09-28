@@ -104,9 +104,11 @@ struct SkillFrontmatter {
     updated: Option<String>,
 }
 
-/// Name = filename slug (e.g. `data-validator.md` → `data-validator`).
-/// Always — the skill's invocation handle is the slug, not the heading
-/// or frontmatter `name:`. Description falls back through:
+/// Name = path slug (e.g. `data-validator.md` → `data-validator`,
+/// `data-validator/SKILL.md` → `data-validator`; see
+/// [`skill_name_from_path`]). Always — the skill's invocation handle
+/// is the slug, not the heading or frontmatter `name:`. Description
+/// falls back through:
 /// 1. Frontmatter `description:`
 /// 2. `# Heading` text (when no description in frontmatter)
 /// 3. Empty
@@ -126,7 +128,7 @@ fn parse_skill_with_frontmatter(
         None => (SkillId::new(), false),
     };
 
-    let name = name_from_filename(path)?;
+    let name = skill_name_from_path(path)?;
     let body = after_fm.trim().to_string();
     let description = fm
         .description
@@ -158,7 +160,7 @@ fn parse_skill_without_frontmatter(
     space_slug: Option<String>,
     path: &str,
 ) -> Option<ParsedSkill> {
-    let name = name_from_filename(path)?;
+    let name = skill_name_from_path(path)?;
     let body = content.trim().to_string();
     let description = heading_text(&body).unwrap_or_default();
 
@@ -202,6 +204,42 @@ pub fn space_slug_from_skill_path(relative_path: &str) -> Option<String> {
         Some(parts[1].to_string())
     } else {
         None
+    }
+}
+
+/// Anthropic Agent Skills layout: `.../skills/<name>/SKILL.md` (same
+/// convention the sandbox scans from `.claude/skills/`).
+pub const SKILL_DIR_FILE: &str = "SKILL.md";
+
+pub fn is_skill_dir_file(path: &str) -> bool {
+    path.rsplit('/').next() == Some(SKILL_DIR_FILE)
+}
+
+/// Skill name for either on-disk layout:
+/// - flat, `.../skills/<name>.md` → slug of the file stem;
+/// - directory, `.../skills/<name>/SKILL.md` → slug of the parent
+///   directory, so sibling `references/` and `scripts/` can live
+///   beside the skill without changing its invocation handle.
+///
+/// Examples:
+/// - `spaces/mkt/skills/write-blog-post.md` → `Some("write-blog-post")`
+/// - `spaces/mkt/skills/write-blog-post/SKILL.md` → `Some("write-blog-post")`
+/// - `spaces/mkt/skills/SKILL.md` → `None` (no directory to name it)
+pub fn skill_name_from_path(path: &str) -> Option<String> {
+    if !is_skill_dir_file(path) {
+        return name_from_filename(path);
+    }
+    let mut parts = path.rsplit('/');
+    parts.next()?; // SKILL.md
+    let dir = parts.next()?;
+    if dir == "skills" {
+        return None;
+    }
+    let slug = slugify(dir);
+    if slug.is_empty() {
+        None
+    } else {
+        Some(slug)
     }
 }
 
@@ -297,6 +335,78 @@ mod path_tests {
             None,
             "non-skill subtree must not match"
         );
+    }
+
+    #[test]
+    fn skill_name_flat_layout_uses_file_stem() {
+        assert_eq!(
+            skill_name_from_path("spaces/mkt/skills/write-blog-post.md"),
+            Some("write-blog-post".to_string())
+        );
+        assert_eq!(
+            skill_name_from_path("runtime/skills/Deploy Prod.md"),
+            Some("deploy-prod".to_string())
+        );
+    }
+
+    #[test]
+    fn skill_name_dir_layout_uses_parent_dir() {
+        assert_eq!(
+            skill_name_from_path("spaces/mkt/skills/write-blog-post/SKILL.md"),
+            Some("write-blog-post".to_string())
+        );
+        assert_eq!(
+            skill_name_from_path("runtime/projects/alpha/skills/Daily Digest/SKILL.md"),
+            Some("daily-digest".to_string())
+        );
+        assert_eq!(
+            skill_name_from_path("runtime/skills/deploy/SKILL.md"),
+            Some("deploy".to_string())
+        );
+    }
+
+    #[test]
+    fn skill_name_dir_layout_needs_a_directory() {
+        assert_eq!(
+            skill_name_from_path("spaces/mkt/skills/SKILL.md"),
+            None,
+            "SKILL.md directly under skills/ has no directory to name it"
+        );
+        assert_eq!(skill_name_from_path("SKILL.md"), None);
+    }
+
+    #[test]
+    fn dir_layout_parses_name_from_dir_not_file() {
+        let content = "---\nname: ignored-name\ndescription: \"Writes a post\"\n---\n\n# Write blog post\n\nBody.";
+        let parsed = parse_skill_markdown(content, "spaces/mkt/skills/write-blog-post/SKILL.md")
+            .expect("parses");
+        assert_eq!(parsed.name, "write-blog-post");
+        assert_eq!(parsed.description, "Writes a post");
+        assert_eq!(parsed.space_slug.as_deref(), Some("mkt"));
+        assert_eq!(parsed.project_name, None);
+        assert_eq!(parsed.path, "spaces/mkt/skills/write-blog-post/SKILL.md");
+        assert!(
+            parsed.needs_rewrite,
+            "no id: in frontmatter → rewrite at same path"
+        );
+    }
+
+    #[test]
+    fn dir_layout_scopes_project_and_global() {
+        let parsed = parse_skill_markdown(
+            "# Deploy\n\nSteps.",
+            "runtime/projects/alpha/skills/deploy/SKILL.md",
+        )
+        .expect("parses");
+        assert_eq!(parsed.name, "deploy");
+        assert_eq!(parsed.project_name.as_deref(), Some("alpha"));
+        assert_eq!(parsed.space_slug, None);
+
+        let parsed = parse_skill_markdown("# Deploy\n\nSteps.", "runtime/skills/deploy/SKILL.md")
+            .expect("parses");
+        assert_eq!(parsed.name, "deploy");
+        assert_eq!(parsed.project_name, None);
+        assert_eq!(parsed.space_slug, None);
     }
 
     #[test]
