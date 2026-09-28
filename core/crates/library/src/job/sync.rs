@@ -19,6 +19,12 @@ pub(crate) struct CommitTick {
     pub head: String,
 }
 
+pub type HeadAdvancedHook = Arc<
+    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync,
+>;
+
+pub(crate) type HeadAdvancedHooks = Arc<RwLock<Vec<HeadAdvancedHook>>>;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct LibrarySyncConfig {}
 
@@ -35,6 +41,7 @@ pub(crate) struct LibrarySyncJobInitializer {
     search: SearchStore,
     importers: ImporterRegistry,
     embed_spawner: JobSpawner<LibraryEmbedConfig>,
+    head_advanced_hooks: HeadAdvancedHooks,
 }
 
 impl LibrarySyncJobInitializer {
@@ -44,6 +51,7 @@ impl LibrarySyncJobInitializer {
         search: SearchStore,
         importers: ImporterRegistry,
         embed_spawner: JobSpawner<LibraryEmbedConfig>,
+        head_advanced_hooks: HeadAdvancedHooks,
     ) -> Self {
         Self {
             rx: Arc::new(Mutex::new(rx)),
@@ -51,6 +59,7 @@ impl LibrarySyncJobInitializer {
             search,
             importers,
             embed_spawner,
+            head_advanced_hooks,
         }
     }
 }
@@ -69,6 +78,7 @@ impl ResidentJobInitializer for LibrarySyncJobInitializer {
             search: self.search.clone(),
             importers: Arc::clone(&self.importers),
             embed_spawner: self.embed_spawner.clone(),
+            head_advanced_hooks: Arc::clone(&self.head_advanced_hooks),
         }))
     }
 }
@@ -79,6 +89,7 @@ struct LibrarySyncRunner {
     search: SearchStore,
     importers: ImporterRegistry,
     embed_spawner: JobSpawner<LibraryEmbedConfig>,
+    head_advanced_hooks: HeadAdvancedHooks,
 }
 
 #[async_trait::async_trait]
@@ -118,8 +129,11 @@ impl ResidentJobRunner for LibrarySyncRunner {
                                 .await
                             {
                                 Ok(()) => {
-                                    state.last_processed_head = Some(tick.head);
+                                    state.last_processed_head = Some(tick.head.clone());
                                     current_job.update_execution_state(state.clone()).await?;
+                                    for hook in self.head_advanced_hooks.read().await.iter() {
+                                        hook(tick.head.clone()).await;
+                                    }
                                 }
                                 Err(e) => {
                                     tracing::warn!(

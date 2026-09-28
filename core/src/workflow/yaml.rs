@@ -16,7 +16,7 @@ fn default_output_schema_boxed() -> Box<OutputSchema> {
 use crate::skill::file::slugify;
 use crate::skill::name_from_filename;
 
-use super::definition::{WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger};
+use super::definition::{SpaceWritesDecl, WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger};
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, Default)]
 struct WorkflowYaml {
@@ -30,6 +30,8 @@ struct WorkflowYaml {
     model_chain: Option<ModelChain>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     sandboxes: Vec<WorkflowSandboxYaml>,
+    #[serde(default, skip_serializing_if = "SpaceWritesDecl::is_default")]
+    space_writes: SpaceWritesDecl,
     steps: Vec<WorkflowStepYaml>,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     created: String,
@@ -432,6 +434,7 @@ pub fn render_workflow_yaml(
     steps: &[WorkflowStepDef],
     sandboxes: &[WorkflowSandboxDecl],
     model_chain: Option<&ModelChain>,
+    space_writes: &SpaceWritesDecl,
     created_at: &str,
     updated_at: &str,
 ) -> String {
@@ -445,6 +448,7 @@ pub fn render_workflow_yaml(
             .iter()
             .map(WorkflowSandboxYaml::from_runtime)
             .collect(),
+        space_writes: space_writes.clone(),
         steps: steps.iter().map(WorkflowStepYaml::from_runtime).collect(),
         created: created_at.to_string(),
         updated: updated_at.to_string(),
@@ -464,6 +468,7 @@ pub struct ParsedWorkflow {
     pub steps: Vec<WorkflowStepDef>,
     pub sandboxes: Vec<WorkflowSandboxDecl>,
     pub model_chain: Option<ModelChain>,
+    pub space_writes: SpaceWritesDecl,
     pub created_at: String,
     pub updated_at: String,
     pub original_path: String,
@@ -528,6 +533,7 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
 
     let description = yaml.description;
     let model_chain = yaml.model_chain;
+    let space_writes = yaml.space_writes;
 
     let rendered = render_workflow_yaml(
         workflow_id,
@@ -537,6 +543,7 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
         &steps,
         &sandboxes,
         model_chain.as_ref(),
+        &space_writes,
         &yaml.created,
         &yaml.updated,
     );
@@ -553,6 +560,7 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
         steps,
         sandboxes,
         model_chain,
+        space_writes,
         created_at: yaml.created,
         updated_at: yaml.updated,
         original_path: path.to_string(),
@@ -586,6 +594,7 @@ pub fn project_name_from_workflow_path(relative_path: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::definition::{SpaceWritesFailure, SpaceWritesMessage, SpaceWritesMode};
     use super::*;
 
     fn sample_steps() -> Vec<WorkflowStepDef> {
@@ -624,6 +633,7 @@ mod tests {
             &sample_steps(),
             sandboxes,
             None,
+            &SpaceWritesDecl::default(),
             "2026-04-29T00:00:00Z",
             "2026-04-29T00:00:00Z",
         )
@@ -692,6 +702,99 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn workflow_yaml_roundtrip_preserves_space_writes_block() {
+        for decl in [
+            SpaceWritesDecl {
+                mode: SpaceWritesMode::Merge,
+                on_failure: SpaceWritesFailure::Keep,
+                message: Some(SpaceWritesMessage {
+                    title: "curate: ${{ trigger.date }}".to_string(),
+                    body: None,
+                }),
+            },
+            SpaceWritesDecl {
+                mode: SpaceWritesMode::OpenPr,
+                on_failure: SpaceWritesFailure::Discard,
+                message: Some(SpaceWritesMessage {
+                    title: "${{ steps.proofread.outputs.pr_title }}".to_string(),
+                    body: Some("${{ steps.proofread.outputs.pr_body }}".to_string()),
+                }),
+            },
+            SpaceWritesDecl {
+                mode: SpaceWritesMode::ReadOnly,
+                on_failure: SpaceWritesFailure::Keep,
+                message: None,
+            },
+        ] {
+            let id = WorkflowDefinitionId::new();
+            let content = render_workflow_yaml(
+                id,
+                "curate-dev-spaces",
+                None,
+                &WorkflowTrigger::Manual { condition: None },
+                &sample_steps(),
+                &[],
+                None,
+                &decl,
+                "2026-09-26T00:00:00Z",
+                "2026-09-26T00:00:00Z",
+            );
+            assert!(content.contains("space_writes:"), "got: {content}");
+
+            let path = canonical_workflow_path("curate-dev-spaces", None);
+            let parsed = parse_workflow_yaml(&content, &path).expect("parses");
+            assert_eq!(parsed.space_writes, decl, "mode {:?}", decl.mode);
+        }
+    }
+
+    #[test]
+    fn workflow_yaml_message_without_body_omits_key() {
+        let id = WorkflowDefinitionId::new();
+        let decl = SpaceWritesDecl {
+            mode: SpaceWritesMode::Merge,
+            on_failure: SpaceWritesFailure::Keep,
+            message: Some(SpaceWritesMessage {
+                title: "curate: ${{ trigger.date }}".to_string(),
+                body: None,
+            }),
+        };
+        let content = render_workflow_yaml(
+            id,
+            "curate-dev-spaces",
+            None,
+            &WorkflowTrigger::Manual { condition: None },
+            &sample_steps(),
+            &[],
+            None,
+            &decl,
+            "2026-09-26T00:00:00Z",
+            "2026-09-26T00:00:00Z",
+        );
+        assert!(!content.contains("body:"), "got: {content}");
+    }
+
+    #[test]
+    fn workflow_yaml_omits_default_space_writes_block() {
+        let id = WorkflowDefinitionId::new();
+        let content = render_workflow_yaml(
+            id,
+            "no-space-writes",
+            None,
+            &WorkflowTrigger::Manual { condition: None },
+            &sample_steps(),
+            &[],
+            None,
+            &SpaceWritesDecl::default(),
+            "2026-09-24T00:00:00Z",
+            "2026-09-24T00:00:00Z",
+        );
+        assert!(!content.contains("space_writes:"));
+        let path = canonical_workflow_path("no-space-writes", None);
+        let parsed = parse_workflow_yaml(&content, &path).expect("parses");
+        assert!(parsed.space_writes.is_default());
     }
 
     #[test]
@@ -818,6 +921,7 @@ steps:
             &steps,
             &[],
             None,
+            &SpaceWritesDecl::default(),
             "2026-05-06T00:00:00Z",
             "2026-05-06T00:00:00Z",
         );

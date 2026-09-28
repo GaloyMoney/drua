@@ -547,7 +547,7 @@ impl Projects {
         }
 
         let project_id = sub
-            .project_id()
+            .effective_project_id()
             .ok_or(crate::auth::error::AuthorizationError::AuthenticationRequired)?;
         let project = self.repo.find_by_id(project_id).await?;
         if !project.is_space_mounted(space.id) {

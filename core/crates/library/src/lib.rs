@@ -1,5 +1,6 @@
 pub mod attribution;
 mod config;
+mod draft;
 mod error;
 mod git;
 mod importer;
@@ -17,20 +18,25 @@ use tokio::sync::mpsc;
 
 pub use attribution::{CommitAttribution, CommitSubjectKind};
 pub use config::LibraryConfig;
+pub use draft::{
+    ApplyOutcome, DraftHandle, DraftName, DraftObservation, Drafts, Mergeability, RebaseOutcome,
+    SpaceTarget, TouchedPath,
+};
 pub use error::LibraryError;
 pub use github_app::GitHubAppTokenProvider;
 pub use importer::{DocType, GitFileHash, LibraryImporter, UpsertError};
-pub use job::{LivenessRef, WriteOp};
+pub use job::{HeadAdvancedHook, LivenessRef, WriteOp};
 pub use primitives::SpaceId;
 pub use search::{SearchHit, SearchStore, SearchableFields};
 pub use space::{NewSpace, Space, SpaceError, SpaceEvent, Spaces, SPACE_DOC_TYPE};
 pub use synced::LibrarySynced;
 
 use self::git::GitEngine;
-pub use self::git::{BlobEntries, DirEntry, PathDates, PathDatesMap};
+pub use self::git::{BlobEntries, DeltaKind, DirEntry, PathDates, PathDatesMap};
 use self::job::{
-    CommitTick, ImporterRegistry, LibraryEmbedConfig, LibraryEmbedJobInitializer,
-    LibrarySyncConfig, LibrarySyncJobInitializer, LibraryWriteConfig, LibraryWriteJobInitializer,
+    CommitTick, HeadAdvancedHooks, ImporterRegistry, LibraryEmbedConfig,
+    LibraryEmbedJobInitializer, LibrarySyncConfig, LibrarySyncJobInitializer, LibraryWriteConfig,
+    LibraryWriteJobInitializer,
 };
 use self::synced::{HookEntry, LibrarySyncHook};
 
@@ -44,7 +50,9 @@ pub struct Library {
     git: Arc<GitEngine>,
     search: SearchStore,
     spaces: Spaces,
+    drafts: Drafts,
     importers: ImporterRegistry,
+    head_advanced_hooks: HeadAdvancedHooks,
     write_spawner: ::job::JobSpawner<LibraryWriteConfig>,
     embed_spawner: ::job::JobSpawner<LibraryEmbedConfig>,
     /// Fetcher task handle is wrapped in `Arc` so the `Library` itself
@@ -74,6 +82,7 @@ impl Library {
 
         let search = SearchStore::new(pool, Arc::clone(&embedder));
         let spaces = Spaces::new(&git, pool);
+        let drafts = Drafts::new(&git);
 
         let embed_spawner = jobs.add_initializer(LibraryEmbedJobInitializer::new(
             search.clone(),
@@ -102,12 +111,15 @@ impl Library {
             git.commit_notify(),
         );
 
+        let head_advanced_hooks: HeadAdvancedHooks = Arc::new(tokio::sync::RwLock::new(Vec::new()));
+
         let spawner = jobs.add_resident_initializer(LibrarySyncJobInitializer::new(
             tick_rx,
             Arc::clone(&git),
             search.clone(),
             Arc::clone(&importers),
             embed_spawner.clone(),
+            Arc::clone(&head_advanced_hooks),
         ));
         spawner.spawn(LibrarySyncConfig::default()).await?;
 
@@ -123,7 +135,9 @@ impl Library {
             git,
             search,
             spaces,
+            drafts,
             importers,
+            head_advanced_hooks,
             write_spawner,
             embed_spawner,
             _fetcher: Arc::new(fetcher),
@@ -140,6 +154,10 @@ impl Library {
     /// ordering.
     pub async fn register_importer(&self, importer: Arc<dyn LibraryImporter>) {
         self.importers.write().await.insert(0, importer);
+    }
+
+    pub async fn on_head_advanced(&self, hook: HeadAdvancedHook) {
+        self.head_advanced_hooks.write().await.push(hook);
     }
 
     fn spawn_fetcher(
@@ -180,8 +198,16 @@ impl Library {
         &self.spaces
     }
 
+    pub fn drafts(&self) -> &Drafts {
+        &self.drafts
+    }
+
     pub fn search(&self) -> &SearchStore {
         &self.search
+    }
+
+    pub fn github_app(&self) -> Option<&Arc<GitHubAppTokenProvider>> {
+        self.github_app.as_ref()
     }
 
     /// Bare-clone path. Callers should prefer `read_blob_at_head`,

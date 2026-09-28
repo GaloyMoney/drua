@@ -4,6 +4,7 @@ pub mod agent;
 mod arguments_envelope;
 pub mod audit;
 pub mod auth;
+pub mod changeset;
 pub mod code_assistant;
 mod config;
 pub mod encryption;
@@ -33,6 +34,7 @@ use std::sync::Arc;
 use agent::Agents;
 use audit::Audit;
 use auth::{AuthResource, AuthSubject, AuthVerb};
+use changeset::Changesets;
 use code_assistant::CodeAssistant;
 use git_proxy::GitProxies;
 use github_app::GitHubAppTokenProvider;
@@ -72,6 +74,7 @@ pub struct App {
     git_proxies: Arc<GitProxies>,
     tunnel: Arc<tunnel::TunnelService>,
     library: drua_library::Library,
+    changesets: Arc<Changesets>,
     spaces: Arc<AuthedSpaces>,
     search: Arc<AuthedSearch>,
     notes: Arc<Notes>,
@@ -273,6 +276,50 @@ impl App {
         toolsets.register_top_level(ProjectAgent::new(Arc::clone(&agents)));
         toolsets.register_top_level(SubmitOutputTool::new(Arc::clone(&agents)));
 
+        let changeset_github_app = library.github_app().cloned();
+        let changeset_repo_coord = drua_config.github_coord();
+        let changesets = Arc::new(Changesets::new(
+            pool,
+            &agents,
+            &library,
+            &users,
+            changeset_github_app.clone(),
+            changeset_repo_coord.clone(),
+        ));
+
+        {
+            let changesets = Arc::clone(&changesets);
+            library
+                .on_head_advanced(Arc::new(move |head: String| {
+                    let changesets = Arc::clone(&changesets);
+                    Box::pin(async move {
+                        if let Err(e) = changesets.observe_main(&head).await {
+                            tracing::warn!(error = %e, %head, "changeset.observe_main failed");
+                        }
+                    })
+                }))
+                .await;
+        }
+
+        // A closed-but-unmerged PR never moves `main`, so `observe_main`
+        // (fired from `on_head_advanced`) can't see it; this poll owns
+        // that outcome instead, and always sweeps leftover refs of
+        // finished changesets regardless of a GitHub App — that backstop
+        // doesn't need GitHub. Only the PR-reconcile half is skipped
+        // without one, matching how `submit` itself requires it.
+        let spawner =
+            jobs.add_resident_initializer(changeset::job::ChangesetPrPollJobInitializer::new(
+                Arc::clone(&changesets),
+                changeset_github_app,
+                changeset_repo_coord,
+            ));
+        spawner
+            .spawn(changeset::job::ChangesetPrPollConfig {
+                interval_secs: config.changeset.pr_poll_interval_secs,
+            })
+            .await
+            .map_err(|e| AppError::Job(e.to_string()))?;
+
         let workflows = Arc::new(Workflows::init(
             pool,
             library.clone(),
@@ -282,6 +329,7 @@ impl App {
             Arc::clone(&users),
             Arc::clone(&toolsets),
             compose_config.script_step,
+            Arc::clone(&changesets),
             &mut jobs,
         ));
 
@@ -307,6 +355,7 @@ impl App {
             Arc::new(library.spaces().clone()),
             Arc::clone(&projects),
             Arc::clone(&users),
+            Arc::clone(&changesets),
         ));
         toolsets.register_top_level(TextEditor::new(
             Arc::clone(&sandboxes),
@@ -354,6 +403,7 @@ impl App {
             Arc::clone(&workflows),
             Arc::clone(&skills),
             Arc::clone(&notes),
+            Arc::clone(&changesets),
         ));
 
         // Compose is constructed with its complete dependencies after the other
@@ -414,6 +464,7 @@ impl App {
             git_proxies,
             tunnel,
             library,
+            changesets,
             spaces,
             search,
             notes,
@@ -492,6 +543,10 @@ impl App {
 
     pub fn library(&self) -> &drua_library::Library {
         &self.library
+    }
+
+    pub fn changesets(&self) -> &Changesets {
+        &self.changesets
     }
 
     pub fn spaces(&self) -> &AuthedSpaces {

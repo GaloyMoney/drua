@@ -85,7 +85,7 @@ impl TopLevelTool for Grep {
         let path_for_space = input.path.as_deref().unwrap_or("");
         let space_output = self.space_fs.grep(subject, path_for_space, &input).await?;
 
-        if let Some(output) = space_output {
+        if let Some((output, _stamp)) = space_output {
             let out = TextOutput {
                 output: output.clone(),
             };

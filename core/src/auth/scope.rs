@@ -359,8 +359,81 @@ mod tests {
         let space_id = SpaceId::new();
         assert!(!s.permits(AuthVerb::Read, &AuthResource::Space(Some(space_id))));
         assert!(!s.permits(AuthVerb::Update, &AuthResource::Space(Some(space_id))));
-        assert!(!s.permits(AuthVerb::Update, &AuthResource::Space(None)));
         assert!(!s.permits(AuthVerb::Delete, &AuthResource::Space(None)));
+    }
+
+    #[test]
+    fn project_member_has_no_space_grants() {
+        use crate::primitives::SpaceId;
+        let project = test_project_id();
+        let s = AuthScope::ProjectMember(project);
+        let space_id = SpaceId::new();
+
+        assert!(!s.permits(AuthVerb::Update, &AuthResource::Space(Some(space_id))));
+        assert!(!s.permits(AuthVerb::Read, &AuthResource::Space(Some(space_id))));
+        assert!(!s.permits(AuthVerb::Create, &AuthResource::Space(None)));
+    }
+
+    #[test]
+    fn workflow_markers_grant_nothing() {
+        use crate::primitives::SpaceId;
+        let space_id = SpaceId::new();
+        for marker in [AuthScope::WorkflowStepAgent, AuthScope::WorkflowScript] {
+            assert!(!marker.permits(AuthVerb::Update, &AuthResource::Space(Some(space_id))));
+            assert!(!marker.permits(AuthVerb::Read, &AuthResource::Space(Some(space_id))));
+            assert!(!marker.permits(AuthVerb::Create, &AuthResource::Space(None)));
+        }
+    }
+
+    #[test]
+    fn can_draft_spaces_is_admin_or_run() {
+        use crate::auth::AuthSubject;
+        use crate::primitives::{AgentId, McpCredsId, UserId, WorkflowDefinitionId};
+
+        let project = test_project_id();
+
+        assert!(AuthSubject::User(UserId::new()).can_draft_spaces());
+        assert!(AuthSubject::ExportedAgent(
+            UserId::new(),
+            McpCredsId::new(),
+            vec![AuthScope::Admin]
+        )
+        .can_draft_spaces());
+        assert!(AuthSubject::WorkflowExecutor(
+            project,
+            WorkflowDefinitionId::new(),
+            crate::primitives::WorkflowRunId::new(),
+            vec![AuthScope::ProjectAdmin(project)],
+        )
+        .can_draft_spaces());
+        assert!(AuthSubject::Agent(
+            project,
+            AgentId::new(),
+            vec![
+                AuthScope::ProjectMember(project),
+                AuthScope::WorkflowStepAgent,
+            ],
+        )
+        .can_draft_spaces());
+
+        assert!(!AuthSubject::Agent(
+            project,
+            AgentId::new(),
+            vec![AuthScope::ProjectAdmin(project)],
+        )
+        .can_draft_spaces());
+        assert!(!AuthSubject::Agent(
+            project,
+            AgentId::new(),
+            vec![AuthScope::ProjectMember(project)],
+        )
+        .can_draft_spaces());
+        assert!(!AuthSubject::ExportedAgent(
+            UserId::new(),
+            McpCredsId::new(),
+            vec![AuthScope::ProjectAdmin(ProjectId::new())],
+        )
+        .can_draft_spaces());
     }
 
     /// Vec<AuthScope> serializes the same as the old Vec<String>.

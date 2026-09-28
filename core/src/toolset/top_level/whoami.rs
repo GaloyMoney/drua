@@ -3,6 +3,7 @@ use std::sync::LazyLock;
 use rmcp::model::{CallToolResult, Content, JsonObject};
 
 use crate::auth::AuthSubject;
+use crate::library::SPACE_WRITE_MODE_SENTENCE;
 
 use super::super::error::ToolSetsError;
 use super::super::traits::TopLevelTool;
@@ -56,6 +57,10 @@ struct WhoAmIOutput {
 static WHOAMI_OUTPUT_SCHEMA: LazyLock<serde_json::Value> =
     LazyLock::new(schema_for::<WhoAmIOutput>);
 
+fn space_write_mode_note(subject: &AuthSubject) -> Option<String> {
+    (!subject.is_admin()).then(|| SPACE_WRITE_MODE_SENTENCE.trim().to_string())
+}
+
 #[async_trait::async_trait]
 impl TopLevelTool for WhoAmI {
     fn name(&self) -> &str {
@@ -99,6 +104,7 @@ impl TopLevelTool for WhoAmI {
                 user_id: Some(user_id.to_string()),
                 creds_id: Some(creds_id.to_string()),
                 scopes: Some(scopes_list(scopes)),
+                note: space_write_mode_note(subject),
                 ..Default::default()
             },
             AuthSubject::Agent(project_id, agent_id, scopes) => WhoAmIOutput {

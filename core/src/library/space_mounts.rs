@@ -21,6 +21,7 @@ use tracing::instrument;
 use crate::library::{AuthedSpaces, LibraryError};
 use crate::primitives::{ProjectId, SpaceId};
 use crate::project::repo::{ProjectFindError, ProjectRepo};
+use crate::workflow::SpaceWritesMode;
 
 #[derive(Error, Debug)]
 pub enum SpaceMountsError {
@@ -33,6 +34,16 @@ pub enum SpaceMountsError {
 /// Cap on the rendered `<spaces>` system block — above this we render a
 /// truncation footer; agents enumerate the rest via the `spaces` tool.
 const SPACES_BLOCK_LIMIT: usize = 20;
+
+pub const SPACE_WRITE_MODE_SENTENCE: &str =
+    "Spaces are read-only in this session — edits to a space are made \
+     by a workflow (`space_writes:`) or by an admin.\n";
+
+#[derive(Debug, Clone, Copy)]
+pub enum SpacesBlockMode {
+    Interactive,
+    WorkflowRun(SpaceWritesMode),
+}
 
 #[derive(Clone)]
 pub struct SpaceMounts {
@@ -104,27 +115,42 @@ impl SpaceMounts {
     pub async fn spaces_block_for_project(
         &self,
         project_id: ProjectId,
+        mode: SpacesBlockMode,
     ) -> Result<Option<String>, SpaceMountsError> {
         let spaces = self.spaces_for_project(project_id).await?;
-        Ok(render_spaces_block(&spaces))
+        Ok(render_spaces_block(&spaces, mode))
     }
 }
 
-fn render_spaces_block(spaces: &[Space]) -> Option<String> {
+fn render_spaces_block(spaces: &[Space], mode: SpacesBlockMode) -> Option<String> {
     if spaces.is_empty() {
         return None;
     }
     let total = spaces.len();
 
-    let header = "<spaces>\n\
+    let write_line = match mode {
+        SpacesBlockMode::Interactive => SPACE_WRITE_MODE_SENTENCE.to_string(),
+        SpacesBlockMode::WorkflowRun(write_mode) => workflow_run_write_line(write_mode),
+    };
+    let tools_line = match mode {
+        SpacesBlockMode::Interactive => {
+            "Use the file tools (Read, LS, Glob, Grep) — or `spaces view` \
+             if you are the project lead — with paths prefixed \
+             `space:<slug>/` to read their contents."
+        }
+        SpacesBlockMode::WorkflowRun(_) => {
+            "Use the file tools (Read, LS, Glob, Grep, Edit, Move, \
+             Delete) with paths prefixed `space:<slug>/` to read or \
+             write their contents."
+        }
+    };
+    let header = format!(
+        "<spaces>\n\
          This project has the following knowledge spaces mounted — \
-         collaborative folders backed by a shared library. Use the \
-         file tools (Read, LS, Glob, Grep, Edit, Move, Delete) with \
-         paths prefixed `space:<slug>/` to read or write their \
-         contents. Writes commit to the upstream library automatically; \
-         no sandbox attachment is required.\n";
+         collaborative folders backed by a shared library. {tools_line} {write_line}"
+    );
 
-    let mut buf = String::from(header);
+    let mut buf = header;
     for s in spaces.iter().take(SPACES_BLOCK_LIMIT) {
         match s.description.as_deref() {
             Some(d) if !d.is_empty() => {
@@ -141,4 +167,23 @@ fn render_spaces_block(spaces: &[Space]) -> Option<String> {
     }
     buf.push_str("</spaces>\n");
     Some(buf)
+}
+
+fn workflow_run_write_line(mode: SpaceWritesMode) -> String {
+    match mode {
+        SpaceWritesMode::Merge => "This run's edits to space:<slug>/ paths are staged in a \
+             draft the workflow owns and are merged to the published library when the run \
+             succeeds. Use the file tools with space:<slug>/ paths as usual. library_search \
+             sees the published library only.\n"
+            .to_string(),
+        SpaceWritesMode::OpenPr => "This run's edits to space:<slug>/ paths are staged in a \
+             draft the workflow owns and are opened as a pull request for review when the run \
+             succeeds. Use the file tools with space:<slug>/ paths as usual. library_search \
+             sees the published library only.\n"
+            .to_string(),
+        SpaceWritesMode::ReadOnly => {
+            "Spaces are read-only in this run; space:<slug>/ paths can be read but not written.\n"
+                .to_string()
+        }
+    }
 }

@@ -37,7 +37,8 @@ write_note_to_space() {
     command: "edit",
     slug: $slug,
     edit_op: "write",
-    op_args: { path: $path, content: $content }
+    op_args: { path: $path, content: $content },
+    target: "main"
   }')"
 }
 
@@ -297,7 +298,8 @@ note_id_by_title() {
   #    the row + search row.
   run admin_call "spaces" "$(jq -nc --arg s "$space_slug" '{
     command: "edit", slug: $s, edit_op: "delete",
-    op_args: { path: "notes/space-note.md" }
+    op_args: { path: "notes/space-note.md" },
+    target: "main"
   }')"
   echo "$output"
   [[ "$output" != *"PathNotFound"* ]]

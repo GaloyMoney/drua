@@ -198,6 +198,7 @@ async fn setup(test_name: &str) -> (App, AuthSubject, AuthSubject) {
             "a.md",
             "hello\n".into(),
             CommitAttribution::library_default(),
+            &drua_library::SpaceTarget::Main,
         )
         .await
         .expect("write a.md");

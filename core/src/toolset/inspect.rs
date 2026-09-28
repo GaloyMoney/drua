@@ -38,6 +38,23 @@ pub(crate) enum EditOp {
     Move,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SpaceTarget {
+    #[default]
+    Main,
+    Draft,
+}
+
+impl SpaceTarget {
+    fn scheme(self) -> &'static str {
+        match self {
+            SpaceTarget::Main => "space",
+            SpaceTarget::Draft => "draft",
+        }
+    }
+}
+
 /// Translates `{offset, limit}` (zero-based) into the 1-based,
 /// inclusive `(start, end)` range the file view layer expects.
 /// `end == -1` means EOF.
@@ -78,17 +95,18 @@ pub(crate) async fn dispatch_view(
     slug: &str,
     op: ReadOp,
     op_args: JsonObject,
+    target: SpaceTarget,
 ) -> Result<CallToolResult, ToolSetsError> {
     let path = op_args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-    let space_path = format!("space:{slug}/{path}");
+    let space_path = format!("{}:{slug}/{path}", target.scheme());
     let invalid = || -> ToolSetsError {
         ToolSetsError::Library(SpaceError::Io(format!("invalid space path: {space_path}")).into())
     };
 
-    match op {
+    let (text, stamp) = match op {
         ReadOp::Read => {
             let view_range = parse_view_range(&op_args);
-            let view = space_fs
+            let (view, stamp) = space_fs
                 .view_file(subject, &space_path, view_range)
                 .await?
                 .ok_or_else(invalid)?;
@@ -96,24 +114,23 @@ pub(crate) async fn dispatch_view(
                 FileView::File(text) => text,
                 FileView::Dir(entries) => entries.join("\n"),
             };
-            Ok(CallToolResult::success(vec![Content::text(text)]))
+            (text, stamp)
         }
         ReadOp::Ls => {
             if op_args_details(&op_args) {
-                let entries = space_fs
+                let (entries, stamp) = space_fs
                     .view_dir_detailed(subject, &space_path)
                     .await?
                     .ok_or_else(invalid)?;
                 let (_, text, _) = super::top_level::render_detailed(entries);
-                return Ok(CallToolResult::success(vec![Content::text(text)]));
+                (text, stamp)
+            } else {
+                let (entries, stamp) = space_fs
+                    .view_dir(subject, &space_path)
+                    .await?
+                    .ok_or_else(invalid)?;
+                (entries.join("\n"), stamp)
             }
-            let entries = space_fs
-                .view_dir(subject, &space_path)
-                .await?
-                .ok_or_else(invalid)?;
-            Ok(CallToolResult::success(vec![Content::text(
-                entries.join("\n"),
-            )]))
         }
         ReadOp::Glob => {
             let pattern = op_args
@@ -121,32 +138,34 @@ pub(crate) async fn dispatch_view(
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| ToolSetsError::MissingArgument("pattern".to_string()))?;
             if op_args_details(&op_args) {
-                let entries = space_fs
+                let (entries, stamp) = space_fs
                     .glob_detailed(subject, &space_path, pattern)
                     .await?
                     .ok_or_else(invalid)?;
                 let (_, text, _) = super::top_level::render_detailed(entries);
-                return Ok(CallToolResult::success(vec![Content::text(text)]));
+                (text, stamp)
+            } else {
+                let (matches, stamp) = space_fs
+                    .glob(subject, &space_path, pattern)
+                    .await?
+                    .ok_or_else(invalid)?;
+                (matches.join("\n"), stamp)
             }
-            let matches = space_fs
-                .glob(subject, &space_path, pattern)
-                .await?
-                .ok_or_else(invalid)?;
-            Ok(CallToolResult::success(vec![Content::text(
-                matches.join("\n"),
-            )]))
         }
         ReadOp::Grep => {
             let args: sandbox::GrepInput =
                 serde_json::from_value(serde_json::Value::Object(op_args))
                     .map_err(|e| ToolSetsError::InvalidArgument(e.to_string()))?;
-            let out = space_fs
+            space_fs
                 .grep(subject, &space_path, &args)
                 .await?
-                .ok_or_else(invalid)?;
-            Ok(CallToolResult::success(vec![Content::text(out)]))
+                .ok_or_else(invalid)?
         }
-    }
+    };
+
+    Ok(CallToolResult::success(vec![Content::text(format!(
+        "{stamp}\n{text}"
+    ))]))
 }
 
 /// Runs an `EditOp` against the relevant `space:<slug>/...` path(s).
@@ -162,7 +181,9 @@ pub(crate) async fn dispatch_edit(
     slug: &str,
     op: EditOp,
     op_args: JsonObject,
+    target: SpaceTarget,
 ) -> Result<CallToolResult, ToolSetsError> {
+    let scheme = target.scheme();
     let str_arg = |key: &str| -> Result<String, ToolSetsError> {
         op_args
             .get(key)
@@ -177,29 +198,25 @@ pub(crate) async fn dispatch_edit(
             .ok_or_else(|| ToolSetsError::MissingArgument(key.to_string()))
     };
 
-    match op {
+    let (text, stamp) = match op {
         EditOp::Write => {
             let path = str_arg("path")?;
             let content = str_arg("content")?;
-            let space_path = format!("space:{slug}/{path}");
+            let space_path = format!("{scheme}:{slug}/{path}");
             let result = space_fs.write_file(subject, &space_path, content).await?;
-            require_space_op(result, "write")?;
-            Ok(CallToolResult::success(vec![Content::text(format!(
-                "Wrote {space_path}"
-            ))]))
+            let stamp = require_space_op(result, "write")?;
+            (format!("Wrote {space_path}"), stamp)
         }
         EditOp::StrReplace => {
             let path = str_arg("path")?;
             let old_str = str_arg("old_str")?;
             let new_str = str_arg("new_str")?;
-            let space_path = format!("space:{slug}/{path}");
+            let space_path = format!("{scheme}:{slug}/{path}");
             let result = space_fs
                 .str_replace(subject, &space_path, old_str, new_str)
                 .await?;
-            require_space_op(result, "str_replace")?;
-            Ok(CallToolResult::success(vec![Content::text(format!(
-                "Replaced in {space_path}"
-            ))]))
+            let stamp = require_space_op(result, "str_replace")?;
+            (format!("Replaced in {space_path}"), stamp)
         }
         EditOp::Insert => {
             let path = str_arg("path")?;
@@ -210,46 +227,40 @@ pub(crate) async fn dispatch_edit(
                 ));
             }
             let text = str_arg("text")?;
-            let space_path = format!("space:{slug}/{path}");
+            let space_path = format!("{scheme}:{slug}/{path}");
             let result = space_fs
                 .insert_line(subject, &space_path, line as usize, text)
                 .await?;
-            require_space_op(result, "insert")?;
-            Ok(CallToolResult::success(vec![Content::text(format!(
-                "Inserted into {space_path}"
-            ))]))
+            let stamp = require_space_op(result, "insert")?;
+            (format!("Inserted into {space_path}"), stamp)
         }
         EditOp::Delete => {
             let path = str_arg("path")?;
-            let space_path = format!("space:{slug}/{path}");
+            let space_path = format!("{scheme}:{slug}/{path}");
             let result = space_fs.delete_file(subject, &space_path).await?;
-            require_space_op(result, "delete")?;
-            Ok(CallToolResult::success(vec![Content::text(format!(
-                "Deleted {space_path}"
-            ))]))
+            let stamp = require_space_op(result, "delete")?;
+            (format!("Deleted {space_path}"), stamp)
         }
         EditOp::Move => {
             let from = str_arg("from")?;
             let to = str_arg("to")?;
-            let from_path = format!("space:{slug}/{from}");
-            let to_path = format!("space:{slug}/{to}");
+            let from_path = format!("{scheme}:{slug}/{from}");
+            let to_path = format!("{scheme}:{slug}/{to}");
             let result = space_fs.move_file(subject, &from_path, &to_path).await?;
-            require_space_op(result, "move")?;
-            Ok(CallToolResult::success(vec![Content::text(format!(
-                "Moved {from_path} -> {to_path}"
-            ))]))
+            let stamp = require_space_op(result, "move")?;
+            (format!("Moved {from_path} -> {to_path}"), stamp)
         }
-    }
+    };
+
+    Ok(CallToolResult::success(vec![Content::text(format!(
+        "{stamp}\n{text}"
+    ))]))
 }
 
 /// Errors `Ok(None)` (empty slug → `parse_space_path` returns None)
 /// as `InvalidArgument` so callers can't silently no-op. Successful
 /// ops just propagate.
-pub(crate) fn require_space_op(result: Option<()>, what: &str) -> Result<(), ToolSetsError> {
-    if result.is_none() {
-        return Err(ToolSetsError::InvalidArgument(format!(
-            "slug must be non-empty for {what}"
-        )));
-    }
-    Ok(())
+pub(crate) fn require_space_op<T>(result: Option<T>, what: &str) -> Result<T, ToolSetsError> {
+    result
+        .ok_or_else(|| ToolSetsError::InvalidArgument(format!("slug must be non-empty for {what}")))
 }

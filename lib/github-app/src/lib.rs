@@ -1,10 +1,12 @@
 pub mod config;
 pub mod error;
+pub mod pulls;
 
 use tracing::instrument;
 
 pub use config::*;
 pub use error::*;
+pub use pulls::PullRequest;
 
 pub struct InstallationToken {
     pub token: String,

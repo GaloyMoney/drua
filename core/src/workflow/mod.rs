@@ -32,7 +32,8 @@ pub const WORKFLOW_DOC_TYPE: drua_library::DocType = drua_library::DocType::new(
 
 pub use definition::{
     default_output_schema, parse_cron_schedule, parse_timezone, OutputSchema, OutputSchemaError,
-    WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger,
+    SpaceWritesDecl, SpaceWritesFailure, SpaceWritesMessage, SpaceWritesMode, WorkflowSandboxDecl,
+    WorkflowStepDef, WorkflowTrigger,
 };
 pub use entity::*;
 pub use error::*;
@@ -204,6 +205,39 @@ fn reject_forward_step_refs(
     Ok(())
 }
 
+pub(crate) async fn abandon_run_draft(
+    changesets: &crate::changeset::Changesets,
+    sub: &AuthSubject,
+    run: &mut WorkflowRun,
+    id: ChangesetId,
+) {
+    if run.changeset_on_failure.unwrap_or_default() == SpaceWritesFailure::Keep {
+        tracing::info!(changeset_id = %id, run_id = %run.id, "abandon_run_draft: on_failure=keep; leaving the draft open");
+        return;
+    }
+    match changesets
+        .discard(sub, id, Some("workflow run did not succeed".to_string()))
+        .await
+    {
+        Ok(_) => {
+            let _ = run.changeset_closed(
+                id,
+                Some(run::entity::SpaceWritesOutcome::Discarded {
+                    reason: "workflow run did not succeed".to_string(),
+                }),
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                changeset_id = %id,
+                run_id = %run.id,
+                "abandon_run_draft: failed to discard; left open for manual follow-up"
+            );
+        }
+    }
+}
+
 fn validate_ref_against_prior_steps(
     step_name: &str,
     r: &TemplateRef,
@@ -232,6 +266,7 @@ pub struct Workflows {
     /// from `ToolSets` per validation) so `validate_steps` doesn't
     /// depend on the compose tool being registered.
     script_step_limits: crate::toolset::ScriptStepLimits,
+    changesets: Arc<crate::changeset::Changesets>,
     execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
     cron_spawner: ::job::JobSpawner<TriggerCronConfig>,
 }
@@ -251,6 +286,7 @@ impl Workflows {
         users: Arc<Users>,
         toolsets: Arc<ToolSets>,
         script_step_limits: crate::toolset::ScriptStepLimits,
+        changesets: Arc<crate::changeset::Changesets>,
         jobs: &mut ::job::Jobs,
     ) -> Self {
         let execute_run_spawner = jobs.add_initializer(ExecuteRunJobInitializer::new(
@@ -260,6 +296,7 @@ impl Workflows {
             Arc::clone(&skills),
             Arc::clone(&sandboxes),
             Arc::clone(&toolsets),
+            Arc::clone(&changesets),
         ));
         let cron_spawner = jobs.add_initializer(TriggerCronJobInitializer::new(
             WorkflowDefinitionRepo::new_without_library(pool),
@@ -276,6 +313,7 @@ impl Workflows {
             agents,
             sandboxes,
             script_step_limits,
+            changesets,
             execute_run_spawner,
             cron_spawner,
         }
@@ -309,6 +347,7 @@ impl Workflows {
             steps,
             sandboxes,
             model_chain,
+            space_writes,
             original_path,
             rendered,
             ..
@@ -352,6 +391,7 @@ impl Workflows {
         }
 
         Self::validate_trigger(&trigger)?;
+        Self::validate_space_writes(&space_writes, &steps)?;
 
         let file_hash = drua_library::GitFileHash::new(rendered);
 
@@ -369,6 +409,7 @@ impl Workflows {
                     Some(steps),
                     Some(sandboxes),
                     Some(model_chain.clone()),
+                    Some(space_writes.clone()),
                     file_hash,
                 )
                 .did_execute()
@@ -403,7 +444,8 @@ impl Workflows {
             .trigger(trigger)
             .steps(steps)
             .sandboxes(sandboxes)
-            .model_chain(model_chain);
+            .model_chain(model_chain)
+            .space_writes(space_writes);
         if let Some(project) = project_name {
             builder = builder.project_name(project);
         }
@@ -649,6 +691,44 @@ impl Workflows {
         Ok(())
     }
 
+    fn validate_space_writes(
+        decl: &SpaceWritesDecl,
+        steps: &[WorkflowStepDef],
+    ) -> Result<(), WorkflowError> {
+        match (decl.mode, &decl.message) {
+            (SpaceWritesMode::ReadOnly, Some(_)) => {
+                return Err(WorkflowError::InvalidSpaceWrites(
+                    "space_writes.message is set but mode is read_only — remove the message or choose merge / open_pr".to_string(),
+                ));
+            }
+            (SpaceWritesMode::OpenPr, None) => {
+                return Err(WorkflowError::InvalidSpaceWrites(
+                    "space_writes.mode open_pr requires space_writes.message.title (the PR title)"
+                        .to_string(),
+                ));
+            }
+            (SpaceWritesMode::OpenPr, Some(m)) if m.title.trim().is_empty() => {
+                return Err(WorkflowError::InvalidSpaceWrites(
+                    "space_writes.message.title must not be empty for mode open_pr".to_string(),
+                ));
+            }
+            _ => {}
+        }
+        let Some(message) = &decl.message else {
+            return Ok(());
+        };
+        let all_steps: std::collections::HashSet<String> =
+            steps.iter().map(|s| s.name().to_string()).collect();
+        for s in std::iter::once(&message.title).chain(message.body.iter()) {
+            for r in template::extract_refs_in_string(s).map_err(|e| {
+                WorkflowError::InvalidTemplateRef(format!("space_writes.message: {e}"))
+            })? {
+                validate_ref_against_prior_steps("space_writes.message", &r, &all_steps)?;
+            }
+        }
+        Ok(())
+    }
+
     /// For every `Preexisting` decl, look the sandbox up by name in
     /// the workflow's project (project-unique) and verify `sub`
     /// can `Read` it. Returns a map from decl name to resolved
@@ -692,6 +772,7 @@ impl Workflows {
         steps: Vec<WorkflowStepDef>,
         sandboxes: Vec<WorkflowSandboxDecl>,
         model_chain: Option<llm::ModelChain>,
+        space_writes: SpaceWritesDecl,
     ) -> Result<WorkflowDefinition, WorkflowError> {
         sub.can(AuthVerb::Create, AuthResource::Workflow(project_id, None))?;
 
@@ -705,6 +786,7 @@ impl Workflows {
 
         self.validate_steps(sub, project_id, &steps, &sandboxes)
             .await?;
+        Self::validate_space_writes(&space_writes, &steps)?;
 
         let trigger = match trigger {
             WorkflowTrigger::Webhook {
@@ -725,7 +807,8 @@ impl Workflows {
             .trigger(trigger)
             .steps(steps)
             .sandboxes(sandboxes)
-            .model_chain(model_chain);
+            .model_chain(model_chain)
+            .space_writes(space_writes);
         if !project_name.is_empty() {
             builder = builder.project_name(project_name);
         }
@@ -758,6 +841,7 @@ impl Workflows {
         steps: Option<Vec<WorkflowStepDef>>,
         sandboxes: Option<Vec<WorkflowSandboxDecl>>,
         model_chain: Option<Option<llm::ModelChain>>,
+        space_writes: Option<SpaceWritesDecl>,
     ) -> Result<WorkflowDefinition, WorkflowError> {
         let mut definition = self.repo.find_by_id(id).await?;
         sub.can(
@@ -780,6 +864,10 @@ impl Workflows {
             self.validate_steps(sub, definition.project_id, next_steps, next_sandboxes)
                 .await?;
         }
+        if steps.is_some() || space_writes.is_some() {
+            let next_space_writes = space_writes.as_ref().unwrap_or(&definition.space_writes);
+            Self::validate_space_writes(next_space_writes, next_steps)?;
+        }
 
         // Capture before `update_content` mutates `definition.trigger`.
         // Only a non-cron → cron transition needs a fresh spawn. A
@@ -790,7 +878,15 @@ impl Workflows {
         // duplicates the chain.
         let was_cron = matches!(definition.trigger, WorkflowTrigger::Cron { .. });
         if definition
-            .update_content(name, description, trigger, steps, sandboxes, model_chain)
+            .update_content(
+                name,
+                description,
+                trigger,
+                steps,
+                sandboxes,
+                model_chain,
+                space_writes,
+            )
             .did_execute()
         {
             let mut op = self.repo.begin_op().await?;
@@ -1329,7 +1425,35 @@ impl Workflows {
         for agent_id in deleted_agents {
             self.agents.invalidate_agent_cache(agent_id);
         }
+
+        self.close_cancelled_run_changeset(&mut run).await;
+
         Ok(run)
+    }
+
+    async fn close_cancelled_run_changeset(&self, run: &mut WorkflowRun) {
+        let cs = match self.changesets.open_draft_for_run(run.id).await {
+            Ok(Some(cs)) => cs,
+            Ok(None) => return,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    run_id = %run.id,
+                    "cancel_run: draft lookup failed; leaving it as-is"
+                );
+                return;
+            }
+        };
+        let sub = AuthSubject::workflow_executor(run.project_id, run.definition_id, run.id);
+        abandon_run_draft(&self.changesets, &sub, run, cs.id).await;
+        if let Err(e) = self.run_repo.update(run).await {
+            tracing::warn!(
+                error = %e,
+                changeset_id = %cs.id,
+                run_id = %run.id,
+                "cancel_run: failed to persist the run after abandoning its draft"
+            );
+        }
     }
 
     #[instrument(name = "core.workflow.delete_for_project_in_op", skip_all)]

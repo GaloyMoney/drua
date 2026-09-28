@@ -12,7 +12,7 @@ use crate::project::Projects;
 use crate::space_fs::SpaceFs;
 
 use super::super::error::ToolSetsError;
-use super::super::inspect::{dispatch_edit, dispatch_view, EditOp, ReadOp};
+use super::super::inspect::{dispatch_view, ReadOp, SpaceTarget};
 use super::super::traits::TopLevelTool;
 use super::{parse_params, OutputSchema};
 
@@ -50,14 +50,6 @@ enum SpacesParams {
         #[serde(default)]
         op_args: Option<JsonObject>,
     },
-    /// Mutating file ops on a space mounted on the caller's project.
-    /// `op` selects the sub-tool; `op_args` shape depends on it.
-    Edit {
-        slug: String,
-        op: EditOp,
-        #[serde(default)]
-        op_args: Option<JsonObject>,
-    },
     /// Hybrid FTS + semantic search restricted to a single mounted
     /// space. Mirrors `notes.search` / skill `use_skill search`, but
     /// scoped to `space_file` rows tagged with this space's id.
@@ -83,7 +75,6 @@ impl SpacesParams {
             Self::Unmount { .. } => "unmount",
             Self::List { .. } => "list",
             Self::View { .. } => "view",
-            Self::Edit { .. } => "edit",
             Self::Search { .. } => "search",
         }
     }
@@ -137,12 +128,12 @@ static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
         "properties": {
             "command": {
                 "type": "string",
-                "enum": ["create", "mount", "unmount", "list", "view", "edit", "search"],
+                "enum": ["create", "mount", "unmount", "list", "view", "search"],
                 "description": "Which spaces operation to perform."
             },
             "slug": {
                 "type": "string",
-                "description": "Directory-safe identifier ([a-z0-9-]+, no leading/trailing hyphens). Becomes spaces/<slug>/ in the library repo. Required for create, mount, unmount, view, and edit."
+                "description": "Directory-safe identifier ([a-z0-9-]+, no leading/trailing hyphens). Becomes spaces/<slug>/ in the library repo. Required for create, mount, unmount, view, and search."
             },
             "description": {
                 "type": "string",
@@ -154,12 +145,12 @@ static SPACES_SCHEMA: LazyLock<serde_json::Value> = LazyLock::new(|| {
             },
             "op": {
                 "type": "string",
-                "enum": ["read", "ls", "grep", "glob", "write", "str_replace", "insert", "delete", "move"],
-                "description": "Sub-op for view (read|ls|grep|glob) or edit (write|str_replace|insert|delete|move)."
+                "enum": ["read", "ls", "grep", "glob"],
+                "description": "Sub-op for view (read|ls|grep|glob)."
             },
             "op_args": {
                 "type": "object",
-                "description": "Sub-op arguments. view: read/ls take {path, ...} (ls also takes details? — append each file's first-/last-commit dates); grep/glob take {pattern, path?, ...} (glob also takes details?). edit: write {path, content}; str_replace {path, old_str, new_str}; insert {path, line, text}; delete {path}; move {from, to}."
+                "description": "Sub-op arguments. view: read/ls take {path, ...} (ls also takes details? — append each file's first-/last-commit dates); grep/glob take {pattern, path?, ...} (glob also takes details?)."
             },
             "query": {
                 "type": "string",
@@ -251,28 +242,24 @@ impl TopLevelTool for SpacesTool {
 
     fn description(&self) -> &str {
         "Manage library spaces — bounded collaborative folders under \
-         `spaces/<slug>/` in the knowledge-base repo. Commands: \
-         `create` (requires `slug`, optional `description`; auto-mounts \
-         onto the caller's project), \
-         `mount` / `unmount` (requires `slug`; idempotent), \
-         `list` (defaults to spaces mounted by the caller's project; \
-         pass `all: true` to discover every space in the library), \
-         `view` (read-only file ops; requires `slug`, `op`, `op_args`; \
-         op=read {path, offset?, limit?}, ls {path, details?}, \
-         grep {pattern, path?, glob?, output_mode?, ...}, \
-         glob {pattern, path?, details?}), \
-         `edit` (mutating file ops; requires `slug`, `op`, `op_args`; \
-         op=write {path, content} (full overwrite), \
-         str_replace {path, old_str, new_str} (old_str must occur once), \
-         insert {path, line, text} (line is 1-based, insert AFTER; 0 prepends), \
-         delete {path}, move {from, to}), \
-         `search` (hybrid FTS + semantic search over the files in a \
-         single mounted space; requires `slug`, `query`; optional \
-         `paths` is a list of subtree prefixes (e.g. \
-         [\"triggers/\", \"runbooks/\"]) — empty = whole space; \
-         optional `limit` defaults to 10). \
-         File ops and search are gated on the slug being mounted on \
-         the caller's project. Use path=\"\" for the space root."
+         `spaces/<slug>/` in the knowledge-base repo, read-only from here. \
+         Commands: `create` (requires `slug`, optional `description`; \
+         auto-mounts onto the caller's project; leads/admins only), \
+         `mount` / `unmount` (requires `slug`; idempotent; leads/admins \
+         only), `list` (defaults to spaces mounted by the caller's \
+         project; pass `all: true` to discover every space in the \
+         library), `view` (read-only file ops; requires `slug`, `op`, \
+         `op_args`; op=read {path, offset?, limit?}, ls {path, details?}, \
+         grep {pattern, path?, glob?, output_mode?, ...}, glob {pattern, \
+         path?, details?}), `search` (hybrid FTS + semantic search over \
+         the files in a single mounted space; requires `slug`, `query`; \
+         optional `paths` is a list of subtree prefixes (e.g. \
+         [\"triggers/\", \"runbooks/\"]) — empty = whole space; optional \
+         `limit` defaults to 10). Spaces are edited by a workflow \
+         (`space_writes:` block) or by an admin (`drua_admin_spaces` with \
+         `target: draft`) — not from here. File ops and search are \
+         gated on the slug being mounted on the caller's project. Use \
+         path=\"\" for the space root."
     }
 
     fn input_schema(&self) -> &serde_json::Value {
@@ -284,13 +271,7 @@ impl TopLevelTool for SpacesTool {
     }
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
-        // Project leads only — the tool mutates the project's
-        // `mounted_spaces` set (via create / mount / unmount), and even
-        // the `list` command is conceptually about administering what
-        // the project sees. `Update on Project(P)` matches `ProjectAdmin`
-        // (the lead-agent scope) without granting access to ordinary
-        // task agents (`ProjectMember`).
-        subject.project_id().is_some_and(|p| {
+        subject.effective_project_id().is_some_and(|p| {
             subject
                 .can(AuthVerb::Update, AuthResource::Project(Some(p)))
                 .is_ok()
@@ -302,7 +283,9 @@ impl TopLevelTool for SpacesTool {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let project_id = subject.project_id().ok_or(ToolSetsError::Unauthorized)?;
+        let project_id = subject
+            .effective_project_id()
+            .ok_or(ToolSetsError::Unauthorized)?;
         let params: SpacesParams = parse_params(arguments)?;
         Audit::record_action(format!("spaces.{}", params.command_name()));
 
@@ -314,16 +297,7 @@ impl TopLevelTool for SpacesTool {
                     &slug,
                     op,
                     op_args.unwrap_or_default(),
-                )
-                .await;
-            }
-            SpacesParams::Edit { slug, op, op_args } => {
-                return dispatch_edit(
-                    &self.space_fs,
-                    subject,
-                    &slug,
-                    op,
-                    op_args.unwrap_or_default(),
+                    SpaceTarget::Main,
                 )
                 .await;
             }
@@ -575,6 +549,32 @@ mod tests {
                 .and_then(|v| v.as_str()),
             Some("string")
         );
+    }
+
+    #[test]
+    fn schema_has_no_draft_commands() {
+        let schema = &*SPACES_SCHEMA;
+        let cmd_enum = schema
+            .pointer("/properties/command/enum")
+            .expect("command.enum")
+            .as_array()
+            .expect("array");
+        for removed in [
+            "edit",
+            "start-draft",
+            "draft-status",
+            "list-drafts",
+            "merge-draft",
+            "open-pr",
+            "discard-draft",
+            "rebase-draft",
+        ] {
+            assert!(
+                !cmd_enum.iter().any(|v| v == removed),
+                "command enum must not advertise {removed}"
+            );
+        }
+        assert!(schema.pointer("/properties/target").is_none());
     }
 
     #[test]

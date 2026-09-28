@@ -480,6 +480,50 @@ impl WorkflowSandboxDecl {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SpaceWritesDecl {
+    #[serde(default)]
+    pub mode: SpaceWritesMode,
+    #[serde(default)]
+    pub on_failure: SpaceWritesFailure,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<SpaceWritesMessage>,
+}
+
+impl SpaceWritesDecl {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+
+    pub fn opens_draft(&self) -> bool {
+        self.mode != SpaceWritesMode::ReadOnly
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SpaceWritesMode {
+    #[default]
+    Merge,
+    OpenPr,
+    ReadOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SpaceWritesFailure {
+    #[default]
+    Keep,
+    Discard,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpaceWritesMessage {
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

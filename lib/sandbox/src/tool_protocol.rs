@@ -128,7 +128,9 @@ pub struct GrepInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 
-    /// Glob pattern to filter files (e.g. `*.rs`, `**/*.{ts,tsx}`).
+    /// Glob pattern to filter files (e.g. `*.rs`, `**/*.{ts,tsx}`),
+    /// matched relative to `path`; for `space:` paths results are
+    /// relative to the space root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub glob: Option<String>,
 

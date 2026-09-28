@@ -7,7 +7,7 @@ use std::process::Command;
 
 use drua_core::agent::{AgentRole, AgentsConfig, ModelDefaults, RoleConfig};
 use drua_core::library::LibraryConfig;
-use drua_core::primitives::{AgentId, AuthSubject, UserId};
+use drua_core::primitives::{AuthSubject, UserId};
 use drua_core::{App, AppConfig};
 use drua_library::CommitAttribution;
 
@@ -180,13 +180,18 @@ async fn setup(test_name: &str) -> (App, AuthSubject, AuthSubject) {
             "a.md",
             "hello\n".into(),
             CommitAttribution::library_default(),
+            &drua_library::SpaceTarget::Main,
         )
         .await
         .expect("write a.md");
 
     // Not a project admin, not a sandbox attachment — just enough to
     // pass `can_use_agent_file_tools` and mount-scoped `space:` access.
-    let agent = AuthSubject::Agent(project.id, AgentId::new(), Vec::new());
+    let agent = AuthSubject::Agent(
+        project.id,
+        project.lead_agent_id,
+        vec![drua_core::auth::AuthScope::ProjectMember(project.id)],
+    );
     (app, user, agent)
 }
 
@@ -266,6 +271,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "helper.js",
             "return {relative: (a,b) => a + b};".into(),
             CommitAttribution::library_default(),
+            &drua_library::SpaceTarget::Main,
         )
         .await
         .unwrap();
@@ -281,6 +287,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "helper.js",
             "return 7;".into(),
             CommitAttribution::library_default(),
+            &drua_library::SpaceTarget::Main,
         )
         .await
         .unwrap();
@@ -290,6 +297,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "dependency.js",
             "return await loadScript('space:private/helper.js');".into(),
             CommitAttribution::library_default(),
+            &drua_library::SpaceTarget::Main,
         )
         .await
         .unwrap();
@@ -300,6 +308,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "caller.js",
             "return {run: async () => await tools.caller_probe({})};".into(),
             CommitAttribution::library_default(),
+            &drua_library::SpaceTarget::Main,
         )
         .await
         .unwrap();
@@ -368,7 +377,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
         async {
             let resume = changes.recv().await.unwrap();
             for path in ["helper.js", "fresh.js"] {
-                spaces.write_file("docs", path, "return {version: 2};".into(), CommitAttribution::library_default()).await.unwrap();
+                spaces.write_file("docs", path, "return {version: 2};".into(), CommitAttribution::library_default(), &drua_library::SpaceTarget::Main).await.unwrap();
             }
             resume.send(()).unwrap();
         }
@@ -396,6 +405,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "dir.js/child",
             "child".into(),
             CommitAttribution::library_default(),
+            &drua_library::SpaceTarget::Main,
         )
         .await
         .unwrap();
@@ -416,6 +426,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "failure.js",
             "throw new Error('attributed failure');".into(),
             CommitAttribution::library_default(),
+            &drua_library::SpaceTarget::Main,
         )
         .await
         .unwrap();
@@ -512,7 +523,17 @@ async fn scripts_read_exact_text_while_mcp_read_stays_numbered() {
 
     let path = "space:docs/raw-fixture.md";
     let fixture = "# Raw\r\nUnicode: \u{1F41F} \u{2014} caf\u{E9}\r\n\r\nEnd\r\n";
-    let fixture_js = serde_json::to_string(fixture).expect("json-encode fixture");
+    app.library()
+        .spaces()
+        .write_file(
+            "docs",
+            "raw-fixture.md",
+            fixture.into(),
+            CommitAttribution::library_default(),
+            &drua_library::SpaceTarget::Main,
+        )
+        .await
+        .unwrap();
 
     let compose = app
         .toolsets()
@@ -523,8 +544,6 @@ async fn scripts_read_exact_text_while_mcp_read_stays_numbered() {
     let script = format!(
         r#"
 const path = {path_js};
-const text = {fixture_js};
-await tools.Edit({{command: 'create', path, file_text: text}});
 const whole = await tools.Read({{path}});
 const ranged = await tools.Read({{path, offset: 0, limit: 1}});
 const viewed = await tools.Edit({{command: 'view', path}});
@@ -597,6 +616,17 @@ async fn scripts_read_lifts_the_view_cap_but_mcp_read_still_enforces_it() {
     // survives any off-by-one at the boundary.
     const FIXTURE_LEN: usize = 1_048_576 + 200_000;
     let path = "space:docs/oversized.txt";
+    app.library()
+        .spaces()
+        .write_file(
+            "docs",
+            "oversized.txt",
+            "x".repeat(FIXTURE_LEN),
+            CommitAttribution::library_default(),
+            &drua_library::SpaceTarget::Main,
+        )
+        .await
+        .unwrap();
 
     let compose = app
         .toolsets()
@@ -609,8 +639,6 @@ async fn scripts_read_lifts_the_view_cap_but_mcp_read_still_enforces_it() {
     let script = format!(
         r#"
 const path = {path_js};
-const text = "x".repeat({FIXTURE_LEN});
-await tools.Edit({{command: 'create', path, file_text: text}});
 const whole = await tools.Read({{path}});
 return {{ length: whole.content.length }};
 "#,
@@ -730,6 +758,7 @@ async fn workflow_scripts_validate_execute_and_preserve_provenance() {
                 vec![serde_json::from_value(value).unwrap()],
                 vec![],
                 None,
+                Default::default(),
             )
             .await;
         assert!(result.is_err(), "accepted invalid step {patch}");
@@ -746,6 +775,7 @@ async fn workflow_scripts_validate_execute_and_preserve_provenance() {
             vec![serde_json::from_value(base.clone()).unwrap()],
             vec![],
             None,
+            Default::default(),
         )
         .await
         .unwrap();
@@ -762,6 +792,7 @@ async fn workflow_scripts_validate_execute_and_preserve_provenance() {
             None,
             Some(vec![invalid_update]),
             None,
+            None,
             None
         )
         .await
@@ -772,6 +803,7 @@ async fn workflow_scripts_validate_execute_and_preserve_provenance() {
         Arc::new(app.library().spaces().clone()),
         Arc::new(app.projects().clone()),
         users,
+        Arc::new(app.changesets().clone()),
     ));
     let audit = Arc::new(Audit::new(&pool));
     let toolsets = Arc::new(
@@ -806,15 +838,20 @@ async fn workflow_scripts_validate_execute_and_preserve_provenance() {
         skills.clone(),
         sandboxes,
         toolsets,
+        Some(Arc::new(app.changesets().clone())),
     );
 
     let source = r#"
 return {
   run: async (args, run) => {
-    const path = `space:docs/runs/${run.id}/inventory.json`;
+    const path = `draft:docs/runs/${run.id}/inventory.json`;
     await tools.Edit({command: 'create', path, file_text: JSON.stringify({args, run})});
     await tools.Read({path});
     return {success: true, output: path, args, run};
+  },
+  direct_main_write: async () => {
+    await tools.Edit({command: 'create', path: 'space:docs/direct.json', file_text: '{}'});
+    return {success: true, output: 'unreachable'};
   },
   failed: () => ({success: false, output: 'declined', reason: 'test'}),
   missing: () => ({success: true}),
@@ -832,6 +869,7 @@ return {
             "tasks.js",
             source.into(),
             CommitAttribution::library_default(),
+            &drua_library::SpaceTarget::Main,
         )
         .await
         .unwrap();
@@ -851,6 +889,7 @@ return {
             "private.js",
             "return {};".into(),
             CommitAttribution::library_default(),
+            &drua_library::SpaceTarget::Main,
         )
         .await
         .unwrap();
@@ -920,6 +959,36 @@ return {
         }
         assert!(prompts.try_recv().is_err(), "script requested a model turn");
     }
+
+    let run_id = seed(
+        &definitions,
+        &runs,
+        project,
+        vec![step("direct_main_write", json!({}))],
+    )
+    .await;
+    executor
+        .run(run_id, Arc::new(AtomicBool::new(false)))
+        .with_event_context(serde_json::from_value(json!({})).unwrap())
+        .await
+        .unwrap();
+    let run = runs.find_by_id(run_id).await.unwrap();
+    assert_eq!(
+        run.state,
+        WorkflowRunState::Succeeded,
+        "{:?}",
+        run.step_results
+    );
+    assert!(run.changeset.is_none(), "the draft closed at run end");
+    let landed = app
+        .library()
+        .spaces()
+        .read_file("docs", "direct.json", &drua_library::SpaceTarget::Main)
+        .await
+        .unwrap()
+        .expect("direct.json landed on main via the default merge exit");
+    assert_eq!(landed, b"{}");
+
     let run_id = seed(
         &definitions,
         &runs,
@@ -1009,9 +1078,24 @@ return {
             .unwrap();
         let text = format!("{:?}", request.prompt);
         assert!(text.contains("inventory.json"), "{text}");
+        let draft = app
+            .changesets()
+            .open_draft_for_run(run_id)
+            .await
+            .unwrap()
+            .expect("the pre-flight's draft is still open mid-run");
+        let draft_target = drua_library::SpaceTarget::Draft(drua_library::DraftHandle::new(
+            draft.draft_name(),
+            draft.head_oid.clone(),
+        ));
         let file = app
             .library()
-            .read_blob_at_head(&format!("spaces/docs/runs/{run_id}/inventory.json"))
+            .spaces()
+            .read_file(
+                "docs",
+                &format!("runs/{run_id}/inventory.json"),
+                &draft_target,
+            )
             .await
             .unwrap()
             .unwrap();
@@ -1100,10 +1184,19 @@ return {
     assert!(serde_json::to_string(&log)
         .unwrap()
         .contains(&run_id.to_string()));
+    assert!(
+        app.changesets()
+            .open_draft_for_run(run_id)
+            .await
+            .unwrap()
+            .is_none(),
+        "the default merge exit should have closed the run's draft"
+    );
     let git_log = Command::new("git")
         .args([
             "log",
             "--format=%B",
+            "main",
             "--",
             &format!("spaces/docs/runs/{run_id}/inventory.json"),
         ])
@@ -1120,5 +1213,103 @@ return {
     }
     assert!(!trailers.contains("Drua-Acting-Agent"));
     assert!(!trailers.contains("Co-Authored-By"));
+    app.shutdown().await;
+}
+
+#[tokio::test]
+#[ignore = "requires isolated postgres + local library clone"]
+async fn step_agent_can_discard_its_own_lazily_created_draft() {
+    use drua_core::workflow::repo::WorkflowDefinitionRepo;
+    use drua_core::workflow::run::NewWorkflowRun;
+    use drua_core::workflow::{WorkflowRunRepo, WorkflowStepDef, WorkflowTrigger};
+
+    let (app, _user, agent) = setup("step-agent-owns-draft").await;
+    let project_id = agent.project_id().unwrap();
+
+    let definitions = WorkflowDefinitionRepo::new_without_library(&pool().await);
+    let runs = WorkflowRunRepo::new(&pool().await);
+    let step: WorkflowStepDef = serde_json::from_value(
+        serde_json::json!({"type":"script_step","name":"inventory","script":"space:docs/tasks.js"}),
+    )
+    .unwrap();
+    let new_definition = drua_core::workflow::NewWorkflowDefinition::builder()
+        .project_id(project_id)
+        .name(format!("step-owns-draft-{}", uuid::Uuid::new_v4()))
+        .trigger(WorkflowTrigger::Manual { condition: None })
+        .steps(vec![step.clone()])
+        .build()
+        .unwrap();
+    let mut op = definitions.begin_op().await.unwrap();
+    let definition = definitions
+        .create_in_op(&mut op, new_definition)
+        .await
+        .unwrap();
+    op.commit().await.unwrap();
+    let run = runs
+        .create(
+            NewWorkflowRun::builder()
+                .definition_id(definition.id)
+                .project_id(project_id)
+                .steps_snapshot(vec![step])
+                .trigger_context(serde_json::json!({}))
+                .build()
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let mut op = app.agents().begin_op().await.unwrap();
+    let step_agent = app
+        .agents()
+        .create_for_workflow_run_in_op(
+            &mut op,
+            project_id,
+            definition.id,
+            run.id,
+            "inventory",
+            None,
+            None,
+            drua_core::workflow::default_output_schema(),
+            drua_core::workflow::SpaceWritesMode::default(),
+        )
+        .await
+        .unwrap();
+    op.commit().await.unwrap();
+    assert_eq!(step_agent.workflow_run_id, Some(run.id));
+
+    let step_agent_subject = AuthSubject::Agent(
+        project_id,
+        step_agent.id,
+        vec![
+            drua_core::auth::AuthScope::ProjectMember(project_id),
+            drua_core::auth::AuthScope::WorkflowStepAgent,
+        ],
+    );
+
+    let draft = app
+        .changesets()
+        .draft_for(
+            &step_agent_subject,
+            Some("inventory draft".into()),
+            None,
+            None,
+        )
+        .await
+        .expect("step agent can lazily create its own draft");
+    assert_eq!(
+        app.changesets()
+            .open_draft_for_run(run.id)
+            .await
+            .unwrap()
+            .expect("keyed by the run, not the agent")
+            .id,
+        draft.id
+    );
+
+    app.changesets()
+        .discard(&step_agent_subject, draft.id, Some("test".into()))
+        .await
+        .expect("the step agent that opened the draft must be able to close it itself");
+
     app.shutdown().await;
 }

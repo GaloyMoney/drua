@@ -94,7 +94,13 @@ async fn write_then_str_replace_happy_path() {
         .expect("create space");
     library
         .spaces()
-        .write_file(slug, "doc.md", "alpha bravo charlie\n".into(), attr())
+        .write_file(
+            slug,
+            "doc.md",
+            "alpha bravo charlie\n".into(),
+            attr(),
+            &drua_library::SpaceTarget::Main,
+        )
         .await
         .expect("write");
 
@@ -105,7 +111,14 @@ async fn write_then_str_replace_happy_path() {
 
     library
         .spaces()
-        .str_replace(slug, "doc.md", "bravo".into(), "BRAVO".into(), attr())
+        .str_replace(
+            slug,
+            "doc.md",
+            "bravo".into(),
+            "BRAVO".into(),
+            attr(),
+            &drua_library::SpaceTarget::Main,
+        )
         .await
         .expect("str_replace");
 
@@ -127,13 +140,26 @@ async fn str_replace_errors_when_old_str_absent_or_ambiguous() {
         .expect("create space");
     library
         .spaces()
-        .write_file(slug, "doc.md", "alpha bravo bravo\n".into(), attr())
+        .write_file(
+            slug,
+            "doc.md",
+            "alpha bravo bravo\n".into(),
+            attr(),
+            &drua_library::SpaceTarget::Main,
+        )
         .await
         .expect("write");
 
     let absent = library
         .spaces()
-        .str_replace(slug, "doc.md", "zulu".into(), "ZULU".into(), attr())
+        .str_replace(
+            slug,
+            "doc.md",
+            "zulu".into(),
+            "ZULU".into(),
+            attr(),
+            &drua_library::SpaceTarget::Main,
+        )
         .await;
     assert!(
         matches!(absent, Err(SpaceError::Validation(_))),
@@ -142,7 +168,14 @@ async fn str_replace_errors_when_old_str_absent_or_ambiguous() {
 
     let ambiguous = library
         .spaces()
-        .str_replace(slug, "doc.md", "bravo".into(), "BRAVO".into(), attr())
+        .str_replace(
+            slug,
+            "doc.md",
+            "bravo".into(),
+            "BRAVO".into(),
+            attr(),
+            &drua_library::SpaceTarget::Main,
+        )
         .await;
     assert!(
         matches!(ambiguous, Err(SpaceError::Validation(_))),
@@ -162,13 +195,25 @@ async fn move_then_delete() {
         .expect("create space");
     library
         .spaces()
-        .write_file(slug, "old.md", "content\n".into(), attr())
+        .write_file(
+            slug,
+            "old.md",
+            "content\n".into(),
+            attr(),
+            &drua_library::SpaceTarget::Main,
+        )
         .await
         .expect("write");
 
     library
         .spaces()
-        .move_file(slug, "old.md", "new.md", attr())
+        .move_file(
+            slug,
+            "old.md",
+            "new.md",
+            attr(),
+            &drua_library::SpaceTarget::Main,
+        )
         .await
         .expect("move");
     assert!(!path_exists(
@@ -182,13 +227,25 @@ async fn move_then_delete() {
 
     let dup = library
         .spaces()
-        .move_file(slug, "new.md", "new.md", attr())
+        .move_file(
+            slug,
+            "new.md",
+            "new.md",
+            attr(),
+            &drua_library::SpaceTarget::Main,
+        )
         .await;
     assert!(matches!(dup, Err(SpaceError::Validation(_))), "{dup:?}");
 
     let missing = library
         .spaces()
-        .move_file(slug, "ghost.md", "elsewhere.md", attr())
+        .move_file(
+            slug,
+            "ghost.md",
+            "elsewhere.md",
+            attr(),
+            &drua_library::SpaceTarget::Main,
+        )
         .await;
     assert!(
         matches!(missing, Err(SpaceError::Validation(_))),
@@ -197,7 +254,7 @@ async fn move_then_delete() {
 
     library
         .spaces()
-        .delete_file(slug, "new.md", attr())
+        .delete_file(slug, "new.md", attr(), &drua_library::SpaceTarget::Main)
         .await
         .expect("delete");
     assert!(!path_exists(
@@ -218,13 +275,26 @@ async fn insert_at_line_number() {
         .expect("create space");
     library
         .spaces()
-        .write_file(slug, "list.md", "one\ntwo\nthree\n".into(), attr())
+        .write_file(
+            slug,
+            "list.md",
+            "one\ntwo\nthree\n".into(),
+            attr(),
+            &drua_library::SpaceTarget::Main,
+        )
         .await
         .expect("write");
 
     library
         .spaces()
-        .insert(slug, "list.md", 1, "one-and-a-half".into(), attr())
+        .insert(
+            slug,
+            "list.md",
+            1,
+            "one-and-a-half".into(),
+            attr(),
+            &drua_library::SpaceTarget::Main,
+        )
         .await
         .expect("insert");
 
@@ -266,7 +336,13 @@ async fn write_renders_rich_attribution_into_commit() {
 
     library
         .spaces()
-        .write_file(slug, "doc.md", "hello\n".into(), rich)
+        .write_file(
+            slug,
+            "doc.md",
+            "hello\n".into(),
+            rich,
+            &drua_library::SpaceTarget::Main,
+        )
         .await
         .expect("write doc.md");
 

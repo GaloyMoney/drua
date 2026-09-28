@@ -29,7 +29,9 @@ use super::{parse_params, render_detailed, schema_for, FilesOutput, OutputSchema
 #[derive(Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct GlobParams {
-    /// Glob pattern to match files (e.g. `**/*.rs`, `src/**/*.ts`).
+    /// Glob pattern to match files (e.g. `**/*.rs`, `src/**/*.ts`),
+    /// matched relative to `path`; for `space:` paths results are
+    /// relative to the space root.
     pattern: String,
 
     /// Directory to search in. Defaults to workspace root, or use
@@ -102,7 +104,7 @@ impl TopLevelTool for GlobTool {
                 .space_fs
                 .glob_detailed(subject, path_for_space, &params.pattern)
                 .await?;
-            if let Some(entries) = space_entries {
+            if let Some((entries, _stamp)) = space_entries {
                 let (files, text, details) = render_detailed(entries);
                 let out = FilesOutput { files, details };
                 return Ok(GLOB_OUTPUT.success(text, &out));
@@ -117,7 +119,7 @@ impl TopLevelTool for GlobTool {
             .glob(subject, path_for_space, &params.pattern)
             .await?;
 
-        if let Some(files) = space_files {
+        if let Some((files, _stamp)) = space_files {
             let text = files.join("\n");
             let out = FilesOutput {
                 files,

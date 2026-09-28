@@ -129,6 +129,7 @@ impl Users {
             ("agent_id", "Drua-Agent"),
             ("sandbox_id", "Drua-Sandbox"),
             ("space_id", "Drua-Space"),
+            ("changeset_id", "Drua-Changeset"),
         ] {
             if let Some(value) = ctx.resource_ids.get(audit_key).and_then(|v| v.as_str()) {
                 attribution.add_trailer(trailer_key, value);

@@ -4,6 +4,7 @@ use drua_library::SpaceError;
 
 use crate::agent::AgentError;
 use crate::auth::error::AuthorizationError;
+use crate::changeset::ChangesetError;
 use crate::library::LibraryError;
 use crate::note::NoteError;
 use crate::project_secret::ProjectSecretError;
@@ -42,4 +43,6 @@ pub enum ProjectError {
     Note(#[from] NoteError),
     #[error("ProjectError - ProjectSecret: {0}")]
     ProjectSecret(#[from] ProjectSecretError),
+    #[error("ProjectError - Changeset: {0}")]
+    Changeset(#[from] ChangesetError),
 }

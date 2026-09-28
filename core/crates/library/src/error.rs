@@ -8,6 +8,18 @@ pub enum LibraryError {
     Io(String),
     #[error("validation: {0}")]
     Validation(String),
+    #[error(
+        "ref {refname} changed underneath the caller: expected {expected}, origin now has {actual}"
+    )]
+    RefChanged {
+        refname: String,
+        expected: String,
+        actual: String,
+    },
+    #[error("merge conflicts: {paths:?}")]
+    MergeConflicts { paths: Vec<String> },
+    #[error("main has no commits yet")]
+    MainUnborn,
     #[error("job: {0}")]
     Job(#[from] job::error::JobError),
     #[error("sqlx: {0}")]

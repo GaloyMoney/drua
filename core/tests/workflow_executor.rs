@@ -147,6 +147,7 @@ async fn build_stack(
         Arc::clone(&skills),
         Arc::clone(&sandboxes),
         Arc::clone(&toolsets),
+        None,
     );
 
     (
@@ -211,6 +212,10 @@ async fn seed_one_step_run(
         .name(format!("test-wf-{}", uuid::Uuid::new_v4()))
         .trigger(WorkflowTrigger::Manual { condition: None })
         .steps(steps.clone())
+        .space_writes(drua_core::workflow::SpaceWritesDecl {
+            mode: drua_core::workflow::SpaceWritesMode::ReadOnly,
+            ..Default::default()
+        })
         .build()
         .expect("build definition");
     let mut op = definitions.begin_op().await.expect("begin op");

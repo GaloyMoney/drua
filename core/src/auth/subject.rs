@@ -76,6 +76,15 @@ impl AuthSubject {
         }
     }
 
+    pub fn effective_project_id(&self) -> Option<ProjectId> {
+        self.project_id().or_else(|| {
+            self.scopes().iter().find_map(|s| match s {
+                AuthScope::ProjectAdmin(pid) | AuthScope::ProjectMember(pid) => Some(*pid),
+                _ => None,
+            })
+        })
+    }
+
     pub fn acting_agent_id(&self) -> Option<AgentId> {
         match self {
             AuthSubject::Agent(_, agent_id, _) => Some(*agent_id),
@@ -149,6 +158,25 @@ impl AuthSubject {
         // Markers must be explicit: has_scope() treats users as having every scope.
         self.scopes().contains(&AuthScope::WorkflowScript)
             || (self.is_agent() && !self.is_project_admin())
+    }
+
+    pub fn in_workflow_run(&self) -> bool {
+        matches!(self, AuthSubject::WorkflowExecutor(_, _, _, _))
+            || self.scopes().contains(&AuthScope::WorkflowStepAgent)
+    }
+
+    pub fn can_draft_spaces(&self) -> bool {
+        self.is_admin() || self.in_workflow_run()
+    }
+
+    pub fn require_space_drafting(&self) -> Result<(), AuthorizationError> {
+        if self.can_draft_spaces() {
+            return Ok(());
+        }
+        Err(AuthorizationError::Forbidden {
+            verb: AuthVerb::Update,
+            resource: AuthResource::Space(None),
+        })
     }
 
     /// `SandboxUse` implies read; first match wins.
@@ -417,5 +445,53 @@ mod workflow_script_tests {
         assert!(Option::<drua_tool_caching::ToolCallOwnerId>::from(&subject).is_none());
         assert!(!AuthScope::WorkflowScript
             .permits(AuthVerb::Read, &AuthResource::Project(Some(project))));
+    }
+
+    #[test]
+    fn workflow_executor_variants_are_in_workflow_run() {
+        let project = ProjectId::new();
+        let run = WorkflowRunId::new();
+        let def = WorkflowDefinitionId::new();
+        assert!(AuthSubject::workflow_executor(project, def, run).in_workflow_run());
+        assert!(AuthSubject::workflow_script(project, def, run).in_workflow_run());
+    }
+
+    #[test]
+    fn agent_with_workflow_step_agent_scope_is_in_workflow_run() {
+        let project = ProjectId::new();
+        let step_agent = AuthSubject::Agent(
+            project,
+            AgentId::new(),
+            vec![
+                AuthScope::ProjectMember(project),
+                AuthScope::WorkflowStepAgent,
+            ],
+        );
+        assert!(step_agent.in_workflow_run());
+    }
+
+    #[test]
+    fn ordinary_subjects_are_not_in_workflow_run() {
+        let project = ProjectId::new();
+        assert!(!AuthSubject::User(UserId::new()).in_workflow_run());
+        assert!(!AuthSubject::Anonymous.in_workflow_run());
+        assert!(!AuthSubject::ExportedAgent(
+            UserId::new(),
+            McpCredsId::new(),
+            vec![AuthScope::Admin]
+        )
+        .in_workflow_run());
+        assert!(!AuthSubject::Agent(
+            project,
+            AgentId::new(),
+            vec![AuthScope::ProjectAdmin(project)],
+        )
+        .in_workflow_run());
+        assert!(!AuthSubject::Agent(
+            project,
+            AgentId::new(),
+            vec![AuthScope::ProjectMember(project)],
+        )
+        .in_workflow_run());
     }
 }

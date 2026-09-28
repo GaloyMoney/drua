@@ -79,7 +79,7 @@ impl Read {
                 .await?
         };
 
-        if let Some(view) = space_view {
+        if let Some((view, _stamp)) = space_view {
             let content = render_file_view(view, for_model, view_range);
             let out = ContentOutput {
                 content: content.clone(),
