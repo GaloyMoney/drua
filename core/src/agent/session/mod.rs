@@ -414,6 +414,20 @@ impl Sessions {
         Ok(session.last_stop_reason())
     }
 
+    /// Reads `stop_reason` and content-emptiness of the agent's most
+    /// recent assistant turn off a single load, so the two facts always
+    /// describe the same turn. Workflow executor consumes this to decide
+    /// whether a closed turn without `submit_output` was an empty stop
+    /// that should be continued.
+    #[instrument(name = "domain.agent_session.last_response_status", skip(self))]
+    pub async fn last_response_status(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Option<message::LastResponseStatus>, AgentSessionError> {
+        let session = self.repo.find_by_agent_id(agent_id).await?;
+        Ok(session.last_response_status())
+    }
+
     #[instrument(name = "domain.agent_session.breaker_config", skip(self))]
     pub async fn breaker_config(
         &self,

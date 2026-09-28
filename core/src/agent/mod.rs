@@ -661,6 +661,18 @@ impl Agents {
         Ok(self.sessions.last_stop_reason(agent_id).await?)
     }
 
+    /// Reads the agent's session for `stop_reason` and content-emptiness
+    /// of its most recent assistant turn, off a single load. Workflow
+    /// executor consumes this to decide whether to continue a turn that
+    /// closed empty (no text, no tool call) without a tool call.
+    #[instrument(name = "domain.agent.last_response_status", skip(self))]
+    pub async fn last_response_status(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Option<session::message::LastResponseStatus>, AgentError> {
+        Ok(self.sessions.last_response_status(agent_id).await?)
+    }
+
     #[instrument(name = "domain.agent.breaker_config", skip(self))]
     pub async fn breaker_config(
         &self,

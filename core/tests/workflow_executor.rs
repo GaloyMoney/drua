@@ -269,6 +269,32 @@ fn max_tokens_response() -> PromptResponse {
     }
 }
 
+fn empty_stop_response() -> PromptResponse {
+    PromptResponse {
+        content: Vec::new(),
+        usage: Usage::default(),
+        stop_reason: Some(StopReason::EndTurn),
+        model_used: None,
+    }
+}
+
+/// A turn that stops with ONLY a `Thinking` block and no text or tool
+/// call — the shape of the production incident's provider, which
+/// reported reasoning tokens but is not modelled at the wire level as
+/// a `Thinking` block by every provider. Must be treated the same as
+/// [`empty_stop_response`]: a `Thinking` block is not content.
+fn thinking_only_response() -> PromptResponse {
+    PromptResponse {
+        content: vec![AssistantBlock::Thinking {
+            text: "internal reasoning".to_string(),
+            signature: None,
+        }],
+        usage: Usage::default(),
+        stop_reason: Some(StopReason::EndTurn),
+        model_used: None,
+    }
+}
+
 fn submit_output_response(id: &str, args: serde_json::Value) -> PromptResponse {
     PromptResponse {
         content: vec![AssistantBlock::ToolUse {
@@ -690,6 +716,329 @@ async fn end_turn_without_submit_output_still_triggers_forced_nudge() {
         .expect("send response");
 
     handle.await.expect("join").expect("run succeeds");
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(run.state, WorkflowRunState::Succeeded);
+}
+
+/// Handoff §3.1 test (1): an empty tool-less `Stop` (no text, no tool
+/// call) is continued with a PLAIN user message — no forced
+/// `tool_choice` — carrying the empty-stop continuation text, not the
+/// "Investigation complete" forced-nudge text. Demonstrated RED against
+/// the pre-fix executor: the unpatched `run_agent_until_submit_output`
+/// only continues on `StopReason::Length`, so an empty `Stop` falls
+/// straight through to `_ => break` and the second prompt request is
+/// the forced nudge (`tool_choice: Tool { submit_output }`, text
+/// "Investigation complete") instead of a plain continuation — this
+/// test's `tool_choice` assertion and its text assertion both fail.
+#[tokio::test]
+async fn empty_stop_is_continued_then_submits_output() {
+    let pool = pool().await;
+    let primary = "claude-haiku-4-5-20251001".to_string();
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx) = build_stack(
+        &pool,
+        ModelChain::new(primary.clone()),
+        BreakerConfig::default(),
+    )
+    .await;
+
+    let (run_id, _) = seed_one_step_run(
+        &skills,
+        &definitions,
+        &runs,
+        &sub,
+        project_id,
+        ModelChain::new(primary),
+        "Say hi.",
+    )
+    .await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move { executor.run(run_id, cancel).await });
+
+    let first = recv_prompt(&mut prompt_rx, "first prompt request").await;
+    first
+        .response_channel
+        .send(Ok(PromptResult::Complete(empty_stop_response())))
+        .expect("send response");
+
+    let second = recv_prompt(&mut prompt_rx, "empty-stop continuation prompt").await;
+    assert!(
+        matches!(second.prompt.tool_choice, None | Some(ToolChoice::Auto)),
+        "empty-stop continuation must not force tool_choice: {:?}",
+        second.prompt.tool_choice
+    );
+    let text = last_user_text(&second.prompt);
+    assert!(
+        text.contains("ended without any text or tool call"),
+        "continuation prompt text: {text}"
+    );
+    assert!(!text.contains("Investigation complete"));
+
+    second
+        .response_channel
+        .send(Ok(PromptResult::Complete(submit_output_response(
+            "tu_1",
+            serde_json::json!({"success": true, "output": "done"}),
+        ))))
+        .expect("send response");
+
+    handle.await.expect("join").expect("run succeeds");
+
+    assert!(
+        prompt_rx.try_recv().is_err(),
+        "no forced nudge should have been sent"
+    );
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(run.state, WorkflowRunState::Succeeded);
+}
+
+/// Handoff §3.1 test (1), thinking-only variant: a turn whose only
+/// content is a `Thinking` block (no `Text`, no `ToolUse`) must be
+/// treated exactly like a literally-empty turn — a stored `Thinking`
+/// block is reasoning, not a reply. Without this case the fix only
+/// covers the provider that returned `content: []`; a provider that
+/// stores its reasoning as a `Thinking` block would silently fall
+/// through to the forced nudge instead.
+#[tokio::test]
+async fn thinking_only_stop_is_continued_as_empty() {
+    let pool = pool().await;
+    let primary = "claude-haiku-4-5-20251001".to_string();
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx) = build_stack(
+        &pool,
+        ModelChain::new(primary.clone()),
+        BreakerConfig::default(),
+    )
+    .await;
+
+    let (run_id, _) = seed_one_step_run(
+        &skills,
+        &definitions,
+        &runs,
+        &sub,
+        project_id,
+        ModelChain::new(primary),
+        "Say hi.",
+    )
+    .await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move { executor.run(run_id, cancel).await });
+
+    let first = recv_prompt(&mut prompt_rx, "first prompt request").await;
+    first
+        .response_channel
+        .send(Ok(PromptResult::Complete(thinking_only_response())))
+        .expect("send response");
+
+    let second = recv_prompt(&mut prompt_rx, "empty-stop continuation prompt").await;
+    assert!(
+        matches!(second.prompt.tool_choice, None | Some(ToolChoice::Auto)),
+        "a Thinking-only turn must not trigger the forced nudge: {:?}",
+        second.prompt.tool_choice
+    );
+    let text = last_user_text(&second.prompt);
+    assert!(
+        text.contains("ended without any text or tool call"),
+        "continuation prompt text: {text}"
+    );
+
+    second
+        .response_channel
+        .send(Ok(PromptResult::Complete(submit_output_response(
+            "tu_1",
+            serde_json::json!({"success": true, "output": "done"}),
+        ))))
+        .expect("send response");
+
+    handle.await.expect("join").expect("run succeeds");
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(run.state, WorkflowRunState::Succeeded);
+}
+
+/// Handoff §3.1 test (2): three consecutive empty stops. Pins down the
+/// `MAX_EMPTY_STOP_CONTINUATIONS = 2` boundary exactly — prompts two and
+/// three are plain continuations (the budgeted retries), and the fourth
+/// is the forced nudge, not a fifth plain continuation. Demonstrated RED
+/// against the pre-fix executor: prompt #2 alone would already be the
+/// forced nudge, so this test's loop over prompts 2 and 3 would see the
+/// forced `tool_choice` / "Investigation complete" text on its very
+/// first iteration.
+#[tokio::test]
+async fn three_empty_stops_exhaust_budget_then_forced_nudge() {
+    let pool = pool().await;
+    let primary = "claude-haiku-4-5-20251001".to_string();
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx) = build_stack(
+        &pool,
+        ModelChain::new(primary.clone()),
+        BreakerConfig::default(),
+    )
+    .await;
+
+    let (run_id, _) = seed_one_step_run(
+        &skills,
+        &definitions,
+        &runs,
+        &sub,
+        project_id,
+        ModelChain::new(primary),
+        "Say hi.",
+    )
+    .await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move { executor.run(run_id, cancel).await });
+
+    let mut continuation_texts = Vec::new();
+    for i in 0..3 {
+        let request = recv_prompt(&mut prompt_rx, &format!("prompt request #{i}")).await;
+        if i > 0 {
+            assert!(
+                matches!(request.prompt.tool_choice, None | Some(ToolChoice::Auto)),
+                "turn {i} must be a budgeted plain continuation, not the forced nudge: {:?}",
+                request.prompt.tool_choice
+            );
+            continuation_texts.push(last_user_text(&request.prompt));
+        }
+        request
+            .response_channel
+            .send(Ok(PromptResult::Complete(empty_stop_response())))
+            .unwrap_or_else(|_| panic!("send response #{i}"));
+    }
+    assert_eq!(
+        continuation_texts.len(),
+        2,
+        "exactly two budgeted continuations (MAX_EMPTY_STOP_CONTINUATIONS)"
+    );
+    for text in &continuation_texts {
+        assert!(text.contains("ended without any text or tool call"));
+        assert!(!text.contains("Investigation complete"));
+    }
+
+    let fourth = recv_prompt(&mut prompt_rx, "fourth prompt request (forced nudge)").await;
+    assert!(
+        matches!(
+            fourth.prompt.tool_choice,
+            Some(ToolChoice::Tool { ref name }) if name == "submit_output"
+        ),
+        "budget exhausted; the 4th turn must be the forced nudge: {:?}",
+        fourth.prompt.tool_choice
+    );
+    let text = last_user_text(&fourth.prompt);
+    assert!(text.contains("Investigation complete"));
+
+    fourth
+        .response_channel
+        .send(Ok(PromptResult::Complete(submit_output_response(
+            "tu_1",
+            serde_json::json!({"success": true, "output": "done"}),
+        ))))
+        .expect("send response");
+
+    handle.await.expect("join").expect("run succeeds");
+
+    assert!(
+        prompt_rx.try_recv().is_err(),
+        "no fifth prompt should have been sent"
+    );
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(run.state, WorkflowRunState::Succeeded);
+}
+
+/// Handoff §5 / D3: empty stops and `max_tokens` stops draw from
+/// separate counters. Interleaves both stop reasons so that neither
+/// budget alone would cover the full sequence (2 empty-stop
+/// continuations + 2 max-tokens continuations = 4 continuations, while
+/// `MAX_EMPTY_STOP_CONTINUATIONS` is 2 and the default
+/// `consecutive_max_tokens` breaker limit is 3) — if the two reasons
+/// shared one counter, one of the later turns would hit the forced
+/// nudge instead of continuing.
+#[tokio::test]
+async fn empty_stop_and_max_tokens_budgets_do_not_starve_each_other() {
+    let pool = pool().await;
+    let primary = "claude-haiku-4-5-20251001".to_string();
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx) = build_stack(
+        &pool,
+        ModelChain::new(primary.clone()),
+        BreakerConfig::default(),
+    )
+    .await;
+
+    let (run_id, _) = seed_one_step_run(
+        &skills,
+        &definitions,
+        &runs,
+        &sub,
+        project_id,
+        ModelChain::new(primary),
+        "Say hi.",
+    )
+    .await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move { executor.run(run_id, cancel).await });
+
+    // P1 -> empty stop, P2 -> max_tokens, P3 -> empty stop, P4 -> max_tokens,
+    // P5 -> submit_output. Each of the two continuation reasons is used
+    // twice, interleaved, without either exhausting its budget early.
+    let responses = [
+        empty_stop_response(),
+        max_tokens_response(),
+        empty_stop_response(),
+        max_tokens_response(),
+    ];
+    let mut empty_stop_continuations = 0;
+    let mut max_tokens_continuations = 0;
+    for (i, response) in responses.into_iter().enumerate() {
+        let request = recv_prompt(&mut prompt_rx, &format!("prompt request #{i}")).await;
+        if i > 0 {
+            assert!(
+                matches!(request.prompt.tool_choice, None | Some(ToolChoice::Auto)),
+                "turn {i} must not be the forced nudge: {:?}",
+                request.prompt.tool_choice
+            );
+            let text = last_user_text(&request.prompt);
+            if text.contains("ended without any text or tool call") {
+                empty_stop_continuations += 1;
+            } else if text.contains("hit the output token limit") {
+                max_tokens_continuations += 1;
+            } else {
+                panic!("unexpected continuation text at turn {i}: {text}");
+            }
+        }
+        request
+            .response_channel
+            .send(Ok(PromptResult::Complete(response)))
+            .unwrap_or_else(|_| panic!("send response #{i}"));
+    }
+
+    let fifth = recv_prompt(&mut prompt_rx, "fifth prompt request").await;
+    assert!(
+        matches!(fifth.prompt.tool_choice, None | Some(ToolChoice::Auto)),
+        "neither budget should have been exhausted by the other's turns: {:?}",
+        fifth.prompt.tool_choice
+    );
+    let fifth_text = last_user_text(&fifth.prompt);
+    assert!(
+        fifth_text.contains("hit the output token limit"),
+        "the continuation for the final max_tokens response: {fifth_text}"
+    );
+    max_tokens_continuations += 1;
+    fifth
+        .response_channel
+        .send(Ok(PromptResult::Complete(submit_output_response(
+            "tu_1",
+            serde_json::json!({"success": true, "output": "done"}),
+        ))))
+        .expect("send response");
+
+    handle.await.expect("join").expect("run succeeds");
+
+    assert_eq!(empty_stop_continuations, 2);
+    assert_eq!(max_tokens_continuations, 2);
 
     let run = runs.find_by_id(run_id).await.expect("reload run");
     assert_eq!(run.state, WorkflowRunState::Succeeded);
