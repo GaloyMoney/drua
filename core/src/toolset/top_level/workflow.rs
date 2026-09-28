@@ -476,6 +476,28 @@ struct WorkflowRunOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     completed_at: Option<String>,
     step_results: Vec<StepResultOutput>,
+    /// The run's `space_writes` draft, if it ever opened one — present
+    /// while the run has one still open, and left in place after it
+    /// closes so the final run output reports what happened to it
+    /// (OQ-12, handoff-space-changesets-followups-2026-09-28.md).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    changeset: Option<WorkflowRunChangesetOutput>,
+}
+
+#[derive(serde::Serialize, schemars::JsonSchema)]
+struct WorkflowRunChangesetOutput {
+    id: String,
+    /// `open` (still open, run in flight), `merged`, `pr_opened`, or
+    /// `discarded`.
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pr_number: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pr_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    merge_oid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
 }
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
@@ -1233,7 +1255,56 @@ fn run_to_output(r: &WorkflowRun) -> WorkflowRunOutput {
         started_at: r.started_at().to_rfc3339(),
         completed_at: r.completed_at.map(|t| t.to_rfc3339()),
         step_results: r.step_results.iter().map(step_result_to_output).collect(),
+        changeset: run_changeset_to_output(r),
     }
+}
+
+fn run_changeset_to_output(r: &WorkflowRun) -> Option<WorkflowRunChangesetOutput> {
+    if let Some(id) = r.changeset {
+        return Some(WorkflowRunChangesetOutput {
+            id: id.to_string(),
+            status: "open".to_string(),
+            pr_number: None,
+            pr_url: None,
+            merge_oid: None,
+            reason: None,
+        });
+    }
+    let id = r.last_changeset_id?;
+    let out = match r.last_changeset_outcome.as_ref() {
+        Some(crate::workflow::SpaceWritesOutcome::Merged { merge_oid }) => {
+            WorkflowRunChangesetOutput {
+                id: id.to_string(),
+                status: "merged".to_string(),
+                pr_number: None,
+                pr_url: None,
+                merge_oid: Some(merge_oid.clone()),
+                reason: None,
+            }
+        }
+        Some(crate::workflow::SpaceWritesOutcome::PrOpened { pr_number, pr_url }) => {
+            WorkflowRunChangesetOutput {
+                id: id.to_string(),
+                status: "pr_opened".to_string(),
+                pr_number: Some(*pr_number),
+                pr_url: Some(pr_url.clone()),
+                merge_oid: None,
+                reason: None,
+            }
+        }
+        Some(crate::workflow::SpaceWritesOutcome::Discarded { reason }) => {
+            WorkflowRunChangesetOutput {
+                id: id.to_string(),
+                status: "discarded".to_string(),
+                pr_number: None,
+                pr_url: None,
+                merge_oid: None,
+                reason: Some(reason.clone()),
+            }
+        }
+        None => return None,
+    };
+    Some(out)
 }
 
 fn step_result_to_output(sr: &StepResult) -> StepResultOutput {
@@ -1748,7 +1819,7 @@ mod space_writes_tests {
         let d = build_definition(SpaceWritesDecl::default());
         let text = format_get_text(&d);
         assert!(
-            text.contains("space_writes: merge (on_failure: keep)"),
+            text.contains("space_writes: merge (on_failure: discard)"),
             "the merge default must be visible: {text}"
         );
     }
@@ -1787,7 +1858,7 @@ mod space_writes_tests {
     #[test]
     fn definition_update_content_round_trips_space_writes_and_ignores_none() {
         let mut d = build_definition(SpaceWritesDecl::default());
-        assert!(format_get_text(&d).contains("space_writes: merge (on_failure: keep)"));
+        assert!(format_get_text(&d).contains("space_writes: merge (on_failure: discard)"));
 
         let new_decl = SpaceWritesDecl {
             mode: SpaceWritesMode::OpenPr,
@@ -1805,5 +1876,76 @@ mod space_writes_tests {
         // must leave the prior value untouched.
         let _ = d.update_content(None, None, None, None, None, None, None);
         assert_eq!(d.space_writes, new_decl);
+    }
+
+    fn build_run() -> WorkflowRun {
+        use crate::workflow::run::NewWorkflowRun;
+        use es_entity::{IntoEvents as _, TryFromEvents as _};
+
+        let new = NewWorkflowRun::builder()
+            .definition_id(WorkflowDefinitionId::new())
+            .project_id(crate::primitives::ProjectId::new())
+            .trigger_context(serde_json::json!({}))
+            .steps_snapshot(vec![WorkflowStepDef::AgentStep {
+                name: "s1".to_string(),
+                skill: "audit".to_string(),
+                sandbox: None,
+                sandbox_mode: None,
+                timeout_seconds: None,
+                model_chain: None,
+                output_schema: Box::new(crate::workflow::default_output_schema()),
+                condition: None,
+            }])
+            .build()
+            .unwrap();
+        WorkflowRun::try_from_events(new.into_events()).unwrap()
+    }
+
+    // These exercise `run_changeset_to_output` (the piece `run_to_output`
+    // delegates to for the `changeset` field) directly, rather than
+    // `run_to_output` itself — the latter also calls `r.started_at()`,
+    // which needs `entity_first_persisted_at`, only set by an actual DB
+    // persist (not available to an entity built via `TryFromEvents` in a
+    // unit test, per the rest of this codebase's convention for such
+    // tests — see e.g. `project::entity::tests`).
+
+    #[test]
+    fn run_output_omits_changeset_when_none_was_ever_opened() {
+        let run = build_run();
+        assert!(run_changeset_to_output(&run).is_none());
+    }
+
+    #[test]
+    fn run_output_shows_open_changeset() {
+        let mut run = build_run();
+        let id = crate::primitives::ChangesetId::new();
+        let _ = run.changeset_opened(id, SpaceWritesFailure::Discard);
+        let cs = run_changeset_to_output(&run).expect("changeset present");
+        assert_eq!(cs.id, id.to_string());
+        assert_eq!(cs.status, "open");
+    }
+
+    #[test]
+    fn run_output_shows_outcome_after_close_oq12() {
+        // OQ-12 (handoff-space-changesets-followups-2026-09-28.md,
+        // originally from #504's OQ table): the run's final structured
+        // output must surface the changeset's outcome once it closes.
+        let mut run = build_run();
+        let id = crate::primitives::ChangesetId::new();
+        let _ = run.changeset_opened(id, SpaceWritesFailure::Discard);
+        let _ = run.changeset_closed(
+            id,
+            Some(crate::workflow::SpaceWritesOutcome::Merged {
+                merge_oid: "abc123".to_string(),
+            }),
+        );
+        let cs = run_changeset_to_output(&run).expect("changeset present");
+        assert_eq!(cs.id, id.to_string());
+        assert_eq!(cs.status, "merged");
+        assert_eq!(cs.merge_oid.as_deref(), Some("abc123"));
+
+        let value = serde_json::to_value(&cs).unwrap();
+        assert_eq!(value["status"], "merged");
+        assert_eq!(value["merge_oid"], "abc123");
     }
 }

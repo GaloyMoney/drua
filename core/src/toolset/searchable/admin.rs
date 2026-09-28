@@ -2389,6 +2389,31 @@ fn run_state(state: WorkflowRunState) -> &'static str {
     }
 }
 
+/// `None` when the run never opened a `space_writes` draft. Surfaced
+/// even after the draft closes (`WorkflowRun::last_changeset_id`
+/// survives the close, unlike `changeset` itself) so the run's final
+/// output reports what happened to it — OQ-12,
+/// handoff-space-changesets-followups-2026-09-28.md.
+fn format_run_changeset(r: &WorkflowRun) -> Option<String> {
+    if let Some(id) = r.changeset {
+        return Some(format!("{id} (open)"));
+    }
+    let id = r.last_changeset_id?;
+    let outcome = match r.last_changeset_outcome.as_ref() {
+        Some(crate::workflow::SpaceWritesOutcome::Merged { merge_oid }) => {
+            format!("merged {merge_oid}")
+        }
+        Some(crate::workflow::SpaceWritesOutcome::PrOpened { pr_number, pr_url }) => {
+            format!("pr_opened #{pr_number} {pr_url}")
+        }
+        Some(crate::workflow::SpaceWritesOutcome::Discarded { reason }) => {
+            format!("discarded ({reason})")
+        }
+        None => return None,
+    };
+    Some(format!("{id} ({outcome})"))
+}
+
 fn format_run(r: &WorkflowRun) -> String {
     let mut out = format!(
         "Run:\n  id: {}\n  definition_id: {}\n  project_id: {}\n  state: {}\n",
@@ -2397,6 +2422,9 @@ fn format_run(r: &WorkflowRun) -> String {
         r.project_id,
         run_state(r.state),
     );
+    if let Some(cs) = format_run_changeset(r) {
+        out.push_str(&format!("  changeset: {cs}\n"));
+    }
     if !r.step_results.is_empty() {
         out.push_str("  steps:\n");
         for step in &r.step_results {
@@ -3235,7 +3263,7 @@ mod tests {
         assert!(d.space_writes.is_default());
         let text = format_workflow(&d, false);
         assert!(
-            text.contains("space_writes: merge (on_failure: keep)"),
+            text.contains("space_writes: merge (on_failure: discard)"),
             "the merge default must be visible, not hidden like the sandboxes line: {text}"
         );
     }
@@ -3278,11 +3306,11 @@ mod tests {
         // `update_content(.., space_writes: None)` — what `update_space_writes:
         // false` maps to — must leave the prior value untouched.
         let mut d = build_definition(SpaceWritesDecl::default());
-        assert!(format_workflow(&d, false).contains("space_writes: merge (on_failure: keep)"));
+        assert!(format_workflow(&d, false).contains("space_writes: merge (on_failure: discard)"));
 
         let new_decl = SpaceWritesDecl {
             mode: SpaceWritesMode::OpenPr,
-            on_failure: SpaceWritesFailure::Discard,
+            on_failure: SpaceWritesFailure::Keep,
             message: Some(crate::workflow::SpaceWritesMessage {
                 title: "chore: curate".to_string(),
                 body: None,
@@ -3296,6 +3324,71 @@ mod tests {
         // the value must survive unchanged.
         let _ = d.update_content(None, None, None, None, None, None, None);
         assert_eq!(d.space_writes, new_decl);
+    }
+
+    /// Builds a `WorkflowRun` via `TryFromEvents`, same no-DB approach
+    /// as `build_definition`.
+    fn build_run() -> WorkflowRun {
+        use crate::workflow::run::NewWorkflowRun;
+        use es_entity::{IntoEvents as _, TryFromEvents as _};
+
+        let new = NewWorkflowRun::builder()
+            .definition_id(WorkflowDefinitionId::new())
+            .project_id(ProjectId::new())
+            .trigger_context(serde_json::json!({}))
+            .steps_snapshot(vec![WorkflowStepDef::AgentStep {
+                name: "s1".to_string(),
+                skill: "audit".to_string(),
+                sandbox: None,
+                sandbox_mode: None,
+                timeout_seconds: None,
+                model_chain: None,
+                output_schema: Box::new(crate::workflow::default_output_schema()),
+                condition: None,
+            }])
+            .build()
+            .unwrap();
+        WorkflowRun::try_from_events(new.into_events()).unwrap()
+    }
+
+    #[test]
+    fn format_run_omits_changeset_line_when_none_was_ever_opened() {
+        let run = build_run();
+        let text = format_run(&run);
+        assert!(!text.contains("changeset:"), "{text}");
+    }
+
+    #[test]
+    fn format_run_shows_open_changeset() {
+        let mut run = build_run();
+        let id = crate::primitives::ChangesetId::new();
+        let _ = run.changeset_opened(id, crate::workflow::SpaceWritesFailure::Discard);
+        let text = format_run(&run);
+        assert!(text.contains(&format!("changeset: {id} (open)")), "{text}");
+    }
+
+    #[test]
+    fn format_run_shows_outcome_after_close_oq12() {
+        // OQ-12 (handoff-space-changesets-followups-2026-09-28.md,
+        // originally from #504's OQ table): the run's final output must
+        // surface the changeset's outcome once it closes.
+        let mut run = build_run();
+        let id = crate::primitives::ChangesetId::new();
+        let _ = run.changeset_opened(id, crate::workflow::SpaceWritesFailure::Discard);
+        let _ = run.changeset_closed(
+            id,
+            Some(crate::workflow::SpaceWritesOutcome::PrOpened {
+                pr_number: 7,
+                pr_url: "https://github.com/x/y/pull/7".to_string(),
+            }),
+        );
+        let text = format_run(&run);
+        assert!(
+            text.contains(&format!(
+                "changeset: {id} (pr_opened #7 https://github.com/x/y/pull/7)"
+            )),
+            "{text}"
+        );
     }
 
     #[test]

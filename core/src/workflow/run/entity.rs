@@ -210,6 +210,15 @@ pub struct WorkflowRun {
     pub changeset: Option<ChangesetId>,
     #[builder(default)]
     pub changeset_on_failure: Option<SpaceWritesFailure>,
+    /// The most recently closed draft's id and outcome — unlike
+    /// `changeset`/`changeset_on_failure` (cleared on close so the
+    /// idempotency check in `changeset_closed` works), this is kept
+    /// around for the run's own final output (OQ-12,
+    /// handoff-space-changesets-followups-2026-09-28.md).
+    #[builder(default)]
+    pub last_changeset_id: Option<ChangesetId>,
+    #[builder(default)]
+    pub last_changeset_outcome: Option<SpaceWritesOutcome>,
     events: EntityEvents<WorkflowRunEvent>,
 }
 
@@ -591,6 +600,8 @@ impl WorkflowRun {
         }
         self.changeset = None;
         self.changeset_on_failure = None;
+        self.last_changeset_id = Some(changeset_id);
+        self.last_changeset_outcome = outcome.clone();
         self.events.push(WorkflowRunEvent::ChangesetClosed {
             changeset_id,
             outcome,
@@ -619,6 +630,8 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
         let mut results: Vec<StepResult> = Vec::new();
         let mut changeset: Option<ChangesetId> = None;
         let mut changeset_on_failure: Option<SpaceWritesFailure> = None;
+        let mut last_changeset_id: Option<ChangesetId> = None;
+        let mut last_changeset_outcome: Option<SpaceWritesOutcome> = None;
 
         for event in events.iter_all() {
             match event {
@@ -767,11 +780,16 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
                     changeset = Some(*changeset_id);
                     changeset_on_failure = Some(*on_failure);
                 }
-                WorkflowRunEvent::ChangesetClosed { changeset_id, .. } => {
+                WorkflowRunEvent::ChangesetClosed {
+                    changeset_id,
+                    outcome,
+                } => {
                     if changeset == Some(*changeset_id) {
                         changeset = None;
                         changeset_on_failure = None;
                     }
+                    last_changeset_id = Some(*changeset_id);
+                    last_changeset_outcome = outcome.clone();
                 }
             }
         }
@@ -780,6 +798,8 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
         builder = builder.completed_at(completed_at);
         builder = builder.changeset(changeset);
         builder = builder.changeset_on_failure(changeset_on_failure);
+        builder = builder.last_changeset_id(last_changeset_id);
+        builder = builder.last_changeset_outcome(last_changeset_outcome);
 
         builder.events(events).build()
     }
@@ -1503,6 +1523,78 @@ mod tests {
             .did_execute());
         assert!(run.changeset.is_none());
         assert!(run.changeset_on_failure.is_none());
+        // Unlike `changeset`/`changeset_on_failure`, these survive the
+        // close so the run's final output can report the outcome
+        // (OQ-12).
+        assert_eq!(run.last_changeset_id, Some(id));
+        assert_eq!(
+            run.last_changeset_outcome,
+            Some(SpaceWritesOutcome::Merged {
+                merge_oid: "abc123".into()
+            })
+        );
+    }
+
+    #[test]
+    fn last_changeset_outcome_hydrates_from_events() {
+        let mut run = fresh_run(&["a"]);
+        let id = ChangesetId::new();
+        run.changeset_opened(id, SpaceWritesFailure::Discard)
+            .did_execute();
+        run.changeset_closed(
+            id,
+            Some(SpaceWritesOutcome::PrOpened {
+                pr_number: 42,
+                pr_url: "https://github.com/x/y/pull/42".into(),
+            }),
+        )
+        .did_execute();
+
+        let events = run.events;
+        let rehydrated = WorkflowRun::try_from_events(events).unwrap();
+        assert!(rehydrated.changeset.is_none());
+        assert_eq!(rehydrated.last_changeset_id, Some(id));
+        assert_eq!(
+            rehydrated.last_changeset_outcome,
+            Some(SpaceWritesOutcome::PrOpened {
+                pr_number: 42,
+                pr_url: "https://github.com/x/y/pull/42".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn changeset_closed_retry_after_close_is_idempotent_and_keeps_last_outcome() {
+        // `changeset_closed` called twice with the same id (e.g. a
+        // retried `finish_space_writes`) must not push a second event
+        // — the `self.changeset != Some(id)` guard already covered
+        // this; confirm `last_changeset_*` doesn't get clobbered by a
+        // no-op retry either.
+        let mut run = fresh_run(&["a"]);
+        let id = ChangesetId::new();
+        run.changeset_opened(id, SpaceWritesFailure::Discard)
+            .did_execute();
+        run.changeset_closed(
+            id,
+            Some(SpaceWritesOutcome::Discarded {
+                reason: "empty".into(),
+            }),
+        )
+        .did_execute();
+
+        let retry = run.changeset_closed(
+            id,
+            Some(SpaceWritesOutcome::Merged {
+                merge_oid: "should-not-apply".into(),
+            }),
+        );
+        assert!(matches!(retry, Idempotent::AlreadyApplied));
+        assert_eq!(
+            run.last_changeset_outcome,
+            Some(SpaceWritesOutcome::Discarded {
+                reason: "empty".into(),
+            })
+        );
     }
 
     #[test]
@@ -1588,7 +1680,7 @@ mod tests {
         assert!(matches!(
             opened,
             WorkflowRunEvent::ChangesetOpened {
-                on_failure: SpaceWritesFailure::Keep,
+                on_failure: SpaceWritesFailure::Discard,
                 ..
             }
         ));

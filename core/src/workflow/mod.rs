@@ -37,7 +37,10 @@ pub use definition::{
 };
 pub use entity::*;
 pub use error::*;
-pub use run::{StepResult, WorkflowRun, WorkflowRunRepo, WorkflowRunState, WorkflowStepState};
+pub use run::{
+    SpaceWritesOutcome, StepResult, WorkflowRun, WorkflowRunRepo, WorkflowRunState,
+    WorkflowStepState,
+};
 
 pub struct ProviderFanOutResult {
     pub triggered: usize,
@@ -205,15 +208,84 @@ fn reject_forward_step_refs(
     Ok(())
 }
 
+/// Closes out a run's draft when the run didn't succeed (failed, errored,
+/// or was cancelled).
+///
+/// `on_failure: keep` never leaves the draft as a silent, unreviewable
+/// branch: it always tries to open a PR, regardless of the workflow's
+/// declared `mode` (`validate_space_writes` rejects `mode: merge` +
+/// `on_failure: keep` going forward, but this stays mode-agnostic so a
+/// grandfathered definition persisted before that check existed still
+/// gets the same safety net). An empty draft (nothing was written before
+/// the failure) falls through to discard instead — there's nothing to
+/// review. See handoff-space-changesets-followups-2026-09-28.md, I3.
 pub(crate) async fn abandon_run_draft(
     changesets: &crate::changeset::Changesets,
     sub: &AuthSubject,
     run: &mut WorkflowRun,
     id: ChangesetId,
+    message: Option<&SpaceWritesMessage>,
+    trigger_context: &serde_json::Value,
+    run_context: &serde_json::Value,
 ) {
     if run.changeset_on_failure.unwrap_or_default() == SpaceWritesFailure::Keep {
-        tracing::info!(changeset_id = %id, run_id = %run.id, "abandon_run_draft: on_failure=keep; leaving the draft open");
-        return;
+        let step_outputs = executor::collect_step_outputs(&run.step_results);
+        let ctx = template::TemplateContext {
+            trigger: trigger_context,
+            steps: &step_outputs,
+            run: run_context,
+        };
+        let fallback_title = format!("workflow run {} did not succeed", run.id);
+        let (title, body) = match message {
+            Some(m) => {
+                let title = ctx.substitute_in_string(&m.title).unwrap_or_else(|e| {
+                    tracing::warn!(
+                        error = %e,
+                        changeset_id = %id,
+                        run_id = %run.id,
+                        "abandon_run_draft: space_writes.message.title template failed; using a generic title"
+                    );
+                    fallback_title.clone()
+                });
+                let body = m
+                    .body
+                    .as_ref()
+                    .and_then(|b| ctx.substitute_in_string(b).ok())
+                    .unwrap_or_default();
+                (title, body)
+            }
+            None => (fallback_title, String::new()),
+        };
+        match changesets.submit(sub, id, title, body).await {
+            Ok(cs) => {
+                let _ = run.changeset_closed(
+                    id,
+                    Some(run::entity::SpaceWritesOutcome::PrOpened {
+                        pr_number: cs.pr_number.unwrap_or_default(),
+                        pr_url: cs.pr_url.unwrap_or_default(),
+                    }),
+                );
+                tracing::info!(
+                    changeset_id = %id,
+                    run_id = %run.id,
+                    "abandon_run_draft: on_failure=keep; opened a PR instead of leaving a silent draft"
+                );
+                return;
+            }
+            Err(crate::changeset::ChangesetError::Empty { .. }) => {
+                // Nothing was written before the failure — nothing to
+                // review; fall through to discard below.
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    changeset_id = %id,
+                    run_id = %run.id,
+                    "abandon_run_draft: on_failure=keep; failed to open a PR, leaving the draft open for manual follow-up"
+                );
+                return;
+            }
+        }
     }
     match changesets
         .discard(sub, id, Some("workflow run did not succeed".to_string()))
@@ -695,6 +767,15 @@ impl Workflows {
         decl: &SpaceWritesDecl,
         steps: &[WorkflowStepDef],
     ) -> Result<(), WorkflowError> {
+        if decl.mode == SpaceWritesMode::Merge && decl.on_failure == SpaceWritesFailure::Keep {
+            return Err(WorkflowError::InvalidSpaceWrites(
+                "space_writes.mode merge cannot be combined with on_failure: keep — a merge-mode \
+                 draft left open after a failed run has no PR to surface it and is silently \
+                 forgotten; choose on_failure: discard, or use mode: open_pr if the failed work \
+                 should be kept and reviewed"
+                    .to_string(),
+            ));
+        }
         match (decl.mode, &decl.message) {
             (SpaceWritesMode::ReadOnly, Some(_)) => {
                 return Err(WorkflowError::InvalidSpaceWrites(
@@ -1445,7 +1526,34 @@ impl Workflows {
             }
         };
         let sub = AuthSubject::workflow_executor(run.project_id, run.definition_id, run.id);
-        abandon_run_draft(&self.changesets, &sub, run, cs.id).await;
+        let message = match self.repo.find_by_id(run.definition_id).await {
+            Ok(def) => def.space_writes.message,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    run_id = %run.id,
+                    "cancel_run: workflow definition lookup failed; abandoning the draft \
+                     without a rendered space_writes.message"
+                );
+                None
+            }
+        };
+        let run_context = serde_json::json!({
+            "id": run.id.to_string(),
+            "started_at": run.started_at().to_rfc3339(),
+            "date": run.started_at().format("%Y-%m-%d").to_string(),
+        });
+        let trigger_context = run.trigger_context.clone();
+        abandon_run_draft(
+            &self.changesets,
+            &sub,
+            run,
+            cs.id,
+            message.as_ref(),
+            &trigger_context,
+            &run_context,
+        )
+        .await;
         if let Err(e) = self.run_repo.update(run).await {
             tracing::warn!(
                 error = %e,
@@ -1675,5 +1783,72 @@ mod tests {
         assert!(!is_cel_identifier("1step"));
         assert!(!is_cel_identifier("has space"));
         assert!(!is_cel_identifier("dot.in.middle"));
+    }
+
+    fn sample_step() -> WorkflowStepDef {
+        WorkflowStepDef::AgentStep {
+            name: "step".to_string(),
+            skill: "audit".to_string(),
+            sandbox: None,
+            sandbox_mode: None,
+            timeout_seconds: None,
+            model_chain: None,
+            output_schema: Box::new(default_output_schema()),
+            condition: None,
+        }
+    }
+
+    #[test]
+    fn validate_space_writes_rejects_merge_mode_with_keep_on_failure() {
+        let decl = SpaceWritesDecl {
+            mode: SpaceWritesMode::Merge,
+            on_failure: SpaceWritesFailure::Keep,
+            message: None,
+        };
+        let err = Workflows::validate_space_writes(&decl, &[sample_step()]).unwrap_err();
+        assert!(matches!(err, WorkflowError::InvalidSpaceWrites(_)));
+    }
+
+    #[test]
+    fn validate_space_writes_accepts_merge_mode_with_discard_on_failure() {
+        let decl = SpaceWritesDecl {
+            mode: SpaceWritesMode::Merge,
+            on_failure: SpaceWritesFailure::Discard,
+            message: None,
+        };
+        Workflows::validate_space_writes(&decl, &[sample_step()]).unwrap();
+    }
+
+    #[test]
+    fn validate_space_writes_accepts_open_pr_mode_with_keep_on_failure() {
+        let decl = SpaceWritesDecl {
+            mode: SpaceWritesMode::OpenPr,
+            on_failure: SpaceWritesFailure::Keep,
+            message: Some(SpaceWritesMessage {
+                title: "chore: curate".to_string(),
+                body: None,
+            }),
+        };
+        Workflows::validate_space_writes(&decl, &[sample_step()]).unwrap();
+    }
+
+    #[test]
+    fn validate_space_writes_accepts_read_only_mode_with_keep_on_failure() {
+        // read_only never opens a draft (`opens_draft()` is false), so
+        // on_failure is moot there — no reason to reject it.
+        let decl = SpaceWritesDecl {
+            mode: SpaceWritesMode::ReadOnly,
+            on_failure: SpaceWritesFailure::Keep,
+            message: None,
+        };
+        Workflows::validate_space_writes(&decl, &[sample_step()]).unwrap();
+    }
+
+    #[test]
+    fn space_writes_failure_default_is_discard() {
+        // I3: flipped from `keep` so a workflow that never sets
+        // `on_failure` explicitly gets a failed run's draft cleaned up
+        // automatically instead of accumulating silently.
+        assert_eq!(SpaceWritesFailure::default(), SpaceWritesFailure::Discard);
     }
 }

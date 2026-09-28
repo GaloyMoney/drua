@@ -48,7 +48,7 @@ const DEFAULT_TOOL_STEP_TIMEOUT_SECS: u64 = 300;
 /// `template::TemplateContext::build_cel_context`. Net effect: the
 /// "downstream null-coalesce" contract documented in memo
 /// `019e06a1` falls out for free.
-fn collect_step_outputs(results: &[StepResult]) -> HashMap<String, serde_json::Value> {
+pub(super) fn collect_step_outputs(results: &[StepResult]) -> HashMap<String, serde_json::Value> {
     let mut out = HashMap::with_capacity(results.len());
     for r in results {
         match &r.output {
@@ -424,7 +424,16 @@ impl Executor {
         );
 
         if cancelled_concurrently || !run.would_succeed() {
-            abandon_run_draft(changesets, &sub, run, id).await;
+            abandon_run_draft(
+                changesets,
+                &sub,
+                run,
+                id,
+                definition.space_writes.message.as_ref(),
+                trigger_context,
+                run_context,
+            )
+            .await;
             if let Err(e) = self.runs.update(run).await {
                 tracing::warn!(
                     error = %e,

@@ -516,8 +516,8 @@ pub enum SpaceWritesMode {
 )]
 #[serde(rename_all = "snake_case")]
 pub enum SpaceWritesFailure {
-    #[default]
     Keep,
+    #[default]
     Discard,
 }
 
