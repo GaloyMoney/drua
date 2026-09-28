@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::agent::AgentsConfig;
+use crate::changeset::ChangesetConfig;
 use crate::encryption::EncryptionKey;
 use crate::github_app::GitHubAppConfig;
 use crate::library::LibraryConfig;
@@ -32,6 +33,8 @@ pub struct AppConfig {
     pub github_app: Option<GitHubAppConfig>,
     #[serde(default)]
     pub library: LibraryConfig,
+    #[serde(default)]
+    pub changeset: ChangesetConfig,
     /// YAML-driven allow-list for the smart-HTTP git proxy. Restart
     /// the server to apply edits (no live reload — memo `019dfebc` §7.2).
     #[serde(default)]

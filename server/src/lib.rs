@@ -188,6 +188,7 @@ pub async fn run_server(args: RunServerArgs) -> anyhow::Result<()> {
         sandbox: config.sandbox.clone(),
         github_app: github_app_config,
         library: config.library.clone(),
+        changeset: config.changeset.clone(),
         git_proxy: config.git_proxy.clone(),
         tunnel_runtime,
         tool_caching: config.tool_caching.clone(),

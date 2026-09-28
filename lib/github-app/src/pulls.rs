@@ -166,6 +166,20 @@ mod tests {
     }
 
     #[test]
+    fn pull_response_parses_a_closed_unmerged_pr() {
+        let json = serde_json::json!({
+            "number": 13,
+            "html_url": "https://github.com/o/r/pull/13",
+            "state": "closed",
+        });
+        let parsed: PullResponse = serde_json::from_value(json).unwrap();
+        let pr: PullRequest = parsed.into();
+        assert_eq!(pr.state, "closed");
+        assert!(!pr.merged);
+        assert_eq!(pr.merge_commit_sha, None);
+    }
+
+    #[test]
     fn pull_response_carries_merge_sha_when_merged() {
         let json = serde_json::json!({
             "number": 7,

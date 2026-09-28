@@ -7,8 +7,11 @@ use std::sync::Arc;
 
 use drua_core::agent::{AgentRole, AgentsConfig, ModelDefaults, RoleConfig};
 use drua_core::auth::AuthScope;
+use drua_core::changeset::repo::ChangesetRepo;
+use drua_core::changeset::ChangesetStatus;
+use drua_core::github_app::PullRequest;
 use drua_core::library::LibraryConfig;
-use drua_core::primitives::{AuthSubject, McpCredsId, UserId};
+use drua_core::primitives::{AuthSubject, ChangesetId, McpCredsId, UserId};
 use drua_core::project::ProjectError;
 use drua_core::toolset::SearchableToolSet;
 use drua_core::{App, AppConfig};
@@ -280,6 +283,63 @@ async fn run_subject_for(
     AuthSubject::workflow_executor(project_id, definition.id, run.id)
 }
 
+/// Forces a changeset straight to Submitted with a `pr_number`, bypassing
+/// `Changesets::submit` (which requires a GitHub App this fixture doesn't
+/// configure). Mirrors `run_subject_for`'s pattern of reaching a raw repo
+/// directly in tests.
+async fn force_submit(pool: &sqlx::PgPool, id: ChangesetId, pr_number: u64) {
+    let repo = ChangesetRepo::new(pool);
+    let mut op = repo.begin_op().await.expect("begin op");
+    let mut cs = repo
+        .find_by_id_in_op(&mut op, id)
+        .await
+        .expect("find changeset");
+    let head_oid = cs.head_oid.clone();
+    cs.submit(
+        head_oid,
+        pr_number,
+        format!("https://github.com/o/r/pull/{pr_number}"),
+        "t".into(),
+        "b".into(),
+    )
+    .expect("submit transition")
+    .did_execute();
+    repo.update_in_op(&mut op, &mut cs)
+        .await
+        .expect("update changeset");
+    op.commit().await.expect("commit op");
+}
+
+fn open_pr(number: u64) -> PullRequest {
+    PullRequest {
+        number,
+        html_url: format!("https://github.com/o/r/pull/{number}"),
+        state: "open".into(),
+        merged: false,
+        merge_commit_sha: None,
+    }
+}
+
+fn closed_unmerged_pr(number: u64) -> PullRequest {
+    PullRequest {
+        number,
+        html_url: format!("https://github.com/o/r/pull/{number}"),
+        state: "closed".into(),
+        merged: false,
+        merge_commit_sha: None,
+    }
+}
+
+fn merged_pr(number: u64, merge_commit_sha: &str) -> PullRequest {
+    PullRequest {
+        number,
+        html_url: format!("https://github.com/o/r/pull/{number}"),
+        state: "closed".into(),
+        merged: true,
+        merge_commit_sha: Some(merge_commit_sha.to_string()),
+    }
+}
+
 fn admin_tool_set(app: &App) -> drua_core::toolset::AdminToolSet {
     drua_core::toolset::AdminToolSet::new(
         Arc::new(app.agents().clone()),
@@ -542,6 +602,173 @@ async fn apply_on_an_empty_draft_is_rejected() {
         matches!(err, drua_core::changeset::ChangesetError::Empty { id } if id == cs.id),
         "expected Empty, got: {err}"
     );
+}
+
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn reconcile_pr_state_open_pr_leaves_submitted_changeset_unchanged() {
+    let (app, user) = setup("reconcile_open").await;
+    project_with_space(&app, &user, "proj-reconcile-open", "docs").await;
+    let cs = app
+        .changesets()
+        .draft_for(&user, Some("staged".into()), None, None)
+        .await
+        .expect("open changeset");
+    space_fs(&app)
+        .write_file(&user, "draft:docs/a.md", "staged\n".into())
+        .await
+        .expect("write_file dispatch")
+        .expect("space path");
+
+    let pool = pool().await;
+    force_submit(&pool, cs.id, 101).await;
+
+    app.changesets()
+        .reconcile_pr_state(cs.id, &open_pr(101))
+        .await
+        .expect("reconcile");
+
+    let refreshed = app.changesets().status(&user, cs.id).await.expect("status");
+    assert_eq!(refreshed.status, ChangesetStatus::Submitted);
+}
+
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn reconcile_pr_state_closed_unmerged_pr_rejects_and_deletes_ref() {
+    let (app, user) = setup("reconcile_rejected").await;
+    project_with_space(&app, &user, "proj-reconcile-rejected", "docs").await;
+    let cs = app
+        .changesets()
+        .draft_for(&user, Some("staged".into()), None, None)
+        .await
+        .expect("open changeset");
+    space_fs(&app)
+        .write_file(&user, "draft:docs/a.md", "staged\n".into())
+        .await
+        .expect("write_file dispatch")
+        .expect("space path");
+
+    let pool = pool().await;
+    force_submit(&pool, cs.id, 202).await;
+
+    app.changesets()
+        .reconcile_pr_state(cs.id, &closed_unmerged_pr(202))
+        .await
+        .expect("reconcile");
+
+    let refreshed = app.changesets().status(&user, cs.id).await.expect("status");
+    assert_eq!(refreshed.status, ChangesetStatus::Rejected);
+
+    let ref_after = app
+        .library()
+        .resolve_ref(&cs.git_ref())
+        .await
+        .expect("resolve ref");
+    assert!(ref_after.is_none(), "ref must be deleted after rejection");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn reconcile_pr_state_merged_pr_marks_merged_and_deletes_ref() {
+    let (app, user) = setup("reconcile_merged").await;
+    project_with_space(&app, &user, "proj-reconcile-merged", "docs").await;
+    let cs = app
+        .changesets()
+        .draft_for(&user, Some("staged".into()), None, None)
+        .await
+        .expect("open changeset");
+    space_fs(&app)
+        .write_file(&user, "draft:docs/a.md", "staged\n".into())
+        .await
+        .expect("write_file dispatch")
+        .expect("space path");
+
+    let pool = pool().await;
+    force_submit(&pool, cs.id, 303).await;
+    let before = app.changesets().status(&user, cs.id).await.expect("status");
+
+    app.changesets()
+        .reconcile_pr_state(cs.id, &merged_pr(303, &before.head_oid))
+        .await
+        .expect("reconcile");
+
+    let refreshed = app.changesets().status(&user, cs.id).await.expect("status");
+    assert_eq!(refreshed.status, ChangesetStatus::Merged);
+
+    let ref_after = app
+        .library()
+        .resolve_ref(&cs.git_ref())
+        .await
+        .expect("resolve ref");
+    assert!(ref_after.is_none(), "ref must be deleted after merge");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn reconcile_pr_state_on_an_already_applied_changeset_is_a_no_op() {
+    let (app, user) = setup("reconcile_applied_race").await;
+    project_with_space(&app, &user, "proj-reconcile-applied", "docs").await;
+    let cs = app
+        .changesets()
+        .draft_for(&user, Some("staged".into()), None, None)
+        .await
+        .expect("open changeset");
+    space_fs(&app)
+        .write_file(&user, "draft:docs/a.md", "staged\n".into())
+        .await
+        .expect("write_file dispatch")
+        .expect("space path");
+
+    app.changesets()
+        .apply(&user, cs.id, None, None)
+        .await
+        .expect("apply");
+
+    // `apply` commits Applied before it calls `close_pull`, so the poll
+    // can see a closed PR for a changeset it already finished, via a
+    // stale list read taken before `apply` landed.
+    app.changesets()
+        .reconcile_pr_state(cs.id, &closed_unmerged_pr(404))
+        .await
+        .expect("reconcile must not error on the expected race");
+
+    let refreshed = app.changesets().status(&user, cs.id).await.expect("status");
+    assert_eq!(refreshed.status, ChangesetStatus::Applied);
+}
+
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn write_against_a_rejected_changeset_is_rejected() {
+    let (app, user) = setup("rejected_write").await;
+    project_with_space(&app, &user, "proj-rejected-write", "docs").await;
+
+    let cs = app
+        .changesets()
+        .draft_for(&user, Some("will be rejected".into()), None, None)
+        .await
+        .expect("open changeset");
+    let fs = space_fs(&app);
+    fs.write_file(&user, "draft:docs/a.md", "staged\n".into())
+        .await
+        .expect("write_file dispatch")
+        .expect("space path");
+
+    let pool = pool().await;
+    force_submit(&pool, cs.id, 505).await;
+    app.changesets()
+        .reconcile_pr_state(cs.id, &closed_unmerged_pr(505))
+        .await
+        .expect("reconcile");
+
+    let path = format!("space:docs@{}/a.md", cs.id);
+    let err = fs
+        .write_file(&user, &path, "too late\n".into())
+        .await
+        .expect_err("a rejected changeset must not accept writes");
+    let ProjectError::Space(SpaceError::ChangesetNotOpen { status, .. }) = &err else {
+        panic!("expected ChangesetNotOpen, got: {err}");
+    };
+    assert_eq!(status, "Rejected");
 }
 
 #[tokio::test]

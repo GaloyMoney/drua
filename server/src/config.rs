@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::config::{AuthConfig, LoginMethod};
 use drua_core::agent::{AgentsConfig, ModelDefaults};
+use drua_core::changeset::ChangesetConfig;
 use drua_core::library::LibraryConfig;
 use drua_core::prompt_executor::{
     ModelConfig, OpenAiResponsesAuth, PromptExecutorConfig, Provider,
@@ -35,6 +36,8 @@ pub struct Config {
     pub github_app: Option<GitHubAppCliConfig>,
     #[serde(default)]
     pub library: LibraryConfig,
+    #[serde(default)]
+    pub changeset: ChangesetConfig,
     #[serde(default)]
     pub git_proxy: GitProxyAppConfig,
     /// Tool-output elision thresholds (the walker in `drua-tool-caching`).

@@ -1,5 +1,6 @@
 pub mod entity;
 pub mod error;
+pub(crate) mod job;
 pub mod repo;
 
 use std::collections::HashMap;
@@ -15,6 +16,7 @@ use crate::agent::repo::AgentRepo;
 use crate::audit::Audit;
 use crate::auth::error::AuthorizationError;
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
+use crate::github_app::PullRequest;
 use crate::primitives::*;
 
 /// Cap on [`Changesets::touched_cache`]'s size. Entries are keyed by a
@@ -22,6 +24,25 @@ use crate::primitives::*;
 /// bounds memory — an arbitrary entry is dropped rather than the truly
 /// least-recently-used one.
 const TOUCHED_CACHE_CAP: usize = 1024;
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+pub struct ChangesetConfig {
+    /// How often the GitHub PR-close poll runs. Default 60s.
+    #[serde(default = "default_pr_poll_interval_secs")]
+    pub pr_poll_interval_secs: u64,
+}
+
+impl Default for ChangesetConfig {
+    fn default() -> Self {
+        Self {
+            pr_poll_interval_secs: default_pr_poll_interval_secs(),
+        }
+    }
+}
+
+fn default_pr_poll_interval_secs() -> u64 {
+    60
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TouchedFile {
@@ -771,6 +792,102 @@ impl Changesets {
             );
         }
         Audit::record_action_if_unset("changeset.observe_merged");
+        Audit::record_changeset_id(id);
+        Ok(())
+    }
+
+    /// Applies GitHub's PR state to a Submitted changeset: merged (any merge
+    /// method) becomes Merged, closed-unmerged becomes Rejected, open is a
+    /// no-op. Free of any polling detail — callable directly from a webhook
+    /// handler in a later iteration, as well as from the poll job.
+    #[instrument(name = "domain.changeset.reconcile_pr_state", skip(self, pr))]
+    pub async fn reconcile_pr_state(
+        &self,
+        id: ChangesetId,
+        pr: &PullRequest,
+    ) -> Result<(), ChangesetError> {
+        let result = if pr.merged {
+            match pr.merge_commit_sha.as_deref() {
+                Some(merge_oid) => self.mark_merged_in_op(id, merge_oid).await,
+                None => {
+                    tracing::warn!(
+                        changeset_id = %id,
+                        pr_number = pr.number,
+                        "reconcile_pr_state: PR reports merged with no merge_commit_sha; skipping"
+                    );
+                    return Ok(());
+                }
+            }
+        } else if pr.state == "closed" {
+            self.mark_rejected_in_op(id, pr.number).await
+        } else {
+            return Ok(());
+        };
+
+        match result {
+            Ok(()) => Ok(()),
+            // Another path (a direct git merge, `apply`) already finished
+            // this changeset first; the poll just lost the race.
+            Err(ChangesetError::InvalidTransition { from, op }) => {
+                tracing::debug!(
+                    changeset_id = %id,
+                    ?from,
+                    op,
+                    "reconcile_pr_state: changeset already finished via another path"
+                );
+                Ok(())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Every Submitted changeset with a `pr_number` attached, across every
+    /// project — the poll job's work list.
+    pub(crate) async fn list_submitted_with_pr(&self) -> Result<Vec<Changeset>, ChangesetError> {
+        let mut out = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self
+                .repo
+                .list_for_status_by_created_at(
+                    ChangesetStatus::Submitted,
+                    es_entity::PaginatedQueryArgs { first: 200, after },
+                    es_entity::ListDirection::Ascending,
+                )
+                .await?;
+            out.extend(
+                page.entities
+                    .into_iter()
+                    .filter(|cs| cs.pr_number.is_some()),
+            );
+            if !page.has_next_page {
+                break;
+            }
+            after = page.end_cursor;
+        }
+        Ok(out)
+    }
+
+    async fn mark_rejected_in_op(
+        &self,
+        id: ChangesetId,
+        pr_number: u64,
+    ) -> Result<(), ChangesetError> {
+        let mut op = self.repo.begin_op().await?;
+        let mut cs = self.repo.find_by_id_in_op(&mut op, id).await?;
+        if cs.mark_rejected(pr_number)?.did_execute() {
+            self.repo.update_in_op(&mut op, &mut cs).await?;
+        }
+        op.commit().await?;
+
+        if let Err(e) = self.library.delete_ref(&cs.git_ref(), true).await {
+            tracing::warn!(
+                error = %e,
+                changeset_id = %id,
+                "reconcile_pr_state: delete_ref after rejection failed (best effort; branch may already be gone)"
+            );
+        }
+        Audit::record_action_if_unset("changeset.observe_rejected");
         Audit::record_changeset_id(id);
         Ok(())
     }
