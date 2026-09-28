@@ -177,6 +177,7 @@ struct SandboxParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 struct LogParams {
     #[schemars(with = "Option<uuid::Uuid>")]
     workflow_run_id: Option<crate::primitives::WorkflowRunId>,
@@ -3666,5 +3667,24 @@ mod script_step_tests {
         let query = params.into_query();
         assert_eq!(query.workflow_run_id, Some(run));
         assert_eq!(query.workflow_step.as_deref(), Some("inventory"));
+    }
+
+    /// Handoff §3.3: `run_id` instead of `workflow_run_id` (or any other
+    /// unknown key) must be rejected, not silently ignored — the published
+    /// input schema already advertises `additionalProperties: false`, so a
+    /// caller trusting that schema would otherwise be told it got a
+    /// filtered view when it actually got the unfiltered global log.
+    #[test]
+    fn admin_log_rejects_unknown_argument() {
+        let run = crate::primitives::WorkflowRunId::new();
+        let args = serde_json::json!({"run_id": run.to_string()})
+            .as_object()
+            .unwrap()
+            .clone();
+        match parse_params::<LogParams>(Some(args)) {
+            Err(ToolSetsError::InvalidArgument(_)) => {}
+            Ok(_) => panic!("unknown key `run_id` must be rejected, but parsed successfully"),
+            Err(e) => panic!("expected InvalidArgument, got a different error: {e}"),
+        }
     }
 }
