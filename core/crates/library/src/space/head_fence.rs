@@ -138,15 +138,24 @@ impl HeadFence {
 
         // The fence is durable and is published only after a successful push.
         // If origin is temporarily unreachable, fail the read rather than serve
-        // data known to be stale. A successful fetch makes origin authoritative;
-        // this also handles a legitimate force-push that replaced the fenced
-        // commit with a non-descendant head.
+        // data known to be stale.
         self.git
             .fetch_and_head()
             .await
             .map_err(|e| SpaceError::Git(e.to_string()))?;
 
-        return Ok(());
+        // A successful transport-level fetch is not itself proof that the
+        // required acknowledged write is visible. The remote may have been
+        // force-pushed, or another ref race may have replaced the fenced
+        // commit. Re-check the actual local graph and fail closed if the fence
+        // is still not satisfied.
+        if self.local_contains(&required_head).await? {
+            return Ok(());
+        }
+
+        return Err(SpaceError::Git(format!(
+            "library head fence {required_head} is not reachable after refreshing origin"
+        )));
     }
 
     async fn required_head(&self) -> Result<Option<String>, SpaceError> {
