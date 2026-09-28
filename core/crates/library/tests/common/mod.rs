@@ -18,7 +18,7 @@ fn tests_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("CARGO_TARGET_TMPDIR") {
         return PathBuf::from(dir).join("drua-library");
     }
-    std::env::temp_dir().join("drua-library-tests")
+    return std::env::temp_dir().join("drua-library-tests");
 }
 
 fn ensure_artifacts_wiped() {
@@ -31,7 +31,7 @@ fn ensure_artifacts_wiped() {
 
 pub fn library_data_dir(test_name: &str) -> PathBuf {
     ensure_artifacts_wiped();
-    tests_dir().join(".library").join(test_name)
+    return tests_dir().join(".library").join(test_name);
 }
 
 /// Spawning the resident job resolves to the existing one while a row
@@ -74,13 +74,17 @@ pub async fn reset_library_db_state(pool: &sqlx::PgPool) {
         .execute(pool)
         .await
         .expect("delete spaces");
+    sqlx::query("DELETE FROM ephemeral_outbox_events WHERE event_type = 'drua_library_head'")
+        .execute(pool)
+        .await
+        .expect("delete library head fence");
 }
 
 fn fixtures_root() -> PathBuf {
     ensure_artifacts_wiped();
     let root = tests_dir().join("fixtures");
     std::fs::create_dir_all(&root).expect("create fixtures root");
-    root
+    return root;
 }
 
 /// A bare upstream + a working clone. `path()` returns the bare upstream
@@ -126,12 +130,12 @@ impl TestRepo {
         git(&work, &["commit", "--quiet", "-m", "initial commit"]);
         git(&work, &["push", "--quiet", "-u", "origin", "main"]);
 
-        Self { upstream, work }
+        return Self { upstream, work };
     }
 
     /// Path to the bare upstream — pass to `LibraryConfig::repo_url`.
     pub fn path(&self) -> &Path {
-        &self.upstream
+        return &self.upstream;
     }
 
     /// Add a new commit upstream. Pulls any external pushes (e.g. Library's
