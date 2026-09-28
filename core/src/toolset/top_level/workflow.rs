@@ -1307,6 +1307,37 @@ fn run_changeset_to_output(r: &WorkflowRun) -> Option<WorkflowRunChangesetOutput
     Some(out)
 }
 
+fn format_run_changeset_text(cs: &WorkflowRunChangesetOutput) -> String {
+    match cs.status.as_str() {
+        "merged" => format!(
+            "{} (merged{})",
+            cs.id,
+            cs.merge_oid
+                .as_deref()
+                .map(|oid| format!(" {oid}"))
+                .unwrap_or_default()
+        ),
+        "pr_opened" => {
+            let number = cs.pr_number.map(|n| format!(" #{n}")).unwrap_or_default();
+            let url = cs
+                .pr_url
+                .as_deref()
+                .map(|u| format!(" {u}"))
+                .unwrap_or_default();
+            format!("{} (pr_opened{number}{url})", cs.id)
+        }
+        "discarded" => format!(
+            "{} (discarded{})",
+            cs.id,
+            cs.reason
+                .as_deref()
+                .map(|r| format!(": {r}"))
+                .unwrap_or_default()
+        ),
+        other => format!("{} ({other})", cs.id),
+    }
+}
+
 fn step_result_to_output(sr: &StepResult) -> StepResultOutput {
     StepResultOutput {
         name: sr.name.clone(),
@@ -1581,6 +1612,15 @@ fn format_run_text(r: &WorkflowRun) -> String {
     out.push_str(&format!("started_at:    {}\n", r.started_at().to_rfc3339()));
     if let Some(t) = r.completed_at {
         out.push_str(&format!("completed_at:  {}\n", t.to_rfc3339()));
+    }
+    // OQ-12 (handoff-space-changesets-followups-2026-09-28.md): the
+    // structured `changeset` output field already carries this; skills
+    // reading only the text channel need it too.
+    if let Some(cs) = run_changeset_to_output(r) {
+        out.push_str(&format!(
+            "changeset:     {}\n",
+            format_run_changeset_text(&cs)
+        ));
     }
     out.push('\n');
     if matches!(
@@ -1947,5 +1987,65 @@ mod space_writes_tests {
         let value = serde_json::to_value(&cs).unwrap();
         assert_eq!(value["status"], "merged");
         assert_eq!(value["merge_oid"], "abc123");
+    }
+
+    #[test]
+    fn format_run_text_includes_changeset_outcome() {
+        // Cursor Bugbot flagged that format_run_text (unlike format_run in
+        // admin.rs and the structured `changeset` output field) omitted the
+        // changeset outcome entirely — skills reading only the workflow
+        // tool's text channel never saw it. format_run_text also calls
+        // r.started_at(), which needs entity_first_persisted_at to be set —
+        // build_run() alone doesn't do that (matches the rest of this
+        // codebase's TryFromEvents-based unit tests, which avoid
+        // started_at()), so mark the events persisted explicitly here.
+        use crate::workflow::run::NewWorkflowRun;
+        use es_entity::{IntoEvents as _, TryFromEvents as _};
+
+        let new = NewWorkflowRun::builder()
+            .definition_id(WorkflowDefinitionId::new())
+            .project_id(crate::primitives::ProjectId::new())
+            .trigger_context(serde_json::json!({}))
+            .steps_snapshot(vec![])
+            .build()
+            .unwrap();
+        let mut events = new.into_events();
+        events.mark_new_events_persisted_at(chrono::Utc::now());
+        let mut run = WorkflowRun::try_from_events(events).unwrap();
+
+        let id = crate::primitives::ChangesetId::new();
+        let _ = run.changeset_opened(id, SpaceWritesFailure::Discard);
+        let _ = run.changeset_closed(
+            id,
+            Some(crate::workflow::SpaceWritesOutcome::Merged {
+                merge_oid: "abc123".to_string(),
+            }),
+        );
+
+        let text = format_run_text(&run);
+        assert!(
+            text.contains(&format!("changeset:     {id} (merged abc123)")),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn format_run_text_omits_changeset_line_when_none_was_ever_opened() {
+        use crate::workflow::run::NewWorkflowRun;
+        use es_entity::{IntoEvents as _, TryFromEvents as _};
+
+        let new = NewWorkflowRun::builder()
+            .definition_id(WorkflowDefinitionId::new())
+            .project_id(crate::primitives::ProjectId::new())
+            .trigger_context(serde_json::json!({}))
+            .steps_snapshot(vec![])
+            .build()
+            .unwrap();
+        let mut events = new.into_events();
+        events.mark_new_events_persisted_at(chrono::Utc::now());
+        let run = WorkflowRun::try_from_events(events).unwrap();
+
+        let text = format_run_text(&run);
+        assert!(!text.contains("changeset:"), "{text}");
     }
 }
