@@ -28,8 +28,8 @@ use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxMode, SandboxSpecs, Sandb
 use crate::skill::{ScopedSkill, Skill, SkillSource, Skills};
 use crate::space_fs::SpaceFs;
 use crate::workflow::{
-    WorkflowDefinition, WorkflowRun, WorkflowRunState, WorkflowSandboxDecl, WorkflowStepDef,
-    WorkflowTrigger, Workflows,
+    SpaceWritesDecl, SpaceWritesFailure, SpaceWritesMode, WorkflowDefinition, WorkflowRun,
+    WorkflowRunState, WorkflowSandboxDecl, WorkflowStepDef, WorkflowTrigger, Workflows,
 };
 
 use super::super::error::ToolSetsError;
@@ -647,6 +647,13 @@ struct WorkflowParams {
     #[serde(default)]
     model_chain: Option<llm::ModelChain>,
 
+    /// `create`: optional, defaults to `{mode: merge, on_failure: keep}`.
+    /// `update`: applies when `update_space_writes` is true; omitting it
+    /// (while `update_space_writes: true`) resets to that same default —
+    /// there is no separate clear flag, the default IS the reset.
+    #[serde(default)]
+    space_writes: Option<SpaceWritesDecl>,
+
     /// `update`-only flags: when `false`, the corresponding field is
     /// left untouched. `clear_*` variants set the field to `None`.
     #[serde(default)]
@@ -659,6 +666,8 @@ struct WorkflowParams {
     update_trigger: bool,
     #[serde(default)]
     clear_model_chain: bool,
+    #[serde(default)]
+    update_space_writes: bool,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -785,13 +794,18 @@ static TOOLS: &[ToolDef] = &[
         description: "Manage workflows across any project. Commands: \
                        `create` (requires `project_id`, `name`, `steps`; \
                        optional `description`, `provider`, `manual`, \
-                       `sandboxes`), \
+                       `sandboxes`, `space_writes` — defaults to \
+                       `{mode: merge, on_failure: keep}`), \
                        `list` (requires `project_id`), \
-                       `get` (requires `definition_id`), \
+                       `get` (requires `definition_id`; always reports \
+                       `space_writes`, including the silent `merge` default), \
                        `update` (requires `definition_id`; optional `name`, \
                        `description`+`clear_description` for None semantics, \
                        `provider`+`update_trigger`, `steps`+`update_steps`, \
-                       `sandboxes`+`update_sandboxes`), \
+                       `sandboxes`+`update_sandboxes`, \
+                       `space_writes`+`update_space_writes` — omitting \
+                       `space_writes` while `update_space_writes: true` \
+                       resets it to the `merge`/`keep` default), \
                        `delete` (requires `definition_id`; cascades to runs).",
         schema: &WORKFLOW_SCHEMA,
     },
@@ -1570,7 +1584,7 @@ impl AdminToolSet {
                         steps,
                         sandboxes,
                         params.model_chain,
-                        crate::workflow::SpaceWritesDecl::default(),
+                        params.space_writes.unwrap_or_default(),
                     )
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
@@ -1663,6 +1677,9 @@ impl AdminToolSet {
                 } else {
                     params.model_chain.map(Some)
                 };
+                let space_writes = params
+                    .update_space_writes
+                    .then(|| params.space_writes.unwrap_or_default());
                 let definition = self
                     .workflows
                     .update(
@@ -1674,7 +1691,7 @@ impl AdminToolSet {
                         steps,
                         sandboxes,
                         model_chain,
-                        None,
+                        space_writes,
                     )
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
@@ -2324,7 +2341,7 @@ fn format_workflow(d: &WorkflowDefinition, created: bool) -> String {
     };
     let description = d.description.as_deref().unwrap_or("\u{2014}");
     format!(
-        "{header}\n  id: {}\n  name: {}\n  project: {}\n  trigger: {}\n  description: {}\n  steps: {}\n  sandboxes: {}",
+        "{header}\n  id: {}\n  name: {}\n  project: {}\n  trigger: {}\n  description: {}\n  steps: {}\n  sandboxes: {}\n  space_writes: {}",
         d.id,
         d.name,
         d.project_id,
@@ -2332,7 +2349,28 @@ fn format_workflow(d: &WorkflowDefinition, created: bool) -> String {
         description,
         d.steps.len(),
         d.sandboxes.len(),
+        format_space_writes(&d.space_writes),
     )
+}
+
+/// Always rendered (never hidden behind `is_default()`): `merge` is the
+/// silent default a workflow runs with when nobody sets `space_writes`,
+/// and that invisibility is exactly what I1 exists to fix — see
+/// handoff-space-changesets-followups-2026-09-28.md.
+fn format_space_writes(sw: &SpaceWritesDecl) -> String {
+    let mode = match sw.mode {
+        SpaceWritesMode::Merge => "merge",
+        SpaceWritesMode::OpenPr => "open_pr",
+        SpaceWritesMode::ReadOnly => "read_only",
+    };
+    let on_failure = match sw.on_failure {
+        SpaceWritesFailure::Keep => "keep",
+        SpaceWritesFailure::Discard => "discard",
+    };
+    match &sw.message {
+        Some(m) => format!("{mode} (on_failure: {on_failure}, title: {})", m.title),
+        None => format!("{mode} (on_failure: {on_failure})"),
+    }
 }
 
 /// Renders a `WorkflowRun` as text. Step outputs are emitted as
@@ -2979,6 +3017,93 @@ mod tests {
         assert!(!p.update_sandboxes);
         assert!(!p.update_trigger);
         assert!(!p.clear_description);
+        assert!(!p.update_space_writes);
+    }
+
+    #[test]
+    fn workflow_create_parses_space_writes() {
+        let project_id = uuid::Uuid::new_v4();
+        let p: WorkflowParams = parse_params(args(serde_json::json!({
+            "command": "create",
+            "project_id": project_id,
+            "name": "curator",
+            "manual": true,
+            "steps": [
+                { "type": "agent_step", "name": "s1", "skill": "audit" }
+            ],
+            "space_writes": {
+                "mode": "open_pr",
+                "on_failure": "discard",
+                "message": { "title": "chore: curate" },
+            },
+        })))
+        .expect("parse");
+        let sw = p.space_writes.expect("space_writes present");
+        assert_eq!(sw.mode, crate::workflow::SpaceWritesMode::OpenPr);
+        assert_eq!(sw.on_failure, crate::workflow::SpaceWritesFailure::Discard);
+        assert_eq!(sw.message.expect("message").title, "chore: curate");
+    }
+
+    #[test]
+    fn workflow_create_defaults_space_writes_to_merge_when_omitted() {
+        let project_id = uuid::Uuid::new_v4();
+        let p: WorkflowParams = parse_params(args(serde_json::json!({
+            "command": "create",
+            "project_id": project_id,
+            "name": "curator",
+            "manual": true,
+            "steps": [
+                { "type": "agent_step", "name": "s1", "skill": "audit" }
+            ],
+        })))
+        .expect("parse");
+        assert!(p.space_writes.is_none());
+        // The handler maps `None` to `SpaceWritesDecl::default()` (merge/keep) —
+        // see WorkflowCommand::Create.
+        assert_eq!(
+            p.space_writes.unwrap_or_default(),
+            crate::workflow::SpaceWritesDecl::default()
+        );
+    }
+
+    #[test]
+    fn workflow_update_parses_space_writes_with_flag() {
+        let definition_id = uuid::Uuid::new_v4();
+        let p: WorkflowParams = parse_params(args(serde_json::json!({
+            "command": "update",
+            "definition_id": definition_id,
+            "update_space_writes": true,
+            "space_writes": {
+                "mode": "read_only",
+            },
+        })))
+        .expect("parse");
+        assert!(p.update_space_writes);
+        let sw = p.space_writes.expect("space_writes present");
+        assert_eq!(sw.mode, crate::workflow::SpaceWritesMode::ReadOnly);
+        assert!(sw.message.is_none());
+    }
+
+    #[test]
+    fn workflow_update_without_flag_leaves_space_writes_field_unused() {
+        // `update_space_writes: false` (the default) is the signal that
+        // leaves the entity's space_writes untouched, independent of
+        // whatever `space_writes` was also passed — mirrors the
+        // `update_sandboxes` convention.
+        let definition_id = uuid::Uuid::new_v4();
+        let p: WorkflowParams = parse_params(args(serde_json::json!({
+            "command": "update",
+            "definition_id": definition_id,
+            "space_writes": { "mode": "open_pr", "message": { "title": "x" } },
+        })))
+        .expect("parse");
+        assert!(!p.update_space_writes);
+        // The handler computes `params.update_space_writes.then(|| ...)`,
+        // so this parses fine but must not be applied.
+        let applied = p
+            .update_space_writes
+            .then(|| p.space_writes.unwrap_or_default());
+        assert!(applied.is_none());
     }
 
     #[test]
@@ -3064,6 +3189,113 @@ mod tests {
         .expect("parse");
         assert!(matches!(p.command, WorkflowCommand::Cancel));
         assert!(p.reason.is_none());
+    }
+
+    /// Builds a `WorkflowDefinition` via `TryFromEvents` (the same path
+    /// the repo uses to hydrate from Postgres) without touching a
+    /// database — enough to exercise `format_workflow`/`update_content`
+    /// end to end for I1's "always show space_writes" requirement and
+    /// the update-vs-untouched semantics.
+    fn build_definition(space_writes: SpaceWritesDecl) -> WorkflowDefinition {
+        use crate::workflow::WorkflowDefinitionEvent;
+        use es_entity::{EntityEvents, TryFromEvents as _};
+
+        let id = WorkflowDefinitionId::new();
+        let events = EntityEvents::init(
+            id,
+            [WorkflowDefinitionEvent::Initialized {
+                id,
+                project_id: ProjectId::new(),
+                project_name: None,
+                name: "curator".to_string(),
+                description: None,
+                trigger: WorkflowTrigger::Manual { condition: None },
+                steps: vec![WorkflowStepDef::AgentStep {
+                    name: "s1".to_string(),
+                    skill: "audit".to_string(),
+                    sandbox: None,
+                    sandbox_mode: None,
+                    timeout_seconds: None,
+                    model_chain: None,
+                    output_schema: Box::new(crate::workflow::default_output_schema()),
+                    condition: None,
+                }],
+                sandboxes: vec![],
+                model_chain: None,
+                original_path: None,
+                space_writes,
+            }],
+        );
+        WorkflowDefinition::try_from_events(events).expect("hydrate")
+    }
+
+    #[test]
+    fn format_workflow_always_shows_space_writes_even_at_the_silent_default() {
+        let d = build_definition(SpaceWritesDecl::default());
+        assert!(d.space_writes.is_default());
+        let text = format_workflow(&d, false);
+        assert!(
+            text.contains("space_writes: merge (on_failure: keep)"),
+            "the merge default must be visible, not hidden like the sandboxes line: {text}"
+        );
+    }
+
+    #[test]
+    fn format_workflow_shows_read_only_mode_and_discard_on_failure() {
+        let d = build_definition(SpaceWritesDecl {
+            mode: SpaceWritesMode::ReadOnly,
+            on_failure: SpaceWritesFailure::Discard,
+            message: None,
+        });
+        let text = format_workflow(&d, false);
+        assert!(
+            text.contains("space_writes: read_only (on_failure: discard)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn format_workflow_shows_message_title_when_present() {
+        let d = build_definition(SpaceWritesDecl {
+            mode: SpaceWritesMode::OpenPr,
+            on_failure: SpaceWritesFailure::Keep,
+            message: Some(crate::workflow::SpaceWritesMessage {
+                title: "chore: curate".to_string(),
+                body: None,
+            }),
+        });
+        let text = format_workflow(&d, false);
+        assert!(
+            text.contains("space_writes: open_pr (on_failure: keep, title: chore: curate)"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn workflow_definition_update_content_round_trips_space_writes_and_ignores_none() {
+        // Simulates create -> get -> update -> get through the public
+        // entity API: `update_content(.., space_writes: Some(_))` applies;
+        // `update_content(.., space_writes: None)` — what `update_space_writes:
+        // false` maps to — must leave the prior value untouched.
+        let mut d = build_definition(SpaceWritesDecl::default());
+        assert!(format_workflow(&d, false).contains("space_writes: merge (on_failure: keep)"));
+
+        let new_decl = SpaceWritesDecl {
+            mode: SpaceWritesMode::OpenPr,
+            on_failure: SpaceWritesFailure::Discard,
+            message: Some(crate::workflow::SpaceWritesMessage {
+                title: "chore: curate".to_string(),
+                body: None,
+            }),
+        };
+        let _ = d.update_content(None, None, None, None, None, None, Some(new_decl.clone()));
+        assert_eq!(d.space_writes, new_decl);
+        assert!(format_workflow(&d, false).contains("space_writes: open_pr"));
+
+        // `update_space_writes: false` on the tool maps to `None` here —
+        // the value must survive unchanged.
+        let _ = d.update_content(None, None, None, None, None, None, None);
+        assert_eq!(d.space_writes, new_decl);
     }
 
     #[test]
