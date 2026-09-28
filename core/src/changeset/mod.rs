@@ -14,7 +14,7 @@ use repo::ChangesetRepo;
 
 use drua_library::{ApplyOutcome, DraftObservation, Mergeability, RebaseOutcome};
 
-use crate::agent::repo::AgentRepo;
+use crate::agent::Agents;
 use crate::audit::Audit;
 use crate::auth::error::AuthorizationError;
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
@@ -147,7 +147,7 @@ type TouchedCacheKey = (String, String);
 #[derive(Clone)]
 pub struct Changesets {
     repo: ChangesetRepo,
-    agents: AgentRepo,
+    agents: Arc<Agents>,
     drafts: drua_library::Drafts,
     users: crate::user::Users,
     github: Option<Arc<GitHubAppTokenProvider>>,
@@ -161,7 +161,7 @@ pub struct Changesets {
 impl Changesets {
     pub fn new(
         pool: &sqlx::PgPool,
-        agents: &AgentRepo,
+        agents: &Arc<Agents>,
         library: &drua_library::Library,
         users: &crate::user::Users,
         github: Option<Arc<GitHubAppTokenProvider>>,
@@ -169,7 +169,7 @@ impl Changesets {
     ) -> Self {
         Self {
             repo: ChangesetRepo::new(pool),
-            agents: agents.clone(),
+            agents: Arc::clone(agents),
             drafts: library.drafts().clone(),
             users: users.clone(),
             github,
@@ -182,7 +182,7 @@ impl Changesets {
         if let AuthSubject::Agent(_, agent_id, _)
         | AuthSubject::AgentOnBehalfOfUser(_, _, agent_id, _) = sub
         {
-            match self.agents.find_by_id(*agent_id).await {
+            match self.agents.find_by_id_unchecked(*agent_id).await {
                 Ok(agent) => {
                     if let Some(run_id) = agent.workflow_run_id {
                         return Ok(ChangesetActor::WorkflowRun { run_id });
@@ -305,10 +305,12 @@ impl Changesets {
         first_touched_path: Option<&str>,
     ) -> String {
         let who = match actor {
-            ChangesetActor::Agent { agent_id } => match self.agents.find_by_id(agent_id).await {
-                Ok(agent) => agent.name,
-                Err(_) => describe_actor(&actor),
-            },
+            ChangesetActor::Agent { agent_id } => {
+                match self.agents.find_by_id_unchecked(agent_id).await {
+                    Ok(agent) => agent.name,
+                    Err(_) => describe_actor(&actor),
+                }
+            }
             ChangesetActor::User { user_id } => match self.users.find_by_id(user_id).await {
                 Ok(user) => user.email.unwrap_or_else(|| describe_actor(&actor)),
                 Err(_) => describe_actor(&actor),

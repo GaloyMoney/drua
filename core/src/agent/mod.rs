@@ -588,6 +588,17 @@ impl Agents {
         Ok(agent)
     }
 
+    /// Unauthorized repo lookup for internal cross-service callers that
+    /// already trust their caller (e.g. `Changesets` resolving a draft's
+    /// owning actor) and have no `AuthSubject` to check against.
+    #[instrument(name = "domain.agent.find_by_id_unchecked", skip(self))]
+    pub async fn find_by_id_unchecked(
+        &self,
+        id: impl Into<AgentId> + std::fmt::Debug,
+    ) -> Result<Agent, AgentError> {
+        Ok(self.repo.find_by_id(id.into()).await?)
+    }
+
     #[instrument(name = "domain.agent.update_session_chain", skip(self, sub))]
     pub async fn update_session_chain(
         &self,

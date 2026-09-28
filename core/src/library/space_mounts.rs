@@ -173,13 +173,13 @@ fn workflow_run_write_line(mode: SpaceWritesMode) -> String {
     match mode {
         SpaceWritesMode::Merge => "This run's edits to space:<slug>/ paths are staged in a \
              draft the workflow owns and are merged to the published library when the run \
-             succeeds. Use the file tools with space:<slug>/ paths as usual — no draft: prefix \
-             and no draft commands. library_search sees the published library only.\n"
+             succeeds. Use the file tools with space:<slug>/ paths as usual. library_search \
+             sees the published library only.\n"
             .to_string(),
         SpaceWritesMode::OpenPr => "This run's edits to space:<slug>/ paths are staged in a \
              draft the workflow owns and are opened as a pull request for review when the run \
-             succeeds. Use the file tools with space:<slug>/ paths as usual — no draft: prefix \
-             and no draft commands. library_search sees the published library only.\n"
+             succeeds. Use the file tools with space:<slug>/ paths as usual. library_search \
+             sees the published library only.\n"
             .to_string(),
         SpaceWritesMode::ReadOnly => {
             "Spaces are read-only in this run; space:<slug>/ paths can be read but not written.\n"

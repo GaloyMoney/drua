@@ -305,8 +305,10 @@ struct SpacesParams {
     /// Per-op arguments. See command docs for shape.
     #[serde(default)]
     op_args: Option<JsonObject>,
+    /// Defaults to `main` for `view`, `draft` for `edit` — writing
+    /// straight to `main` is opt-in via an explicit `target: "main"`.
     #[serde(default)]
-    target: SpaceTarget,
+    target: Option<SpaceTarget>,
 
     /// Required for `search`. Keywords or natural language.
     query: Option<String>,
@@ -840,15 +842,14 @@ static TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "spaces",
         description: "Manage library spaces — bounded collaborative folders under \
-                       `spaces/<slug>/` in the knowledge-base repo. Reads of \
-                       `space:<slug>/` paths see the published library. Writes go \
-                       to `draft:<slug>/` — your unpublished draft, started on \
-                       first write or with `start-draft` — and are landed with \
+                       `spaces/<slug>/` in the knowledge-base repo. `view`/`edit` \
+                       default to `target: draft` — your unpublished draft, started \
+                       on first write or with `start-draft` — and are landed with \
                        `merge-draft` (an admin always holds write authority, \
                        so this always succeeds) or sent for review with \
-                       `open-pr` (opens a GitHub PR instead). Direct writes \
-                       to `space:<slug>/` are accepted only with no open draft. \
-                       Commands: \
+                       `open-pr` (opens a GitHub PR instead). Writing straight to \
+                       `space:<slug>/` is opt-in: pass `target: main` explicitly \
+                       (accepted only with no open draft). Commands: \
                        `create` (requires `slug`, optional `description`; the space \
                        is created unmounted — pair with `mount` to attach), \
                        `list` (no args; every space in the library), \
@@ -860,7 +861,7 @@ static TOOLS: &[ToolDef] = &[
                        ('main' default | 'draft')), \
                        `edit` (mutating file ops; requires `slug`, `edit_op` \
                        (write|str_replace|insert|delete|move), `op_args`, \
-                       optional `target` ('main' default | 'draft')), \
+                       optional `target` ('draft' default | 'main')), \
                        `search` (hybrid FTS + semantic search inside a single \
                        space; requires `slug`, `query`; optional `paths` \
                        (subtree prefixes; reject leading `/`, `..`, globs); \
@@ -1338,7 +1339,15 @@ impl AdminToolSet {
                 })?;
                 let op_args = params.op_args.unwrap_or_default();
                 Audit::record_action("spaces.view");
-                dispatch_view(&self.space_fs, subject, &slug, op, op_args, params.target).await
+                dispatch_view(
+                    &self.space_fs,
+                    subject,
+                    &slug,
+                    op,
+                    op_args,
+                    params.target.unwrap_or(SpaceTarget::Main),
+                )
+                .await
             }
 
             SpacesCommand::Edit => {
@@ -1350,7 +1359,15 @@ impl AdminToolSet {
                 })?;
                 let op_args = params.op_args.unwrap_or_default();
                 Audit::record_action("spaces.edit");
-                dispatch_edit(&self.space_fs, subject, &slug, op, op_args, params.target).await
+                dispatch_edit(
+                    &self.space_fs,
+                    subject,
+                    &slug,
+                    op,
+                    op_args,
+                    params.target.unwrap_or(SpaceTarget::Draft),
+                )
+                .await
             }
 
             SpacesCommand::Search => {

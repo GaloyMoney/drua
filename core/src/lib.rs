@@ -31,7 +31,6 @@ pub use llm::{ModelChain, ModelSpec, ReasoningEffort};
 
 use std::sync::Arc;
 
-use agent::repo::AgentRepo;
 use agent::Agents;
 use audit::Audit;
 use auth::{AuthResource, AuthSubject, AuthVerb};
@@ -281,7 +280,7 @@ impl App {
         let changeset_repo_coord = drua_config.github_coord();
         let changesets = Arc::new(Changesets::new(
             pool,
-            &AgentRepo::new(pool),
+            &agents,
             &library,
             &users,
             changeset_github_app.clone(),
