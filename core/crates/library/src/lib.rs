@@ -289,6 +289,10 @@ impl Library {
         self.git.resolve_ref(refname).await
     }
 
+    pub async fn list_refs(&self, prefix: &str) -> Result<Vec<(String, String)>, LibraryError> {
+        self.git.list_refs(prefix).await
+    }
+
     pub async fn create_ref(&self, refname: &str, oid: &str) -> Result<(), LibraryError> {
         self.git.create_ref(refname, oid).await
     }

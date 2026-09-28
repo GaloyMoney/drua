@@ -1010,6 +1010,39 @@ impl GitEngine {
         .map_err(|e| LibraryError::Git(format!("resolve_ref join: {e}")))?
     }
 
+    /// Refs whose name starts with `prefix`, as `(name, oid)` pairs. A
+    /// local read against this replica's clone; does not go through the
+    /// write queue.
+    #[tracing::instrument(name = "library.git.list_refs", skip_all, fields(%prefix))]
+    pub async fn list_refs(&self, prefix: &str) -> Result<Vec<(String, String)>, LibraryError> {
+        let repo_path = self.repo_path.clone();
+        let prefix = prefix.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Vec<(String, String)>, LibraryError> {
+            let repo = git2::Repository::open_bare(&repo_path)
+                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
+            Self::list_refs_blocking(&repo, &prefix)
+        })
+        .await
+        .map_err(|e| LibraryError::Git(format!("list_refs join: {e}")))?
+    }
+
+    fn list_refs_blocking(
+        repo: &git2::Repository,
+        prefix: &str,
+    ) -> Result<Vec<(String, String)>, LibraryError> {
+        let refs = repo
+            .references_glob(&format!("{prefix}*"))
+            .map_err(|e| LibraryError::Git(format!("list_refs: {e}")))?;
+        let mut out = Vec::new();
+        for r in refs {
+            let r = r.map_err(|e| LibraryError::Git(format!("list_refs: {e}")))?;
+            if let (Some(name), Some(oid)) = (r.name(), r.target()) {
+                out.push((name.to_string(), oid.to_string()));
+            }
+        }
+        Ok(out)
+    }
+
     /// Creates `refname` at `oid`, pushed immediately (see
     /// [`Self::apply_create_ref_blocking`]). Routed through the write
     /// queue like every other ref mutation, so it shares the advisory
@@ -3773,6 +3806,46 @@ mod tests {
         assert!(tree.get_path(Path::new("c.md")).is_ok());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_refs_blocking_returns_only_refs_under_the_prefix() {
+        let (origin_dir, local_dir, local_repo) = origin_and_clone("list-refs");
+        let main_oid = local_repo
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .target()
+            .unwrap();
+        local_repo
+            .reference("refs/heads/drua/a", main_oid, false, "test create")
+            .unwrap();
+        local_repo
+            .reference("refs/heads/drua/b", main_oid, false, "test create")
+            .unwrap();
+
+        let mut refs = GitEngine::list_refs_blocking(&local_repo, "refs/heads/drua/").unwrap();
+        refs.sort();
+        assert_eq!(
+            refs,
+            vec![
+                ("refs/heads/drua/a".to_string(), main_oid.to_string()),
+                ("refs/heads/drua/b".to_string(), main_oid.to_string()),
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(&origin_dir);
+        let _ = std::fs::remove_dir_all(&local_dir);
+    }
+
+    #[test]
+    fn list_refs_blocking_is_empty_when_no_ref_matches() {
+        let (origin_dir, local_dir, local_repo) = origin_and_clone("list-refs-empty");
+        assert_eq!(
+            GitEngine::list_refs_blocking(&local_repo, "refs/heads/drua/").unwrap(),
+            Vec::<(String, String)>::new()
+        );
+        let _ = std::fs::remove_dir_all(&origin_dir);
+        let _ = std::fs::remove_dir_all(&local_dir);
     }
 
     #[test]

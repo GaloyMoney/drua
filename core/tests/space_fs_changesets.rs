@@ -773,6 +773,157 @@ async fn write_against_a_rejected_changeset_is_rejected() {
 
 #[tokio::test]
 #[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn sweep_finished_refs_deletes_the_ref_of_a_rejected_changeset_whose_ref_still_exists() {
+    let (app, user) = setup("sweep_rejected").await;
+    project_with_space(&app, &user, "proj-sweep-rejected", "docs").await;
+    let cs = app
+        .changesets()
+        .draft_for(&user, Some("staged".into()), None, None)
+        .await
+        .expect("open changeset");
+    space_fs(&app)
+        .write_file(&user, "draft:docs/a.md", "staged\n".into())
+        .await
+        .expect("write_file dispatch")
+        .expect("space path");
+
+    let pool = pool().await;
+    force_submit(&pool, cs.id, 606).await;
+
+    // Mark Rejected through the entity and repo directly, bypassing
+    // `mark_rejected_in_op`'s own best-effort `delete_ref` — the ref must
+    // still be there for the sweep to find.
+    let repo = ChangesetRepo::new(&pool);
+    let mut op = repo.begin_op().await.expect("begin op");
+    let mut rejected = repo
+        .find_by_id_in_op(&mut op, cs.id)
+        .await
+        .expect("find changeset");
+    rejected
+        .mark_rejected(606)
+        .expect("mark rejected")
+        .did_execute();
+    repo.update_in_op(&mut op, &mut rejected)
+        .await
+        .expect("update changeset");
+    op.commit().await.expect("commit op");
+
+    let before = app
+        .library()
+        .resolve_ref(&cs.git_ref())
+        .await
+        .expect("resolve ref");
+    assert!(before.is_some(), "ref must still exist before the sweep");
+
+    app.changesets().sweep_finished_refs().await.expect("sweep");
+
+    let after = app
+        .library()
+        .resolve_ref(&cs.git_ref())
+        .await
+        .expect("resolve ref");
+    assert!(after.is_none(), "sweep must delete the leftover ref");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn sweep_finished_refs_leaves_open_and_submitted_changesets_alone() {
+    let (app, user) = setup("sweep_live").await;
+    project_with_space(&app, &user, "proj-sweep-live", "docs").await;
+
+    let open_cs = app
+        .changesets()
+        .draft_for(&user, Some("still open".into()), None, None)
+        .await
+        .expect("open changeset");
+    let submitted_cs = app
+        .changesets()
+        .draft_for(&user, Some("still submitted".into()), None, None)
+        .await
+        .expect("open changeset");
+    let fs = space_fs(&app);
+    fs.write_file(&user, "draft:docs/a.md", "open work\n".into())
+        .await
+        .expect("write_file dispatch")
+        .expect("space path");
+    fs.write_file(
+        &user,
+        &format!("space:docs@{}/a.md", submitted_cs.id),
+        "submitted work\n".into(),
+    )
+    .await
+    .expect("write_file dispatch")
+    .expect("space path");
+
+    let pool = pool().await;
+    force_submit(&pool, submitted_cs.id, 707).await;
+
+    app.changesets().sweep_finished_refs().await.expect("sweep");
+
+    assert!(
+        app.library()
+            .resolve_ref(&open_cs.git_ref())
+            .await
+            .expect("resolve ref")
+            .is_some(),
+        "sweep must leave an Open changeset's ref alone"
+    );
+    assert!(
+        app.library()
+            .resolve_ref(&submitted_cs.git_ref())
+            .await
+            .expect("resolve ref")
+            .is_some(),
+        "sweep must leave a Submitted changeset's ref alone"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn sweep_finished_refs_leaves_unaccounted_and_unparseable_refs_alone() {
+    let (app, user) = setup("sweep_unaccounted").await;
+    project_with_space(&app, &user, "proj-sweep-unaccounted", "docs").await;
+
+    let main_oid = app
+        .library()
+        .resolve_ref("refs/heads/main")
+        .await
+        .expect("resolve main")
+        .expect("main exists");
+
+    let no_row_ref = "refs/heads/drua/00000000-0000-0000-0000-000000000000";
+    let unparseable_ref = "refs/heads/drua/not-a-uuid";
+    app.library()
+        .create_ref(no_row_ref, &main_oid)
+        .await
+        .expect("create ref with no changeset row");
+    app.library()
+        .create_ref(unparseable_ref, &main_oid)
+        .await
+        .expect("create ref with an unparseable name");
+
+    app.changesets().sweep_finished_refs().await.expect("sweep");
+
+    assert!(
+        app.library()
+            .resolve_ref(no_row_ref)
+            .await
+            .expect("resolve ref")
+            .is_some(),
+        "sweep must not delete a drua/ ref with no changeset row"
+    );
+    assert!(
+        app.library()
+            .resolve_ref(unparseable_ref)
+            .await
+            .expect("resolve ref")
+            .is_some(),
+        "sweep must not delete a drua/ ref whose name doesn't parse"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
 async fn glob_and_grep_match_relative_to_the_anchored_path() {
     let (app, user) = setup("glob_anchor").await;
     let agent = project_with_space(&app, &user, "proj-glob-anchor", "docs").await;

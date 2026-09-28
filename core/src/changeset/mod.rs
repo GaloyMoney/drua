@@ -25,6 +25,9 @@ use crate::primitives::*;
 /// least-recently-used one.
 const TOUCHED_CACHE_CAP: usize = 1024;
 
+/// Prefix of every changeset draft ref, matching [`Changeset::git_ref_for`].
+const DRUA_REF_PREFIX: &str = "refs/heads/drua/";
+
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct ChangesetConfig {
     /// How often the GitHub PR-close poll runs. Default 60s.
@@ -896,6 +899,70 @@ impl Changesets {
         }
         Audit::record_action_if_unset("changeset.observe_rejected");
         Audit::record_changeset_id(id);
+        Ok(())
+    }
+
+    /// Deletes the ref of every finished (terminal-status) changeset still
+    /// found under [`DRUA_REF_PREFIX`]. Driven by the refs that exist,
+    /// rather than by scanning every finished changeset — the backstop
+    /// for the best-effort `delete_ref` calls in `mark_rejected_in_op`,
+    /// `mark_merged_in_op`, `discard` and `apply`, any of which can leave
+    /// a ref behind if the delete itself fails.
+    #[instrument(name = "domain.changeset.sweep_finished_refs", skip(self))]
+    pub async fn sweep_finished_refs(&self) -> Result<(), ChangesetError> {
+        self.library.fetch_and_head().await?;
+        let refs = self.library.list_refs(DRUA_REF_PREFIX).await?;
+        let mut deleted = 0usize;
+        for (refname, _oid) in refs {
+            let Some(id_str) = refname.strip_prefix(DRUA_REF_PREFIX) else {
+                continue;
+            };
+            let Ok(id) = id_str.parse::<ChangesetId>() else {
+                tracing::debug!(
+                    %refname,
+                    "sweep_finished_refs: ref name doesn't parse as a changeset id; skipping"
+                );
+                continue;
+            };
+            let cs = match self.repo.find_by_id(id).await {
+                Ok(cs) => cs,
+                Err(e) if e.was_not_found() => {
+                    tracing::warn!(
+                        changeset_id = %id,
+                        %refname,
+                        "sweep_finished_refs: no changeset row for this ref; leaving it alone"
+                    );
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        changeset_id = %id,
+                        "sweep_finished_refs: lookup failed; will retry next tick"
+                    );
+                    continue;
+                }
+            };
+            if !cs.status.is_terminal() {
+                continue;
+            }
+            if let Err(e) = self.library.delete_ref(&refname, true).await {
+                tracing::warn!(
+                    error = %e,
+                    changeset_id = %id,
+                    %refname,
+                    "sweep_finished_refs: delete_ref failed; will retry next tick"
+                );
+                continue;
+            }
+            deleted += 1;
+        }
+        if deleted > 0 {
+            tracing::info!(
+                deleted,
+                "sweep_finished_refs: deleted leftover refs of finished changesets"
+            );
+        }
         Ok(())
     }
 

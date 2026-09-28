@@ -123,6 +123,9 @@ impl ChangesetPrPollRunner {
                 );
             }
         }
+        if let Err(e) = self.changesets.sweep_finished_refs().await {
+            tracing::warn!(error = %e, "changeset.pr_poll: sweep_finished_refs failed; will retry next tick");
+        }
         Ok(())
     }
 }
