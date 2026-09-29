@@ -496,10 +496,14 @@ impl DeltaSynthesizer {
                 finish_reason: Some(reason.clone()),
                 upstream_error: self.upstream_error.take(),
             });
-        } else if chunk.error.is_some() {
+        } else if chunk.error.is_some() && !self.done_emitted {
             // A mid-stream upstream failure: an `error` object with no
             // `finish_reason` on any choice (or no choice at all). D1/D2 —
-            // record it as incomplete rather than dropping it.
+            // record it as incomplete rather than dropping it. Gated on
+            // `done_emitted` so a stray error chunk arriving after a
+            // normal finish_reason chunk can't overwrite the completed
+            // stop with `stop_reason: None` (StreamAccumulator applies
+            // whichever `Done` it sees last).
             deltas.extend(self.drain_pending_usage());
             self.log_incomplete_stream(None);
             self.done_emitted = true;
@@ -935,6 +939,39 @@ mod tests {
                 upstream_error: None,
             }
         )));
+    }
+
+    /// Bugbot finding: a stray `error` chunk arriving after the stream
+    /// already finished normally must not emit a second `Done` — doing so
+    /// would overwrite the completed `stop_reason` with `None` and store a
+    /// finished reply as an incomplete `Error` turn.
+    #[test]
+    fn synthesizer_ignores_trailing_error_after_normal_completion() {
+        let mut synth = DeltaSynthesizer::new();
+
+        synth
+            .process_chunk(r#"{"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#)
+            .unwrap();
+        let done = synth
+            .process_chunk(
+                r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":1}}"#,
+            )
+            .unwrap();
+        assert!(done.iter().any(|d| matches!(
+            d,
+            StreamDelta::Done {
+                stop_reason: Some(StopReason::EndTurn),
+                ..
+            }
+        )));
+
+        let trailing = synth
+            .process_chunk(r#"{"error":{"code":500,"message":"trailing garbage"}}"#)
+            .unwrap();
+        assert!(
+            trailing.is_empty(),
+            "a trailing error after a normal finish must not emit anything: {trailing:?}"
+        );
     }
 
     #[test]
