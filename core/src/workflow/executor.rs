@@ -1040,15 +1040,16 @@ impl Executor {
     /// conversation going long enough for that to happen. A turn that
     /// closes empty — a tool-less `Stop`, or an incomplete stream
     /// recorded as `Error` (D1/D2; a `Thinking`-only turn counts as
-    /// empty too) — is continued the same way, up to
-    /// `MAX_CONSECUTIVE_EMPTY_TURNS` *consecutive* empty turns on the
+    /// empty too) — is continued the same way, up to the breaker's own
+    /// `consecutive_empty_turns` *consecutive* empty turns on the
     /// session's own count (D6): a real tool call in between resets the
     /// streak, so a run that alternates empty turns with progress never
     /// exhausts this budget on that alone. `MAX_EMPTY_TURN_CONTINUATIONS`
-    /// bounds the total cost regardless. Two consecutive empty turns also
-    /// trip the session breaker, which advances the model chain when a
-    /// fallback exists (D7) — this loop resets its own counters on that
-    /// and simply keeps going. Once the agent finishes a turn without
+    /// bounds the total cost regardless. Reaching that same
+    /// `consecutive_empty_turns` threshold also trips the session
+    /// breaker, which advances the model chain when a fallback exists
+    /// (D7) — this loop resets its own counters on that and simply keeps
+    /// going. Once the agent finishes a turn without
     /// calling `submit_output` for any OTHER reason (a plain text
     /// reply, or an empty turn past its budget), retry once with
     /// `tool_choice` forced to the synthetic tool. After a second miss
@@ -1067,22 +1068,18 @@ impl Executor {
         const EMPTY_STOP_CONTINUATION: &str =
             "Your previous turn ended without any text or tool call. Continue from where \
              you were: make the next tool call now.";
-        // Mirrors the session breaker's own `consecutive_empty_turns`
-        // default (D6) — the executor's per-turn ceiling and the
-        // breaker's trip threshold are the same budget, read from two
-        // different vantage points.
-        const MAX_CONSECUTIVE_EMPTY_TURNS: usize = 2;
         // Bounds the total cost of empty-turn continuations across a
         // step regardless of how the streak resets, replacing #515's flat
         // `MAX_EMPTY_STOP_CONTINUATIONS` counter (D6).
         const MAX_EMPTY_TURN_CONTINUATIONS: usize = 6;
 
-        let limit = self
-            .agents
-            .breaker_config(agent.id)
-            .await?
-            .consecutive_max_tokens
-            .max(1);
+        let breaker_config = self.agents.breaker_config(agent.id).await?;
+        let limit = breaker_config.consecutive_max_tokens.max(1);
+        // Read, not hardcoded: this must be the same threshold the
+        // session breaker trips on (D6), or a `consecutive_empty_turns`
+        // configured above the executor's own ceiling would force-nudge
+        // before the breaker ever gets a chance to advance the chain.
+        let empty_limit = breaker_config.consecutive_empty_turns.max(1);
         let mut next_prompt = Some(prompt);
         let mut continuations = 0usize;
         let mut empty_continuations = 0usize;
@@ -1124,7 +1121,7 @@ impl Executor {
                     stop_reason: StopReason::Stop | StopReason::Error,
                     is_empty: true,
                     trailing_empty,
-                }) if trailing_empty <= MAX_CONSECUTIVE_EMPTY_TURNS
+                }) if trailing_empty <= empty_limit
                     && empty_continuations < MAX_EMPTY_TURN_CONTINUATIONS =>
                 {
                     empty_continuations += 1;

@@ -1854,3 +1854,84 @@ async fn hard_llm_failure_errors_the_step_without_reaching_continuation_logic() 
         "reason: {reason}"
     );
 }
+
+/// Bugbot finding: the executor's empty-turn ceiling must read
+/// `breaker_config.consecutive_empty_turns`, not a hardcoded value —
+/// they're documented as the same budget (D6). With the threshold
+/// configured above the old hardcoded 2, three consecutive incomplete
+/// turns must all be plain continuations: the third turn both stays
+/// within the executor's (now correctly 3) ceiling AND simultaneously
+/// trips the session breaker, advancing the chain — so the fallback's
+/// first turn must land as a normal continuation, not a forced nudge.
+#[tokio::test]
+async fn executor_respects_a_raised_consecutive_empty_turns_threshold() {
+    let pool = pool().await;
+    let primary = "claude-haiku-4-5-20251001".to_string();
+    let fallback = "claude-haiku-4-5-fallback".to_string();
+    let chain = ModelChain::new(primary.clone()).with_fallback(fallback.clone());
+    let breaker = BreakerConfig {
+        consecutive_empty_turns: 3,
+        ..BreakerConfig::default()
+    };
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx) =
+        build_stack(&pool, chain.clone(), breaker).await;
+
+    let (run_id, _) = seed_one_step_run(
+        &skills,
+        &definitions,
+        &runs,
+        &sub,
+        project_id,
+        chain,
+        "Say hi.",
+    )
+    .await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move { executor.run(run_id, cancel).await });
+
+    for i in 0..3 {
+        let request = recv_prompt(&mut prompt_rx, &format!("primary prompt #{i}")).await;
+        assert_eq!(
+            request.prompt.chain.primary.name, primary,
+            "turn {i} should still be on the primary model"
+        );
+        assert!(
+            matches!(request.prompt.tool_choice, None | Some(ToolChoice::Auto)),
+            "turn {i} must not be forced before the configured threshold is reached: {:?}",
+            request.prompt.tool_choice
+        );
+        request
+            .response_channel
+            .send(Ok(PromptResult::Complete(incomplete_response())))
+            .unwrap_or_else(|_| panic!("send response #{i}"));
+    }
+
+    let fourth = recv_prompt(&mut prompt_rx, "fourth prompt request after chain advance").await;
+    assert_eq!(
+        fourth.prompt.chain.primary.name, fallback,
+        "three consecutive incomplete turns should have tripped the breaker"
+    );
+    assert!(
+        matches!(fourth.prompt.tool_choice, None | Some(ToolChoice::Auto)),
+        "the fallback's first turn must be a normal continuation, not a forced nudge: {:?}",
+        fourth.prompt.tool_choice
+    );
+    fourth
+        .response_channel
+        .send(Ok(PromptResult::Complete(submit_output_response(
+            "tu_1",
+            serde_json::json!({"success": true, "output": "recovered on fallback"}),
+        ))))
+        .expect("send response");
+
+    handle.await.expect("join").expect("run succeeds");
+
+    assert!(
+        prompt_rx.try_recv().is_err(),
+        "no forced nudge should have been sent"
+    );
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(run.state, WorkflowRunState::Succeeded);
+}
