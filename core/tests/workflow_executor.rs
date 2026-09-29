@@ -1188,3 +1188,113 @@ async fn empty_stop_and_max_tokens_budgets_do_not_starve_each_other() {
     let run = runs.find_by_id(run_id).await.expect("reload run");
     assert_eq!(run.state, WorkflowRunState::Succeeded);
 }
+
+/// Bugbot review of PR #515 (inline comment on 87f5c173,
+/// executor.rs:1092): `empty_stops` was not reset alongside
+/// `continuations` when the breaker advances the model chain, so a
+/// fallback model inherited whatever empty-stop budget the primary had
+/// already spent. Mirrors
+/// `fallback_gets_its_own_continuation_budget_after_chain_advance`, but
+/// spends the PRIMARY's empty-stop budget first (2 empty stops), then
+/// trips the breaker via 3 consecutive `MaxTokens` stops to advance the
+/// chain, then gives the FALLBACK's first turn an empty stop.
+/// Demonstrated RED against the unpatched reset: `empty_stops` stays at
+/// 2 (its own limit) after the advance, so the fallback's first empty
+/// stop hits `empty_stops < MAX_EMPTY_STOP_CONTINUATIONS` as `2 < 2`
+/// (false) and goes straight to the forced nudge instead of getting its
+/// own continuation.
+#[tokio::test]
+async fn empty_stop_budget_resets_on_chain_advance() {
+    let pool = pool().await;
+    let primary = "claude-haiku-4-5-20251001".to_string();
+    let fallback = "claude-haiku-4-5-fallback".to_string();
+    let chain = ModelChain::new(primary.clone()).with_fallback(fallback.clone());
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx) =
+        build_stack(&pool, chain.clone(), BreakerConfig::default()).await;
+
+    let (run_id, _) = seed_one_step_run(
+        &skills,
+        &definitions,
+        &runs,
+        &sub,
+        project_id,
+        chain,
+        "Do a very long plan before your first tool call.",
+    )
+    .await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move { executor.run(run_id, cancel).await });
+
+    // Primary: spend its whole empty-stop budget (2 empty stops) first.
+    for i in 0..2 {
+        let request = recv_prompt(&mut prompt_rx, &format!("primary empty-stop prompt #{i}")).await;
+        assert_eq!(
+            request.prompt.chain.primary.name, primary,
+            "turn {i} should still be on the primary model"
+        );
+        request
+            .response_channel
+            .send(Ok(PromptResult::Complete(empty_stop_response())))
+            .unwrap_or_else(|_| panic!("send response #{i}"));
+    }
+
+    // Then trip the breaker with 3 consecutive MaxTokens stops, advancing
+    // the chain to the fallback (same mechanism as
+    // `fallback_gets_its_own_continuation_budget_after_chain_advance`).
+    for i in 0..3 {
+        let request = recv_prompt(&mut prompt_rx, &format!("primary max_tokens prompt #{i}")).await;
+        assert_eq!(
+            request.prompt.chain.primary.name, primary,
+            "turn {i} should still be on the primary model"
+        );
+        request
+            .response_channel
+            .send(Ok(PromptResult::Complete(max_tokens_response())))
+            .unwrap_or_else(|_| panic!("send response #{i}"));
+    }
+
+    // The fallback's first turn is ITSELF an empty stop. If `empty_stops`
+    // wasn't reset alongside `continuations` on chain advance, this
+    // immediately exhausts a budget the fallback never got to spend, and
+    // the next prompt is the forced nudge instead of a plain continuation.
+    let fallback_first = recv_prompt(&mut prompt_rx, "fallback first prompt").await;
+    assert_eq!(fallback_first.prompt.chain.primary.name, fallback);
+    fallback_first
+        .response_channel
+        .send(Ok(PromptResult::Complete(empty_stop_response())))
+        .expect("send response");
+
+    let fallback_second = recv_prompt(&mut prompt_rx, "fallback second prompt").await;
+    assert!(
+        matches!(
+            fallback_second.prompt.tool_choice,
+            None | Some(ToolChoice::Auto)
+        ),
+        "fallback's first empty stop must not force submit_output: {:?}",
+        fallback_second.prompt.tool_choice
+    );
+    let text = last_user_text(&fallback_second.prompt);
+    assert!(
+        text.contains("ended without any text or tool call"),
+        "must be the plain empty-stop continuation, not the forced nudge: {text}"
+    );
+
+    fallback_second
+        .response_channel
+        .send(Ok(PromptResult::Complete(submit_output_response(
+            "tu_1",
+            serde_json::json!({"success": true, "output": "recovered"}),
+        ))))
+        .expect("send response");
+
+    handle.await.expect("join").expect("run succeeds");
+
+    assert!(
+        prompt_rx.try_recv().is_err(),
+        "no forced nudge should have been sent"
+    );
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(run.state, WorkflowRunState::Succeeded);
+}

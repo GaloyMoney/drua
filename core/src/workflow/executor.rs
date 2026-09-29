@@ -1085,9 +1085,14 @@ impl Executor {
             // the chain (a fresh thread starts). Mirror that here: a flat
             // `continuations` counter that never reset would let the
             // primary's max_tokens streak exhaust the fallback's budget
-            // before the fallback gets a single turn.
+            // before the fallback gets a single turn. `empty_stops` is a
+            // separate budget (D3) but the same reasoning applies to it —
+            // reset both together, or a fallback whose first turn is an
+            // empty stop would inherit whatever the primary had already
+            // spent, sometimes leaving it none at all.
             if self.agents.chain_just_advanced(agent.id).await? {
                 continuations = 0;
+                empty_stops = 0;
             }
             match self.agents.last_response_status(agent.id).await? {
                 Some(LastResponseStatus {
