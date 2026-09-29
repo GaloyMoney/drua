@@ -497,6 +497,10 @@ chain:
             defaults.consecutive_max_tokens
         );
         assert_eq!(
+            role.breaker.consecutive_empty_turns,
+            defaults.consecutive_empty_turns
+        );
+        assert_eq!(
             role.breaker.max_turns_per_prompt,
             defaults.max_turns_per_prompt
         );

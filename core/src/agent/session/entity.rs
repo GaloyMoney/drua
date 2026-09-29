@@ -194,6 +194,28 @@ enum BreakerTrip {
     ConsecutiveMaxTokens {
         n: usize,
     },
+    ConsecutiveEmptyTurns {
+        n: usize,
+    },
+}
+
+/// Content-only emptiness rule shared by [`AgentSession::last_response_status`]
+/// and [`is_empty_turn`]: no `Text` block with non-whitespace text, no
+/// `ToolUse` block. A `Thinking` block does not count as content.
+fn content_is_empty(content: &[AssistantBlock]) -> bool {
+    !content.iter().any(|b| match b {
+        AssistantBlock::Text { text } => !text.trim().is_empty(),
+        AssistantBlock::ToolUse { .. } => true,
+        AssistantBlock::Thinking { .. } => false,
+    })
+}
+
+/// A turn counts toward the empty-turn breaker (D5) when it closed on
+/// `Stop` or `Error` with no content — extending #515's empty-`Stop`
+/// definition to the `Error` turns this PR now records for an incomplete
+/// stream.
+fn is_empty_turn(stop_reason: &StopReason, content: &[AssistantBlock]) -> bool {
+    matches!(stop_reason, StopReason::Stop | StopReason::Error) && content_is_empty(content)
 }
 
 fn truncate_on_char_boundary(s: &str, max_bytes: usize) -> String {
@@ -578,19 +600,48 @@ impl AgentSession {
     pub fn last_response_status(&self) -> Option<LastResponseStatus> {
         self.events.iter_all().rev().find_map(|e| match e {
             AgentSessionEvent::AssistantResponseReceived {
+                thread_id,
                 stop_reason,
                 content,
                 ..
             } => Some(LastResponseStatus {
                 stop_reason: stop_reason.clone(),
-                is_empty: !content.iter().any(|b| match b {
-                    AssistantBlock::Text { text } => !text.trim().is_empty(),
-                    AssistantBlock::ToolUse { .. } => true,
-                    AssistantBlock::Thinking { .. } => false,
-                }),
+                is_empty: content_is_empty(content),
+                trailing_empty: self.trailing_empty_turns(*thread_id),
             }),
             _ => None,
         })
+    }
+
+    /// Consecutive empty turns (D5) closed in a row on `thread_id`, walked
+    /// back from the newest event. Modelled on
+    /// [`Self::detect_consecutive_max_tokens`]: stops at this thread's
+    /// `ThreadStarted` or the first non-empty response on it, skipping
+    /// every other event type so the continuation's `UserInputAdded` /
+    /// `PromptSent` between two empty turns doesn't break the streak.
+    fn trailing_empty_turns(&self, thread_id: SessionThreadId) -> usize {
+        let mut count = 0usize;
+        for event in self.events.iter_all().rev() {
+            match event {
+                AgentSessionEvent::ThreadStarted { thread_id: tid, .. } if *tid == thread_id => {
+                    break;
+                }
+                AgentSessionEvent::AssistantResponseReceived {
+                    thread_id: tid,
+                    stop_reason,
+                    content,
+                    ..
+                } if *tid == thread_id => {
+                    if is_empty_turn(stop_reason, content) {
+                        count += 1;
+                    } else {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        count
     }
 
     pub fn breaker_config(&self) -> &BreakerConfig {
@@ -931,6 +982,9 @@ impl AgentSession {
             }
             BreakerTrip::ConsecutiveMaxTokens { n } => {
                 format!("{n} consecutive max_tokens stops on model {model}{suffix}")
+            }
+            BreakerTrip::ConsecutiveEmptyTurns { n } => {
+                format!("{n} consecutive empty turns on model {model}{suffix}")
             }
         }
     }
@@ -1310,6 +1364,18 @@ impl AgentSession {
         if self.breaker_config.enabled && is_max_tokens {
             if let Some(trip) = self.detect_consecutive_max_tokens(thread_id) {
                 self.advance_chain_or_fail(trip)?;
+            }
+        }
+
+        if self.breaker_config.enabled {
+            let n = self.breaker_config.consecutive_empty_turns;
+            // D7: only advance, never fail the step. With no fallback
+            // `can_advance_chain()` is false, so `advance_chain_or_fail`
+            // is never reached and can only take its advancing branch —
+            // the forced nudge is the better last resort when the chain
+            // is exhausted.
+            if n > 0 && self.can_advance_chain() && self.trailing_empty_turns(thread_id) >= n {
+                self.advance_chain_or_fail(BreakerTrip::ConsecutiveEmptyTurns { n })?;
             }
         }
 
@@ -2192,6 +2258,7 @@ mod tests {
             Some(LastResponseStatus {
                 stop_reason: StopReason::Stop,
                 is_empty: true,
+                trailing_empty: 1,
             })
         );
     }
@@ -2221,6 +2288,7 @@ mod tests {
             Some(LastResponseStatus {
                 stop_reason: StopReason::Stop,
                 is_empty: true,
+                trailing_empty: 1,
             }),
             "a Thinking block must not count as content"
         );
@@ -2250,6 +2318,7 @@ mod tests {
             Some(LastResponseStatus {
                 stop_reason: StopReason::Stop,
                 is_empty: true,
+                trailing_empty: 1,
             }),
             "whitespace-only text must count as empty"
         );
@@ -2279,6 +2348,7 @@ mod tests {
             Some(LastResponseStatus {
                 stop_reason: StopReason::Stop,
                 is_empty: false,
+                trailing_empty: 0,
             })
         );
     }
@@ -2333,8 +2403,174 @@ mod tests {
             Some(LastResponseStatus {
                 stop_reason: StopReason::Stop,
                 is_empty: true,
+                trailing_empty: 1,
             }),
             "must read the newest response off the new thread, not the old thread's Length"
+        );
+    }
+
+    /// Handoff §4.3: `trailing_empty_turns` counts across the interleaved
+    /// `UserInputAdded`/`PromptSent` a continuation produces — those event
+    /// types must not break the streak. No fallback is configured, so the
+    /// breaker must not trip and `assistant_response_received` must not
+    /// error (D7).
+    #[test]
+    fn trailing_empty_turns_counts_across_interleaved_user_input() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![],
+        };
+        let mut session = started_session(chain, BreakerConfig::default());
+
+        for i in 0..2 {
+            let thread_id = session.current_main_thread_id().unwrap();
+            let result = session.assistant_response_received(
+                thread_id,
+                vec![],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            );
+            assert!(result.is_ok(), "turn {i}: {result:?}");
+            session
+                .add_user_input(TargetThread::Main, user_source(), "continue".into())
+                .unwrap();
+            advance_turn(&mut session);
+        }
+
+        assert_eq!(
+            session.last_response_status(),
+            Some(LastResponseStatus {
+                stop_reason: StopReason::Stop,
+                is_empty: true,
+                trailing_empty: 2,
+            })
+        );
+        assert_eq!(
+            session.last_chain_advance(),
+            None,
+            "no fallback exists; the breaker must not have advanced anything"
+        );
+    }
+
+    /// Handoff §4.3: a non-empty turn breaks the streak — the count for the
+    /// newest response never looks past it.
+    #[test]
+    fn trailing_empty_turns_stops_at_a_non_empty_turn() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![],
+        };
+        let mut session = started_session(chain, BreakerConfig::default());
+
+        let thread_id = session.current_main_thread_id().unwrap();
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+        session
+            .add_user_input(TargetThread::Main, user_source(), "continue".into())
+            .unwrap();
+        advance_turn(&mut session);
+
+        let thread_id = session.current_main_thread_id().unwrap();
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::Text {
+                    text: "made progress".into(),
+                }],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            session.last_response_status(),
+            Some(LastResponseStatus {
+                stop_reason: StopReason::Stop,
+                is_empty: false,
+                trailing_empty: 0,
+            }),
+            "a real reply must reset the streak, not extend it"
+        );
+    }
+
+    /// Handoff §4.3 / D7: two consecutive empty turns trip the breaker when
+    /// a fallback exists, advancing the model chain — and the streak
+    /// starts over at zero on the refreshed thread the advance spawns,
+    /// proving `trailing_empty_turns` stops at `ThreadStarted` rather than
+    /// reading across the boundary.
+    #[test]
+    fn consecutive_empty_turns_trip_breaker_and_advance_chain_with_fallback() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![model_defaults("fallback-model")],
+        };
+        let mut session = started_session(chain, BreakerConfig::default());
+
+        let thread_id = session.current_main_thread_id().unwrap();
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+        session
+            .add_user_input(TargetThread::Main, user_source(), "continue".into())
+            .unwrap();
+        advance_turn(&mut session);
+
+        let thread_id = session.current_main_thread_id().unwrap();
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+
+        let (reason, from_model, to_model) =
+            session.last_chain_advance().expect("chain should advance");
+        assert!(reason.contains("consecutive empty turns"), "{reason}");
+        assert_eq!(from_model, "primary-model");
+        assert_eq!(to_model, "fallback-model");
+        assert_eq!(session.model(), "fallback-model");
+
+        session
+            .add_user_input(TargetThread::Main, user_source(), "continue".into())
+            .unwrap();
+        advance_turn(&mut session);
+
+        let thread_id = session.current_main_thread_id().unwrap();
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+        assert_eq!(
+            session.last_response_status(),
+            Some(LastResponseStatus {
+                stop_reason: StopReason::Stop,
+                is_empty: true,
+                trailing_empty: 1,
+            }),
+            "the streak must start at zero on the refreshed thread"
         );
     }
 

@@ -91,6 +91,9 @@ pub struct BreakerConfig {
     pub consecutive_error_turns: usize,
     pub identical_failing_calls: usize,
     pub consecutive_max_tokens: usize,
+    /// Consecutive empty turns (D5) on one thread that advance the model
+    /// chain (D7). `0` disables it.
+    pub consecutive_empty_turns: usize,
     pub max_turns_per_prompt: usize,
 }
 
@@ -101,6 +104,7 @@ impl Default for BreakerConfig {
             consecutive_error_turns: 15,
             identical_failing_calls: 3,
             consecutive_max_tokens: 3,
+            consecutive_empty_turns: 2,
             max_turns_per_prompt: 250,
         }
     }

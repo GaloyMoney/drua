@@ -1038,12 +1038,19 @@ impl Executor {
     /// itself advances the chain to a fallback (or fails the turn)
     /// once that threshold is hit, so this loop only has to keep the
     /// conversation going long enough for that to happen. A turn that
-    /// closes on an empty tool-less `Stop` (no text, no tool call — a
-    /// `Thinking`-only turn counts as empty) gets its own, smaller
-    /// continuation budget for the same reason: the model may simply
-    /// not have finished yet. Once the agent finishes a turn without
+    /// closes empty — a tool-less `Stop`, or an incomplete stream
+    /// recorded as `Error` (D1/D2; a `Thinking`-only turn counts as
+    /// empty too) — is continued the same way, up to
+    /// `MAX_CONSECUTIVE_EMPTY_TURNS` *consecutive* empty turns on the
+    /// session's own count (D6): a real tool call in between resets the
+    /// streak, so a run that alternates empty turns with progress never
+    /// exhausts this budget on that alone. `MAX_EMPTY_TURN_CONTINUATIONS`
+    /// bounds the total cost regardless. Two consecutive empty turns also
+    /// trip the session breaker, which advances the model chain when a
+    /// fallback exists (D7) — this loop resets its own counters on that
+    /// and simply keeps going. Once the agent finishes a turn without
     /// calling `submit_output` for any OTHER reason (a plain text
-    /// reply, or an empty stop past its budget), retry once with
+    /// reply, or an empty turn past its budget), retry once with
     /// `tool_choice` forced to the synthetic tool. After a second miss
     /// the step fails.
     async fn run_agent_until_submit_output(
@@ -1060,10 +1067,15 @@ impl Executor {
         const EMPTY_STOP_CONTINUATION: &str =
             "Your previous turn ended without any text or tool call. Continue from where \
              you were: make the next tool call now.";
-        // Two retries bound the extra cost at two model calls; kept
-        // separate from `continuations` (the `Length` budget) so a turn
-        // sequence that mixes both stop reasons can't starve either one.
-        const MAX_EMPTY_STOP_CONTINUATIONS: usize = 2;
+        // Mirrors the session breaker's own `consecutive_empty_turns`
+        // default (D6) — the executor's per-turn ceiling and the
+        // breaker's trip threshold are the same budget, read from two
+        // different vantage points.
+        const MAX_CONSECUTIVE_EMPTY_TURNS: usize = 2;
+        // Bounds the total cost of empty-turn continuations across a
+        // step regardless of how the streak resets, replacing #515's flat
+        // `MAX_EMPTY_STOP_CONTINUATIONS` counter (D6).
+        const MAX_EMPTY_TURN_CONTINUATIONS: usize = 6;
 
         let limit = self
             .agents
@@ -1073,7 +1085,7 @@ impl Executor {
             .max(1);
         let mut next_prompt = Some(prompt);
         let mut continuations = 0usize;
-        let mut empty_stops = 0usize;
+        let mut empty_continuations = 0usize;
         loop {
             if let Some(value) = self
                 .stream_agent_response(agent, next_prompt.take(), None, step_name, timeout_seconds)
@@ -1085,14 +1097,14 @@ impl Executor {
             // the chain (a fresh thread starts). Mirror that here: a flat
             // `continuations` counter that never reset would let the
             // primary's max_tokens streak exhaust the fallback's budget
-            // before the fallback gets a single turn. `empty_stops` is a
-            // separate budget (D3) but the same reasoning applies to it —
-            // reset both together, or a fallback whose first turn is an
-            // empty stop would inherit whatever the primary had already
+            // before the fallback gets a single turn. `empty_continuations`
+            // is a separate budget (D3) but the same reasoning applies to
+            // it — reset both together, or a fallback whose first turn is
+            // an empty turn would inherit whatever the primary had already
             // spent, sometimes leaving it none at all.
             if self.agents.chain_just_advanced(agent.id).await? {
                 continuations = 0;
-                empty_stops = 0;
+                empty_continuations = 0;
             }
             match self.agents.last_response_status(agent.id).await? {
                 Some(LastResponseStatus {
@@ -1109,14 +1121,18 @@ impl Executor {
                     next_prompt = Some(MAX_TOKENS_CONTINUATION.to_string());
                 }
                 Some(LastResponseStatus {
-                    stop_reason: StopReason::Stop,
+                    stop_reason: StopReason::Stop | StopReason::Error,
                     is_empty: true,
-                }) if empty_stops < MAX_EMPTY_STOP_CONTINUATIONS => {
-                    empty_stops += 1;
+                    trailing_empty,
+                }) if trailing_empty <= MAX_CONSECUTIVE_EMPTY_TURNS
+                    && empty_continuations < MAX_EMPTY_TURN_CONTINUATIONS =>
+                {
+                    empty_continuations += 1;
                     tracing::warn!(
                         step = step_name,
                         agent_id = %agent.id,
-                        empty_stops,
+                        empty_continuations,
+                        trailing_empty,
                         "workflow step: turn ended empty without submit_output; continuing"
                     );
                     next_prompt = Some(EMPTY_STOP_CONTINUATION.to_string());
