@@ -131,6 +131,19 @@ pub(crate) struct OpenAiStreamChunk {
     /// providers OpenRouter doesn't report for.
     #[serde(default)]
     pub provider: Option<String>,
+    /// A mid-stream upstream failure (observed from OpenRouter): a chunk
+    /// carrying this instead of, or alongside, a `finish_reason`.
+    #[serde(default)]
+    pub error: Option<OpenAiStreamError>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct OpenAiStreamError {
+    /// Gateways send this as either a number or a string.
+    #[serde(default)]
+    pub code: Option<serde_json::Value>,
+    #[serde(default)]
+    pub message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

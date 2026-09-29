@@ -8,8 +8,8 @@ use llm::StopReason;
 
 use crate::types::{
     OpenAiCacheControl, OpenAiContentBlock, OpenAiFunction, OpenAiMessage, OpenAiMessageContent,
-    OpenAiRequest, OpenAiRequestToolCall, OpenAiStreamChunk, OpenAiTool, OpenAiToolChoice,
-    OpenAiToolChoiceFunction, OpenAiToolFunction, ReasoningConfig, StreamOptions,
+    OpenAiRequest, OpenAiRequestToolCall, OpenAiStreamChunk, OpenAiStreamError, OpenAiTool,
+    OpenAiToolChoice, OpenAiToolChoiceFunction, OpenAiToolFunction, ReasoningConfig, StreamOptions,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -289,6 +289,42 @@ pub(crate) struct DeltaSynthesizer {
     /// free on retry: `drive_stream_with_retry` constructs a fresh
     /// `DeltaSynthesizer` per attempt.
     provider: Option<String>,
+    /// Set once a `Done` has been emitted, so the `[DONE]` sentinel
+    /// doesn't emit a second one when the stream ended normally.
+    done_emitted: bool,
+    /// Newest upstream error object seen, formatted as `"<code>: <message>"`.
+    /// Folded into whichever `Done` delta ends up being emitted, the same
+    /// way `provider` is folded into `Usage`.
+    upstream_error: Option<String>,
+    /// The most recent raw chunk text (or the `[DONE]` sentinel),
+    /// truncated to a bounded size, for the diagnostic log emitted when a
+    /// stream ends without a usable `finish_reason`.
+    last_chunk: String,
+}
+
+/// Bounds the `last_chunk` field kept for the "no usable finish_reason"
+/// diagnostic log — large enough to see the shape of the chunk, small
+/// enough to not bloat logs.
+const MAX_LAST_CHUNK_BYTES: usize = 2048;
+
+fn truncate_chunk(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
+}
+
+fn format_upstream_error(err: &OpenAiStreamError) -> String {
+    match (&err.code, &err.message) {
+        (Some(code), Some(message)) => format!("{code}: {message}"),
+        (Some(code), None) => code.to_string(),
+        (None, Some(message)) => message.clone(),
+        (None, None) => "upstream error".to_string(),
+    }
 }
 
 #[derive(Copy, Clone)]
@@ -310,14 +346,44 @@ impl DeltaSynthesizer {
             saw_tool_call: false,
             pending_usage: None,
             provider: None,
+            done_emitted: false,
+            upstream_error: None,
+            last_chunk: String::new(),
         }
     }
 
+    fn log_incomplete_stream(&self, finish_reason: Option<&str>) {
+        tracing::warn!(
+            finish_reason = ?finish_reason,
+            upstream_error = ?self.upstream_error,
+            upstream_provider = ?self.provider,
+            saw_text = self.saw_text,
+            saw_tool_call = self.saw_tool_call,
+            last_chunk = %self.last_chunk,
+            "openai-client: stream ended without a usable finish_reason"
+        );
+    }
+
     pub fn process_chunk(&mut self, data: &str) -> Result<Vec<StreamDelta>, String> {
+        self.last_chunk = truncate_chunk(data, MAX_LAST_CHUNK_BYTES);
+
         if data.trim() == "[DONE]" {
             // Flush any usage that arrived in a separate post-finish chunk
             // (some providers split usage into its own trailing chunk).
-            return Ok(self.drain_pending_usage());
+            let mut deltas = self.drain_pending_usage();
+            // A stream can end at `[DONE]` with no `finish_reason` chunk at
+            // all (D1/D2) — record it as incomplete rather than silently
+            // leaving the turn looking like a clean stop.
+            if !self.done_emitted {
+                self.log_incomplete_stream(None);
+                self.done_emitted = true;
+                deltas.push(StreamDelta::Done {
+                    stop_reason: None,
+                    finish_reason: None,
+                    upstream_error: self.upstream_error.take(),
+                });
+            }
+            return Ok(deltas);
         }
 
         let chunk: OpenAiStreamChunk =
@@ -325,6 +391,9 @@ impl DeltaSynthesizer {
 
         if chunk.provider.is_some() {
             self.provider = chunk.provider.clone();
+        }
+        if let Some(err) = &chunk.error {
+            self.upstream_error = Some(format_upstream_error(err));
         }
 
         let mut deltas = Vec::new();
@@ -355,11 +424,9 @@ impl DeltaSynthesizer {
             });
         }
 
-        let Some(choice) = chunk.choices.first() else {
-            return Ok(deltas);
-        };
+        let choice = chunk.choices.first();
 
-        if let Some(delta) = &choice.delta {
+        if let Some(delta) = choice.and_then(|c| c.delta.as_ref()) {
             if let Some(text) = &delta.content {
                 if !text.is_empty() {
                     self.saw_text = true;
@@ -400,7 +467,7 @@ impl DeltaSynthesizer {
             }
         }
 
-        if let Some(reason) = &choice.finish_reason {
+        if let Some(reason) = choice.and_then(|c| c.finish_reason.as_ref()) {
             // An upstream "stop" with no text and no tool calls means the
             // model returned an empty completion. Some providers (e.g. deepseek
             // via OpenRouter) do this after a tool error and leave the workflow
@@ -420,7 +487,27 @@ impl DeltaSynthesizer {
                 "tool_calls" => Some(StopReason::ToolUse),
                 _ => None,
             };
-            deltas.push(StreamDelta::Done { stop_reason });
+            if stop_reason.is_none() {
+                self.log_incomplete_stream(Some(reason));
+            }
+            self.done_emitted = true;
+            deltas.push(StreamDelta::Done {
+                stop_reason,
+                finish_reason: Some(reason.clone()),
+                upstream_error: self.upstream_error.take(),
+            });
+        } else if chunk.error.is_some() {
+            // A mid-stream upstream failure: an `error` object with no
+            // `finish_reason` on any choice (or no choice at all). D1/D2 —
+            // record it as incomplete rather than dropping it.
+            deltas.extend(self.drain_pending_usage());
+            self.log_incomplete_stream(None);
+            self.done_emitted = true;
+            deltas.push(StreamDelta::Done {
+                stop_reason: None,
+                finish_reason: None,
+                upstream_error: self.upstream_error.take(),
+            });
         }
 
         Ok(deltas)
@@ -712,6 +799,7 @@ mod tests {
             d,
             StreamDelta::Done {
                 stop_reason: Some(StopReason::EndTurn),
+                ..
             }
         )));
 
@@ -759,6 +847,92 @@ mod tests {
             d,
             StreamDelta::Done {
                 stop_reason: Some(StopReason::ToolUse),
+                ..
+            }
+        )));
+    }
+
+    /// Handoff §4.1 test 1: a chunk carrying a top-level `error` object
+    /// alongside `finish_reason: "error"` is recorded as incomplete, not
+    /// returned as `Err` — D2.
+    #[test]
+    fn synthesizer_reports_upstream_error_chunk_as_incomplete() {
+        let mut synth = DeltaSynthesizer::new();
+
+        let deltas = synth
+            .process_chunk(
+                r#"{"error":{"code":502,"message":"Provider disconnected"},"choices":[{"delta":{},"finish_reason":"error"}]}"#,
+            )
+            .expect("incomplete stream is not an Err");
+
+        let (stop_reason, finish_reason, upstream_error) = deltas
+            .iter()
+            .find_map(|d| match d {
+                StreamDelta::Done {
+                    stop_reason,
+                    finish_reason,
+                    upstream_error,
+                } => Some((*stop_reason, finish_reason.clone(), upstream_error.clone())),
+                _ => None,
+            })
+            .expect("Done delta");
+        assert_eq!(stop_reason, None);
+        assert_eq!(finish_reason.as_deref(), Some("error"));
+        assert!(
+            upstream_error
+                .as_deref()
+                .is_some_and(|e| e.contains("Provider disconnected")),
+            "got: {upstream_error:?}"
+        );
+    }
+
+    /// Handoff §4.1 test 2: an unrecognised `finish_reason` still carries
+    /// the raw string, even with no accompanying `error` object.
+    #[test]
+    fn synthesizer_reports_content_filter_finish_reason() {
+        let mut synth = DeltaSynthesizer::new();
+
+        let deltas = synth
+            .process_chunk(r#"{"choices":[{"delta":{},"finish_reason":"content_filter"}]}"#)
+            .unwrap();
+
+        assert!(deltas.iter().any(|d| matches!(
+            d,
+            StreamDelta::Done {
+                stop_reason: None,
+                finish_reason: Some(reason),
+                ..
+            } if reason == "content_filter"
+        )));
+    }
+
+    /// Handoff §4.1 test 3: a usage chunk followed by `[DONE]`, with no
+    /// `finish_reason` chunk ever arriving, still yields the usage delta
+    /// and a `Done` with both new fields `None` — the "stream just
+    /// stopped" case (D1).
+    #[test]
+    fn synthesizer_done_at_sentinel_with_no_finish_reason_chunk() {
+        let mut synth = DeltaSynthesizer::new();
+
+        synth
+            .process_chunk(r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":3}}"#)
+            .unwrap();
+        let deltas = synth.process_chunk("[DONE]").unwrap();
+
+        assert!(deltas.iter().any(|d| matches!(
+            d,
+            StreamDelta::Usage {
+                input_tokens: 10,
+                output_tokens: 3,
+                ..
+            }
+        )));
+        assert!(deltas.iter().any(|d| matches!(
+            d,
+            StreamDelta::Done {
+                stop_reason: None,
+                finish_reason: None,
+                upstream_error: None,
             }
         )));
     }
@@ -791,7 +965,8 @@ mod tests {
         assert!(mid.iter().any(|d| matches!(
             d,
             StreamDelta::Done {
-                stop_reason: Some(StopReason::EndTurn)
+                stop_reason: Some(StopReason::EndTurn),
+                ..
             }
         )));
         // Usage hasn't arrived yet, so it must not be in `mid`.
@@ -964,7 +1139,9 @@ mod tests {
             d,
             StreamDelta::Done {
                 stop_reason: Some(StopReason::EndTurn),
-            }
+                finish_reason: Some(reason),
+                ..
+            } if reason == "stop"
         )));
     }
 
@@ -1131,6 +1308,36 @@ mod tests {
                 .get("ttl")
                 .is_none(),
             "default TTL should be omitted from wire JSON"
+        );
+    }
+
+    /// Handoff §4.1 test 6: a `StreamAccumulator` fed the deltas from an
+    /// upstream-error chunk carries both new fields through to the final
+    /// `PromptResponse`.
+    #[test]
+    fn stream_accumulator_carries_finish_reason_and_upstream_error() {
+        let mut synth = DeltaSynthesizer::new();
+        let deltas = synth
+            .process_chunk(
+                r#"{"error":{"code":502,"message":"Provider disconnected"},"choices":[{"delta":{},"finish_reason":"error"}]}"#,
+            )
+            .expect("incomplete stream is not an Err");
+
+        let mut acc = llm::stream::StreamAccumulator::new();
+        for delta in &deltas {
+            acc.process(delta);
+        }
+        let response = acc.finish();
+
+        assert_eq!(response.stop_reason, None);
+        assert_eq!(response.finish_reason.as_deref(), Some("error"));
+        assert!(
+            response
+                .upstream_error
+                .as_deref()
+                .is_some_and(|e| e.contains("Provider disconnected")),
+            "got: {:?}",
+            response.upstream_error
         );
     }
 }

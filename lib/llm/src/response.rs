@@ -17,6 +17,16 @@ pub struct PromptResponse {
     /// per-chunk `provider`). `None` when the client didn't report one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_provider: Option<String>,
+    /// Raw wire finish reason (e.g. `"stop"`, `"content_filter"`,
+    /// `"error"`), independent of whether it mapped to a known
+    /// `StopReason`. `None` when the stream ended with no finish reason
+    /// at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+    /// Set when the stream ended on a provider-reported error rather than
+    /// a normal finish.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]

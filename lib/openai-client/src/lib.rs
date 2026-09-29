@@ -248,6 +248,8 @@ impl OpenAiClient {
             usage.cost_usd = tracing::field::Empty,
             usage.upstream_inference_cost_usd = tracing::field::Empty,
             upstream_provider = tracing::field::Empty,
+            finish_reason = tracing::field::Empty,
+            upstream_error = tracing::field::Empty,
             stream.delta_count = tracing::field::Empty,
         );
         if let Some(agent_id) = &prompt.trace_agent_id {
@@ -302,6 +304,8 @@ async fn drive_stream_with_retry(
     let mut transient_retries: u32 = 0;
     let mut delta_count: u64 = 0;
     let mut usage_seen: Option<UsageSnapshot> = None;
+    let mut finish_reason_seen: Option<String> = None;
+    let mut upstream_error_seen: Option<String> = None;
     let mut ttfb_recorded = false;
 
     loop {
@@ -341,6 +345,15 @@ async fn drive_stream_with_retry(
                                 upstream_inference_cost_usd: *upstream_inference_cost_usd,
                                 upstream_provider: upstream_provider.clone(),
                             });
+                        }
+                        if let StreamDelta::Done {
+                            finish_reason,
+                            upstream_error,
+                            ..
+                        } = &delta
+                        {
+                            finish_reason_seen = finish_reason.clone();
+                            upstream_error_seen = upstream_error.clone();
                         }
                         tx.try_send(Ok(delta))
                             .map_err(|e| SseError::Processing(e.to_string()))?;
@@ -441,6 +454,12 @@ async fn drive_stream_with_retry(
         if let Some(p) = &u.upstream_provider {
             span.record("upstream_provider", p.as_str());
         }
+    }
+    if let Some(reason) = &finish_reason_seen {
+        span.record("finish_reason", reason.as_str());
+    }
+    if let Some(error) = &upstream_error_seen {
+        span.record("upstream_error", error.as_str());
     }
 }
 

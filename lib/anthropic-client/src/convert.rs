@@ -202,6 +202,29 @@ fn convert_assistant_block(block: &AssistantBlock) -> AnthropicContent {
     }
 }
 
+/// The wire value `stop_reason` carries, for [`PromptResponse::finish_reason`]
+/// — Anthropic's dialect of the raw finish string OpenAI-compatible
+/// providers send on `finish_reason`.
+fn raw_stop_reason(sr: AnthropicStopReason) -> &'static str {
+    match sr {
+        AnthropicStopReason::EndTurn => "end_turn",
+        AnthropicStopReason::MaxTokens => "max_tokens",
+        AnthropicStopReason::ToolUse => "tool_use",
+        AnthropicStopReason::StopSequence => "stop_sequence",
+    }
+}
+
+/// Same wire strings as [`raw_stop_reason`], for the accumulator's
+/// already-mapped [`AccumulatedStopReason`].
+fn raw_accumulated_stop_reason(sr: AccumulatedStopReason) -> &'static str {
+    match sr {
+        AccumulatedStopReason::EndTurn => "end_turn",
+        AccumulatedStopReason::MaxTokens => "max_tokens",
+        AccumulatedStopReason::ToolUse => "tool_use",
+        AccumulatedStopReason::StopSequence => "stop_sequence",
+    }
+}
+
 fn convert_tool(tool: &Tool) -> AnthropicTool {
     AnthropicTool {
         name: tool.name.clone(),
@@ -246,6 +269,11 @@ pub(crate) fn accumulated_to_response(acc: AccumulatedResponse) -> PromptRespons
         ..Default::default()
     };
 
+    let finish_reason = acc
+        .stop_reason
+        .map(raw_accumulated_stop_reason)
+        .map(str::to_string);
+
     PromptResponse {
         content,
         usage,
@@ -254,6 +282,8 @@ pub(crate) fn accumulated_to_response(acc: AccumulatedResponse) -> PromptRespons
         // Direct Anthropic, never OpenRouter — no upstream-provider
         // concept applies here.
         upstream_provider: None,
+        finish_reason,
+        upstream_error: None,
     }
 }
 
@@ -404,7 +434,12 @@ impl AnthropicDeltaConverter {
                     AnthropicStopReason::ToolUse => StopReason::ToolUse,
                     AnthropicStopReason::StopSequence => StopReason::StopSequence,
                 });
-                deltas.push(StreamDelta::Done { stop_reason });
+                let finish_reason = delta.stop_reason.map(raw_stop_reason).map(str::to_string);
+                deltas.push(StreamDelta::Done {
+                    stop_reason,
+                    finish_reason,
+                    upstream_error: None,
+                });
                 deltas
             }
             AnthropicStreamEvent::MessageStop => vec![],
