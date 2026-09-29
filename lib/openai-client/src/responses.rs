@@ -781,6 +781,8 @@ impl ResponsesDeltaSynthesizer {
             },
             StreamDelta::Done {
                 stop_reason: Some(self.stop_reason()),
+                finish_reason: self.pending_incomplete_reason.clone(),
+                upstream_error: None,
             },
         ])
     }
@@ -1161,7 +1163,8 @@ mod tests {
         assert!(terminal.iter().any(|delta| matches!(
             delta,
             StreamDelta::Done {
-                stop_reason: Some(llm::StopReason::ToolUse)
+                stop_reason: Some(llm::StopReason::ToolUse),
+                ..
             }
         )));
     }

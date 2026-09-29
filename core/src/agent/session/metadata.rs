@@ -12,6 +12,11 @@ pub struct AssistantResponseMetadata {
     /// field existed).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_provider: Option<String>,
+    /// Raw wire finish reason (e.g. `"stop"`, `"error"`). `None` when the
+    /// client didn't report one, or for a stored event from before this
+    /// field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,6 +67,9 @@ impl From<llm::response::Usage> for AssistantResponseMetadata {
             // `PromptResponse` itself. Callers with a full response set
             // `metadata.upstream_provider` after this conversion.
             upstream_provider: None,
+            // Same reasoning as `upstream_provider`: `finish_reason` lives
+            // on `PromptResponse`, not `Usage`.
+            finish_reason: None,
         }
     }
 }
@@ -115,6 +123,7 @@ mod tests {
         assert_eq!(m.usage.reasoning, 0);
         assert!(m.cost.upstream_inference_usd.is_none());
         assert_eq!(m.upstream_provider, None);
+        assert_eq!(m.finish_reason, None);
     }
 
     /// Handoff §3.4: mirrors what `Sessions::assistant_response_received`
@@ -130,6 +139,8 @@ mod tests {
             stop_reason: None,
             model_used: None,
             upstream_provider: Some("Anthropic".to_string()),
+            finish_reason: None,
+            upstream_error: None,
         };
         let mut metadata = AssistantResponseMetadata::from(response.usage);
         metadata.upstream_provider = response.upstream_provider;
@@ -146,6 +157,8 @@ mod tests {
             stop_reason: None,
             model_used: None,
             upstream_provider: None,
+            finish_reason: None,
+            upstream_error: None,
         };
         let mut metadata = AssistantResponseMetadata::from(response.usage);
         metadata.upstream_provider = response.upstream_provider;
@@ -161,5 +174,18 @@ mod tests {
         let json = serde_json::to_string(&metadata).expect("serialize");
         let hydrated: AssistantResponseMetadata = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(hydrated.upstream_provider.as_deref(), Some("DeepInfra"));
+    }
+
+    /// Handoff §4.2 test 2 / D4: the `finish_reason` key must round-trip
+    /// through JSON once set, the same way `upstream_provider` does — and a
+    /// stored event predating this field (the `legacy_metadata_without_new_fields_round_trips`
+    /// JSON above) hydrates it as `None`.
+    #[test]
+    fn finish_reason_round_trips_through_json() {
+        let mut metadata = AssistantResponseMetadata::from(llm::response::Usage::default());
+        metadata.finish_reason = Some("error".to_string());
+        let json = serde_json::to_string(&metadata).expect("serialize");
+        let hydrated: AssistantResponseMetadata = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(hydrated.finish_reason.as_deref(), Some("error"));
     }
 }

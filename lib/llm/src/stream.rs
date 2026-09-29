@@ -44,6 +44,12 @@ pub enum StreamDelta {
     },
     Done {
         stop_reason: Option<StopReason>,
+        /// Raw wire finish reason (e.g. `"stop"`, `"content_filter"`),
+        /// independent of whether it mapped to a known `StopReason`.
+        finish_reason: Option<String>,
+        /// Set when the stream ended on a provider-reported error rather
+        /// than a normal finish.
+        upstream_error: Option<String>,
     },
     Error {
         message: String,
@@ -58,6 +64,8 @@ pub struct StreamAccumulator {
     usage: Usage,
     upstream_provider: Option<String>,
     stop_reason: Option<StopReason>,
+    finish_reason: Option<String>,
+    upstream_error: Option<String>,
     done: bool,
 }
 
@@ -82,6 +90,8 @@ impl StreamAccumulator {
             usage: Usage::default(),
             upstream_provider: None,
             stop_reason: None,
+            finish_reason: None,
+            upstream_error: None,
             done: false,
         }
     }
@@ -146,8 +156,14 @@ impl StreamAccumulator {
                     self.upstream_provider = upstream_provider.clone();
                 }
             }
-            StreamDelta::Done { stop_reason } => {
+            StreamDelta::Done {
+                stop_reason,
+                finish_reason,
+                upstream_error,
+            } => {
                 self.stop_reason = *stop_reason;
+                self.finish_reason = finish_reason.clone();
+                self.upstream_error = upstream_error.clone();
                 self.done = true;
             }
             StreamDelta::Error { .. } => {
@@ -198,6 +214,8 @@ impl StreamAccumulator {
             stop_reason: self.stop_reason,
             model_used: None,
             upstream_provider: self.upstream_provider,
+            finish_reason: self.finish_reason,
+            upstream_error: self.upstream_error,
         }
     }
 }
@@ -243,6 +261,8 @@ mod tests {
         });
         acc.process(&StreamDelta::Done {
             stop_reason: Some(StopReason::EndTurn),
+            finish_reason: Some("stop".to_string()),
+            upstream_error: None,
         });
 
         assert!(acc.is_done());
@@ -284,6 +304,8 @@ mod tests {
         });
         acc.process(&StreamDelta::Done {
             stop_reason: Some(StopReason::ToolUse),
+            finish_reason: Some("tool_calls".to_string()),
+            upstream_error: None,
         });
 
         let resp = acc.finish();
@@ -315,6 +337,8 @@ mod tests {
         });
         acc.process(&StreamDelta::Done {
             stop_reason: Some(StopReason::EndTurn),
+            finish_reason: Some("stop".to_string()),
+            upstream_error: None,
         });
 
         let resp = acc.finish();
@@ -370,6 +394,8 @@ mod tests {
         });
         acc.process(&StreamDelta::Done {
             stop_reason: Some(StopReason::ToolUse),
+            finish_reason: Some("tool_calls".to_string()),
+            upstream_error: None,
         });
 
         let resp = acc.finish();
@@ -429,6 +455,8 @@ mod tests {
         });
         acc.process(&StreamDelta::Done {
             stop_reason: Some(StopReason::ToolUse),
+            finish_reason: Some("tool_calls".to_string()),
+            upstream_error: None,
         });
 
         let resp = acc.finish();
@@ -484,6 +512,8 @@ mod tests {
         });
         acc.process(&StreamDelta::Done {
             stop_reason: Some(StopReason::EndTurn),
+            finish_reason: Some("stop".to_string()),
+            upstream_error: None,
         });
 
         let resp = acc.finish();

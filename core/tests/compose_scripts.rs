@@ -1115,6 +1115,8 @@ return {
                 stop_reason: Some(llm::response::StopReason::ToolUse),
                 model_used: None,
                 upstream_provider: None,
+                finish_reason: None,
+                upstream_error: None,
             })))
             .unwrap();
     };

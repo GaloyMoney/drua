@@ -223,10 +223,21 @@ impl Sessions {
             .into_iter()
             .map(AssistantBlock::from)
             .collect();
-        let stop_reason = response
-            .stop_reason
-            .map(StopReason::from)
-            .unwrap_or(StopReason::Stop);
+        // A stream that never reached a recognised `stop`/`length`/
+        // `tool_calls` finish is incomplete (D1), not a clean stop — record
+        // it as an error turn carrying the raw evidence rather than letting
+        // it masquerade as `StopReason::Stop` with empty content (D2).
+        let (stop_reason, error_message) = match response.stop_reason {
+            Some(reason) => (StopReason::from(reason), None),
+            None => (
+                StopReason::Error,
+                Some(match (&response.finish_reason, &response.upstream_error) {
+                    (_, Some(e)) => format!("upstream stream error: {e}"),
+                    (Some(r), None) => format!("unrecognised finish_reason: {r}"),
+                    (None, None) => "stream ended without a finish_reason".to_string(),
+                }),
+            ),
+        };
         if matches!(stop_reason, StopReason::Length) {
             tracing::warn!(
                 agent_id = %agent_id,
@@ -240,9 +251,32 @@ impl Sessions {
         let mut metadata = AssistantResponseMetadata::from(response.usage);
         metadata.model = model;
         metadata.upstream_provider = response.upstream_provider;
+        metadata.finish_reason = response.finish_reason;
 
-        let result =
-            session.assistant_response_received(thread_id, content, stop_reason, None, metadata);
+        let result = session.assistant_response_received(
+            thread_id,
+            content,
+            stop_reason,
+            error_message,
+            metadata,
+        );
+        if let Some((reason, from_model, to_model)) = session.last_chain_advance() {
+            tracing::warn!(
+                agent_id = %agent_id,
+                session_id = %session.id,
+                from_model,
+                to_model,
+                reason,
+                "agent_session.breaker: advanced model chain"
+            );
+        } else if let Err(AgentSessionError::BreakerTripped { reason }) = &result {
+            tracing::error!(
+                agent_id = %agent_id,
+                session_id = %session.id,
+                reason = %reason,
+                "agent_session.breaker: chain exhausted, failing turn"
+            );
+        }
         self.repo.update_in_op(&mut op, &mut session).await?;
         op.commit().await?;
         result
@@ -278,6 +312,7 @@ impl Sessions {
             },
             cost: Cost::default(),
             upstream_provider: None,
+            finish_reason: None,
         };
 
         let result = session.assistant_response_received(

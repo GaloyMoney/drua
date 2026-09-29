@@ -200,6 +200,9 @@ pub enum StopReason {
 pub struct LastResponseStatus {
     pub stop_reason: StopReason,
     pub is_empty: bool,
+    /// Consecutive empty turns (D5) closed in a row on the newest
+    /// response's thread, this one included.
+    pub trailing_empty: usize,
 }
 
 impl From<Prompt> for llm::Prompt {

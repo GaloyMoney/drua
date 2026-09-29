@@ -19,6 +19,12 @@ pub struct ExportableThread {
     pub entries: Vec<ExportableEntry>,
 }
 
+// `AssistantResponseMetadata` carries several `Option<String>` fields
+// (upstream provider, finish reason); boxing it would ripple through every
+// exporter that builds one of these per response. Entries are built once
+// per exported turn, not on a hot path, so the size difference doesn't
+// matter in practice.
+#[allow(clippy::large_enum_variant)]
 pub enum ExportableEntry {
     UserMessage {
         text: String,
