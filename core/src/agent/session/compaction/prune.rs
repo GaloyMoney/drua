@@ -358,6 +358,7 @@ mod tests {
             },
             cost: Cost::default(),
             upstream_provider: None,
+            finish_reason: None,
         }
     }
 
