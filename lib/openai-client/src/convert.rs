@@ -282,6 +282,13 @@ pub(crate) struct DeltaSynthesizer {
     saw_text: bool,
     saw_tool_call: bool,
     pending_usage: Option<PendingUsage>,
+    /// Newest `provider` seen on any chunk this attempt, independent of
+    /// `pending_usage` — OpenRouter isn't documented to always pair it
+    /// with the `usage` chunk, so track it as soon as it's seen and fold
+    /// it into whichever `Usage` delta ends up being drained. Reset for
+    /// free on retry: `drive_stream_with_retry` constructs a fresh
+    /// `DeltaSynthesizer` per attempt.
+    provider: Option<String>,
 }
 
 #[derive(Copy, Clone)]
@@ -302,6 +309,7 @@ impl DeltaSynthesizer {
             saw_text: false,
             saw_tool_call: false,
             pending_usage: None,
+            provider: None,
         }
     }
 
@@ -314,6 +322,10 @@ impl DeltaSynthesizer {
 
         let chunk: OpenAiStreamChunk =
             serde_json::from_str(data).map_err(|e| format!("JSON parse: {e}"))?;
+
+        if chunk.provider.is_some() {
+            self.provider = chunk.provider.clone();
+        }
 
         let mut deltas = Vec::new();
 
@@ -424,6 +436,7 @@ impl DeltaSynthesizer {
                 reasoning_output_tokens: u.reasoning_output_tokens,
                 cost_usd: u.cost_usd,
                 upstream_inference_cost_usd: u.upstream_inference_cost_usd,
+                upstream_provider: self.provider.take(),
             }],
             None => Vec::new(),
         }
@@ -809,7 +822,7 @@ mod tests {
             .unwrap();
         let deltas = synth
             .process_chunk(
-                r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1500,"completion_tokens":300,"prompt_tokens_details":{"cached_tokens":900,"cache_write_tokens":400},"completion_tokens_details":{"reasoning_tokens":120},"cost":0.00785,"cost_details":{"upstream_inference_cost":0.00712}}}"#,
+                r#"{"provider":"Anthropic","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1500,"completion_tokens":300,"prompt_tokens_details":{"cached_tokens":900,"cache_write_tokens":400},"completion_tokens_details":{"reasoning_tokens":120},"cost":0.00785,"cost_details":{"upstream_inference_cost":0.00712}}}"#,
             )
             .unwrap();
 
@@ -824,6 +837,7 @@ mod tests {
                     reasoning_output_tokens,
                     cost_usd,
                     upstream_inference_cost_usd,
+                    upstream_provider,
                 } => Some((
                     *input_tokens,
                     *output_tokens,
@@ -832,6 +846,7 @@ mod tests {
                     *reasoning_output_tokens,
                     *cost_usd,
                     *upstream_inference_cost_usd,
+                    upstream_provider.clone(),
                 )),
                 _ => None,
             })
@@ -843,6 +858,60 @@ mod tests {
         assert_eq!(usage.4, 120);
         assert_eq!(usage.5, Some(0.00785));
         assert_eq!(usage.6, Some(0.00712));
+        assert_eq!(usage.7, Some("Anthropic".to_string()));
+    }
+
+    /// Handoff §3.4: a chunk without `provider` must hydrate the delta's
+    /// `upstream_provider` as `None`, not panic or default to an empty
+    /// string — direct OpenAI and providers OpenRouter doesn't report for
+    /// both omit the field entirely.
+    #[test]
+    fn synthesizer_without_provider_field_yields_none() {
+        let mut synth = DeltaSynthesizer::new();
+        synth
+            .process_chunk(r#"{"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#)
+            .unwrap();
+        let deltas = synth
+            .process_chunk(
+                r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+            )
+            .unwrap();
+
+        let provider = deltas.iter().find_map(|d| match d {
+            StreamDelta::Usage {
+                upstream_provider, ..
+            } => Some(upstream_provider.clone()),
+            _ => None,
+        });
+        assert_eq!(provider, Some(None));
+    }
+
+    /// A chunk carrying `provider` before the chunk carrying `usage` (the
+    /// order the docs' example implies: `provider` appears on the same
+    /// object as `id`/`model`, sent as soon as OpenRouter has routed the
+    /// request, independent of when usage totals become available) must
+    /// still end up on the final `Usage` delta.
+    #[test]
+    fn synthesizer_carries_provider_seen_before_usage_chunk() {
+        let mut synth = DeltaSynthesizer::new();
+        synth
+            .process_chunk(
+                r#"{"provider":"DeepInfra","choices":[{"delta":{"content":"hi"},"finish_reason":null}]}"#,
+            )
+            .unwrap();
+        let deltas = synth
+            .process_chunk(
+                r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+            )
+            .unwrap();
+
+        let provider = deltas.iter().find_map(|d| match d {
+            StreamDelta::Usage {
+                upstream_provider, ..
+            } => Some(upstream_provider.clone()),
+            _ => None,
+        });
+        assert_eq!(provider, Some(Some("DeepInfra".to_string())));
     }
 
     #[test]

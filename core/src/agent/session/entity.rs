@@ -567,6 +567,32 @@ impl AgentSession {
         })
     }
 
+    /// Same newest-response walk as [`Self::last_stop_reason`], but also
+    /// reports whether that response's content is empty: no `Text` block
+    /// with non-whitespace text and no `ToolUse` block. A `Thinking` block
+    /// does not count as content — a reasoning-only turn is still empty
+    /// from the caller's point of view. Workflow executor consumes this to
+    /// decide whether a closed turn without `submit_output` was an empty
+    /// stop that should be continued, reading both facts off one event so
+    /// the decision can't be split across two different newest-responses.
+    pub fn last_response_status(&self) -> Option<LastResponseStatus> {
+        self.events.iter_all().rev().find_map(|e| match e {
+            AgentSessionEvent::AssistantResponseReceived {
+                stop_reason,
+                content,
+                ..
+            } => Some(LastResponseStatus {
+                stop_reason: stop_reason.clone(),
+                is_empty: !content.iter().any(|b| match b {
+                    AssistantBlock::Text { text } => !text.trim().is_empty(),
+                    AssistantBlock::ToolUse { .. } => true,
+                    AssistantBlock::Thinking { .. } => false,
+                }),
+            }),
+            _ => None,
+        })
+    }
+
     pub fn breaker_config(&self) -> &BreakerConfig {
         &self.breaker_config
     }
@@ -927,6 +953,7 @@ impl AgentSession {
                     reasoning: 0,
                 },
                 cost: Cost::default(),
+                upstream_provider: None,
             },
         );
     }
@@ -1606,6 +1633,7 @@ mod tests {
                 reasoning: 0,
             },
             cost: Cost::default(),
+            upstream_provider: None,
         }
     }
 
@@ -2124,6 +2152,186 @@ mod tests {
         assert_eq!(
             session.last_stop_reason(),
             Some(StopReason::Stop),
+            "must read the newest response off the new thread, not the old thread's Length"
+        );
+    }
+
+    #[test]
+    fn last_response_status_is_none_before_any_response() {
+        let session = new_session_with(
+            ModelChain {
+                primary: model_defaults("primary-model"),
+                fallbacks: vec![],
+            },
+            BreakerConfig::default(),
+        );
+        assert_eq!(session.last_response_status(), None);
+    }
+
+    #[test]
+    fn last_response_status_reports_a_literally_empty_stop_as_empty() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![],
+        };
+        let mut session = started_session(chain, BreakerConfig::default());
+        let thread_id = session.current_main_thread_id().unwrap();
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+        assert_eq!(
+            session.last_response_status(),
+            Some(LastResponseStatus {
+                stop_reason: StopReason::Stop,
+                is_empty: true,
+            })
+        );
+    }
+
+    #[test]
+    fn last_response_status_reports_a_thinking_only_stop_as_empty() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![],
+        };
+        let mut session = started_session(chain, BreakerConfig::default());
+        let thread_id = session.current_main_thread_id().unwrap();
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::Thinking {
+                    text: "internal reasoning".into(),
+                    signature: None,
+                }],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+        assert_eq!(
+            session.last_response_status(),
+            Some(LastResponseStatus {
+                stop_reason: StopReason::Stop,
+                is_empty: true,
+            }),
+            "a Thinking block must not count as content"
+        );
+    }
+
+    #[test]
+    fn last_response_status_reports_a_whitespace_only_text_stop_as_empty() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![],
+        };
+        let mut session = started_session(chain, BreakerConfig::default());
+        let thread_id = session.current_main_thread_id().unwrap();
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::Text {
+                    text: "   \n\t".into(),
+                }],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+        assert_eq!(
+            session.last_response_status(),
+            Some(LastResponseStatus {
+                stop_reason: StopReason::Stop,
+                is_empty: true,
+            }),
+            "whitespace-only text must count as empty"
+        );
+    }
+
+    #[test]
+    fn last_response_status_reports_real_text_as_not_empty() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![],
+        };
+        let mut session = started_session(chain, BreakerConfig::default());
+        let thread_id = session.current_main_thread_id().unwrap();
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::Text {
+                    text: "I looked around but did not call a tool.".into(),
+                }],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+        assert_eq!(
+            session.last_response_status(),
+            Some(LastResponseStatus {
+                stop_reason: StopReason::Stop,
+                is_empty: false,
+            })
+        );
+    }
+
+    #[test]
+    fn last_response_status_reads_newest_response_across_threads() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![model_defaults("fallback-model")],
+        };
+        let mut session = started_session(chain, BreakerConfig::default());
+        let original_thread_id = session.current_main_thread_id().unwrap();
+
+        for i in 0..3 {
+            let thread_id = session.current_main_thread_id().unwrap();
+            let result = session.assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::Text { text: "...".into() }],
+                StopReason::Length,
+                None,
+                dummy_metadata(),
+            );
+            assert!(result.is_ok(), "turn {i}: {result:?}");
+            session
+                .add_user_input(TargetThread::Main, user_source(), "continue".into())
+                .unwrap();
+            advance_turn(&mut session);
+        }
+
+        assert_eq!(
+            session.model(),
+            "fallback-model",
+            "3rd consecutive max_tokens turn should have advanced the chain"
+        );
+        let new_thread_id = session.current_main_thread_id().unwrap();
+        assert_ne!(
+            new_thread_id, original_thread_id,
+            "the stale model chain should have spawned a context-refreshed thread"
+        );
+        session
+            .assistant_response_received(
+                new_thread_id,
+                vec![],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            session.last_response_status(),
+            Some(LastResponseStatus {
+                stop_reason: StopReason::Stop,
+                is_empty: true,
+            }),
             "must read the newest response off the new thread, not the old thread's Length"
         );
     }

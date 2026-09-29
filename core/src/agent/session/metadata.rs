@@ -6,6 +6,12 @@ pub struct AssistantResponseMetadata {
     pub model: String,
     pub usage: Usage,
     pub cost: Cost,
+    /// Upstream provider that actually served this turn (e.g. `"Anthropic"`,
+    /// `"DeepInfra"` via OpenRouter). `None` when the client didn't report
+    /// one (direct Anthropic/OpenAI, or a stored event from before this
+    /// field existed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_provider: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -52,6 +58,10 @@ impl From<llm::response::Usage> for AssistantResponseMetadata {
                 upstream_inference_usd: usage.upstream_inference_cost_usd,
                 ..Cost::default()
             },
+            // `Usage` (this impl's source) doesn't carry it — it lives on
+            // `PromptResponse` itself. Callers with a full response set
+            // `metadata.upstream_provider` after this conversion.
+            upstream_provider: None,
         }
     }
 }
@@ -104,5 +114,52 @@ mod tests {
         let m: AssistantResponseMetadata = serde_json::from_str(json).expect("legacy hydrates");
         assert_eq!(m.usage.reasoning, 0);
         assert!(m.cost.upstream_inference_usd.is_none());
+        assert_eq!(m.upstream_provider, None);
+    }
+
+    /// Handoff §3.4: mirrors what `Sessions::assistant_response_received`
+    /// does — build metadata from `response.usage`, then set
+    /// `upstream_provider` from the full response, since `Usage` alone
+    /// doesn't carry it. A chunk that reported a provider must survive
+    /// into the stored metadata.
+    #[test]
+    fn metadata_carries_upstream_provider_from_full_response() {
+        let response = llm::PromptResponse {
+            content: Vec::new(),
+            usage: llm::response::Usage::default(),
+            stop_reason: None,
+            model_used: None,
+            upstream_provider: Some("Anthropic".to_string()),
+        };
+        let mut metadata = AssistantResponseMetadata::from(response.usage);
+        metadata.upstream_provider = response.upstream_provider;
+        assert_eq!(metadata.upstream_provider.as_deref(), Some("Anthropic"));
+    }
+
+    /// A response that never reported a provider (direct Anthropic/OpenAI)
+    /// must not fabricate one.
+    #[test]
+    fn metadata_upstream_provider_is_none_when_response_did_not_report_one() {
+        let response = llm::PromptResponse {
+            content: Vec::new(),
+            usage: llm::response::Usage::default(),
+            stop_reason: None,
+            model_used: None,
+            upstream_provider: None,
+        };
+        let mut metadata = AssistantResponseMetadata::from(response.usage);
+        metadata.upstream_provider = response.upstream_provider;
+        assert_eq!(metadata.upstream_provider, None);
+    }
+
+    /// The `upstream_provider` key must round-trip through JSON once set —
+    /// this is what gets persisted on `AssistantResponseReceived.metadata`.
+    #[test]
+    fn upstream_provider_round_trips_through_json() {
+        let mut metadata = AssistantResponseMetadata::from(llm::response::Usage::default());
+        metadata.upstream_provider = Some("DeepInfra".to_string());
+        let json = serde_json::to_string(&metadata).expect("serialize");
+        let hydrated: AssistantResponseMetadata = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(hydrated.upstream_provider.as_deref(), Some("DeepInfra"));
     }
 }

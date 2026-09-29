@@ -251,6 +251,9 @@ pub(crate) fn accumulated_to_response(acc: AccumulatedResponse) -> PromptRespons
         usage,
         stop_reason,
         model_used: None,
+        // Direct Anthropic, never OpenRouter — no upstream-provider
+        // concept applies here.
+        upstream_provider: None,
     }
 }
 
@@ -326,6 +329,7 @@ impl AnthropicDeltaConverter {
                     reasoning_output_tokens: 0,
                     cost_usd: None,
                     upstream_inference_cost_usd: None,
+                    upstream_provider: None,
                 }]
             }
             AnthropicStreamEvent::ContentBlockStart {
@@ -391,6 +395,7 @@ impl AnthropicDeltaConverter {
                         reasoning_output_tokens: 0,
                         cost_usd: None,
                         upstream_inference_cost_usd: None,
+                        upstream_provider: None,
                     });
                 }
                 let stop_reason = delta.stop_reason.map(|sr| match sr {

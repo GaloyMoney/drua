@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use es_entity::context::{EventContext, WithEventContext};
 use tracing::Instrument;
 
-use crate::agent::session::message::{StopReason, SUBMIT_OUTPUT_TOOL_NAME};
+use crate::agent::session::message::{LastResponseStatus, StopReason, SUBMIT_OUTPUT_TOOL_NAME};
 use crate::agent::{Agent, Agents};
 use crate::auth::AuthSubject;
 use crate::primitives::{
@@ -250,7 +250,6 @@ impl Executor {
 
         for step in &steps {
             let step_name = step.name().to_string();
-            crate::audit::Audit::record_workflow_step(&step_name);
 
             if run.step_already_terminal(&step_name) {
                 continue;
@@ -771,6 +770,13 @@ impl Executor {
         borrowed_preexisting: &mut HashSet<SandboxId>,
         definition: &super::entity::WorkflowDefinition,
     ) -> Result<serde_json::Value, WorkflowError> {
+        // Recorded here rather than by the caller: this call runs inside
+        // the `.with_event_context(step_context)` scope the caller wraps
+        // this future in, which is what makes the write actually persist
+        // in the ambient `EventContext` for everything downstream (tool
+        // calls included) to see. A bare call on the caller's own
+        // unwrapped context is thrown away the instant it returns.
+        crate::audit::Audit::record_workflow_step(step.name());
         match step {
             WorkflowStepDef::AgentStep {
                 name,
@@ -1031,11 +1037,15 @@ impl Executor {
     /// breaker's `consecutive_max_tokens` threshold — the breaker
     /// itself advances the chain to a fallback (or fails the turn)
     /// once that threshold is hit, so this loop only has to keep the
-    /// conversation going long enough for that to happen. Once the
-    /// agent finishes a turn without calling `submit_output` for any
-    /// OTHER reason (a plain text reply, an empty tool-less `Stop`),
-    /// retry once with `tool_choice` forced to the synthetic tool.
-    /// After a second miss the step fails.
+    /// conversation going long enough for that to happen. A turn that
+    /// closes on an empty tool-less `Stop` (no text, no tool call — a
+    /// `Thinking`-only turn counts as empty) gets its own, smaller
+    /// continuation budget for the same reason: the model may simply
+    /// not have finished yet. Once the agent finishes a turn without
+    /// calling `submit_output` for any OTHER reason (a plain text
+    /// reply, or an empty stop past its budget), retry once with
+    /// `tool_choice` forced to the synthetic tool. After a second miss
+    /// the step fails.
     async fn run_agent_until_submit_output(
         &self,
         agent: &Agent,
@@ -1047,6 +1057,13 @@ impl Executor {
             "Your previous turn hit the output token limit before making a tool call. \
              Continue from where you were: make the next tool call now. Do not restate \
              your plan or summarise what you have read.";
+        const EMPTY_STOP_CONTINUATION: &str =
+            "Your previous turn ended without any text or tool call. Continue from where \
+             you were: make the next tool call now.";
+        // Two retries bound the extra cost at two model calls; kept
+        // separate from `continuations` (the `Length` budget) so a turn
+        // sequence that mixes both stop reasons can't starve either one.
+        const MAX_EMPTY_STOP_CONTINUATIONS: usize = 2;
 
         let limit = self
             .agents
@@ -1056,6 +1073,7 @@ impl Executor {
             .max(1);
         let mut next_prompt = Some(prompt);
         let mut continuations = 0usize;
+        let mut empty_stops = 0usize;
         loop {
             if let Some(value) = self
                 .stream_agent_response(agent, next_prompt.take(), None, step_name, timeout_seconds)
@@ -1067,12 +1085,20 @@ impl Executor {
             // the chain (a fresh thread starts). Mirror that here: a flat
             // `continuations` counter that never reset would let the
             // primary's max_tokens streak exhaust the fallback's budget
-            // before the fallback gets a single turn.
+            // before the fallback gets a single turn. `empty_stops` is a
+            // separate budget (D3) but the same reasoning applies to it —
+            // reset both together, or a fallback whose first turn is an
+            // empty stop would inherit whatever the primary had already
+            // spent, sometimes leaving it none at all.
             if self.agents.chain_just_advanced(agent.id).await? {
                 continuations = 0;
+                empty_stops = 0;
             }
-            match self.agents.last_stop_reason(agent.id).await? {
-                Some(StopReason::Length) if continuations < limit => {
+            match self.agents.last_response_status(agent.id).await? {
+                Some(LastResponseStatus {
+                    stop_reason: StopReason::Length,
+                    ..
+                }) if continuations < limit => {
                     continuations += 1;
                     tracing::warn!(
                         step = step_name,
@@ -1081,6 +1107,19 @@ impl Executor {
                         "workflow step: turn hit max_tokens without submit_output; continuing"
                     );
                     next_prompt = Some(MAX_TOKENS_CONTINUATION.to_string());
+                }
+                Some(LastResponseStatus {
+                    stop_reason: StopReason::Stop,
+                    is_empty: true,
+                }) if empty_stops < MAX_EMPTY_STOP_CONTINUATIONS => {
+                    empty_stops += 1;
+                    tracing::warn!(
+                        step = step_name,
+                        agent_id = %agent.id,
+                        empty_stops,
+                        "workflow step: turn ended empty without submit_output; continuing"
+                    );
+                    next_prompt = Some(EMPTY_STOP_CONTINUATION.to_string());
                 }
                 _ => break,
             }

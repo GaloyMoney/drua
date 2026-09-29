@@ -37,6 +37,10 @@ pub enum StreamDelta {
         reasoning_output_tokens: u32,
         cost_usd: Option<f64>,
         upstream_inference_cost_usd: Option<f64>,
+        /// Upstream provider that actually served this turn (e.g.
+        /// OpenRouter's per-chunk `provider`). `None` when the client
+        /// didn't report one.
+        upstream_provider: Option<String>,
     },
     Done {
         stop_reason: Option<StopReason>,
@@ -52,6 +56,7 @@ pub struct StreamAccumulator {
     tool_calls: Vec<ToolCallBuilder>,
     tool_call_index: HashMap<String, usize>,
     usage: Usage,
+    upstream_provider: Option<String>,
     stop_reason: Option<StopReason>,
     done: bool,
 }
@@ -75,6 +80,7 @@ impl StreamAccumulator {
             tool_calls: Vec::new(),
             tool_call_index: HashMap::new(),
             usage: Usage::default(),
+            upstream_provider: None,
             stop_reason: None,
             done: false,
         }
@@ -122,6 +128,7 @@ impl StreamAccumulator {
                 reasoning_output_tokens,
                 cost_usd,
                 upstream_inference_cost_usd,
+                upstream_provider,
             } => {
                 self.usage.input_tokens += *input_tokens;
                 self.usage.output_tokens += *output_tokens;
@@ -134,6 +141,9 @@ impl StreamAccumulator {
                 if let Some(c) = upstream_inference_cost_usd {
                     self.usage.upstream_inference_cost_usd =
                         Some(self.usage.upstream_inference_cost_usd.unwrap_or(0.0) + *c);
+                }
+                if upstream_provider.is_some() {
+                    self.upstream_provider = upstream_provider.clone();
                 }
             }
             StreamDelta::Done { stop_reason } => {
@@ -187,6 +197,7 @@ impl StreamAccumulator {
             usage: self.usage,
             stop_reason: self.stop_reason,
             model_used: None,
+            upstream_provider: self.upstream_provider,
         }
     }
 }
@@ -212,6 +223,7 @@ mod tests {
             reasoning_output_tokens: 0,
             cost_usd: None,
             upstream_inference_cost_usd: None,
+            upstream_provider: None,
         });
         acc.process(&StreamDelta::TextDelta {
             text: "Hello".to_string(),
@@ -227,6 +239,7 @@ mod tests {
             reasoning_output_tokens: 0,
             cost_usd: None,
             upstream_inference_cost_usd: None,
+            upstream_provider: None,
         });
         acc.process(&StreamDelta::Done {
             stop_reason: Some(StopReason::EndTurn),
@@ -267,6 +280,7 @@ mod tests {
             reasoning_output_tokens: 0,
             cost_usd: None,
             upstream_inference_cost_usd: None,
+            upstream_provider: None,
         });
         acc.process(&StreamDelta::Done {
             stop_reason: Some(StopReason::ToolUse),
@@ -325,6 +339,7 @@ mod tests {
             reasoning_output_tokens: 0,
             cost_usd: None,
             upstream_inference_cost_usd: None,
+            upstream_provider: None,
         });
         // Thinking
         acc.process(&StreamDelta::ThinkingDelta {
@@ -351,6 +366,7 @@ mod tests {
             reasoning_output_tokens: 0,
             cost_usd: None,
             upstream_inference_cost_usd: None,
+            upstream_provider: None,
         });
         acc.process(&StreamDelta::Done {
             stop_reason: Some(StopReason::ToolUse),
@@ -451,6 +467,7 @@ mod tests {
             reasoning_output_tokens: 0,
             cost_usd: None,
             upstream_inference_cost_usd: None,
+            upstream_provider: None,
         });
         acc.process(&StreamDelta::TextDelta {
             text: "hi".to_string(),
@@ -463,6 +480,7 @@ mod tests {
             reasoning_output_tokens: 0,
             cost_usd: None,
             upstream_inference_cost_usd: None,
+            upstream_provider: None,
         });
         acc.process(&StreamDelta::Done {
             stop_reason: Some(StopReason::EndTurn),

@@ -58,6 +58,55 @@ async fn build_stack(
     AuthSubject,
     mpsc::Receiver<PromptRequest>,
 ) {
+    build_stack_inner(pool, chain, breaker, None).await
+}
+
+/// Same as [`build_stack`], but wires a real `Audit` into the toolset so
+/// tool-call dispatch records rows to `audit_entries` — needed to assert
+/// on the audit row a step agent's tool call produces.
+async fn build_stack_with_audit(
+    pool: &sqlx::PgPool,
+    chain: ModelChain,
+    breaker: BreakerConfig,
+) -> (
+    Executor,
+    WorkflowDefinitionRepo,
+    WorkflowRunRepo,
+    Arc<Skills>,
+    ProjectId,
+    AuthSubject,
+    mpsc::Receiver<PromptRequest>,
+    Arc<drua_core::audit::Audit>,
+) {
+    let audit = Arc::new(drua_core::audit::Audit::new(pool));
+    let (executor, definitions, runs, skills, project_id, sub, prompt_rx) =
+        build_stack_inner(pool, chain, breaker, Some(Arc::clone(&audit))).await;
+    (
+        executor,
+        definitions,
+        runs,
+        skills,
+        project_id,
+        sub,
+        prompt_rx,
+        audit,
+    )
+}
+
+async fn build_stack_inner(
+    pool: &sqlx::PgPool,
+    chain: ModelChain,
+    breaker: BreakerConfig,
+    audit: Option<Arc<drua_core::audit::Audit>>,
+) -> (
+    Executor,
+    WorkflowDefinitionRepo,
+    WorkflowRunRepo,
+    Arc<Skills>,
+    ProjectId,
+    AuthSubject,
+    mpsc::Receiver<PromptRequest>,
+) {
     let (prompt_tx, prompt_rx) = mpsc::channel::<PromptRequest>(64);
 
     let mut builtin_roles = HashMap::new();
@@ -104,7 +153,7 @@ async fn build_stack(
     };
 
     let toolsets = Arc::new(
-        ToolSets::init(ToolSetsConfig::default(), None, None, None)
+        ToolSets::init(ToolSetsConfig::default(), audit, None, None)
             .await
             .expect("init toolsets"),
     );
@@ -266,6 +315,35 @@ fn max_tokens_response() -> PromptResponse {
         usage: Usage::default(),
         stop_reason: Some(StopReason::MaxTokens),
         model_used: None,
+        upstream_provider: None,
+    }
+}
+
+fn empty_stop_response() -> PromptResponse {
+    PromptResponse {
+        content: Vec::new(),
+        usage: Usage::default(),
+        stop_reason: Some(StopReason::EndTurn),
+        model_used: None,
+        upstream_provider: None,
+    }
+}
+
+/// A turn that stops with ONLY a `Thinking` block and no text or tool
+/// call — the shape of the production incident's provider, which
+/// reported reasoning tokens but is not modelled at the wire level as
+/// a `Thinking` block by every provider. Must be treated the same as
+/// [`empty_stop_response`]: a `Thinking` block is not content.
+fn thinking_only_response() -> PromptResponse {
+    PromptResponse {
+        content: vec![AssistantBlock::Thinking {
+            text: "internal reasoning".to_string(),
+            signature: None,
+        }],
+        usage: Usage::default(),
+        stop_reason: Some(StopReason::EndTurn),
+        model_used: None,
+        upstream_provider: None,
     }
 }
 
@@ -279,6 +357,7 @@ fn submit_output_response(id: &str, args: serde_json::Value) -> PromptResponse {
         usage: Usage::default(),
         stop_reason: Some(StopReason::ToolUse),
         model_used: None,
+        upstream_provider: None,
     }
 }
 
@@ -334,6 +413,97 @@ async fn run_agent_step_prompt_carries_run_context() {
     assert_eq!(
         run.step_results[0].output,
         Some(serde_json::json!({"success": true, "output": "hi"}))
+    );
+}
+
+/// Handoff §3.2: a tool call made by a workflow step agent must be
+/// stamped with `workflow_run_id` and `resource_ids.workflow_step`, not
+/// just the entries the executor itself writes. `submit_output` is
+/// dispatched through the same `fan_out_tool_calls` -> `call_top_level_tool`
+/// path as any other agent tool call, so it doubles as the tool call
+/// under test here.
+///
+/// Demonstrated RED against the pre-fix `drive_session_loop`: its
+/// `tokio::spawn` started the tool-dispatch task with a fresh, empty
+/// `EventContext` (task-locals never cross an un-wrapped `tokio::spawn`
+/// boundary), so `workflow_run_id` / `workflow_step` — recorded by
+/// `Executor::run` and `send_message_with_choice` on the CALLING task —
+/// were invisible to `call_top_level_instance`'s audit context. The
+/// query below returned zero rows.
+#[tokio::test]
+async fn agent_step_tool_call_is_stamped_with_run_and_step() {
+    let pool = pool().await;
+    let primary = "claude-haiku-4-5-20251001".to_string();
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx, audit) =
+        build_stack_with_audit(
+            &pool,
+            ModelChain::new(primary.clone()),
+            BreakerConfig::default(),
+        )
+        .await;
+
+    let (run_id, _) = seed_one_step_run(
+        &skills,
+        &definitions,
+        &runs,
+        &sub,
+        project_id,
+        ModelChain::new(primary),
+        "Say hi.",
+    )
+    .await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move { executor.run(run_id, cancel).await });
+
+    let request = recv_prompt(&mut prompt_rx, "first prompt request").await;
+    request
+        .response_channel
+        .send(Ok(PromptResult::Complete(submit_output_response(
+            "tu_1",
+            serde_json::json!({"success": true, "output": "hi"}),
+        ))))
+        .expect("send response");
+
+    handle.await.expect("join").expect("run succeeds");
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(run.state, WorkflowRunState::Succeeded);
+
+    // `Audit::record_from_context` persists fire-and-forget (a detached
+    // `tokio::spawn`), so poll briefly rather than assuming the row has
+    // landed the instant the run future resolves.
+    let query = drua_core::audit::primitives::AuditLogQuery {
+        workflow_run_id: Some(run_id),
+        workflow_step: Some("step".to_string()),
+        entrypoint: Some("mcp: submit_output".to_string()),
+        limit: 10,
+        ..Default::default()
+    };
+    let entries = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let entries = audit.find(&query).await.expect("query audit_entries");
+            if !entries.is_empty() {
+                return entries;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for the submit_output audit row");
+
+    assert_eq!(
+        entries.len(),
+        1,
+        "exactly one submit_output tool call: {entries:?}"
+    );
+    let entry = &entries[0];
+    assert_eq!(entry.workflow_run_id, Some(run_id));
+    assert_eq!(
+        entry.resource_id("workflow_step"),
+        Some("step"),
+        "resource_ids: {:?}",
+        entry.resource_ids
     );
 }
 
@@ -666,6 +836,7 @@ async fn end_turn_without_submit_output_still_triggers_forced_nudge() {
             usage: Usage::default(),
             stop_reason: Some(StopReason::EndTurn),
             model_used: None,
+            upstream_provider: None,
         })))
         .expect("send response");
 
@@ -690,6 +861,439 @@ async fn end_turn_without_submit_output_still_triggers_forced_nudge() {
         .expect("send response");
 
     handle.await.expect("join").expect("run succeeds");
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(run.state, WorkflowRunState::Succeeded);
+}
+
+/// Handoff §3.1 test (1): an empty tool-less `Stop` (no text, no tool
+/// call) is continued with a PLAIN user message — no forced
+/// `tool_choice` — carrying the empty-stop continuation text, not the
+/// "Investigation complete" forced-nudge text. Demonstrated RED against
+/// the pre-fix executor: the unpatched `run_agent_until_submit_output`
+/// only continues on `StopReason::Length`, so an empty `Stop` falls
+/// straight through to `_ => break` and the second prompt request is
+/// the forced nudge (`tool_choice: Tool { submit_output }`, text
+/// "Investigation complete") instead of a plain continuation — this
+/// test's `tool_choice` assertion and its text assertion both fail.
+#[tokio::test]
+async fn empty_stop_is_continued_then_submits_output() {
+    let pool = pool().await;
+    let primary = "claude-haiku-4-5-20251001".to_string();
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx) = build_stack(
+        &pool,
+        ModelChain::new(primary.clone()),
+        BreakerConfig::default(),
+    )
+    .await;
+
+    let (run_id, _) = seed_one_step_run(
+        &skills,
+        &definitions,
+        &runs,
+        &sub,
+        project_id,
+        ModelChain::new(primary),
+        "Say hi.",
+    )
+    .await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move { executor.run(run_id, cancel).await });
+
+    let first = recv_prompt(&mut prompt_rx, "first prompt request").await;
+    first
+        .response_channel
+        .send(Ok(PromptResult::Complete(empty_stop_response())))
+        .expect("send response");
+
+    let second = recv_prompt(&mut prompt_rx, "empty-stop continuation prompt").await;
+    assert!(
+        matches!(second.prompt.tool_choice, None | Some(ToolChoice::Auto)),
+        "empty-stop continuation must not force tool_choice: {:?}",
+        second.prompt.tool_choice
+    );
+    let text = last_user_text(&second.prompt);
+    assert!(
+        text.contains("ended without any text or tool call"),
+        "continuation prompt text: {text}"
+    );
+    assert!(!text.contains("Investigation complete"));
+
+    second
+        .response_channel
+        .send(Ok(PromptResult::Complete(submit_output_response(
+            "tu_1",
+            serde_json::json!({"success": true, "output": "done"}),
+        ))))
+        .expect("send response");
+
+    handle.await.expect("join").expect("run succeeds");
+
+    assert!(
+        prompt_rx.try_recv().is_err(),
+        "no forced nudge should have been sent"
+    );
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(run.state, WorkflowRunState::Succeeded);
+}
+
+/// Handoff §3.1 test (1), thinking-only variant: a turn whose only
+/// content is a `Thinking` block (no `Text`, no `ToolUse`) must be
+/// treated exactly like a literally-empty turn — a stored `Thinking`
+/// block is reasoning, not a reply. Without this case the fix only
+/// covers the provider that returned `content: []`; a provider that
+/// stores its reasoning as a `Thinking` block would silently fall
+/// through to the forced nudge instead.
+#[tokio::test]
+async fn thinking_only_stop_is_continued_as_empty() {
+    let pool = pool().await;
+    let primary = "claude-haiku-4-5-20251001".to_string();
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx) = build_stack(
+        &pool,
+        ModelChain::new(primary.clone()),
+        BreakerConfig::default(),
+    )
+    .await;
+
+    let (run_id, _) = seed_one_step_run(
+        &skills,
+        &definitions,
+        &runs,
+        &sub,
+        project_id,
+        ModelChain::new(primary),
+        "Say hi.",
+    )
+    .await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move { executor.run(run_id, cancel).await });
+
+    let first = recv_prompt(&mut prompt_rx, "first prompt request").await;
+    first
+        .response_channel
+        .send(Ok(PromptResult::Complete(thinking_only_response())))
+        .expect("send response");
+
+    let second = recv_prompt(&mut prompt_rx, "empty-stop continuation prompt").await;
+    assert!(
+        matches!(second.prompt.tool_choice, None | Some(ToolChoice::Auto)),
+        "a Thinking-only turn must not trigger the forced nudge: {:?}",
+        second.prompt.tool_choice
+    );
+    let text = last_user_text(&second.prompt);
+    assert!(
+        text.contains("ended without any text or tool call"),
+        "continuation prompt text: {text}"
+    );
+
+    second
+        .response_channel
+        .send(Ok(PromptResult::Complete(submit_output_response(
+            "tu_1",
+            serde_json::json!({"success": true, "output": "done"}),
+        ))))
+        .expect("send response");
+
+    handle.await.expect("join").expect("run succeeds");
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(run.state, WorkflowRunState::Succeeded);
+}
+
+/// Handoff §3.1 test (2): three consecutive empty stops. Pins down the
+/// `MAX_EMPTY_STOP_CONTINUATIONS = 2` boundary exactly — prompts two and
+/// three are plain continuations (the budgeted retries), and the fourth
+/// is the forced nudge, not a fifth plain continuation. Demonstrated RED
+/// against the pre-fix executor: prompt #2 alone would already be the
+/// forced nudge, so this test's loop over prompts 2 and 3 would see the
+/// forced `tool_choice` / "Investigation complete" text on its very
+/// first iteration.
+#[tokio::test]
+async fn three_empty_stops_exhaust_budget_then_forced_nudge() {
+    let pool = pool().await;
+    let primary = "claude-haiku-4-5-20251001".to_string();
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx) = build_stack(
+        &pool,
+        ModelChain::new(primary.clone()),
+        BreakerConfig::default(),
+    )
+    .await;
+
+    let (run_id, _) = seed_one_step_run(
+        &skills,
+        &definitions,
+        &runs,
+        &sub,
+        project_id,
+        ModelChain::new(primary),
+        "Say hi.",
+    )
+    .await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move { executor.run(run_id, cancel).await });
+
+    let mut continuation_texts = Vec::new();
+    for i in 0..3 {
+        let request = recv_prompt(&mut prompt_rx, &format!("prompt request #{i}")).await;
+        if i > 0 {
+            assert!(
+                matches!(request.prompt.tool_choice, None | Some(ToolChoice::Auto)),
+                "turn {i} must be a budgeted plain continuation, not the forced nudge: {:?}",
+                request.prompt.tool_choice
+            );
+            continuation_texts.push(last_user_text(&request.prompt));
+        }
+        request
+            .response_channel
+            .send(Ok(PromptResult::Complete(empty_stop_response())))
+            .unwrap_or_else(|_| panic!("send response #{i}"));
+    }
+    assert_eq!(
+        continuation_texts.len(),
+        2,
+        "exactly two budgeted continuations (MAX_EMPTY_STOP_CONTINUATIONS)"
+    );
+    for text in &continuation_texts {
+        assert!(text.contains("ended without any text or tool call"));
+        assert!(!text.contains("Investigation complete"));
+    }
+
+    let fourth = recv_prompt(&mut prompt_rx, "fourth prompt request (forced nudge)").await;
+    assert!(
+        matches!(
+            fourth.prompt.tool_choice,
+            Some(ToolChoice::Tool { ref name }) if name == "submit_output"
+        ),
+        "budget exhausted; the 4th turn must be the forced nudge: {:?}",
+        fourth.prompt.tool_choice
+    );
+    let text = last_user_text(&fourth.prompt);
+    assert!(text.contains("Investigation complete"));
+
+    fourth
+        .response_channel
+        .send(Ok(PromptResult::Complete(submit_output_response(
+            "tu_1",
+            serde_json::json!({"success": true, "output": "done"}),
+        ))))
+        .expect("send response");
+
+    handle.await.expect("join").expect("run succeeds");
+
+    assert!(
+        prompt_rx.try_recv().is_err(),
+        "no fifth prompt should have been sent"
+    );
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(run.state, WorkflowRunState::Succeeded);
+}
+
+/// Handoff §5 / D3: empty stops and `max_tokens` stops draw from
+/// separate counters. Interleaves both stop reasons so that neither
+/// budget alone would cover the full sequence (2 empty-stop
+/// continuations + 2 max-tokens continuations = 4 continuations, while
+/// `MAX_EMPTY_STOP_CONTINUATIONS` is 2 and the default
+/// `consecutive_max_tokens` breaker limit is 3) — if the two reasons
+/// shared one counter, one of the later turns would hit the forced
+/// nudge instead of continuing.
+#[tokio::test]
+async fn empty_stop_and_max_tokens_budgets_do_not_starve_each_other() {
+    let pool = pool().await;
+    let primary = "claude-haiku-4-5-20251001".to_string();
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx) = build_stack(
+        &pool,
+        ModelChain::new(primary.clone()),
+        BreakerConfig::default(),
+    )
+    .await;
+
+    let (run_id, _) = seed_one_step_run(
+        &skills,
+        &definitions,
+        &runs,
+        &sub,
+        project_id,
+        ModelChain::new(primary),
+        "Say hi.",
+    )
+    .await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move { executor.run(run_id, cancel).await });
+
+    // P1 -> empty stop, P2 -> max_tokens, P3 -> empty stop, P4 -> max_tokens,
+    // P5 -> submit_output. Each of the two continuation reasons is used
+    // twice, interleaved, without either exhausting its budget early.
+    let responses = [
+        empty_stop_response(),
+        max_tokens_response(),
+        empty_stop_response(),
+        max_tokens_response(),
+    ];
+    let mut empty_stop_continuations = 0;
+    let mut max_tokens_continuations = 0;
+    for (i, response) in responses.into_iter().enumerate() {
+        let request = recv_prompt(&mut prompt_rx, &format!("prompt request #{i}")).await;
+        if i > 0 {
+            assert!(
+                matches!(request.prompt.tool_choice, None | Some(ToolChoice::Auto)),
+                "turn {i} must not be the forced nudge: {:?}",
+                request.prompt.tool_choice
+            );
+            let text = last_user_text(&request.prompt);
+            if text.contains("ended without any text or tool call") {
+                empty_stop_continuations += 1;
+            } else if text.contains("hit the output token limit") {
+                max_tokens_continuations += 1;
+            } else {
+                panic!("unexpected continuation text at turn {i}: {text}");
+            }
+        }
+        request
+            .response_channel
+            .send(Ok(PromptResult::Complete(response)))
+            .unwrap_or_else(|_| panic!("send response #{i}"));
+    }
+
+    let fifth = recv_prompt(&mut prompt_rx, "fifth prompt request").await;
+    assert!(
+        matches!(fifth.prompt.tool_choice, None | Some(ToolChoice::Auto)),
+        "neither budget should have been exhausted by the other's turns: {:?}",
+        fifth.prompt.tool_choice
+    );
+    let fifth_text = last_user_text(&fifth.prompt);
+    assert!(
+        fifth_text.contains("hit the output token limit"),
+        "the continuation for the final max_tokens response: {fifth_text}"
+    );
+    max_tokens_continuations += 1;
+    fifth
+        .response_channel
+        .send(Ok(PromptResult::Complete(submit_output_response(
+            "tu_1",
+            serde_json::json!({"success": true, "output": "done"}),
+        ))))
+        .expect("send response");
+
+    handle.await.expect("join").expect("run succeeds");
+
+    assert_eq!(empty_stop_continuations, 2);
+    assert_eq!(max_tokens_continuations, 2);
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(run.state, WorkflowRunState::Succeeded);
+}
+
+/// Bugbot review of PR #515 (inline comment on 87f5c173,
+/// executor.rs:1092): `empty_stops` was not reset alongside
+/// `continuations` when the breaker advances the model chain, so a
+/// fallback model inherited whatever empty-stop budget the primary had
+/// already spent. Mirrors
+/// `fallback_gets_its_own_continuation_budget_after_chain_advance`, but
+/// spends the PRIMARY's empty-stop budget first (2 empty stops), then
+/// trips the breaker via 3 consecutive `MaxTokens` stops to advance the
+/// chain, then gives the FALLBACK's first turn an empty stop.
+/// Demonstrated RED against the unpatched reset: `empty_stops` stays at
+/// 2 (its own limit) after the advance, so the fallback's first empty
+/// stop hits `empty_stops < MAX_EMPTY_STOP_CONTINUATIONS` as `2 < 2`
+/// (false) and goes straight to the forced nudge instead of getting its
+/// own continuation.
+#[tokio::test]
+async fn empty_stop_budget_resets_on_chain_advance() {
+    let pool = pool().await;
+    let primary = "claude-haiku-4-5-20251001".to_string();
+    let fallback = "claude-haiku-4-5-fallback".to_string();
+    let chain = ModelChain::new(primary.clone()).with_fallback(fallback.clone());
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx) =
+        build_stack(&pool, chain.clone(), BreakerConfig::default()).await;
+
+    let (run_id, _) = seed_one_step_run(
+        &skills,
+        &definitions,
+        &runs,
+        &sub,
+        project_id,
+        chain,
+        "Do a very long plan before your first tool call.",
+    )
+    .await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move { executor.run(run_id, cancel).await });
+
+    // Primary: spend its whole empty-stop budget (2 empty stops) first.
+    for i in 0..2 {
+        let request = recv_prompt(&mut prompt_rx, &format!("primary empty-stop prompt #{i}")).await;
+        assert_eq!(
+            request.prompt.chain.primary.name, primary,
+            "turn {i} should still be on the primary model"
+        );
+        request
+            .response_channel
+            .send(Ok(PromptResult::Complete(empty_stop_response())))
+            .unwrap_or_else(|_| panic!("send response #{i}"));
+    }
+
+    // Then trip the breaker with 3 consecutive MaxTokens stops, advancing
+    // the chain to the fallback (same mechanism as
+    // `fallback_gets_its_own_continuation_budget_after_chain_advance`).
+    for i in 0..3 {
+        let request = recv_prompt(&mut prompt_rx, &format!("primary max_tokens prompt #{i}")).await;
+        assert_eq!(
+            request.prompt.chain.primary.name, primary,
+            "turn {i} should still be on the primary model"
+        );
+        request
+            .response_channel
+            .send(Ok(PromptResult::Complete(max_tokens_response())))
+            .unwrap_or_else(|_| panic!("send response #{i}"));
+    }
+
+    // The fallback's first turn is ITSELF an empty stop. If `empty_stops`
+    // wasn't reset alongside `continuations` on chain advance, this
+    // immediately exhausts a budget the fallback never got to spend, and
+    // the next prompt is the forced nudge instead of a plain continuation.
+    let fallback_first = recv_prompt(&mut prompt_rx, "fallback first prompt").await;
+    assert_eq!(fallback_first.prompt.chain.primary.name, fallback);
+    fallback_first
+        .response_channel
+        .send(Ok(PromptResult::Complete(empty_stop_response())))
+        .expect("send response");
+
+    let fallback_second = recv_prompt(&mut prompt_rx, "fallback second prompt").await;
+    assert!(
+        matches!(
+            fallback_second.prompt.tool_choice,
+            None | Some(ToolChoice::Auto)
+        ),
+        "fallback's first empty stop must not force submit_output: {:?}",
+        fallback_second.prompt.tool_choice
+    );
+    let text = last_user_text(&fallback_second.prompt);
+    assert!(
+        text.contains("ended without any text or tool call"),
+        "must be the plain empty-stop continuation, not the forced nudge: {text}"
+    );
+
+    fallback_second
+        .response_channel
+        .send(Ok(PromptResult::Complete(submit_output_response(
+            "tu_1",
+            serde_json::json!({"success": true, "output": "recovered"}),
+        ))))
+        .expect("send response");
+
+    handle.await.expect("join").expect("run succeeds");
+
+    assert!(
+        prompt_rx.try_recv().is_err(),
+        "no forced nudge should have been sent"
+    );
 
     let run = runs.find_by_id(run_id).await.expect("reload run");
     assert_eq!(run.state, WorkflowRunState::Succeeded);

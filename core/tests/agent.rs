@@ -203,6 +203,7 @@ async fn send_message_round_trip_via_prompt_channel() {
             },
             stop_reason: None,
             model_used: None,
+            upstream_provider: None,
         })))
         .expect("send response");
 
@@ -379,6 +380,7 @@ async fn send_message_dispatches_registered_tool_call() {
             },
             stop_reason: Some(StopReason::ToolUse),
             model_used: None,
+            upstream_provider: None,
         })))
         .expect("send first response");
 
@@ -401,6 +403,7 @@ async fn send_message_dispatches_registered_tool_call() {
             },
             stop_reason: None,
             model_used: None,
+            upstream_provider: None,
         })))
         .expect("send second response");
 
@@ -605,6 +608,7 @@ async fn identical_failing_tool_calls_advance_chain_to_fallback() {
                 },
                 stop_reason: Some(StopReason::ToolUse),
                 model_used: None,
+                upstream_provider: None,
             })))
             .unwrap_or_else(|_| panic!("send response #{i}"));
     }
@@ -627,6 +631,7 @@ async fn identical_failing_tool_calls_advance_chain_to_fallback() {
             usage: Usage::default(),
             stop_reason: None,
             model_used: None,
+            upstream_provider: None,
         })))
         .expect("send fallback response");
 
@@ -728,6 +733,7 @@ async fn identical_failing_tool_calls_without_fallback_error_the_turn() {
                 },
                 stop_reason: Some(StopReason::ToolUse),
                 model_used: None,
+                upstream_provider: None,
             })))
             .unwrap_or_else(|_| panic!("send response #{i}"));
     }
@@ -898,6 +904,7 @@ async fn resume_message_continues_past_interrupted_tool_call() {
             },
             stop_reason: Some(StopReason::ToolUse),
             model_used: None,
+            upstream_provider: None,
         })))
         .expect("send first response");
 
@@ -950,6 +957,7 @@ async fn resume_message_continues_past_interrupted_tool_call() {
             },
             stop_reason: None,
             model_used: None,
+            upstream_provider: None,
         })))
         .expect("send continuation response");
 

@@ -661,6 +661,18 @@ impl Agents {
         Ok(self.sessions.last_stop_reason(agent_id).await?)
     }
 
+    /// Reads the agent's session for `stop_reason` and content-emptiness
+    /// of its most recent assistant turn, off a single load. Workflow
+    /// executor consumes this to decide whether to continue a turn that
+    /// closed empty (no text, no tool call) without a tool call.
+    #[instrument(name = "domain.agent.last_response_status", skip(self))]
+    pub async fn last_response_status(
+        &self,
+        agent_id: AgentId,
+    ) -> Result<Option<session::message::LastResponseStatus>, AgentError> {
+        Ok(self.sessions.last_response_status(agent_id).await?)
+    }
+
     #[instrument(name = "domain.agent.breaker_config", skip(self))]
     pub async fn breaker_config(
         &self,
@@ -1522,6 +1534,8 @@ impl Agents {
         mut prompt_state: llm::Prompt,
         workflow_run_id: Option<WorkflowRunId>,
     ) -> Result<(), AgentError> {
+        use es_entity::context::{EventContext, WithEventContext};
+
         let model_name = prompt_state.chain.primary.name.clone();
         prompt_state.trace_agent_id = Some(id.to_string());
         prompt_state.trace_run_id = workflow_run_id.map(|r| r.to_string());
@@ -1534,162 +1548,175 @@ impl Agents {
         let sessions = self.sessions.clone();
         let toolsets = self.toolsets.clone();
         let prompt_requests = self.prompt_requests.clone();
-        tokio::spawn(async move {
-            let mut next = response_rx.await;
-            let mut turn: u32 = 0;
-            let mut input_tokens: u32 = 0;
-            let mut output_tokens: u32 = 0;
-            let mut current_model = model_name;
-            loop {
-                turn += 1;
-                let result = match next {
-                    Ok(Ok(r)) => r,
-                    Ok(Err(e)) => {
-                        let msg = e.to_string();
-                        let _ = sessions
-                            .assistant_response_failed(id, current_model.clone(), msg.clone())
-                            .await;
-                        emit_event(&tx, ChatOutputEvent::Error { message: msg });
-                        return;
-                    }
-                    Err(_) => {
-                        let msg = "prompt response channel closed".to_string();
-                        let _ = sessions
-                            .assistant_response_failed(id, current_model.clone(), msg.clone())
-                            .await;
-                        emit_event(&tx, ChatOutputEvent::Error { message: msg });
-                        return;
-                    }
-                };
-
-                let (response, streamed) = match result {
-                    llm::PromptResult::Stream(handle) => match consume_stream(handle, &tx).await {
-                        Ok(resp) => (resp, true),
-                        Err(msg) => {
+        // `tokio::spawn` starts a brand new task with its own empty
+        // `EventContext` stack, so without capturing and re-seeding it here
+        // the caller's `workflow_run_id` / `workflow_step` (set by
+        // `Executor::run` and `send_message`/`resume_message` before this
+        // call) would be invisible to `fan_out_tool_calls`'s tool-call
+        // audit rows — a fresh context, not a propagated one.
+        let event_context = EventContext::current().data();
+        tokio::spawn(
+            async move {
+                let mut next = response_rx.await;
+                let mut turn: u32 = 0;
+                let mut input_tokens: u32 = 0;
+                let mut output_tokens: u32 = 0;
+                let mut current_model = model_name;
+                loop {
+                    turn += 1;
+                    let result = match next {
+                        Ok(Ok(r)) => r,
+                        Ok(Err(e)) => {
+                            let msg = e.to_string();
                             let _ = sessions
-                                .assistant_response_failed(id, current_model.clone(), msg)
+                                .assistant_response_failed(id, current_model.clone(), msg.clone())
                                 .await;
+                            emit_event(&tx, ChatOutputEvent::Error { message: msg });
                             return;
                         }
-                    },
-                    llm::PromptResult::Complete(response) => (response, false),
-                };
+                        Err(_) => {
+                            let msg = "prompt response channel closed".to_string();
+                            let _ = sessions
+                                .assistant_response_failed(id, current_model.clone(), msg.clone())
+                                .await;
+                            emit_event(&tx, ChatOutputEvent::Error { message: msg });
+                            return;
+                        }
+                    };
 
-                input_tokens += response.usage.input_tokens;
-                output_tokens += response.usage.output_tokens;
+                    let (response, streamed) = match result {
+                        llm::PromptResult::Stream(handle) => {
+                            match consume_stream(handle, &tx).await {
+                                Ok(resp) => (resp, true),
+                                Err(msg) => {
+                                    let _ = sessions
+                                        .assistant_response_failed(id, current_model.clone(), msg)
+                                        .await;
+                                    return;
+                                }
+                            }
+                        }
+                        llm::PromptResult::Complete(response) => (response, false),
+                    };
 
-                let session_response = match sessions
-                    .assistant_response_received(id, response.clone(), current_model.clone())
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(e) => {
+                    input_tokens += response.usage.input_tokens;
+                    output_tokens += response.usage.output_tokens;
+
+                    let session_response = match sessions
+                        .assistant_response_received(id, response.clone(), current_model.clone())
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            emit_event(
+                                &tx,
+                                ChatOutputEvent::Error {
+                                    message: e.to_string(),
+                                },
+                            );
+                            return;
+                        }
+                    };
+
+                    if !streamed {
+                        forward_response(response, &tx);
+                    }
+
+                    let mut next_prompt = match session_response {
+                        session::AgentSessionResponse::Done => break,
+                        session::AgentSessionResponse::ToolUseRequest(tool_uses) => {
+                            let tool_calls: Vec<llm::RequestToolUse> = tool_uses
+                                .into_iter()
+                                .map(|tu| llm::RequestToolUse {
+                                    id: tu.id,
+                                    name: tu.name,
+                                    input: tu.input,
+                                })
+                                .collect();
+                            let results =
+                                fan_out_tool_calls(&toolsets, &agent_subject, tool_calls, &tx)
+                                    .await;
+
+                            // The session detects a terminal `submit_output`
+                            // call inside `add_tool_results` and returns
+                            // `Done` — the loop breaks below without a
+                            // follow-up prompt.
+                            let post = match sessions.add_tool_results(id, results).await {
+                                Ok(r) => r,
+                                Err(e) => {
+                                    emit_event(
+                                        &tx,
+                                        ChatOutputEvent::Error {
+                                            message: e.to_string(),
+                                        },
+                                    );
+                                    return;
+                                }
+                            };
+
+                            if matches!(post, session::AgentSessionResponse::Done) {
+                                break;
+                            }
+
+                            match sessions.next_prompt(id, session::TargetThread::Main).await {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    emit_event(
+                                        &tx,
+                                        ChatOutputEvent::Error {
+                                            message: e.to_string(),
+                                        },
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                        session::AgentSessionResponse::PromptPending { target } => {
+                            match sessions.next_prompt(id, target).await {
+                                Ok(p) => p,
+                                Err(e) => {
+                                    emit_event(
+                                        &tx,
+                                        ChatOutputEvent::Error {
+                                            message: e.to_string(),
+                                        },
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                        _ => break,
+                    };
+
+                    current_model = next_prompt.chain.primary.name.clone();
+                    next_prompt.trace_agent_id = Some(id.to_string());
+                    next_prompt.trace_run_id = workflow_run_id.map(|r| r.to_string());
+                    let (request, rx_next) = llm::PromptRequest::new(next_prompt);
+                    if prompt_requests.send(request).await.is_err() {
                         emit_event(
                             &tx,
                             ChatOutputEvent::Error {
-                                message: e.to_string(),
+                                message: "prompt request channel closed".to_string(),
                             },
                         );
                         return;
                     }
-                };
-
-                if !streamed {
-                    forward_response(response, &tx);
+                    next = rx_next.await;
                 }
 
-                let mut next_prompt = match session_response {
-                    session::AgentSessionResponse::Done => break,
-                    session::AgentSessionResponse::ToolUseRequest(tool_uses) => {
-                        let tool_calls: Vec<llm::RequestToolUse> = tool_uses
-                            .into_iter()
-                            .map(|tu| llm::RequestToolUse {
-                                id: tu.id,
-                                name: tu.name,
-                                input: tu.input,
-                            })
-                            .collect();
-                        let results =
-                            fan_out_tool_calls(&toolsets, &agent_subject, tool_calls, &tx).await;
-
-                        // The session detects a terminal `submit_output`
-                        // call inside `add_tool_results` and returns
-                        // `Done` — the loop breaks below without a
-                        // follow-up prompt.
-                        let post = match sessions.add_tool_results(id, results).await {
-                            Ok(r) => r,
-                            Err(e) => {
-                                emit_event(
-                                    &tx,
-                                    ChatOutputEvent::Error {
-                                        message: e.to_string(),
-                                    },
-                                );
-                                return;
-                            }
-                        };
-
-                        if matches!(post, session::AgentSessionResponse::Done) {
-                            break;
-                        }
-
-                        match sessions.next_prompt(id, session::TargetThread::Main).await {
-                            Ok(p) => p,
-                            Err(e) => {
-                                emit_event(
-                                    &tx,
-                                    ChatOutputEvent::Error {
-                                        message: e.to_string(),
-                                    },
-                                );
-                                return;
-                            }
-                        }
-                    }
-                    session::AgentSessionResponse::PromptPending { target } => {
-                        match sessions.next_prompt(id, target).await {
-                            Ok(p) => p,
-                            Err(e) => {
-                                emit_event(
-                                    &tx,
-                                    ChatOutputEvent::Error {
-                                        message: e.to_string(),
-                                    },
-                                );
-                                return;
-                            }
-                        }
-                    }
-                    _ => break,
-                };
-
-                current_model = next_prompt.chain.primary.name.clone();
-                next_prompt.trace_agent_id = Some(id.to_string());
-                next_prompt.trace_run_id = workflow_run_id.map(|r| r.to_string());
-                let (request, rx_next) = llm::PromptRequest::new(next_prompt);
-                if prompt_requests.send(request).await.is_err() {
-                    emit_event(
-                        &tx,
-                        ChatOutputEvent::Error {
-                            message: "prompt request channel closed".to_string(),
-                        },
-                    );
-                    return;
-                }
-                next = rx_next.await;
+                emit_event(
+                    &tx,
+                    ChatOutputEvent::AssistantDone {
+                        turns: turn,
+                        input_tokens,
+                        output_tokens,
+                        duration_ms: None,
+                        cost_usd: None,
+                    },
+                );
             }
-
-            emit_event(
-                &tx,
-                ChatOutputEvent::AssistantDone {
-                    turns: turn,
-                    input_tokens,
-                    output_tokens,
-                    duration_ms: None,
-                    cost_usd: None,
-                },
-            );
-        });
+            .with_event_context(event_context),
+        );
         Ok(())
     }
 }

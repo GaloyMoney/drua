@@ -247,6 +247,7 @@ impl OpenAiClient {
             usage.reasoning_output_tokens = tracing::field::Empty,
             usage.cost_usd = tracing::field::Empty,
             usage.upstream_inference_cost_usd = tracing::field::Empty,
+            upstream_provider = tracing::field::Empty,
             stream.delta_count = tracing::field::Empty,
         );
         if let Some(agent_id) = &prompt.trace_agent_id {
@@ -327,6 +328,7 @@ async fn drive_stream_with_retry(
                             reasoning_output_tokens,
                             cost_usd,
                             upstream_inference_cost_usd,
+                            upstream_provider,
                         } = &delta
                         {
                             usage_seen = Some(UsageSnapshot {
@@ -337,6 +339,7 @@ async fn drive_stream_with_retry(
                                 reasoning_output_tokens: *reasoning_output_tokens,
                                 cost_usd: *cost_usd,
                                 upstream_inference_cost_usd: *upstream_inference_cost_usd,
+                                upstream_provider: upstream_provider.clone(),
                             });
                         }
                         tx.try_send(Ok(delta))
@@ -435,10 +438,13 @@ async fn drive_stream_with_retry(
         if let Some(c) = u.upstream_inference_cost_usd {
             span.record("usage.upstream_inference_cost_usd", c);
         }
+        if let Some(p) = &u.upstream_provider {
+            span.record("upstream_provider", p.as_str());
+        }
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Clone)]
 struct UsageSnapshot {
     input_tokens: u32,
     output_tokens: u32,
@@ -447,6 +453,7 @@ struct UsageSnapshot {
     reasoning_output_tokens: u32,
     cost_usd: Option<f64>,
     upstream_inference_cost_usd: Option<f64>,
+    upstream_provider: Option<String>,
 }
 
 /// Gate for the mid-stream transient-error retry in

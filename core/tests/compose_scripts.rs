@@ -1114,6 +1114,7 @@ return {
                 usage: Default::default(),
                 stop_reason: Some(llm::response::StopReason::ToolUse),
                 model_used: None,
+                upstream_provider: None,
             })))
             .unwrap();
     };

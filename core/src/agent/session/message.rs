@@ -193,6 +193,15 @@ pub enum StopReason {
     Error,
 }
 
+/// `stop_reason` and content-emptiness of the newest
+/// `AssistantResponseReceived` event, read off the same event so a
+/// caller can't observe the two facts describing different turns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LastResponseStatus {
+    pub stop_reason: StopReason,
+    pub is_empty: bool,
+}
+
 impl From<Prompt> for llm::Prompt {
     fn from(p: Prompt) -> Self {
         let primary_effort = p.model_chain.primary.effort;
