@@ -1,5 +1,9 @@
 use clap::Parser;
 
+use crate::lana_admin_mcp::{
+    DEFAULT_LANA_ADMIN_MCP_CLIENT_ID, DEFAULT_LANA_ADMIN_MCP_SANDBOX_NAMESPACE,
+    DEFAULT_LANA_ADMIN_MCP_URL_TEMPLATE, DEFAULT_LANA_ADMIN_MCP_USERNAME_TEMPLATE,
+};
 use crate::postgres_mcp::{
     DEFAULT_POSTGRES_MCP_CLOUD_SQL_PROXY_IMAGE, DEFAULT_POSTGRES_MCP_CONFIG_SECRET,
     DEFAULT_POSTGRES_MCP_CONNECT_TIMEOUT_SECS, DEFAULT_POSTGRES_MCP_IMAGE,
@@ -176,6 +180,65 @@ pub(crate) struct Cli {
         default_value = DEFAULT_POSTGRES_MCP_REQUEST_MEMORY
     )]
     pub(crate) postgres_mcp_request_memory: String,
+
+    /// Enable per-instance Lana admin MCP upstreams: Ready LanaSandbox CRs are
+    /// discovered automatically, static instances come from
+    /// TUNNEL_LANA_ADMIN_MCP_STATIC_INSTANCES.
+    #[arg(long, env = "TUNNEL_LANA_ADMIN_MCP_ENABLED", default_value_t = false)]
+    pub(crate) lana_admin_mcp_enabled: bool,
+
+    /// Namespace holding the LanaSandbox CRs.
+    #[arg(
+        long,
+        env = "TUNNEL_LANA_ADMIN_MCP_SANDBOX_NAMESPACE",
+        default_value = DEFAULT_LANA_ADMIN_MCP_SANDBOX_NAMESPACE
+    )]
+    pub(crate) lana_admin_mcp_sandbox_namespace: String,
+
+    /// Public Keycloak base URL the per-instance realms live on, e.g.
+    /// https://auth.staging.galoy.io.
+    #[arg(long, env = "TUNNEL_LANA_ADMIN_MCP_KEYCLOAK_BASE_URL")]
+    pub(crate) lana_admin_mcp_keycloak_base_url: Option<String>,
+
+    /// Direct-grant client id that mints lana-admin-mcp tokens.
+    #[arg(
+        long,
+        env = "TUNNEL_LANA_ADMIN_MCP_CLIENT_ID",
+        default_value = DEFAULT_LANA_ADMIN_MCP_CLIENT_ID
+    )]
+    pub(crate) lana_admin_mcp_client_id: String,
+
+    /// Username template for the direct grant; `{instance}` is replaced with
+    /// the instance name.
+    #[arg(
+        long,
+        env = "TUNNEL_LANA_ADMIN_MCP_USERNAME_TEMPLATE",
+        default_value = DEFAULT_LANA_ADMIN_MCP_USERNAME_TEMPLATE
+    )]
+    pub(crate) lana_admin_mcp_username_template: String,
+
+    /// Password for the direct grant. Empty where the realm binds the DEV
+    /// direct-grant flow (staging sandboxes, kind).
+    #[arg(long, env = "TUNNEL_LANA_ADMIN_MCP_PASSWORD", default_value = "")]
+    pub(crate) lana_admin_mcp_password: String,
+
+    /// Admin MCP URL template for discovered sandboxes; `{instance}` is
+    /// replaced with the sandbox (and namespace) name.
+    #[arg(
+        long,
+        env = "TUNNEL_LANA_ADMIN_MCP_URL_TEMPLATE",
+        default_value = DEFAULT_LANA_ADMIN_MCP_URL_TEMPLATE
+    )]
+    pub(crate) lana_admin_mcp_url_template: String,
+
+    /// Comma-separated name=url pairs for Lana instances that are not
+    /// LanaSandbox CRs (e.g. main=http://lana-bank-admin.lana-bank-main.svc:5253/mcp).
+    #[arg(
+        long,
+        env = "TUNNEL_LANA_ADMIN_MCP_STATIC_INSTANCES",
+        default_value = ""
+    )]
+    pub(crate) lana_admin_mcp_static_instances: String,
 
     /// CPU limit for generated DBHub pods.
     #[arg(
