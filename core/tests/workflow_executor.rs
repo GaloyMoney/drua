@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use drua_core::agent::session::BreakerConfig;
+use drua_core::agent::session::{BreakerConfig, CompactionConfig, ResetTimeDeltaSeconds};
 use drua_core::agent::{AgentRole, Agents, AgentsConfig, ModelDefaults, RoleConfig};
 use drua_core::primitives::{AuthSubject, ContextGeneration, ProjectId, UserId};
 use drua_core::sandbox::{SandboxConfig, Sandboxes};
@@ -10,7 +10,7 @@ use drua_core::skill::Skills;
 use drua_core::toolset::{SubmitOutputTool, ToolSets, ToolSetsConfig, ToolSetsError, TopLevelTool};
 use drua_core::workflow::executor::Executor;
 use drua_core::workflow::repo::WorkflowDefinitionRepo;
-use drua_core::workflow::run::NewWorkflowRun;
+use drua_core::workflow::run::{BudgetStopReason, NewWorkflowRun};
 use drua_core::workflow::{
     default_output_schema, NewWorkflowDefinition, WorkflowRunRepo, WorkflowRunState,
     WorkflowStepDef, WorkflowTrigger,
@@ -59,7 +59,43 @@ async fn build_stack(
     AuthSubject,
     mpsc::Receiver<PromptRequest>,
 ) {
-    build_stack_inner(pool, chain, breaker, None, |_| {}).await
+    build_stack_inner(
+        pool,
+        chain,
+        breaker,
+        CompactionConfig::default(),
+        None,
+        |_| {},
+    )
+    .await
+}
+
+/// Same as [`build_stack`], but forces every subsequent prompt onto a
+/// fresh (orphaned) thread — `reset_time_delta_seconds: 0` means any
+/// positive gap since the last turn exceeds the threshold. Lets a test
+/// exercise budget accumulation across a genuine thread reset without
+/// needing to grow a real conversation past the token-count trigger,
+/// matching the curate-live evidence (spend split across an initial
+/// thread and a post-refresh one) — handoff §7's "compacts or refreshes
+/// the thread between two charges" row.
+async fn build_stack_with_thread_reset(
+    pool: &sqlx::PgPool,
+    chain: ModelChain,
+    breaker: BreakerConfig,
+) -> (
+    Executor,
+    WorkflowDefinitionRepo,
+    WorkflowRunRepo,
+    Arc<Skills>,
+    ProjectId,
+    AuthSubject,
+    mpsc::Receiver<PromptRequest>,
+) {
+    let compaction = CompactionConfig {
+        reset_time_delta_seconds: Some(ResetTimeDeltaSeconds(0)),
+        ..CompactionConfig::default()
+    };
+    build_stack_inner(pool, chain, breaker, compaction, None, |_| {}).await
 }
 
 /// Same as [`build_stack`], but also registers a real, dispatchable
@@ -78,9 +114,16 @@ async fn build_stack_with_ping_tool(
     AuthSubject,
     mpsc::Receiver<PromptRequest>,
 ) {
-    build_stack_inner(pool, chain, breaker, None, |toolsets| {
-        toolsets.register_top_level(PingTool::new());
-    })
+    build_stack_inner(
+        pool,
+        chain,
+        breaker,
+        CompactionConfig::default(),
+        None,
+        |toolsets| {
+            toolsets.register_top_level(PingTool::new());
+        },
+    )
     .await
 }
 
@@ -102,8 +145,15 @@ async fn build_stack_with_audit(
     Arc<drua_core::audit::Audit>,
 ) {
     let audit = Arc::new(drua_core::audit::Audit::new(pool));
-    let (executor, definitions, runs, skills, project_id, sub, prompt_rx) =
-        build_stack_inner(pool, chain, breaker, Some(Arc::clone(&audit)), |_| {}).await;
+    let (executor, definitions, runs, skills, project_id, sub, prompt_rx) = build_stack_inner(
+        pool,
+        chain,
+        breaker,
+        CompactionConfig::default(),
+        Some(Arc::clone(&audit)),
+        |_| {},
+    )
+    .await;
     (
         executor,
         definitions,
@@ -120,6 +170,7 @@ async fn build_stack_inner(
     pool: &sqlx::PgPool,
     chain: ModelChain,
     breaker: BreakerConfig,
+    step_agent_compaction: CompactionConfig,
     audit: Option<Arc<drua_core::audit::Audit>>,
     register_extra_tools: impl FnOnce(&ToolSets),
 ) -> (
@@ -154,7 +205,7 @@ async fn build_stack_inner(
         AgentRole::WorkflowStepAgent,
         RoleConfig {
             chain: Some(chain.clone()),
-            compaction: Default::default(),
+            compaction: step_agent_compaction,
             breaker: breaker.clone(),
         },
     );
@@ -309,6 +360,84 @@ async fn seed_one_step_run(
     let run = runs.create(new_run).await.expect("create run");
     let started_at = run.started_at();
     (run.id, started_at)
+}
+
+/// Same shape as [`seed_one_step_run`], but for a workflow with one
+/// `AgentStep` per entry in `skill_bodies` (named `step-0`, `step-1`, …)
+/// and a `max_cost_usd` snapshot on both the definition and the run.
+#[allow(clippy::too_many_arguments)]
+async fn seed_steps_run_with_max_cost(
+    skills: &Skills,
+    definitions: &WorkflowDefinitionRepo,
+    runs: &WorkflowRunRepo,
+    sub: &AuthSubject,
+    project_id: ProjectId,
+    chain: ModelChain,
+    skill_bodies: &[&str],
+    max_cost_usd: f64,
+) -> drua_core::primitives::WorkflowRunId {
+    let mut steps = Vec::with_capacity(skill_bodies.len());
+    for (i, body) in skill_bodies.iter().enumerate() {
+        let skill_name = format!("step-skill-{}", uuid::Uuid::new_v4());
+        skills
+            .create(
+                sub,
+                project_id,
+                "test-project",
+                skill_name.clone(),
+                "test skill".to_string(),
+                body.to_string(),
+            )
+            .await
+            .expect("create skill");
+        steps.push(WorkflowStepDef::AgentStep {
+            name: format!("step-{i}"),
+            skill: skill_name,
+            sandbox: None,
+            sandbox_mode: None,
+            timeout_seconds: None,
+            model_chain: Some(chain.clone()),
+            output_schema: Box::new(default_output_schema()),
+            condition: None,
+        });
+    }
+
+    let new_definition = NewWorkflowDefinition::builder()
+        .project_id(project_id)
+        .name(format!("test-wf-{}", uuid::Uuid::new_v4()))
+        .trigger(WorkflowTrigger::Manual { condition: None })
+        .steps(steps.clone())
+        .space_writes(drua_core::workflow::SpaceWritesDecl {
+            mode: drua_core::workflow::SpaceWritesMode::ReadOnly,
+            ..Default::default()
+        })
+        .max_cost_usd(Some(max_cost_usd))
+        .build()
+        .expect("build definition");
+    let mut op = definitions.begin_op().await.expect("begin op");
+    let definition = definitions
+        .create_in_op(&mut op, new_definition)
+        .await
+        .expect("create definition");
+    op.commit().await.expect("commit");
+
+    let new_run = NewWorkflowRun::builder()
+        .definition_id(definition.id)
+        .project_id(project_id)
+        .trigger_context(serde_json::json!({}))
+        .steps_snapshot(steps)
+        .max_cost_usd(Some(max_cost_usd))
+        .build()
+        .expect("build run");
+    let run = runs.create(new_run).await.expect("create run");
+    run.id
+}
+
+/// Sets a response's reported USD cost (`None` mimics a direct
+/// Anthropic/OpenAI turn, which never reports one).
+fn priced(mut response: PromptResponse, cost_usd: Option<f64>) -> PromptResponse {
+    response.usage.cost_usd = cost_usd;
+    response
 }
 
 /// Bounded wait for the next `PromptRequest`. A regression that hangs
@@ -1853,6 +1982,339 @@ async fn hard_llm_failure_errors_the_step_without_reaching_continuation_logic() 
         reason.contains("prompt response channel closed"),
         "reason: {reason}"
     );
+}
+
+// -- max_cost_usd budget enforcement (handoff-workflow-max-cost-usd-2026-09-30.md) --
+
+/// handoff §2/§7 "Zero limit": a `max_cost_usd: 0` run must deny the
+/// very first model dispatch — no `PromptRequest` is ever sent, so this
+/// test never touches `prompt_rx` at all. `Executor::run` takes `&self`,
+/// so no spawn is needed; the whole run resolves synchronously.
+#[tokio::test]
+async fn zero_max_cost_usd_denies_first_model_dispatch() {
+    let pool = pool().await;
+    let chain = ModelChain::new("claude-haiku-4-5-20251001".to_string());
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx) =
+        build_stack(&pool, chain.clone(), BreakerConfig::default()).await;
+
+    let run_id = seed_steps_run_with_max_cost(
+        &skills,
+        &definitions,
+        &runs,
+        &sub,
+        project_id,
+        chain,
+        &["Say hi."],
+        0.0,
+    )
+    .await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    executor.run(run_id, cancel).await.expect("run completes");
+
+    assert!(
+        prompt_rx.try_recv().is_err(),
+        "a zero budget must never dispatch a model request"
+    );
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(run.state, WorkflowRunState::BudgetExceeded);
+    assert_eq!(run.max_cost_usd, Some(0.0));
+    assert_eq!(run.spent_usd(), 0.0);
+    assert_eq!(run.remaining_cost_usd(), Some(0.0));
+    let stop = run.budget_stop.expect("budget_stop recorded");
+    assert_eq!(stop.reason, BudgetStopReason::LimitReached);
+    assert_eq!(stop.overshoot.as_dollars(), 0.0);
+}
+
+/// handoff §5/§7 "Terminal job retry/resume": once a run is
+/// budget-stopped, re-running the executor job must be a clean no-op —
+/// no further model dispatch, no state change.
+#[tokio::test]
+async fn budget_stopped_run_rejects_further_dispatch_on_retry() {
+    let pool = pool().await;
+    let chain = ModelChain::new("claude-haiku-4-5-20251001".to_string());
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx) =
+        build_stack(&pool, chain.clone(), BreakerConfig::default()).await;
+
+    let run_id = seed_steps_run_with_max_cost(
+        &skills,
+        &definitions,
+        &runs,
+        &sub,
+        project_id,
+        chain,
+        &["Say hi."],
+        0.0,
+    )
+    .await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    executor
+        .run(run_id, Arc::clone(&cancel))
+        .await
+        .expect("first run stops on budget");
+    let first = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(first.state, WorkflowRunState::BudgetExceeded);
+
+    // Simulate the job system retrying the same run (e.g. after a
+    // reschedule). `Executor::run` checks `state.is_terminal()` before
+    // doing anything else.
+    executor
+        .run(run_id, cancel)
+        .await
+        .expect("retry on a terminal run is a clean no-op");
+
+    assert!(
+        prompt_rx.try_recv().is_err(),
+        "a terminal budget-stopped run must never dispatch again"
+    );
+    let second = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(second.state, WorkflowRunState::BudgetExceeded);
+    assert_eq!(second.budget_stop, first.budget_stop);
+}
+
+/// handoff §3's worked example: a $4.80 continuation followed by a
+/// $0.35 `submit_output` turn persists $5.15 spent / $0.15 overshoot,
+/// and stops the run — even though the threshold-crossing turn *is* the
+/// one carrying `submit_output`. "Stop wins": the response is retained
+/// for diagnosis, but the run must not read as a normal success
+/// (handoff §7 "Threshold response contains tool calls or
+/// submit_output").
+#[tokio::test]
+async fn overshoot_amounts_match_handoff_example_and_stop_wins_over_submit_output() {
+    let pool = pool().await;
+    let chain = ModelChain::new("claude-haiku-4-5-20251001".to_string());
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx) =
+        build_stack(&pool, chain.clone(), BreakerConfig::default()).await;
+
+    let run_id = seed_steps_run_with_max_cost(
+        &skills,
+        &definitions,
+        &runs,
+        &sub,
+        project_id,
+        chain,
+        &["Investigate and report."],
+        5.00,
+    )
+    .await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move { executor.run(run_id, cancel).await });
+
+    let first = recv_prompt(&mut prompt_rx, "first turn").await;
+    first
+        .response_channel
+        .send(Ok(PromptResult::Complete(priced(
+            max_tokens_response(),
+            Some(4.80),
+        ))))
+        .expect("send first response");
+
+    let second = recv_prompt(&mut prompt_rx, "continuation turn").await;
+    second
+        .response_channel
+        .send(Ok(PromptResult::Complete(priced(
+            submit_output_response("tu_1", serde_json::json!({"success": true, "output": "x"})),
+            Some(0.35),
+        ))))
+        .expect("send second response");
+
+    handle.await.expect("join").expect("run resolves");
+
+    assert!(
+        prompt_rx.try_recv().is_err(),
+        "no further model request after the threshold-crossing turn"
+    );
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(
+        run.state,
+        WorkflowRunState::BudgetExceeded,
+        "stop wins even though the crossing turn carried submit_output"
+    );
+    assert!((run.spent_usd() - 5.15).abs() < 1e-9);
+    let stop = run.budget_stop.expect("budget_stop recorded");
+    assert_eq!(stop.reason, BudgetStopReason::LimitReached);
+    assert!((stop.overshoot.as_dollars() - 0.15).abs() < 1e-9);
+    assert_eq!(run.remaining_cost_usd(), Some(0.0));
+    // "No tool execution": the crossing turn's `submit_output` call is
+    // never dispatched (handoff §3/§5), so the session never records
+    // `OutputSubmitted` and this step reads as errored, not completed —
+    // `step_results[0].output` must stay `None`. "Retained for
+    // diagnosis" is satisfied one level down: `assistant_response_received`
+    // durably persists the assistant's full turn (including its raw
+    // `submit_output` tool-call JSON) into the session's own message
+    // history unconditionally, before the budget check ever runs.
+    assert_eq!(run.step_results[0].output, None);
+    assert!(
+        run.step_results[0]
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("budget")),
+        "step error should explain the budget stop: {:?}",
+        run.step_results[0].error
+    );
+}
+
+/// handoff §4/P3: a turn with no reported cost (the shape of every
+/// direct-Anthropic/OpenAI response, or a healthy router fallback
+/// landing on one) must block further dispatch with a distinct
+/// `cost_metering_unavailable` reason — not settle as a free turn and
+/// keep going (handoff §7 "Known zero versus missing usage/cost").
+#[tokio::test]
+async fn unresolvable_cost_blocks_dispatch_with_metering_reason() {
+    let pool = pool().await;
+    let chain = ModelChain::new("claude-haiku-4-5-20251001".to_string());
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx) =
+        build_stack(&pool, chain.clone(), BreakerConfig::default()).await;
+
+    let run_id = seed_steps_run_with_max_cost(
+        &skills,
+        &definitions,
+        &runs,
+        &sub,
+        project_id,
+        chain,
+        &["Say hi."],
+        5.00,
+    )
+    .await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move { executor.run(run_id, cancel).await });
+
+    let request = recv_prompt(&mut prompt_rx, "first turn").await;
+    request
+        .response_channel
+        .send(Ok(PromptResult::Complete(priced(
+            submit_output_response("tu_1", serde_json::json!({"success": true, "output": "hi"})),
+            None,
+        ))))
+        .expect("send response");
+
+    handle.await.expect("join").expect("run resolves");
+
+    assert!(prompt_rx.try_recv().is_err());
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(run.state, WorkflowRunState::BudgetExceeded);
+    let stop = run.budget_stop.expect("budget_stop recorded");
+    assert_eq!(stop.reason, BudgetStopReason::CostMeteringUnavailable);
+    assert_eq!(
+        run.spent_usd(),
+        0.0,
+        "an unresolvable cost is not a known charge — it blocks, it doesn't settle as spend"
+    );
+    // Same "no tool execution" reasoning as the overshoot test: the
+    // unpriceable turn's `submit_output` call is never dispatched, so
+    // this step reads as errored, not completed.
+    assert_eq!(run.step_results[0].output, None);
+}
+
+/// Regression: an unlimited run (`max_cost_usd` never set) must behave
+/// exactly as it did before this feature, no matter how expensive the
+/// reported turns are.
+#[tokio::test]
+async fn unlimited_run_ignores_cost_entirely() {
+    let pool = pool().await;
+    let chain = ModelChain::new("claude-haiku-4-5-20251001".to_string());
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx) =
+        build_stack(&pool, chain.clone(), BreakerConfig::default()).await;
+
+    let (run_id, _) =
+        seed_one_step_run(&skills, &definitions, &runs, &sub, project_id, chain, "Hi").await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move { executor.run(run_id, cancel).await });
+
+    let request = recv_prompt(&mut prompt_rx, "first turn").await;
+    request
+        .response_channel
+        .send(Ok(PromptResult::Complete(priced(
+            submit_output_response("tu_1", serde_json::json!({"success": true, "output": "hi"})),
+            Some(1_000_000.0),
+        ))))
+        .expect("send response");
+
+    handle.await.expect("join").expect("run resolves");
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(run.state, WorkflowRunState::Succeeded);
+    assert_eq!(run.max_cost_usd, None);
+    assert_eq!(run.spent_usd(), 0.0);
+    assert_eq!(run.remaining_cost_usd(), None);
+    assert!(run.budget_stop.is_none());
+}
+
+/// handoff §7 "Include a test that compacts or refreshes the thread
+/// between two charges; this matches the actual curate-live run and
+/// catches the tempting current-thread-only implementation." Forces an
+/// orphaned (fresh) thread between the two turns of a single step via
+/// `reset_time_delta_seconds: 0`; accumulation must still see both
+/// charges. Limit and per-turn costs are chosen so that neither turn
+/// alone crosses the limit, but their SUM does — a per-thread
+/// implementation that forgot the pre-reset charge would wrongly let
+/// the run continue.
+#[tokio::test]
+async fn spend_accumulates_correctly_across_a_forced_thread_reset() {
+    let pool = pool().await;
+    let chain = ModelChain::new("claude-haiku-4-5-20251001".to_string());
+    let (executor, definitions, runs, skills, project_id, sub, mut prompt_rx) =
+        build_stack_with_thread_reset(&pool, chain.clone(), BreakerConfig::default()).await;
+
+    let run_id = seed_steps_run_with_max_cost(
+        &skills,
+        &definitions,
+        &runs,
+        &sub,
+        project_id,
+        chain,
+        &["Investigate and report."],
+        0.010,
+    )
+    .await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = tokio::spawn(async move { executor.run(run_id, cancel).await });
+
+    let first = recv_prompt(&mut prompt_rx, "pre-reset turn").await;
+    first
+        .response_channel
+        .send(Ok(PromptResult::Complete(priced(
+            max_tokens_response(),
+            Some(0.005),
+        ))))
+        .expect("send first response");
+
+    // The continuation prompt lands on a brand-new (orphaned) thread —
+    // `reset_time_delta_seconds: 0` means any elapsed time trips it.
+    let second = recv_prompt(&mut prompt_rx, "post-reset turn").await;
+    second
+        .response_channel
+        .send(Ok(PromptResult::Complete(priced(
+            submit_output_response("tu_1", serde_json::json!({"success": true, "output": "x"})),
+            Some(0.006),
+        ))))
+        .expect("send second response");
+
+    handle.await.expect("join").expect("run resolves");
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(
+        run.state,
+        WorkflowRunState::BudgetExceeded,
+        "the pre-reset $0.005 must still count toward the run total"
+    );
+    assert!(
+        (run.spent_usd() - 0.011).abs() < 1e-9,
+        "spent {} should be 0.005 + 0.006, not just the post-reset charge",
+        run.spent_usd()
+    );
+    let stop = run.budget_stop.expect("budget_stop recorded");
+    assert_eq!(stop.reason, BudgetStopReason::LimitReached);
+    assert!((stop.overshoot.as_dollars() - 0.001).abs() < 1e-9);
 }
 
 /// Bugbot finding: the executor's empty-turn ceiling must read

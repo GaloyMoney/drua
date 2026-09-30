@@ -416,32 +416,44 @@ impl Executor {
                 .instrument(tracing::info_span!("core.workflow.step", step = %step_name))
                 .await;
 
-            // Fold this step's observed model spend into the run's
-            // durable ledger before recording the step's own outcome —
-            // `record_step_spend` may transition the run to
-            // `BudgetExceeded`, and `step_completed`/`step_errored` never
-            // touch `state` on an already-terminal run (see their
-            // idempotency guards), so ordering here is safe either way.
+            // Record the step's own outcome BEFORE folding its model
+            // spend into the run's ledger. `record_step_spend` may
+            // transition the run to `BudgetExceeded`, and event order
+            // matters for hydration: `WorkflowRun::try_from_events`
+            // unconditionally re-derives `Running` from a
+            // `StepErrored`/`StepSkipped`/`StepWaiting`/`StepResumed`
+            // event (it long predates this feature and has no reason to
+            // suspect a terminal state already landed earlier in the
+            // stream) — persisting `BudgetExceeded` first and this
+            // step's own event second would hydrate back to `Running`
+            // on the very next load. The in-memory command methods
+            // don't have this problem (`step_errored`'s guard only fires
+            // from `Pending`), so this ordering is required for
+            // hydration correctness, not live-object correctness.
+            let step_errored = match outcome {
+                Ok(output) => {
+                    if run.step_completed(step_name.clone(), output).did_execute() {
+                        self.runs.update(&mut run).await?;
+                    }
+                    false
+                }
+                Err(err) => {
+                    if run
+                        .step_errored(step_name.clone(), err.to_string())
+                        .did_execute()
+                    {
+                        self.runs.update(&mut run).await?;
+                    }
+                    true
+                }
+            };
+
             if let Some(cost) = spend_out {
-                run.record_step_spend(step_name.clone(), cost);
+                run.record_step_spend(step_name, cost);
                 self.runs.update(&mut run).await?;
             }
 
-            match outcome {
-                Ok(output) => {
-                    if run.step_completed(step_name, output).did_execute() {
-                        self.runs.update(&mut run).await?;
-                    }
-                }
-                Err(err) => {
-                    if run.step_errored(step_name, err.to_string()).did_execute() {
-                        self.runs.update(&mut run).await?;
-                    }
-                    break;
-                }
-            }
-
-            if run.budget_stopped() {
+            if step_errored || run.budget_stopped() {
                 // Stop wins even if this step still produced a successful
                 // `submit_output` on its threshold-crossing turn — the run
                 // must not schedule the next step (handoff §3/§5).

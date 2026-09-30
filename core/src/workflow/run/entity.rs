@@ -852,7 +852,9 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
                         .steps_snapshot(steps_snapshot.clone());
                 }
                 WorkflowRunEvent::StepStarted { step_name, .. } => {
-                    state = WorkflowRunState::Running;
+                    if state != WorkflowRunState::BudgetExceeded {
+                        state = WorkflowRunState::Running;
+                    }
                     if !results.iter().any(|r| &r.name == step_name) {
                         results.push(StepResult {
                             name: step_name.clone(),
@@ -888,7 +890,17 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
                     error,
                     completed_at: ts,
                 } => {
-                    state = WorkflowRunState::Running;
+                    // Doesn't downgrade an already-recorded `BudgetExceeded`
+                    // (or any other terminal state a future event type might
+                    // add) — this event's own `state` field can land AFTER
+                    // the run's terminal transition in the persisted stream
+                    // (the executor folds a step's spend, which may cross
+                    // the budget, before or after the step's own outcome —
+                    // see `Executor::run`), so hydration must not assume a
+                    // step event is always the most authoritative signal.
+                    if state != WorkflowRunState::BudgetExceeded {
+                        state = WorkflowRunState::Running;
+                    }
                     if let Some(r) = results.iter_mut().find(|r| &r.name == step_name) {
                         r.error = Some(error.clone());
                         r.completed_at = Some(*ts);
@@ -908,7 +920,9 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
                     condition_body,
                     completed_at: ts,
                 } => {
-                    state = WorkflowRunState::Running;
+                    if state != WorkflowRunState::BudgetExceeded {
+                        state = WorkflowRunState::Running;
+                    }
                     if let Some(r) = results.iter_mut().find(|r| &r.name == step_name) {
                         r.skipped = Some(condition_body.clone());
                         r.completed_at = Some(*ts);
@@ -928,7 +942,9 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
                     provider,
                     ..
                 } => {
-                    state = WorkflowRunState::WaitingForEvent;
+                    if state != WorkflowRunState::BudgetExceeded {
+                        state = WorkflowRunState::WaitingForEvent;
+                    }
                     if let Some(r) = results.iter_mut().find(|r| &r.name == step_name) {
                         r.waiting_provider = Some(provider.clone());
                     } else {
@@ -948,7 +964,9 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
                     resumed_at,
                     ..
                 } => {
-                    state = WorkflowRunState::Running;
+                    if state != WorkflowRunState::BudgetExceeded {
+                        state = WorkflowRunState::Running;
+                    }
                     if let Some(r) = results.iter_mut().find(|r| &r.name == step_name) {
                         r.output = Some(output.clone());
                         r.completed_at = Some(*resumed_at);
@@ -2191,5 +2209,46 @@ mod tests {
         let run = WorkflowRun::try_from_events(events).unwrap();
         assert_eq!(run.max_cost_usd, None);
         assert_eq!(run.remaining_budget(), None);
+    }
+
+    /// Regression: a `StepErrored` (or `StepCompleted`/`StepSkipped`/
+    /// `StepWaiting`/`StepResumed`) event persisted AFTER `BudgetExceeded`
+    /// in the stream — which happens whenever the executor folds a
+    /// step's spend before/after its own outcome — must not hydrate
+    /// back to `Running`. Caught by `Executor::run`'s own integration
+    /// test the hard way: the in-memory entity transitioned correctly
+    /// and persisted `state = 'budget_exceeded'` to the index column,
+    /// but reloading via `try_from_events` silently regressed to
+    /// `Running` because these fold arms set `state` unconditionally.
+    #[test]
+    fn step_errored_after_budget_exceeded_does_not_downgrade_state_on_hydration() {
+        let mut run = fresh_bounded_run(&["step"], 0.0);
+        run.record_step_spend(
+            "step".into(),
+            StepCost::Known {
+                usd: MicroUsd::ZERO,
+            },
+        );
+        assert_eq!(run.state, WorkflowRunState::BudgetExceeded);
+        // Mirrors `Executor::run`'s actual event order for a step whose
+        // dispatch never got as far as `submit_output`.
+        run.step_errored(
+            "step".into(),
+            "model budget stopped this step before submit_output".into(),
+        )
+        .did_execute();
+        assert_eq!(
+            run.state,
+            WorkflowRunState::BudgetExceeded,
+            "the live command method must not downgrade an already-terminal run either"
+        );
+
+        let events = run.events;
+        let rehydrated = WorkflowRun::try_from_events(events).unwrap();
+        assert_eq!(
+            rehydrated.state,
+            WorkflowRunState::BudgetExceeded,
+            "hydration must not re-derive Running from the StepErrored event"
+        );
     }
 }
