@@ -1919,4 +1919,277 @@ mod tests {
             WorkflowRunEvent::ChangesetClosed { outcome: None, .. }
         ));
     }
+
+    // -- max_cost_usd budget ledger (handoff-workflow-max-cost-usd-2026-09-30.md) --
+
+    fn fresh_bounded_run(step_names: &[&str], max_cost_usd: f64) -> WorkflowRun {
+        let new = NewWorkflowRun::builder()
+            .definition_id(WorkflowDefinitionId::new())
+            .project_id(ProjectId::new())
+            .trigger_context(json!({}))
+            .steps_snapshot(step_names.iter().map(|n| sample_step(n)).collect())
+            .max_cost_usd(Some(max_cost_usd))
+            .build()
+            .unwrap();
+        WorkflowRun::try_from_events(new.into_events()).unwrap()
+    }
+
+    #[test]
+    fn unbounded_run_has_no_remaining_budget_and_ignores_spend() {
+        let mut run = fresh_run(&["step"]);
+        assert_eq!(run.max_cost_usd, None);
+        assert_eq!(run.remaining_budget(), None);
+        assert_eq!(run.remaining_cost_usd(), None);
+
+        run.record_step_spend(
+            "step".into(),
+            StepCost::Known {
+                usd: MicroUsd::from_settled_cost(1_000.0),
+            },
+        );
+        assert_eq!(run.spent, MicroUsd::ZERO);
+        assert!(!run.budget_stopped());
+        assert_eq!(run.state, WorkflowRunState::Pending);
+    }
+
+    #[test]
+    fn zero_limit_run_has_zero_remaining_budget_before_any_spend() {
+        // handoff §2: "0 admits no model requests" — the executor reads
+        // `remaining_budget()` before ever starting an agent step's
+        // dispatch loop, so this must already be `ZERO`, not merely
+        // becoming zero after a first (rejected) charge.
+        let run = fresh_bounded_run(&["step"], 0.0);
+        assert_eq!(run.remaining_budget(), Some(MicroUsd::ZERO));
+    }
+
+    #[test]
+    fn zero_limit_stops_on_first_known_zero_spend() {
+        // Mirrors the ceiling short-circuit in `drive_session_loop`: a
+        // `0` ceiling settles as `Known(0)`, not `Unknown` — genuinely no
+        // money was at risk, so the stop reason is `LimitReached`, not a
+        // metering failure.
+        let mut run = fresh_bounded_run(&["step"], 0.0);
+        run.record_step_spend(
+            "step".into(),
+            StepCost::Known {
+                usd: MicroUsd::ZERO,
+            },
+        );
+        assert_eq!(run.state, WorkflowRunState::BudgetExceeded);
+        let stop = run.budget_stop.expect("budget_stop recorded");
+        assert_eq!(stop.reason, BudgetStopReason::LimitReached);
+        assert_eq!(stop.overshoot, MicroUsd::ZERO);
+        assert!(run.state.is_terminal());
+    }
+
+    #[test]
+    fn exact_boundary_stops_with_zero_overshoot() {
+        let mut run = fresh_bounded_run(&["step"], 5.00);
+        run.record_step_spend(
+            "step".into(),
+            StepCost::Known {
+                usd: MicroUsd::from_settled_cost(5.00),
+            },
+        );
+        assert_eq!(run.state, WorkflowRunState::BudgetExceeded);
+        assert_eq!(run.spent_usd(), 5.00);
+        let stop = run.budget_stop.expect("budget_stop recorded");
+        assert_eq!(stop.reason, BudgetStopReason::LimitReached);
+        assert_eq!(stop.overshoot, MicroUsd::ZERO);
+        assert_eq!(run.remaining_cost_usd(), Some(0.0));
+    }
+
+    #[test]
+    fn overshoot_example_from_handoff() {
+        // $4.80 admitted, next turn settles at $0.35 -> $5.15 spent,
+        // $0.15 overshoot (handoff §3's worked example).
+        let mut run = fresh_bounded_run(&["step"], 5.00);
+        run.record_step_spend(
+            "step".into(),
+            StepCost::Known {
+                usd: MicroUsd::from_settled_cost(4.80),
+            },
+        );
+        assert!(!run.budget_stopped());
+        run.record_step_spend(
+            "step".into(),
+            StepCost::Known {
+                usd: MicroUsd::from_settled_cost(0.35),
+            },
+        );
+        assert!(run.budget_stopped());
+        assert!((run.spent_usd() - 5.15).abs() < 1e-9);
+        let stop = run.budget_stop.expect("budget_stop recorded");
+        assert_eq!(stop.reason, BudgetStopReason::LimitReached);
+        assert!((stop.overshoot.as_dollars() - 0.15).abs() < 1e-9);
+    }
+
+    #[test]
+    fn unknown_cost_stops_with_metering_reason_not_limit_reached() {
+        // handoff §4/P3: an unpriced turn (any direct-Anthropic/OpenAI
+        // response, or a healthy router fallback landing on one) must
+        // block further dispatch even though it may be nowhere near the
+        // dollar limit — distinct from an ordinary threshold crossing.
+        let mut run = fresh_bounded_run(&["step"], 5.00);
+        run.record_step_spend("step".into(), StepCost::Unknown);
+        assert_eq!(run.state, WorkflowRunState::BudgetExceeded);
+        let stop = run.budget_stop.expect("budget_stop recorded");
+        assert_eq!(stop.reason, BudgetStopReason::CostMeteringUnavailable);
+        // No known charge — spend stays at whatever it was (zero here).
+        assert_eq!(run.spent, MicroUsd::ZERO);
+    }
+
+    #[test]
+    fn spend_accumulates_across_separate_steps() {
+        // The run-level total is what's enforced, not a per-step or
+        // per-thread figure — mirrors the curate-live evidence
+        // (spend split across an initial thread and a post-refresh one,
+        // both attributable to the same run).
+        let mut run = fresh_bounded_run(&["a", "b", "c"], 10.00);
+        run.record_step_spend(
+            "a".into(),
+            StepCost::Known {
+                usd: MicroUsd::from_settled_cost(0.0033),
+            },
+        );
+        run.record_step_spend(
+            "b".into(),
+            StepCost::Known {
+                usd: MicroUsd::from_settled_cost(6.2648),
+            },
+        );
+        assert!(!run.budget_stopped(), "well under the $10 limit so far");
+        assert!((run.spent_usd() - 6.2681).abs() < 1e-6);
+
+        run.record_step_spend(
+            "c".into(),
+            StepCost::Known {
+                usd: MicroUsd::from_settled_cost(4.0),
+            },
+        );
+        assert!(run.budget_stopped());
+    }
+
+    #[test]
+    fn budget_stop_is_recorded_at_most_once() {
+        let mut run = fresh_bounded_run(&["a", "b"], 1.00);
+        run.record_step_spend(
+            "a".into(),
+            StepCost::Known {
+                usd: MicroUsd::from_settled_cost(2.0),
+            },
+        );
+        let first_stop = run.budget_stop.expect("first stop recorded");
+        // A second step somehow still dispatching (shouldn't happen once
+        // the executor observes `budget_stopped()`, but the ledger must
+        // stay safe if it does) must not overwrite the original stop or
+        // keep accumulating `spent` past it in a way that changes the
+        // recorded overshoot.
+        run.record_step_spend(
+            "b".into(),
+            StepCost::Known {
+                usd: MicroUsd::from_settled_cost(3.0),
+            },
+        );
+        assert_eq!(run.budget_stop, Some(first_stop));
+    }
+
+    #[test]
+    fn would_succeed_is_false_once_budget_stopped_even_with_clean_steps() {
+        let mut run = fresh_bounded_run(&["step"], 1.00);
+        complete(&mut run, "step", json!({"success": true}));
+        assert!(run.would_succeed());
+        run.record_step_spend(
+            "step".into(),
+            StepCost::Known {
+                usd: MicroUsd::from_settled_cost(2.0),
+            },
+        );
+        assert!(
+            !run.would_succeed(),
+            "a budget stop must never let a clean step read as success"
+        );
+    }
+
+    #[test]
+    fn run_completed_is_a_noop_after_budget_exceeded() {
+        let mut run = fresh_bounded_run(&["step"], 1.00);
+        complete(&mut run, "step", json!({"success": true}));
+        run.record_step_spend(
+            "step".into(),
+            StepCost::Known {
+                usd: MicroUsd::from_settled_cost(2.0),
+            },
+        );
+        assert_eq!(run.state, WorkflowRunState::BudgetExceeded);
+        assert!(!run.run_completed().did_execute());
+        assert_eq!(
+            run.state,
+            WorkflowRunState::BudgetExceeded,
+            "run_completed must not reclassify a budget-stopped run as Succeeded"
+        );
+    }
+
+    #[test]
+    fn cancel_is_a_noop_after_budget_exceeded() {
+        let mut run = fresh_bounded_run(&["step"], 1.00);
+        run.record_step_spend("step".into(), StepCost::Unknown);
+        assert!(!run.cancel("operator".to_string(), None).did_execute());
+        assert_eq!(run.state, WorkflowRunState::BudgetExceeded);
+    }
+
+    #[test]
+    fn budget_exceeded_state_is_terminal() {
+        assert!(WorkflowRunState::BudgetExceeded.is_terminal());
+    }
+
+    #[test]
+    fn max_cost_usd_and_ledger_hydrate_through_json_round_trip() {
+        let mut run = fresh_bounded_run(&["step"], 5.00);
+        run.record_step_spend(
+            "step".into(),
+            StepCost::Known {
+                usd: MicroUsd::from_settled_cost(5.50),
+            },
+        );
+        let raw: Vec<serde_json::Value> = run
+            .events
+            .iter_all()
+            .map(|e| serde_json::to_value(e).unwrap())
+            .collect();
+        let deserialized: Vec<WorkflowRunEvent> = raw
+            .into_iter()
+            .map(|v| serde_json::from_value(v).unwrap())
+            .collect();
+        let events = EntityEvents::init(run.id, deserialized);
+        let rehydrated = WorkflowRun::try_from_events(events).unwrap();
+
+        assert_eq!(rehydrated.max_cost_usd, Some(5.00));
+        assert_eq!(rehydrated.spent, run.spent);
+        assert_eq!(rehydrated.state, WorkflowRunState::BudgetExceeded);
+        assert_eq!(rehydrated.budget_stop, run.budget_stop);
+    }
+
+    #[test]
+    fn pre_budget_initialized_event_hydrates_as_unlimited() {
+        // Old run events predate `max_cost_usd` entirely — the field
+        // must be absent from the wire payload (not merely `null`) and
+        // still hydrate cleanly as unlimited (handoff §2).
+        let id = WorkflowRunId::new();
+        let initialized = serde_json::json!({
+            "type": "initialized",
+            "id": id,
+            "definition_id": WorkflowDefinitionId::new(),
+            "project_id": ProjectId::new(),
+            "trigger_context": {},
+            "steps_snapshot": [],
+        });
+        let events = EntityEvents::init(
+            id,
+            [serde_json::from_value::<WorkflowRunEvent>(initialized).unwrap()],
+        );
+        let run = WorkflowRun::try_from_events(events).unwrap();
+        assert_eq!(run.max_cost_usd, None);
+        assert_eq!(run.remaining_budget(), None);
+    }
 }
