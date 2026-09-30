@@ -290,4 +290,120 @@ mod tests {
         assert_eq!(winning.cache_read_input_tokens, 80);
         assert_eq!(winning.cost_usd, Some(0.0042));
     }
+
+    /// handoff-workflow-max-cost-usd-2026-09-30.md P5/§7 "router
+    /// fallback test so budget denial cannot be classified as a
+    /// transient provider error": structurally, a failed (Transient or
+    /// Terminal) attempt can NEVER carry a cost. `walk` never calls
+    /// `send_prompt_streaming` on more than one entry after the first
+    /// `Ok` (first-`Ok`-wins), every failed `AttemptRecord` is
+    /// constructed with `usage: None` at the point of failure — before
+    /// any stream, and therefore any `Usage`, could exist — and
+    /// `record_winning_usage` only ever writes into the *last*
+    /// `Succeeded` attempt. So even with multiple failed entries ahead
+    /// of the eventual winner, none of them can end up billable: the
+    /// budget guard gating on "did this attempt have a cost" can never
+    /// mistake a pre-stream provider failure (a 402, say) for a metered
+    /// charge, and vice versa.
+    #[tokio::test]
+    async fn failed_attempts_can_never_carry_a_cost_even_with_multiple_fallbacks() {
+        let first_bad = Arc::new(FailingProvider::new(
+            "first-bad",
+            PromptError::transient(TransientKind::ServerError, "503"),
+        ));
+        let second_bad = Arc::new(FailingProvider::new(
+            "second-bad",
+            PromptError::transient(TransientKind::RateLimit, "429"),
+        ));
+        let good = Arc::new(OkProvider { name: "openrouter" });
+        let chain = vec![
+            entry("primary", first_bad),
+            entry("secondary", second_bad),
+            entry("fallback", good),
+        ];
+        let mut outcome = walk(&chain, &Prompt::default()).await.unwrap();
+        assert_eq!(outcome.attempts.len(), 3);
+
+        // Failed attempts never had a stream to drain, so they carry no
+        // usage at all — not even a `Usage` with `cost_usd: None`. This
+        // is the structural fact a budget guard depends on: "no usage
+        // record" (this) is what a demonstrably unbilled pre-stream
+        // failure looks like, distinguishable from "usage record with an
+        // unresolvable cost" (a direct-Anthropic winning attempt).
+        assert!(outcome.attempts[0].usage.is_none());
+        assert!(outcome.attempts[1].usage.is_none());
+        assert!(matches!(
+            outcome.attempts[0].outcome,
+            AttemptOutcome::Transient(_)
+        ));
+        assert!(matches!(
+            outcome.attempts[1].outcome,
+            AttemptOutcome::Transient(_)
+        ));
+
+        // Even a pathological/malicious `record_winning_usage` call
+        // (any real caller only calls it once, after fully draining the
+        // winning stream) can only ever write into the last `Succeeded`
+        // slot — there is no code path that reaches into attempts[0] or
+        // attempts[1].
+        WalkOutcome::record_winning_usage(
+            &mut outcome.attempts,
+            Usage {
+                cost_usd: Some(1_000_000.0),
+                ..Default::default()
+            },
+        );
+        assert!(
+            outcome.attempts[0].usage.is_none(),
+            "a failed attempt must never be back-filled with a cost"
+        );
+        assert!(
+            outcome.attempts[1].usage.is_none(),
+            "a failed attempt must never be back-filled with a cost"
+        );
+        assert_eq!(
+            outcome.attempts[2].usage.map(|u| u.cost_usd),
+            Some(Some(1_000_000.0))
+        );
+    }
+
+    /// The other half of P5: a *winning* attempt with no reported cost
+    /// (the shape of a direct-Anthropic/OpenAI response) is
+    /// distinguishable, at the type level, from a failed attempt. A
+    /// caller settling budget spend from `AttemptRecord.usage` can tell
+    /// "no usage record at all" (unbilled-by-construction failure) apart
+    /// from "usage record present, cost unresolvable" (a metering
+    /// failure that must block further dispatch) — they are not the
+    /// same absence.
+    #[tokio::test]
+    async fn winning_attempt_with_unknown_cost_is_distinct_from_a_failed_attempt() {
+        let bad = Arc::new(FailingProvider::new(
+            "bad",
+            PromptError::transient(TransientKind::ServerError, "503"),
+        ));
+        let good = Arc::new(OkProvider {
+            name: "anthropic-direct",
+        });
+        let chain = vec![entry("primary", bad), entry("fallback", good)];
+        let mut outcome = walk(&chain, &Prompt::default()).await.unwrap();
+
+        // The direct-Anthropic fallback's stream never reports a cost.
+        WalkOutcome::record_winning_usage(
+            &mut outcome.attempts,
+            Usage {
+                cost_usd: None,
+                ..Default::default()
+            },
+        );
+
+        assert!(
+            outcome.attempts[0].usage.is_none(),
+            "failed attempt: no usage record at all"
+        );
+        assert_eq!(
+            outcome.attempts[1].usage.map(|u| u.cost_usd),
+            Some(None),
+            "winning attempt: a usage record IS present, but its cost is unresolvable"
+        );
+    }
 }
