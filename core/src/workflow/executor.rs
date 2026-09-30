@@ -10,7 +10,8 @@ use crate::agent::session::message::{LastResponseStatus, StopReason, SUBMIT_OUTP
 use crate::agent::{Agent, Agents};
 use crate::auth::AuthSubject;
 use crate::primitives::{
-    AgentId, ChatOutputEvent, ProjectId, SandboxId, WorkflowDefinitionId, WorkflowRunId,
+    AgentId, BudgetStopKind, ChatOutputEvent, MicroUsd, ProjectId, SandboxId, WorkflowDefinitionId,
+    WorkflowRunId,
 };
 use crate::sandbox::{Sandbox, SandboxAgentMode, SandboxSpecs, SandboxState, Sandboxes};
 use crate::skill::Skills;
@@ -22,7 +23,7 @@ use super::entity::WorkflowDefinition;
 use super::error::WorkflowError;
 use super::repo::WorkflowDefinitionRepo;
 use super::run::entity::SpaceWritesOutcome;
-use super::run::{StepResult, WorkflowRun, WorkflowRunRepo, WorkflowRunState};
+use super::run::{StepCost, StepResult, WorkflowRun, WorkflowRunRepo, WorkflowRunState};
 use super::template::{
     format_template_diagnostics, template_diagnostics, ConditionOutcome, TemplateContext,
 };
@@ -99,6 +100,73 @@ pub struct Executor {
     /// call so the agent-step path is unchanged.
     toolsets: Arc<ToolSets>,
     changesets: Option<Arc<crate::changeset::Changesets>>,
+}
+
+/// Aggregate model spend for one `execute_step` invocation, across every
+/// `stream_agent_response` call it takes (initial dispatch,
+/// max_tokens/empty-turn continuations, the forced-output nudge).
+/// `remaining` is `None` for an unbounded run — `record` then never
+/// tracks or enforces anything, matching pre-feature behaviour exactly.
+/// Folded into the run's durable ledger by `Executor::run` once
+/// `execute_step` returns (handoff-workflow-max-cost-usd-2026-09-30.md §3-4).
+#[derive(Debug, Clone, Copy)]
+struct StepSpend {
+    remaining: Option<MicroUsd>,
+    total_cost: Option<f64>,
+    budget_stopped: Option<BudgetStopKind>,
+}
+
+impl StepSpend {
+    fn new(ceiling: Option<MicroUsd>) -> Self {
+        Self {
+            remaining: ceiling,
+            total_cost: ceiling.map(|_| 0.0),
+            budget_stopped: None,
+        }
+    }
+
+    /// Folds in one dispatch call's reported cost/stop signal. A total
+    /// can't be claimed once any turn's cost is unknown — the moment
+    /// that happens `total_cost` becomes (and stays) `None`.
+    fn record(&mut self, cost_usd: Option<f64>, stopped: Option<BudgetStopKind>) {
+        if self.remaining.is_none() {
+            return; // unbounded — nothing tracked
+        }
+        match cost_usd {
+            Some(c) => {
+                self.total_cost = self.total_cost.map(|t| t + c);
+                self.remaining = self
+                    .remaining
+                    .map(|r| r.saturating_sub(MicroUsd::from_settled_cost(c)));
+            }
+            None => self.total_cost = None,
+        }
+        if stopped.is_some() {
+            self.budget_stopped = stopped;
+        }
+    }
+
+    /// `None` for an unbounded run — nothing to fold into the run's
+    /// ledger. `Some(Unknown)` if any call's cost was unresolvable.
+    fn step_cost(&self) -> Option<StepCost> {
+        self.remaining?;
+        Some(match self.total_cost {
+            Some(v) => StepCost::Known {
+                usd: MicroUsd::from_settled_cost(v),
+            },
+            None => StepCost::Unknown,
+        })
+    }
+}
+
+/// One `stream_agent_response` call's result: the step output (if
+/// `submit_output` was reached), the cost observed for this call
+/// specifically (`None` for an unbounded agent, or if unresolvable), and
+/// why the dispatch loop stopped early, if it did.
+struct StreamOutcome {
+    output: Option<serde_json::Value>,
+    cost_usd: Option<f64>,
+    budget_stopped: Option<BudgetStopKind>,
 }
 
 impl Executor {
@@ -322,6 +390,12 @@ impl Executor {
 
             let step_outputs = collect_step_outputs(&run.step_results);
             let step_context = EventContext::current().data();
+            // Computed fresh from the (single, executor-owned) in-memory
+            // `run` before every agent-dispatching step — the only writer
+            // of `WorkflowRun` is this loop, so there is no concurrent
+            // update to race against (handoff §3-4).
+            let budget_ceiling = run.remaining_budget();
+            let mut spend_out: Option<StepCost> = None;
             let outcome = self
                 .execute_step(
                     project_id,
@@ -335,10 +409,23 @@ impl Executor {
                     &preexisting_ids,
                     &mut borrowed_preexisting,
                     &definition,
+                    budget_ceiling,
+                    &mut spend_out,
                 )
                 .with_event_context(step_context)
                 .instrument(tracing::info_span!("core.workflow.step", step = %step_name))
                 .await;
+
+            // Fold this step's observed model spend into the run's
+            // durable ledger before recording the step's own outcome —
+            // `record_step_spend` may transition the run to
+            // `BudgetExceeded`, and `step_completed`/`step_errored` never
+            // touch `state` on an already-terminal run (see their
+            // idempotency guards), so ordering here is safe either way.
+            if let Some(cost) = spend_out {
+                run.record_step_spend(step_name.clone(), cost);
+                self.runs.update(&mut run).await?;
+            }
 
             match outcome {
                 Ok(output) => {
@@ -352,6 +439,13 @@ impl Executor {
                     }
                     break;
                 }
+            }
+
+            if run.budget_stopped() {
+                // Stop wins even if this step still produced a successful
+                // `submit_output` on its threshold-crossing turn — the run
+                // must not schedule the next step (handoff §3/§5).
+                break;
             }
         }
 
@@ -769,6 +863,8 @@ impl Executor {
         preexisting_ids: &HashSet<SandboxId>,
         borrowed_preexisting: &mut HashSet<SandboxId>,
         definition: &super::entity::WorkflowDefinition,
+        budget_ceiling: Option<MicroUsd>,
+        spend_out: &mut Option<StepCost>,
     ) -> Result<serde_json::Value, WorkflowError> {
         // Recorded here rather than by the caller: this call runs inside
         // the `.with_event_context(step_context)` scope the caller wraps
@@ -906,9 +1002,17 @@ impl Executor {
                     self.sandboxes.reset_for_workflow_step(sandbox_id).await;
                 }
 
+                let mut spend = StepSpend::new(budget_ceiling);
                 let result = self
-                    .run_agent_until_submit_output(&agent, prompt, name, *timeout_seconds)
+                    .run_agent_until_submit_output(
+                        &agent,
+                        prompt,
+                        name,
+                        *timeout_seconds,
+                        &mut spend,
+                    )
                     .await;
+                *spend_out = spend.step_cost();
 
                 // Detach the sandbox unconditionally so the next step can
                 // attach (Write mode is single-writer). Best-effort; the
@@ -1060,6 +1164,7 @@ impl Executor {
         prompt: String,
         step_name: &str,
         timeout_seconds: Option<u64>,
+        spend: &mut StepSpend,
     ) -> Result<serde_json::Value, WorkflowError> {
         const MAX_TOKENS_CONTINUATION: &str =
             "Your previous turn hit the output token limit before making a tool call. \
@@ -1084,11 +1189,31 @@ impl Executor {
         let mut continuations = 0usize;
         let mut empty_continuations = 0usize;
         loop {
-            if let Some(value) = self
-                .stream_agent_response(agent, next_prompt.take(), None, step_name, timeout_seconds)
-                .await?
-            {
+            let outcome = self
+                .stream_agent_response(
+                    agent,
+                    next_prompt.take(),
+                    None,
+                    step_name,
+                    timeout_seconds,
+                    spend.remaining,
+                )
+                .await?;
+            spend.record(outcome.cost_usd, outcome.budget_stopped);
+            if let Some(value) = outcome.output {
                 return Ok(value);
+            }
+            if spend.budget_stopped.is_some() {
+                // The turn we just settled crossed the ceiling (or its
+                // cost couldn't be verified) without producing
+                // `submit_output`. Retain it for diagnosis, but do not
+                // continue the turn loop or attempt the forced-output
+                // nudge below — no further model request goes out
+                // (handoff §3-5).
+                return Err(WorkflowError::StepErrored {
+                    step: step_name.to_string(),
+                    reason: "model budget stopped this step before submit_output".to_string(),
+                });
             }
             // The breaker's own per-thread counter resets when it advances
             // the chain (a fresh thread starts). Mirror that here: a flat
@@ -1144,7 +1269,7 @@ impl Executor {
         // turn is constrained to the synthetic tool.
         let nudge = "Investigation complete — call `submit_output` now to record the structured \
              result for this step.";
-        if let Some(value) = self
+        let outcome = self
             .stream_agent_response(
                 agent,
                 Some(nudge.to_string()),
@@ -1153,10 +1278,18 @@ impl Executor {
                 }),
                 step_name,
                 timeout_seconds,
+                spend.remaining,
             )
-            .await?
-        {
+            .await?;
+        spend.record(outcome.cost_usd, outcome.budget_stopped);
+        if let Some(value) = outcome.output {
             return Ok(value);
+        }
+        if spend.budget_stopped.is_some() {
+            return Err(WorkflowError::StepErrored {
+                step: step_name.to_string(),
+                reason: "model budget stopped this step before submit_output".to_string(),
+            });
         }
 
         Err(WorkflowError::StepErrored {
@@ -1165,11 +1298,15 @@ impl Executor {
         })
     }
 
-    /// Drives one send/resume turn to completion. Returns the
+    /// Drives one send/resume turn to completion. `output` carries the
     /// structured output if the session reached `Done` via a
-    /// `submit_output` call (read from the persisted session event).
-    /// `None` means the turn closed without `submit_output` — the
-    /// caller decides whether to retry.
+    /// `submit_output` call (read from the persisted session event);
+    /// `None` means the turn closed without `submit_output` — the caller
+    /// decides whether to retry. `cost_usd`/`budget_stopped` are read
+    /// back from `AssistantDone` — `budget_ceiling` (`None` unless this
+    /// is a bounded run's step) is passed straight through to
+    /// `Agents::resume_message`/`send_message_with_choice`, which is
+    /// where enforcement actually happens (handoff-workflow-max-cost-usd-2026-09-30.md §3-4).
     async fn stream_agent_response(
         &self,
         agent: &Agent,
@@ -1177,7 +1314,8 @@ impl Executor {
         tool_choice: Option<llm::prompt::ToolChoice>,
         step_name: &str,
         timeout_seconds: Option<u64>,
-    ) -> Result<Option<serde_json::Value>, WorkflowError> {
+        budget_ceiling: Option<MicroUsd>,
+    ) -> Result<StreamOutcome, WorkflowError> {
         let agent_subject = agent.auth_subject();
         // Resume an in-flight prompt if a prior attempt was killed between
         // `PromptSent` and `AssistantResponseReceived`. Otherwise emit the
@@ -1187,17 +1325,29 @@ impl Executor {
         // closed turn flows through to `send_message` as expected.
         let mut rx = match self
             .agents
-            .resume_message(agent_subject.clone(), agent.id)
+            .resume_message(agent_subject.clone(), agent.id, budget_ceiling)
             .await?
         {
             Some(rx) => rx,
             None => match user_prompt {
                 Some(prompt) => {
                     self.agents
-                        .send_message_with_choice(agent_subject, agent.id, prompt, tool_choice)
+                        .send_message_with_choice(
+                            agent_subject,
+                            agent.id,
+                            prompt,
+                            tool_choice,
+                            budget_ceiling,
+                        )
                         .await?
                 }
-                None => return Ok(None),
+                None => {
+                    return Ok(StreamOutcome {
+                        output: None,
+                        cost_usd: None,
+                        budget_stopped: None,
+                    })
+                }
             },
         };
 
@@ -1208,6 +1358,8 @@ impl Executor {
             .map(Duration::from_secs)
             .unwrap_or_else(|| Duration::from_secs(300));
 
+        let mut cost_usd = None;
+        let mut budget_stopped = None;
         loop {
             let event = match tokio::time::timeout(idle_timeout, rx.recv()).await {
                 Ok(Some(event)) => event,
@@ -1220,7 +1372,15 @@ impl Executor {
                 }
             };
             match event {
-                ChatOutputEvent::AssistantDone { .. } => break,
+                ChatOutputEvent::AssistantDone {
+                    cost_usd: c,
+                    budget_stopped: b,
+                    ..
+                } => {
+                    cost_usd = c;
+                    budget_stopped = b;
+                    break;
+                }
                 ChatOutputEvent::Error { message } => {
                     return Err(WorkflowError::StepErrored {
                         step: step_name.to_string(),
@@ -1235,7 +1395,12 @@ impl Executor {
         // pushed `OutputSubmitted` and returned `Done` when the agent
         // called `submit_output`, which broke the agent loop and
         // emitted `AssistantDone`. Read it back here.
-        Ok(self.agents.submitted_output(agent.id).await?)
+        let output = self.agents.submitted_output(agent.id).await?;
+        Ok(StreamOutcome {
+            output,
+            cost_usd,
+            budget_stopped,
+        })
     }
 
     /// Dispatch a single top-level MCP tool with `${{ … }}`-substituted

@@ -2450,6 +2450,25 @@ fn format_run(r: &WorkflowRun) -> String {
     if let Some(cs) = format_run_changeset(r) {
         out.push_str(&format!("  changeset: {cs}\n"));
     }
+    if let Some(limit) = r.max_cost_usd {
+        out.push_str(&format!("  max_cost_usd: ${limit:.2}\n"));
+        out.push_str(&format!("  spent_usd: ${:.6}\n", r.spent_usd()));
+        if let Some(remaining) = r.remaining_cost_usd() {
+            out.push_str(&format!("  remaining_cost_usd: ${remaining:.6}\n"));
+        }
+        if let Some(stop) = &r.budget_stop {
+            let reason = match stop.reason {
+                crate::workflow::run::BudgetStopReason::LimitReached => "limit_reached",
+                crate::workflow::run::BudgetStopReason::CostMeteringUnavailable => {
+                    "cost_metering_unavailable"
+                }
+            };
+            out.push_str(&format!(
+                "  budget_stop: {reason} (overshoot ${:.6})\n",
+                stop.overshoot.as_dollars()
+            ));
+        }
+    }
     if !r.step_results.is_empty() {
         out.push_str("  steps:\n");
         for step in &r.step_results {

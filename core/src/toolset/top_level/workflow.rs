@@ -1522,6 +1522,10 @@ fn format_get_text(d: &WorkflowDefinition) -> String {
         "space_writes: {}\n",
         format_space_writes(&d.space_writes)
     ));
+    match d.max_cost_usd {
+        Some(limit) => out.push_str(&format!("max_cost_usd: ${limit:.2}\n")),
+        None => out.push_str("max_cost_usd: unlimited\n"),
+    }
     if !d.sandboxes.is_empty() {
         out.push_str(&format!("sandboxes:   {}\n", d.sandboxes.len()));
         for sb in &d.sandboxes {
@@ -1644,6 +1648,25 @@ fn format_run_text(r: &WorkflowRun) -> String {
     out.push_str(&format!("started_at:    {}\n", r.started_at().to_rfc3339()));
     if let Some(t) = r.completed_at {
         out.push_str(&format!("completed_at:  {}\n", t.to_rfc3339()));
+    }
+    if let Some(limit) = r.max_cost_usd {
+        out.push_str(&format!("max_cost_usd:  ${limit:.2}\n"));
+        out.push_str(&format!("spent_usd:     ${:.6}\n", r.spent_usd()));
+        if let Some(remaining) = r.remaining_cost_usd() {
+            out.push_str(&format!("remaining_usd: ${remaining:.6}\n"));
+        }
+        if let Some(stop) = &r.budget_stop {
+            let reason = match stop.reason {
+                crate::workflow::run::BudgetStopReason::LimitReached => "limit_reached",
+                crate::workflow::run::BudgetStopReason::CostMeteringUnavailable => {
+                    "cost_metering_unavailable"
+                }
+            };
+            out.push_str(&format!(
+                "budget_stop:   {reason} (overshoot ${:.6})\n",
+                stop.overshoot.as_dollars()
+            ));
+        }
     }
     // OQ-12 (handoff-space-changesets-followups-2026-09-28.md): the
     // structured `changeset` output field already carries this; skills

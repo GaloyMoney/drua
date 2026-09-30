@@ -7,7 +7,7 @@ mod context_generation;
 mod cost;
 
 pub use crate::auth::{error::AuthorizationError, AuthResource, AuthScope, AuthSubject, AuthVerb};
-pub use chat_output_event::ChatOutputEvent;
+pub use chat_output_event::{BudgetStopKind, ChatOutputEvent};
 pub use context_generation::{ContextBumpHook, ContextGeneration, ScopeId};
 pub use cost::{MicroUsd, MicroUsdError};
 

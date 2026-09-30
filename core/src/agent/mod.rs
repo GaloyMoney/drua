@@ -47,8 +47,8 @@ fn default_authz_scopes(role: AgentRole, project_id: ProjectId) -> Vec<AuthScope
 use tracing::instrument;
 
 use crate::primitives::{
-    AgentId, AuthResource, AuthScope, AuthSubject, AuthVerb, ChatOutputEvent, ContextGeneration,
-    ProjectId, SandboxId, WorkflowDefinitionId, WorkflowRunId,
+    AgentId, AuthResource, AuthScope, AuthSubject, AuthVerb, BudgetStopKind, ChatOutputEvent,
+    ContextGeneration, MicroUsd, ProjectId, SandboxId, WorkflowDefinitionId, WorkflowRunId,
 };
 use crate::sandbox::{Sandbox, SandboxAgentMode, Sandboxes};
 pub use config::{AgentsConfig, ModelChain, ModelDefaults, RoleConfig};
@@ -1338,13 +1338,23 @@ impl Agents {
         id: AgentId,
         prompt: String,
     ) -> Result<tokio::sync::mpsc::Receiver<ChatOutputEvent>, AgentError> {
-        self.send_message_with_choice(subject, id, prompt, None)
+        // Never run-owned (this is the plain interactive path), so there is
+        // no budget ceiling to pass.
+        self.send_message_with_choice(subject, id, prompt, None, None)
             .await
     }
 
     /// `tool_choice` is applied to the initial prompt only. The agent
     /// loop's per-turn re-prompts inherit `Auto` from the session, so a
     /// forced choice is a one-shot nudge rather than a sticky setting.
+    ///
+    /// `budget_ceiling` is the caller's remaining `max_cost_usd` room as of
+    /// right now (`None` for an unbounded or non-workflow agent) — the
+    /// workflow executor computes this from its own already-loaded
+    /// `WorkflowRun` and passes it in; `Agents` holds no workflow
+    /// dependency of its own (see handoff-workflow-max-cost-usd-2026-09-30.md
+    /// §3-4). `drive_session_loop` enforces it per turn and reports back
+    /// what it actually spent via `ChatOutputEvent::AssistantDone`.
     #[instrument(name = "domain.agent.send_message_with_choice", skip(self, prompt))]
     pub async fn send_message_with_choice(
         &self,
@@ -1352,6 +1362,7 @@ impl Agents {
         id: AgentId,
         prompt: String,
         tool_choice: Option<llm::prompt::ToolChoice>,
+        budget_ceiling: Option<MicroUsd>,
     ) -> Result<tokio::sync::mpsc::Receiver<ChatOutputEvent>, AgentError> {
         let agent = self.repo.find_by_id(id).await?;
 
@@ -1445,8 +1456,15 @@ impl Agents {
             prompt_state.tool_choice = Some(choice);
         }
 
-        self.drive_session_loop(id, agent_subject, tx, prompt_state, agent.workflow_run_id)
-            .await?;
+        self.drive_session_loop(
+            id,
+            agent_subject,
+            tx,
+            prompt_state,
+            agent.workflow_run_id,
+            budget_ceiling,
+        )
+        .await?;
 
         Ok(rx)
     }
@@ -1472,6 +1490,7 @@ impl Agents {
         &self,
         subject: AuthSubject,
         id: AgentId,
+        budget_ceiling: Option<MicroUsd>,
     ) -> Result<Option<tokio::sync::mpsc::Receiver<ChatOutputEvent>>, AgentError> {
         let agent = self.repo.find_by_id(id).await?;
 
@@ -1510,8 +1529,15 @@ impl Agents {
         };
 
         let (tx, rx) = tokio::sync::mpsc::channel::<ChatOutputEvent>(64);
-        self.drive_session_loop(id, agent_subject, tx, prompt_state, agent.workflow_run_id)
-            .await?;
+        self.drive_session_loop(
+            id,
+            agent_subject,
+            tx,
+            prompt_state,
+            agent.workflow_run_id,
+            budget_ceiling,
+        )
+        .await?;
         Ok(Some(rx))
     }
 
@@ -1526,6 +1552,18 @@ impl Agents {
     /// dispatched `llm::Prompt` as `trace_agent_id`/`trace_run_id` so the
     /// provider clients can record them on their request/stream spans. See
     /// `review-curation-live-run4-2026-09-28.md` R5(a).
+    ///
+    /// `budget_ceiling` (`None` unless this is a run-owned agent on a
+    /// bounded run) is enforced here, at the only two points every prompt
+    /// category funnels through (see this function's two
+    /// `llm::PromptRequest::new` call sites): before dispatch, and after
+    /// each turn settles. A turn whose cost can't be resolved
+    /// (`response.usage.cost_usd == None`) stops the loop just as a
+    /// threshold-crossing turn does — a budget that can't be measured
+    /// must not silently become unlimited
+    /// (handoff-workflow-max-cost-usd-2026-09-30.md §3-4). Reported back
+    /// via `ChatOutputEvent::AssistantDone.{cost_usd,budget_stopped}` for
+    /// the workflow executor to fold into the run's durable ledger.
     async fn drive_session_loop(
         &self,
         id: AgentId,
@@ -1533,10 +1571,31 @@ impl Agents {
         tx: tokio::sync::mpsc::Sender<ChatOutputEvent>,
         mut prompt_state: llm::Prompt,
         workflow_run_id: Option<WorkflowRunId>,
+        budget_ceiling: Option<MicroUsd>,
     ) -> Result<(), AgentError> {
         use es_entity::context::{EventContext, WithEventContext};
 
         let model_name = prompt_state.chain.primary.name.clone();
+
+        // A `0` limit (or one already exhausted before this call started)
+        // admits no model requests at all — not even the first. Reported
+        // through the same `AssistantDone` channel as a mid-loop stop so
+        // callers (`stream_agent_response`) have one place to look.
+        if budget_ceiling == Some(MicroUsd::ZERO) {
+            emit_event(
+                &tx,
+                ChatOutputEvent::AssistantDone {
+                    turns: 0,
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    duration_ms: None,
+                    cost_usd: Some(0.0),
+                    budget_stopped: Some(BudgetStopKind::LimitReached),
+                },
+            );
+            return Ok(());
+        }
+
         prompt_state.trace_agent_id = Some(id.to_string());
         prompt_state.trace_run_id = workflow_run_id.map(|r| r.to_string());
         let (request, response_rx) = llm::PromptRequest::new(prompt_state);
@@ -1562,6 +1621,17 @@ impl Agents {
                 let mut input_tokens: u32 = 0;
                 let mut output_tokens: u32 = 0;
                 let mut current_model = model_name;
+                // Remaining room under `budget_ceiling`, decremented as
+                // turns settle; `None` for an unbounded/non-workflow agent.
+                let mut remaining = budget_ceiling;
+                // Total cost across every turn this invocation dispatches.
+                // Becomes `None` (unknown) the moment any turn's cost is
+                // unresolvable — a total can't be claimed if any piece of
+                // it can't be accounted for. Only tracked for a bounded
+                // agent; an unbounded one keeps reporting `None` exactly as
+                // before this feature.
+                let mut total_cost = budget_ceiling.map(|_| 0.0_f64);
+                let mut budget_stopped: Option<BudgetStopKind> = None;
                 loop {
                     turn += 1;
                     let result = match next {
@@ -1602,6 +1672,28 @@ impl Agents {
                     input_tokens += response.usage.input_tokens;
                     output_tokens += response.usage.output_tokens;
 
+                    // Settle this turn against the ceiling. A turn with no
+                    // reported cost is as dangerous as one that crosses the
+                    // limit outright (P3: no Anthropic-served turn can ever
+                    // be priced, and a healthy router fallback can land on
+                    // one mid-run) — both stop further dispatch.
+                    if budget_ceiling.is_some() {
+                        match response.usage.cost_usd {
+                            Some(cost) => {
+                                total_cost = total_cost.map(|t| t + cost);
+                                remaining = remaining
+                                    .map(|r| r.saturating_sub(MicroUsd::from_settled_cost(cost)));
+                                if remaining == Some(MicroUsd::ZERO) {
+                                    budget_stopped = Some(BudgetStopKind::LimitReached);
+                                }
+                            }
+                            None => {
+                                total_cost = None;
+                                budget_stopped = Some(BudgetStopKind::CostMeteringUnavailable);
+                            }
+                        }
+                    }
+
                     let session_response = match sessions
                         .assistant_response_received(id, response.clone(), current_model.clone())
                         .await
@@ -1620,6 +1712,16 @@ impl Agents {
 
                     if !streamed {
                         forward_response(response, &tx);
+                    }
+
+                    // The turn we just persisted crossed the threshold (or
+                    // its cost can't be verified). Retain it for diagnosis,
+                    // but execute none of its tool calls and send no
+                    // further model request — stop wins even over a
+                    // response containing `submit_output` (handoff §3/§5,
+                    // §7 "no tool execution or false successful completion").
+                    if budget_stopped.is_some() {
+                        break;
                     }
 
                     let mut next_prompt = match session_response {
@@ -1711,7 +1813,8 @@ impl Agents {
                         input_tokens,
                         output_tokens,
                         duration_ms: None,
-                        cost_usd: None,
+                        cost_usd: total_cost,
+                        budget_stopped,
                     },
                 );
             }

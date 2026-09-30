@@ -1,8 +1,28 @@
-use async_graphql::{Context, SimpleObject, Subscription, Union};
+use async_graphql::{Context, Enum, SimpleObject, Subscription, Union};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
 
 use super::primitives::*;
+
+/// Why a run-owned agent's dispatch loop stopped short of a natural
+/// `Done`/no-`submit_output` outcome. `None` on `AssistantDoneEvent` for
+/// every non-workflow (or unbounded) agent.
+#[derive(Enum, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetStopKind {
+    LimitReached,
+    CostMeteringUnavailable,
+}
+
+impl From<drua_core::primitives::BudgetStopKind> for BudgetStopKind {
+    fn from(kind: drua_core::primitives::BudgetStopKind) -> Self {
+        match kind {
+            drua_core::primitives::BudgetStopKind::LimitReached => Self::LimitReached,
+            drua_core::primitives::BudgetStopKind::CostMeteringUnavailable => {
+                Self::CostMeteringUnavailable
+            }
+        }
+    }
+}
 
 #[derive(SimpleObject)]
 pub struct UserMessageEvent {
@@ -53,6 +73,7 @@ pub struct AssistantDoneEvent {
     pub output_tokens: u32,
     pub duration_ms: Option<u64>,
     pub cost_usd: Option<f64>,
+    pub budget_stopped: Option<BudgetStopKind>,
 }
 
 #[derive(SimpleObject)]
@@ -118,12 +139,14 @@ impl From<drua_core::primitives::ChatOutputEvent> for ChatStreamEvent {
                 output_tokens,
                 duration_ms,
                 cost_usd,
+                budget_stopped,
             } => Self::AssistantDone(AssistantDoneEvent {
                 turns,
                 input_tokens,
                 output_tokens,
                 duration_ms,
                 cost_usd,
+                budget_stopped: budget_stopped.map(Into::into),
             }),
             ChatOutputEvent::Error { message } => Self::Error(ErrorEvent { message }),
             ChatOutputEvent::Service { message } => Self::Service(ServiceEvent { message }),
