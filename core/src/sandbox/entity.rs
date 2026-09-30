@@ -81,6 +81,13 @@ pub enum SandboxEvent {
     AgentDetached {
         agent_id: AgentId,
     },
+    /// Records a CPU/memory/disk reallocation. Pod-level resources
+    /// (CPU, memory) only take effect on the next sandbox restart;
+    /// disk growth is applied immediately by the service via the
+    /// admin client (PVC patch) — shrinking is rejected upstream.
+    Resized {
+        specs: SandboxSpecs,
+    },
 }
 
 #[derive(EsEntity, Builder)]
@@ -308,6 +315,22 @@ impl Sandbox {
         self.events.push(SandboxEvent::AgentDetached { agent_id });
         Idempotent::Executed(())
     }
+
+    /// Idempotent when the new specs match current. Pod-level fields
+    /// (cpu, memory) require a follow-up `restart` to take effect; disk
+    /// growth is applied immediately by the service.
+    pub(super) fn resize(&mut self, specs: SandboxSpecs) -> Idempotent<()> {
+        if specs_eq(&self.specs, &specs) {
+            return Idempotent::AlreadyApplied;
+        }
+        self.specs = specs.clone();
+        self.events.push(SandboxEvent::Resized { specs });
+        Idempotent::Executed(())
+    }
+}
+
+fn specs_eq(a: &SandboxSpecs, b: &SandboxSpecs) -> bool {
+    a.cpu == b.cpu && a.memory == b.memory && a.disk_size == b.disk_size
 }
 
 impl core::fmt::Display for Sandbox {
@@ -382,6 +405,9 @@ impl TryFromEvents<SandboxEvent> for Sandbox {
                 }
                 SandboxEvent::AgentDetached { agent_id } => {
                     attached_agents.retain(|(id, _)| *id != *agent_id);
+                }
+                SandboxEvent::Resized { specs } => {
+                    builder = builder.specs(specs.clone());
                 }
             }
         }
@@ -725,6 +751,28 @@ mod tests {
 
         let sb = Sandbox::try_from_events(events).unwrap();
         assert_eq!(sb.attached_agents, vec![(a, SandboxAgentMode::Write)]);
+    }
+
+    #[test]
+    fn resize_updates_specs_and_pushes_event() {
+        let mut sb = new_sandbox();
+        let new_specs = SandboxSpecs {
+            cpu: "200m".into(),
+            memory: "256Mi".into(),
+            disk_size: "2Gi".into(),
+        };
+        let res = sb.resize(new_specs.clone());
+        assert!(res.did_execute());
+        assert_eq!(sb.specs.cpu, "200m");
+        assert_eq!(sb.specs.memory, "256Mi");
+        assert_eq!(sb.specs.disk_size, "2Gi");
+    }
+
+    #[test]
+    fn resize_with_same_specs_is_idempotent() {
+        let mut sb = new_sandbox();
+        let res = sb.resize(test_specs());
+        assert!(!res.did_execute());
     }
 
     #[test]
