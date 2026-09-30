@@ -420,6 +420,7 @@ impl Workflows {
             sandboxes,
             model_chain,
             space_writes,
+            max_cost_usd,
             original_path,
             rendered,
             ..
@@ -464,6 +465,7 @@ impl Workflows {
 
         Self::validate_trigger(&trigger)?;
         Self::validate_space_writes(&space_writes, &steps)?;
+        Self::validate_max_cost_usd(max_cost_usd)?;
 
         let file_hash = drua_library::GitFileHash::new(rendered);
 
@@ -482,6 +484,7 @@ impl Workflows {
                     Some(sandboxes),
                     Some(model_chain.clone()),
                     Some(space_writes.clone()),
+                    Some(max_cost_usd),
                     file_hash,
                 )
                 .did_execute()
@@ -517,7 +520,8 @@ impl Workflows {
             .steps(steps)
             .sandboxes(sandboxes)
             .model_chain(model_chain)
-            .space_writes(space_writes);
+            .space_writes(space_writes)
+            .max_cost_usd(max_cost_usd);
         if let Some(project) = project_name {
             builder = builder.project_name(project);
         }
@@ -554,6 +558,14 @@ impl Workflows {
                 .map_err(|e| WorkflowError::InvalidCondition(format!("trigger: {e}")))?;
         }
         Ok(())
+    }
+
+    /// Config-contract validation table (handoff §2): missing/null is
+    /// unlimited; finite ≥ 0 is a valid budget (`0` admits no model
+    /// requests); negative, NaN or infinite is rejected here so it never
+    /// reaches storage.
+    fn validate_max_cost_usd(value: Option<f64>) -> Result<(), WorkflowError> {
+        entity::validate_max_cost_usd(value).map_err(WorkflowError::InvalidMaxCostUsd)
     }
 
     /// Resolve `skill:` references and validate sandbox references
@@ -854,6 +866,7 @@ impl Workflows {
         sandboxes: Vec<WorkflowSandboxDecl>,
         model_chain: Option<llm::ModelChain>,
         space_writes: SpaceWritesDecl,
+        max_cost_usd: Option<f64>,
     ) -> Result<WorkflowDefinition, WorkflowError> {
         sub.can(AuthVerb::Create, AuthResource::Workflow(project_id, None))?;
 
@@ -868,6 +881,7 @@ impl Workflows {
         self.validate_steps(sub, project_id, &steps, &sandboxes)
             .await?;
         Self::validate_space_writes(&space_writes, &steps)?;
+        Self::validate_max_cost_usd(max_cost_usd)?;
 
         let trigger = match trigger {
             WorkflowTrigger::Webhook {
@@ -889,7 +903,8 @@ impl Workflows {
             .steps(steps)
             .sandboxes(sandboxes)
             .model_chain(model_chain)
-            .space_writes(space_writes);
+            .space_writes(space_writes)
+            .max_cost_usd(max_cost_usd);
         if !project_name.is_empty() {
             builder = builder.project_name(project_name);
         }
@@ -923,6 +938,7 @@ impl Workflows {
         sandboxes: Option<Vec<WorkflowSandboxDecl>>,
         model_chain: Option<Option<llm::ModelChain>>,
         space_writes: Option<SpaceWritesDecl>,
+        max_cost_usd: Option<Option<f64>>,
     ) -> Result<WorkflowDefinition, WorkflowError> {
         let mut definition = self.repo.find_by_id(id).await?;
         sub.can(
@@ -932,6 +948,9 @@ impl Workflows {
 
         if let Some(t) = trigger.as_ref() {
             Self::validate_trigger(t)?;
+        }
+        if let Some(v) = max_cost_usd {
+            Self::validate_max_cost_usd(v)?;
         }
 
         let next_steps = steps.as_ref().unwrap_or(&definition.steps);
@@ -967,6 +986,7 @@ impl Workflows {
                 sandboxes,
                 model_chain,
                 space_writes,
+                max_cost_usd,
             )
             .did_execute()
         {
@@ -1400,6 +1420,7 @@ impl Workflows {
             .project_id(definition.project_id)
             .trigger_context(trigger_context)
             .steps_snapshot(definition.steps.clone())
+            .max_cost_usd(definition.max_cost_usd)
             .build()
             .map_err(|e| WorkflowError::BuildEntity(e.to_string()))?;
 

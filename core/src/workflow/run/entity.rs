@@ -18,6 +18,13 @@ use crate::workflow::definition::{SpaceWritesFailure, WorkflowStepDef};
 ///   the run via `Workflows::cancel_run` before it reached one of the
 ///   above. Distinct so observability + skills can tell a deliberate
 ///   abort apart from an infrastructure error.
+/// - `BudgetExceeded`: the run's `max_cost_usd` was reached (or a
+///   bounded attempt's cost couldn't be verified) and the executor
+///   stopped admitting further model requests. Distinct from
+///   `Errored`/`Cancelled`/a provider 402 mid-`Errored` step — see
+///   `handoff-workflow-max-cost-usd-2026-09-30.md` §5. Persisted as
+///   `VARCHAR` (no Postgres enum, no CHECK constraint), so this new
+///   variant needs no migration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "VARCHAR", rename_all = "snake_case")]
@@ -29,6 +36,7 @@ pub enum WorkflowRunState {
     Failed,
     Errored,
     Cancelled,
+    BudgetExceeded,
 }
 
 impl WorkflowRunState {
@@ -42,8 +50,42 @@ impl WorkflowRunState {
                 | WorkflowRunState::Failed
                 | WorkflowRunState::Errored
                 | WorkflowRunState::Cancelled
+                | WorkflowRunState::BudgetExceeded
         )
     }
+}
+
+/// Why a bounded run's budget stopped dispatch. `LimitReached` is the
+/// ordinary case (handoff §3); `CostMeteringUnavailable` is a
+/// conservative fail-closed stop — a budget that can't be measured must
+/// not silently become unlimited (handoff §4 / P3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetStopReason {
+    /// Settled spend reached or exceeded `max_cost_usd`.
+    LimitReached,
+    /// A step's model dispatch completed (or failed) without the
+    /// provider reporting a cost for at least one turn, so this step's
+    /// true spend can't be verified.
+    CostMeteringUnavailable,
+}
+
+/// Total model spend the executor observed for one `execute_step`
+/// invocation — the sum of every turn's reported cost across every
+/// `stream_agent_response` call it took (initial dispatch, tool-use
+/// turns, continuations, forced-output nudges). Enforcement happens per
+/// turn inside the agent dispatch loop (via the `remaining` ceiling
+/// passed into it); this is the durable, once-per-step settlement the
+/// executor folds into `WorkflowRun::spent` when the step returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum StepCost {
+    /// Every turn in the step reported a cost (possibly `0` for a
+    /// demonstrably unbilled pre-stream failure); this is the sum.
+    Known { usd: MicroUsd },
+    /// At least one turn completed or failed without a resolvable cost.
+    /// Stops a bounded run — see `BudgetStopReason::CostMeteringUnavailable`.
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -117,6 +159,15 @@ pub enum WorkflowRunEvent {
         project_id: ProjectId,
         trigger_context: serde_json::Value,
         steps_snapshot: Vec<WorkflowStepDef>,
+        /// Snapshot of the definition's `max_cost_usd` at trigger time
+        /// (handoff §2: "snapshot the limit into the run at
+        /// initialization alongside its existing snapshots"). Immutable
+        /// for the run's lifetime — editing the definition only affects
+        /// future runs. `#[serde(default)]` so pre-existing run events
+        /// hydrate with no limit (unbounded), same convention as
+        /// `ChangesetOpened.on_failure`.
+        #[serde(default)]
+        max_cost_usd: Option<f64>,
     },
     StepStarted {
         step_name: String,
@@ -182,6 +233,33 @@ pub enum WorkflowRunEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         outcome: Option<SpaceWritesOutcome>,
     },
+    /// Durable settlement of one step's total model spend, folded into
+    /// `WorkflowRun::spent` when the executor observes `execute_step`
+    /// return. Only emitted for bounded runs (`max_cost_usd.is_some()`)
+    /// — an unlimited run never pays this bookkeeping cost. Each event
+    /// represents genuinely new spend (turns dispatched during that one
+    /// `execute_step` invocation), so replays across job retries of the
+    /// same step accumulate correctly rather than needing an
+    /// idempotency guard — a step already in a terminal `StepResult`
+    /// (`step_already_terminal`) is never re-executed, so this can't
+    /// double-count a step that already settled.
+    StepModelSpend {
+        step_name: String,
+        cost: StepCost,
+        recorded_at: DateTime<Utc>,
+    },
+    /// Terminal: the run's budget stopped further model dispatch.
+    /// Carries the diagnostic fields handoff §5 asks for. Idempotent —
+    /// recorded at most once per run (see
+    /// `WorkflowRun::record_budget_stop`).
+    BudgetExceeded {
+        reason: BudgetStopReason,
+        limit: MicroUsd,
+        spent: MicroUsd,
+        overshoot: MicroUsd,
+        step_name: String,
+        exceeded_at: DateTime<Utc>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,10 +297,123 @@ pub struct WorkflowRun {
     pub last_changeset_id: Option<ChangesetId>,
     #[builder(default)]
     pub last_changeset_outcome: Option<SpaceWritesOutcome>,
+    /// Immutable snapshot of the definition's budget at trigger time.
+    /// `None` is unlimited.
+    #[builder(default)]
+    pub max_cost_usd: Option<f64>,
+    /// Sum of every step's `StepCost::Known` settlement on this run.
+    /// Only meaningful (and only ever nonzero) when `max_cost_usd.is_some()`.
+    #[builder(default)]
+    pub spent: MicroUsd,
+    /// Populated once the run's budget threshold is crossed.
+    #[builder(default)]
+    pub budget_stop: Option<BudgetStop>,
     events: EntityEvents<WorkflowRunEvent>,
 }
 
+/// Diagnostic snapshot of why/where a bounded run stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BudgetStop {
+    pub reason: BudgetStopReason,
+    pub limit: MicroUsd,
+    pub spent: MicroUsd,
+    pub overshoot: MicroUsd,
+}
+
 impl WorkflowRun {
+    /// USD view of [`Self::spent`] for status/API surfaces.
+    pub fn spent_usd(&self) -> f64 {
+        self.spent.as_dollars()
+    }
+
+    /// `max(0, limit - spent)`, or `None` for an unlimited run (handoff
+    /// §5: "For unlimited runs remaining budget is null").
+    pub fn remaining_cost_usd(&self) -> Option<f64> {
+        self.remaining_budget().map(MicroUsd::as_dollars)
+    }
+
+    /// Idempotently records why a bounded run's budget stopped (first
+    /// caller wins — a later crossing is a no-op) and transitions the
+    /// run to `BudgetExceeded`.
+    fn record_budget_stop(&mut self, reason: BudgetStopReason, limit: MicroUsd, step_name: String) {
+        if self.budget_stop.is_some() {
+            return;
+        }
+        let overshoot = self.spent.saturating_sub(limit);
+        let stop = BudgetStop {
+            reason,
+            limit,
+            spent: self.spent,
+            overshoot,
+        };
+        self.budget_stop = Some(stop);
+        self.state = WorkflowRunState::BudgetExceeded;
+        let now = Utc::now();
+        self.completed_at = Some(now);
+        self.events.push(WorkflowRunEvent::BudgetExceeded {
+            reason,
+            limit,
+            spent: stop.spent,
+            overshoot,
+            step_name,
+            exceeded_at: now,
+        });
+    }
+
+    /// Folds one step's total observed model spend into the run's
+    /// durable ledger (handoff §3-4). Called by the executor once
+    /// `execute_step` returns (success or failure — a step that erred
+    /// out after spending money still owes that spend), never from
+    /// inside the agent dispatch path itself, so there is exactly one
+    /// writer of `WorkflowRun` and no optimistic-concurrency race with
+    /// the executor's own step-transition events. A no-op on an
+    /// unlimited run (`max_cost_usd.is_none()`) — unbounded runs never
+    /// pay this bookkeeping cost. `Known` sums into `spent`, checking
+    /// the threshold; `Unknown` stops the run outright — a budget that
+    /// can't be measured must not silently become unlimited (handoff §4).
+    pub fn record_step_spend(&mut self, step_name: String, cost: StepCost) {
+        let Some(limit_usd) = self.max_cost_usd else {
+            return;
+        };
+        let limit = MicroUsd::from_validated_limit(limit_usd);
+        self.events.push(WorkflowRunEvent::StepModelSpend {
+            step_name: step_name.clone(),
+            cost,
+            recorded_at: Utc::now(),
+        });
+        match cost {
+            StepCost::Known { usd } => {
+                self.spent = self.spent.saturating_add(usd);
+                if self.spent >= limit {
+                    self.record_budget_stop(BudgetStopReason::LimitReached, limit, step_name);
+                }
+            }
+            StepCost::Unknown => {
+                self.record_budget_stop(
+                    BudgetStopReason::CostMeteringUnavailable,
+                    limit,
+                    step_name,
+                );
+            }
+        }
+    }
+
+    /// `true` once this run's budget has stopped it — checked by the
+    /// executor before dispatching the next step (handoff §3: "no
+    /// further admitted requests once the threshold is reached").
+    pub fn budget_stopped(&self) -> bool {
+        self.budget_stop.is_some()
+    }
+
+    /// Remaining room under this run's budget as of right now, or `None`
+    /// for an unlimited run. The executor passes this into the agent
+    /// dispatch path as the per-turn admission ceiling (handoff §3) —
+    /// `Some(MicroUsd::ZERO)` admits no further model requests.
+    pub fn remaining_budget(&self) -> Option<MicroUsd> {
+        let limit = MicroUsd::from_validated_limit(self.max_cost_usd?);
+        Some(limit.saturating_sub(self.spent))
+    }
+
     pub fn started_at(&self) -> chrono::DateTime<chrono::Utc> {
         self.events
             .entity_first_persisted_at()
@@ -239,8 +430,12 @@ impl WorkflowRun {
             .any(StepResult::step_reported_agent_failure)
     }
 
+    /// `false` once a bounded run's budget has stopped it, even if every
+    /// step so far reported clean success — a budget stop must route to
+    /// `finish_space_writes`'s abandon path (keep/discard), never to the
+    /// success/merge path (handoff §5).
     pub fn would_succeed(&self) -> bool {
-        !self.any_step_errored() && !self.any_step_reported_failure()
+        self.budget_stop.is_none() && !self.any_step_errored() && !self.any_step_reported_failure()
     }
 
     pub fn step_already_terminal(&self, step_name: &str) -> bool {
@@ -432,6 +627,7 @@ impl WorkflowRun {
             self.events.iter_all().rev(),
             already_applied: WorkflowRunEvent::RunCompleted { .. },
             already_applied: WorkflowRunEvent::RunCancelled { .. },
+            already_applied: WorkflowRunEvent::BudgetExceeded { .. },
         );
         if self.state == WorkflowRunState::WaitingForEvent {
             return Idempotent::AlreadyApplied;
@@ -466,6 +662,7 @@ impl WorkflowRun {
             self.events.iter_all().rev(),
             already_applied: WorkflowRunEvent::RunCompleted { .. },
             already_applied: WorkflowRunEvent::RunCancelled { .. },
+            already_applied: WorkflowRunEvent::BudgetExceeded { .. },
         );
         let now = Utc::now();
         self.state = WorkflowRunState::Cancelled;
@@ -632,6 +829,9 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
         let mut changeset_on_failure: Option<SpaceWritesFailure> = None;
         let mut last_changeset_id: Option<ChangesetId> = None;
         let mut last_changeset_outcome: Option<SpaceWritesOutcome> = None;
+        let mut max_cost_usd: Option<f64> = None;
+        let mut spent = MicroUsd::ZERO;
+        let mut budget_stop: Option<BudgetStop> = None;
 
         for event in events.iter_all() {
             match event {
@@ -641,7 +841,9 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
                     project_id,
                     trigger_context,
                     steps_snapshot,
+                    max_cost_usd: limit,
                 } => {
+                    max_cost_usd = *limit;
                     builder = builder
                         .id(*id)
                         .definition_id(*definition_id)
@@ -791,6 +993,28 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
                     last_changeset_id = Some(*changeset_id);
                     last_changeset_outcome = outcome.clone();
                 }
+                WorkflowRunEvent::StepModelSpend { cost, .. } => {
+                    if let StepCost::Known { usd } = cost {
+                        spent = spent.saturating_add(*usd);
+                    }
+                }
+                WorkflowRunEvent::BudgetExceeded {
+                    reason,
+                    limit,
+                    spent: settled_spent,
+                    overshoot,
+                    exceeded_at,
+                    ..
+                } => {
+                    state = WorkflowRunState::BudgetExceeded;
+                    completed_at = Some(*exceeded_at);
+                    budget_stop = Some(BudgetStop {
+                        reason: *reason,
+                        limit: *limit,
+                        spent: *settled_spent,
+                        overshoot: *overshoot,
+                    });
+                }
             }
         }
 
@@ -800,6 +1024,9 @@ impl TryFromEvents<WorkflowRunEvent> for WorkflowRun {
         builder = builder.changeset_on_failure(changeset_on_failure);
         builder = builder.last_changeset_id(last_changeset_id);
         builder = builder.last_changeset_outcome(last_changeset_outcome);
+        builder = builder.max_cost_usd(max_cost_usd);
+        builder = builder.spent(spent);
+        builder = builder.budget_stop(budget_stop);
 
         builder.events(events).build()
     }
@@ -816,6 +1043,8 @@ pub struct NewWorkflowRun {
     pub(crate) project_id: ProjectId,
     pub(crate) trigger_context: serde_json::Value,
     pub(crate) steps_snapshot: Vec<WorkflowStepDef>,
+    #[builder(default)]
+    pub(crate) max_cost_usd: Option<f64>,
 }
 
 impl NewWorkflowRun {
@@ -838,6 +1067,7 @@ impl IntoEvents<WorkflowRunEvent> for NewWorkflowRun {
                 project_id: self.project_id,
                 trigger_context: self.trigger_context,
                 steps_snapshot: self.steps_snapshot,
+                max_cost_usd: self.max_cost_usd,
             }],
         )
     }

@@ -40,6 +40,8 @@ pub enum WorkflowError {
     InvalidStep(String),
     #[error("WorkflowError - InvalidSpaceWrites: {0}")]
     InvalidSpaceWrites(String),
+    #[error("WorkflowError - InvalidMaxCostUsd: {0}")]
+    InvalidMaxCostUsd(String),
     #[error("WorkflowError - InvalidTemplateRef: {0}")]
     InvalidTemplateRef(String),
     #[error("WorkflowError - InvalidCondition: {0}")]

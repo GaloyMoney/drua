@@ -422,6 +422,11 @@ pub enum WorkflowRunState {
     Failed,
     Errored,
     Cancelled,
+    /// The run's `max_cost_usd` budget stopped further model dispatch —
+    /// either the limit was reached, or a step's spend couldn't be
+    /// verified. Distinct from `Errored`/`Cancelled`/a provider 402
+    /// mid-`Errored` step. See `budgetStop` on `WorkflowRun`.
+    BudgetExceeded,
 }
 
 impl From<DomainWorkflowRunState> for WorkflowRunState {
@@ -434,6 +439,7 @@ impl From<DomainWorkflowRunState> for WorkflowRunState {
             DomainWorkflowRunState::Failed => Self::Failed,
             DomainWorkflowRunState::Errored => Self::Errored,
             DomainWorkflowRunState::Cancelled => Self::Cancelled,
+            DomainWorkflowRunState::BudgetExceeded => Self::BudgetExceeded,
         }
     }
 }

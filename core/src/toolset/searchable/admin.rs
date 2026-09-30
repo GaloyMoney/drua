@@ -655,6 +655,15 @@ struct WorkflowParams {
     #[serde(default)]
     space_writes: Option<SpaceWritesDecl>,
 
+    /// Workflow-wide model-spend budget in USD, shared by the whole run.
+    /// Omit for unlimited. `0` admits no model requests. Enforceable only
+    /// when every step's resolved model chain reports a per-call cost
+    /// (OpenRouter-routed models today). `create`: sets the limit.
+    /// `update`: applies `model_chain` wins unless `clear_max_cost_usd` is
+    /// set, same convention as `clear_model_chain`.
+    #[serde(default)]
+    max_cost_usd: Option<f64>,
+
     /// `update`-only flags: when `false`, the corresponding field is
     /// left untouched. `clear_*` variants set the field to `None`.
     #[serde(default)]
@@ -669,6 +678,8 @@ struct WorkflowParams {
     clear_model_chain: bool,
     #[serde(default)]
     update_space_writes: bool,
+    #[serde(default)]
+    clear_max_cost_usd: bool,
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -1586,6 +1597,7 @@ impl AdminToolSet {
                         sandboxes,
                         params.model_chain,
                         params.space_writes.unwrap_or_default(),
+                        params.max_cost_usd,
                     )
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
@@ -1681,6 +1693,11 @@ impl AdminToolSet {
                 let space_writes = params
                     .update_space_writes
                     .then(|| params.space_writes.unwrap_or_default());
+                let max_cost_usd = if params.clear_max_cost_usd {
+                    Some(None)
+                } else {
+                    params.max_cost_usd.map(Some)
+                };
                 let definition = self
                     .workflows
                     .update(
@@ -1693,6 +1710,7 @@ impl AdminToolSet {
                         sandboxes,
                         model_chain,
                         space_writes,
+                        max_cost_usd,
                     )
                     .await
                     .map_err(|e| ToolSetsError::Workflow(e.to_string()))?;
@@ -2341,8 +2359,12 @@ fn format_workflow(d: &WorkflowDefinition, created: bool) -> String {
         },
     };
     let description = d.description.as_deref().unwrap_or("\u{2014}");
+    let max_cost_usd = match d.max_cost_usd {
+        Some(v) => format!("${v:.2}"),
+        None => "unlimited".to_string(),
+    };
     format!(
-        "{header}\n  id: {}\n  name: {}\n  project: {}\n  trigger: {}\n  description: {}\n  steps: {}\n  sandboxes: {}\n  space_writes: {}",
+        "{header}\n  id: {}\n  name: {}\n  project: {}\n  trigger: {}\n  description: {}\n  steps: {}\n  sandboxes: {}\n  space_writes: {}\n  max_cost_usd: {}",
         d.id,
         d.name,
         d.project_id,
@@ -2351,6 +2373,7 @@ fn format_workflow(d: &WorkflowDefinition, created: bool) -> String {
         d.steps.len(),
         d.sandboxes.len(),
         format_space_writes(&d.space_writes),
+        max_cost_usd,
     )
 }
 
@@ -2387,6 +2410,7 @@ fn run_state(state: WorkflowRunState) -> &'static str {
         WorkflowRunState::Failed => "failed",
         WorkflowRunState::Errored => "errored",
         WorkflowRunState::Cancelled => "cancelled",
+        WorkflowRunState::BudgetExceeded => "budget_exceeded",
     }
 }
 
@@ -3253,6 +3277,7 @@ mod tests {
                 model_chain: None,
                 original_path: None,
                 space_writes,
+                max_cost_usd: None,
             }],
         );
         WorkflowDefinition::try_from_events(events).expect("hydrate")
@@ -3317,13 +3342,22 @@ mod tests {
                 body: None,
             }),
         };
-        let _ = d.update_content(None, None, None, None, None, None, Some(new_decl.clone()));
+        let _ = d.update_content(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(new_decl.clone()),
+            None,
+        );
         assert_eq!(d.space_writes, new_decl);
         assert!(format_workflow(&d, false).contains("space_writes: open_pr"));
 
         // `update_space_writes: false` on the tool maps to `None` here —
         // the value must survive unchanged.
-        let _ = d.update_content(None, None, None, None, None, None, None);
+        let _ = d.update_content(None, None, None, None, None, None, None, None);
         assert_eq!(d.space_writes, new_decl);
     }
 

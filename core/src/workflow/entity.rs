@@ -37,6 +37,14 @@ pub enum WorkflowDefinitionEvent {
         original_path: Option<String>,
         #[serde(default)]
         space_writes: SpaceWritesDecl,
+        /// Workflow-wide model-spend budget in USD, shared by every step,
+        /// session, thread and retry/fallback attributable to a run.
+        /// `None`/missing is unlimited (legacy behaviour). Snapshotted
+        /// immutably onto each `WorkflowRun` at trigger time — editing
+        /// this field only affects future runs. See
+        /// `handoff-workflow-max-cost-usd-2026-09-30.md`.
+        #[serde(default)]
+        max_cost_usd: Option<f64>,
     },
     Updated {
         name: Option<String>,
@@ -51,6 +59,11 @@ pub enum WorkflowDefinitionEvent {
         model_chain: Option<Option<ModelChain>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         space_writes: Option<SpaceWritesDecl>,
+        /// Tri-state, same convention as `model_chain`: `Some(Some(_))`
+        /// sets/replaces, `Some(None)` clears (unlimited), `None` leaves
+        /// untouched.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_cost_usd: Option<Option<f64>>,
     },
 }
 
@@ -75,6 +88,10 @@ pub struct WorkflowDefinition {
     pub(crate) original_path: Option<String>,
     #[builder(default)]
     pub space_writes: SpaceWritesDecl,
+    /// Workflow-wide model-spend budget (USD). `None` is unlimited.
+    /// Validated on create/update: finite, non-negative, non-NaN.
+    #[builder(default)]
+    pub max_cost_usd: Option<f64>,
     events: EntityEvents<WorkflowDefinitionEvent>,
 }
 
@@ -116,6 +133,7 @@ impl WorkflowDefinition {
             &self.sandboxes,
             self.model_chain.as_ref(),
             &self.space_writes,
+            self.max_cost_usd,
             &self.created_at().to_rfc3339(),
             &self.updated_at().to_rfc3339(),
         )
@@ -140,6 +158,7 @@ impl WorkflowDefinition {
         sandboxes: Option<Vec<WorkflowSandboxDecl>>,
         model_chain: Option<Option<ModelChain>>,
         space_writes: Option<SpaceWritesDecl>,
+        max_cost_usd: Option<Option<f64>>,
         incoming_file_hash: GitFileHash,
     ) -> Idempotent<()> {
         if self.file_hash() == incoming_file_hash {
@@ -184,6 +203,9 @@ impl WorkflowDefinition {
         if let Some(sw) = &space_writes {
             self.space_writes = sw.clone();
         }
+        if let Some(mc) = &max_cost_usd {
+            self.max_cost_usd = *mc;
+        }
 
         self.events.push(WorkflowDefinitionEvent::Updated {
             name,
@@ -193,6 +215,7 @@ impl WorkflowDefinition {
             sandboxes,
             model_chain,
             space_writes,
+            max_cost_usd,
         });
         Idempotent::Executed(())
     }
@@ -210,6 +233,7 @@ impl WorkflowDefinition {
         sandboxes: Option<Vec<WorkflowSandboxDecl>>,
         model_chain: Option<Option<ModelChain>>,
         space_writes: Option<SpaceWritesDecl>,
+        max_cost_usd: Option<Option<f64>>,
     ) -> Idempotent<()> {
         if name.is_none()
             && description.is_none()
@@ -218,6 +242,7 @@ impl WorkflowDefinition {
             && sandboxes.is_none()
             && model_chain.is_none()
             && space_writes.is_none()
+            && max_cost_usd.is_none()
         {
             return Idempotent::AlreadyApplied;
         }
@@ -260,6 +285,9 @@ impl WorkflowDefinition {
         if let Some(sw) = &space_writes {
             self.space_writes = sw.clone();
         }
+        if let Some(mc) = &max_cost_usd {
+            self.max_cost_usd = *mc;
+        }
 
         self.events.push(WorkflowDefinitionEvent::Updated {
             name,
@@ -269,6 +297,7 @@ impl WorkflowDefinition {
             sandboxes,
             model_chain,
             space_writes,
+            max_cost_usd,
         });
         Idempotent::Executed(())
     }
@@ -278,6 +307,21 @@ impl WorkflowDefinition {
         step.model_chain()
             .cloned()
             .or_else(|| self.model_chain.clone())
+    }
+}
+
+/// Config-contract §2 validation table for `max_cost_usd`:
+/// missing/null → unlimited (`Ok(())`, nothing to store); finite > 0 →
+/// one budget for the whole run; `0` → admit no model requests but let
+/// deterministic prefix steps run; negative, NaN or infinite → rejected
+/// here so an unrepresentable value never reaches storage.
+pub fn validate_max_cost_usd(value: Option<f64>) -> Result<(), String> {
+    match value {
+        None => Ok(()),
+        Some(v) if v.is_nan() => Err("max_cost_usd must not be NaN".to_string()),
+        Some(v) if v.is_infinite() => Err("max_cost_usd must be finite".to_string()),
+        Some(v) if v < 0.0 => Err(format!("max_cost_usd must not be negative, got {v}")),
+        Some(_) => Ok(()),
     }
 }
 
@@ -362,6 +406,7 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     model_chain,
                     original_path,
                     space_writes,
+                    max_cost_usd,
                     ..
                 } => {
                     builder = builder
@@ -375,7 +420,8 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                         .sandboxes(sandboxes.clone())
                         .model_chain(model_chain.clone())
                         .original_path(original_path.clone())
-                        .space_writes(space_writes.clone());
+                        .space_writes(space_writes.clone())
+                        .max_cost_usd(*max_cost_usd);
                 }
                 WorkflowDefinitionEvent::Updated {
                     name,
@@ -385,6 +431,7 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     sandboxes,
                     model_chain,
                     space_writes,
+                    max_cost_usd,
                     ..
                 } => {
                     if let Some(n) = name {
@@ -404,6 +451,9 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     }
                     if let Some(mc) = model_chain {
                         builder = builder.model_chain(mc.clone());
+                    }
+                    if let Some(mc) = max_cost_usd {
+                        builder = builder.max_cost_usd(*mc);
                     }
                     if let Some(sw) = space_writes {
                         builder = builder.space_writes(sw.clone());
@@ -439,6 +489,8 @@ pub struct NewWorkflowDefinition {
     pub(super) original_path: Option<String>,
     #[builder(default)]
     pub(super) space_writes: SpaceWritesDecl,
+    #[builder(default)]
+    pub(super) max_cost_usd: Option<f64>,
 }
 
 impl NewWorkflowDefinition {
@@ -472,6 +524,7 @@ impl IntoEvents<WorkflowDefinitionEvent> for NewWorkflowDefinition {
                 model_chain: self.model_chain,
                 original_path: self.original_path,
                 space_writes: self.space_writes,
+                max_cost_usd: self.max_cost_usd,
             }],
         )
     }
@@ -605,6 +658,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         assert!(matches!(res, Idempotent::Executed(())));
         assert_eq!(
@@ -635,6 +689,7 @@ mod tests {
             Some(WorkflowTrigger::Manual {
                 condition: Some("trigger.payload.env == 'staging'".to_string()),
             }),
+            None,
             None,
             None,
             None,
