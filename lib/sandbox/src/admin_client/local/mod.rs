@@ -245,6 +245,10 @@ impl AdminClient for LocalAdminClient {
         LocalAdminClient::delete_pvcs(self, name).await
     }
 
+    async fn list_pvc_owners(&self) -> Result<Vec<String>, AdminError> {
+        Ok(Vec::new())
+    }
+
     async fn get_sandbox(&self, name: &str) -> Result<SandboxView, AdminError> {
         LocalAdminClient::get_sandbox(self, name).await
     }
