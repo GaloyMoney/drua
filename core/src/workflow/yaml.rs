@@ -29,15 +29,33 @@ struct WorkflowYaml {
     trigger: WorkflowTriggerYaml,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model_chain: Option<ModelChain>,
-    /// Workflow-wide model-spend budget in USD. Missing/`null` is
-    /// unlimited. Enforceable only when the resolved model chain's
-    /// serving provider reports cost on every call (OpenRouter-routed
-    /// models today — direct Anthropic/OpenAI clients never report a
-    /// per-call cost, so a bounded run on those models stops on its
-    /// first turn with a `cost_metering_unavailable` failure rather than
-    /// running unmetered). `0` admits no model requests at all; a
+    /// Workflow-wide model-spend budget in USD, shared by every step,
+    /// session, thread and retry/fallback attributable to one run.
+    /// Missing/`null` is unlimited (default). `0` admits no model
+    /// requests at all — deterministic prefix steps may still run. A
     /// negative, NaN or infinite value is rejected at create/update
-    /// time. See `handoff-workflow-max-cost-usd-2026-09-30.md` §2-3.
+    /// time. Snapshotted immutably onto the run at trigger time —
+    /// editing this field only affects future runs.
+    ///
+    /// This is an actual-spend stop, not a hard invoice ceiling: the
+    /// guarantee is "no further model request once spend reaches the
+    /// limit," not "spend never exceeds it" — the request in flight when
+    /// the limit is crossed can still complete, so the final total can
+    /// overshoot, potentially materially.
+    ///
+    /// Enforceable only when the resolved model chain's serving provider
+    /// reports a cost on every call — OpenRouter-routed models today.
+    /// Direct Anthropic/OpenAI clients never report a per-call cost, so
+    /// a bounded run whose chain (or a fallback within it) resolves to
+    /// one of those stops on its first such turn with a
+    /// `cost_metering_unavailable` failure rather than running unmetered.
+    ///
+    /// v1 allows at most one in-flight billable model request per
+    /// bounded run: setting this on a workflow with concurrent
+    /// run-owned agents serializes them at the dispatch boundary,
+    /// trading away fan-out parallelism for the budget guarantee.
+    ///
+    /// See `handoff-workflow-max-cost-usd-2026-09-30.md` §2-3.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_cost_usd: Option<f64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
