@@ -932,7 +932,7 @@ async fn resume_message_continues_past_interrupted_tool_call() {
 
     // Simulate the job-level retry re-driving the same agent.
     let resumed = agents
-        .resume_message(AuthSubject::User(UserId::new()), agent.id)
+        .resume_message(AuthSubject::User(UserId::new()), agent.id, None)
         .await
         .expect("resume_message");
     let mut resumed_rx =

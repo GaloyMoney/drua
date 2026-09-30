@@ -103,6 +103,7 @@ type AgentUpdateSessionChainPayload {
 }
 
 type AssistantDoneEvent {
+	budgetStopped: BudgetStopKind
 	costUsd: Float
 	durationMs: Int
 	inputTokens: Int!
@@ -148,6 +149,30 @@ type BootstrapPersonalProjectPayload {
 	"""
 	created: Boolean!
 	project: Project!
+}
+
+"""
+Why a run-owned agent's dispatch loop stopped short of a natural
+`Done`/no-`submit_output` outcome. `None` on `AssistantDoneEvent` for
+every non-workflow (or unbounded) agent.
+"""
+enum BudgetStopKind {
+	COST_METERING_UNAVAILABLE
+	LIMIT_REACHED
+}
+
+enum BudgetStopReason {
+	"""
+	A step's model dispatch completed (or failed) without the
+	provider reporting a cost, so its true spend can't be verified —
+	a budget that can't be measured must not silently become
+	unlimited.
+	"""
+	COST_METERING_UNAVAILABLE
+	"""
+	Settled spend reached or exceeded `maxCostUsd`.
+	"""
+	LIMIT_REACHED
 }
 
 union ChatContentBlock = TextContent | ToolUseContent | ThinkingContent | ToolResultContent | SandboxNotificationContent
@@ -783,6 +808,12 @@ type WorkflowDefinition {
 	createdAt: Timestamp!
 	description: String
 	id: WorkflowDefinitionId!
+	"""
+	Workflow-wide model-spend budget in USD, shared by the whole run.
+	`null` is unlimited. Snapshotted immutably onto each run at
+	trigger time — editing this affects future runs only.
+	"""
+	maxCostUsd: Float
 	modelChain: ModelChain
 	name: String!
 	projectId: ProjectId!
@@ -806,10 +837,34 @@ type WorkflowDeletePayload {
 
 type WorkflowRun {
 	agents: [Agent!]!
+	"""
+	Why the run's budget stopped dispatch, if it has. `null` unless
+	`state` is `BUDGET_EXCEEDED`.
+	"""
+	budgetStopReason: BudgetStopReason
 	completedAt: Timestamp
 	definitionId: WorkflowDefinitionId!
 	id: WorkflowRunId!
+	"""
+	Snapshot of the definition's model-spend budget at trigger time.
+	`null` is unlimited.
+	"""
+	maxCostUsd: Float
+	"""
+	How far settled spend exceeded `maxCostUsd` at the moment the
+	budget stopped. `null` unless `state` is `BUDGET_EXCEEDED`.
+	"""
+	overshootUsd: Float
 	projectId: ProjectId!
+	"""
+	`max(0, maxCostUsd - spentUsd)`, or `null` for an unlimited run.
+	"""
+	remainingCostUsd: Float
+	"""
+	Known model spend attributed to this run so far. `null` for an
+	unlimited run — spend is only tracked for a bounded one.
+	"""
+	spentUsd: Float
 	startedAt: Timestamp!
 	state: WorkflowRunState!
 	stepResults: [WorkflowStepResult!]!
@@ -820,6 +875,13 @@ type WorkflowRun {
 scalar WorkflowRunId
 
 enum WorkflowRunState {
+	"""
+	The run's `max_cost_usd` budget stopped further model dispatch —
+	either the limit was reached, or a step's spend couldn't be
+	verified. Distinct from `Errored`/`Cancelled`/a provider 402
+	mid-`Errored` step. See `budgetStop` on `WorkflowRun`.
+	"""
+	BUDGET_EXCEEDED
 	CANCELLED
 	ERRORED
 	FAILED

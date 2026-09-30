@@ -34,6 +34,10 @@ pub struct WorkflowDefinition {
     steps: Vec<WorkflowStep>,
     sandboxes: Vec<WorkflowSandbox>,
     model_chain: Option<ModelChain>,
+    /// Workflow-wide model-spend budget in USD, shared by the whole run.
+    /// `null` is unlimited. Snapshotted immutably onto each run at
+    /// trigger time — editing this affects future runs only.
+    max_cost_usd: Option<f64>,
     created_at: Timestamp,
     updated_at: Timestamp,
     yaml: String,
@@ -76,6 +80,7 @@ impl From<DomainWorkflowDefinition> for WorkflowDefinition {
             steps: entity.steps.iter().map(WorkflowStep::from).collect(),
             sandboxes: entity.sandboxes.iter().map(WorkflowSandbox::from).collect(),
             model_chain: entity.model_chain.clone().map(Into::into),
+            max_cost_usd: entity.max_cost_usd,
             created_at: created_at.into(),
             updated_at: updated_at.into(),
             yaml,
@@ -372,8 +377,45 @@ pub struct WorkflowRun {
     step_results: Vec<WorkflowStepResult>,
     steps_snapshot: Vec<WorkflowStep>,
 
+    /// Snapshot of the definition's model-spend budget at trigger time.
+    /// `null` is unlimited.
+    max_cost_usd: Option<f64>,
+    /// Known model spend attributed to this run so far. `null` for an
+    /// unlimited run — spend is only tracked for a bounded one.
+    spent_usd: Option<f64>,
+    /// `max(0, maxCostUsd - spentUsd)`, or `null` for an unlimited run.
+    remaining_cost_usd: Option<f64>,
+    /// Why the run's budget stopped dispatch, if it has. `null` unless
+    /// `state` is `BUDGET_EXCEEDED`.
+    budget_stop_reason: Option<BudgetStopReason>,
+    /// How far settled spend exceeded `maxCostUsd` at the moment the
+    /// budget stopped. `null` unless `state` is `BUDGET_EXCEEDED`.
+    overshoot_usd: Option<f64>,
+
     #[graphql(skip)]
     pub(super) entity: Arc<DomainWorkflowRun>,
+}
+
+#[derive(Enum, Clone, Copy, PartialEq, Eq)]
+pub enum BudgetStopReason {
+    /// Settled spend reached or exceeded `maxCostUsd`.
+    LimitReached,
+    /// A step's model dispatch completed (or failed) without the
+    /// provider reporting a cost, so its true spend can't be verified —
+    /// a budget that can't be measured must not silently become
+    /// unlimited.
+    CostMeteringUnavailable,
+}
+
+impl From<drua_core::workflow::run::BudgetStopReason> for BudgetStopReason {
+    fn from(reason: drua_core::workflow::run::BudgetStopReason) -> Self {
+        match reason {
+            drua_core::workflow::run::BudgetStopReason::LimitReached => Self::LimitReached,
+            drua_core::workflow::run::BudgetStopReason::CostMeteringUnavailable => {
+                Self::CostMeteringUnavailable
+            }
+        }
+    }
 }
 
 #[ComplexObject]
@@ -408,6 +450,11 @@ impl From<DomainWorkflowRun> for WorkflowRun {
                 .iter()
                 .map(WorkflowStep::from)
                 .collect(),
+            max_cost_usd: entity.max_cost_usd,
+            spent_usd: entity.max_cost_usd.is_some().then(|| entity.spent_usd()),
+            remaining_cost_usd: entity.remaining_cost_usd(),
+            budget_stop_reason: entity.budget_stop.map(|s| s.reason.into()),
+            overshoot_usd: entity.budget_stop.map(|s| s.overshoot.as_dollars()),
             entity: Arc::new(entity),
         }
     }
@@ -422,6 +469,11 @@ pub enum WorkflowRunState {
     Failed,
     Errored,
     Cancelled,
+    /// The run's `max_cost_usd` budget stopped further model dispatch —
+    /// either the limit was reached, or a step's spend couldn't be
+    /// verified. Distinct from `Errored`/`Cancelled`/a provider 402
+    /// mid-`Errored` step. See `budgetStop` on `WorkflowRun`.
+    BudgetExceeded,
 }
 
 impl From<DomainWorkflowRunState> for WorkflowRunState {
@@ -434,6 +486,7 @@ impl From<DomainWorkflowRunState> for WorkflowRunState {
             DomainWorkflowRunState::Failed => Self::Failed,
             DomainWorkflowRunState::Errored => Self::Errored,
             DomainWorkflowRunState::Cancelled => Self::Cancelled,
+            DomainWorkflowRunState::BudgetExceeded => Self::BudgetExceeded,
         }
     }
 }

@@ -29,6 +29,35 @@ struct WorkflowYaml {
     trigger: WorkflowTriggerYaml,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model_chain: Option<ModelChain>,
+    /// Workflow-wide model-spend budget in USD, shared by every step,
+    /// session, thread and retry/fallback attributable to one run.
+    /// Missing/`null` is unlimited (default). `0` admits no model
+    /// requests at all — deterministic prefix steps may still run. A
+    /// negative, NaN or infinite value is rejected at create/update
+    /// time. Snapshotted immutably onto the run at trigger time —
+    /// editing this field only affects future runs.
+    ///
+    /// This is an actual-spend stop, not a hard invoice ceiling: the
+    /// guarantee is "no further model request once spend reaches the
+    /// limit," not "spend never exceeds it" — the request in flight when
+    /// the limit is crossed can still complete, so the final total can
+    /// overshoot, potentially materially.
+    ///
+    /// Enforceable only when the resolved model chain's serving provider
+    /// reports a cost on every call — OpenRouter-routed models today.
+    /// Direct Anthropic/OpenAI clients never report a per-call cost, so
+    /// a bounded run whose chain (or a fallback within it) resolves to
+    /// one of those stops on its first such turn with a
+    /// `cost_metering_unavailable` failure rather than running unmetered.
+    ///
+    /// v1 allows at most one in-flight billable model request per
+    /// bounded run: setting this on a workflow with concurrent
+    /// run-owned agents serializes them at the dispatch boundary,
+    /// trading away fan-out parallelism for the budget guarantee.
+    ///
+    /// See `handoff-workflow-max-cost-usd-2026-09-30.md` §2-3.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_cost_usd: Option<f64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     sandboxes: Vec<WorkflowSandboxYaml>,
     #[serde(default, skip_serializing_if = "SpaceWritesDecl::is_default")]
@@ -438,6 +467,7 @@ pub fn render_workflow_yaml(
     sandboxes: &[WorkflowSandboxDecl],
     model_chain: Option<&ModelChain>,
     space_writes: &SpaceWritesDecl,
+    max_cost_usd: Option<f64>,
     created_at: &str,
     updated_at: &str,
 ) -> String {
@@ -447,6 +477,7 @@ pub fn render_workflow_yaml(
         description: description.map(|s| s.to_string()),
         trigger: WorkflowTriggerYaml::from_runtime(trigger),
         model_chain: model_chain.cloned(),
+        max_cost_usd,
         sandboxes: sandboxes
             .iter()
             .map(WorkflowSandboxYaml::from_runtime)
@@ -472,6 +503,7 @@ pub struct ParsedWorkflow {
     pub sandboxes: Vec<WorkflowSandboxDecl>,
     pub model_chain: Option<ModelChain>,
     pub space_writes: SpaceWritesDecl,
+    pub max_cost_usd: Option<f64>,
     pub created_at: String,
     pub updated_at: String,
     pub original_path: String,
@@ -543,6 +575,11 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
     let description = yaml.description;
     let model_chain = yaml.model_chain;
     let space_writes = yaml.space_writes;
+    let max_cost_usd = yaml.max_cost_usd;
+    if let Err(reason) = super::entity::validate_max_cost_usd(max_cost_usd) {
+        tracing::warn!(path, error = %reason, "workflow yaml max_cost_usd invalid; skipped");
+        return None;
+    }
 
     let rendered = render_workflow_yaml(
         workflow_id,
@@ -553,6 +590,7 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
         &sandboxes,
         model_chain.as_ref(),
         &space_writes,
+        max_cost_usd,
         &yaml.created,
         &yaml.updated,
     );
@@ -570,6 +608,7 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
         sandboxes,
         model_chain,
         space_writes,
+        max_cost_usd,
         created_at: yaml.created,
         updated_at: yaml.updated,
         original_path: path.to_string(),
@@ -643,6 +682,7 @@ mod tests {
             sandboxes,
             None,
             &SpaceWritesDecl::default(),
+            None,
             "2026-04-29T00:00:00Z",
             "2026-04-29T00:00:00Z",
         )
@@ -748,6 +788,7 @@ mod tests {
                 &[],
                 None,
                 &decl,
+                None,
                 "2026-09-26T00:00:00Z",
                 "2026-09-26T00:00:00Z",
             );
@@ -779,6 +820,7 @@ mod tests {
             &[],
             None,
             &decl,
+            None,
             "2026-09-26T00:00:00Z",
             "2026-09-26T00:00:00Z",
         );
@@ -797,6 +839,7 @@ mod tests {
             &[],
             None,
             &SpaceWritesDecl::default(),
+            None,
             "2026-09-24T00:00:00Z",
             "2026-09-24T00:00:00Z",
         );
@@ -931,6 +974,7 @@ steps:
             &[],
             None,
             &SpaceWritesDecl::default(),
+            None,
             "2026-05-06T00:00:00Z",
             "2026-05-06T00:00:00Z",
         );
