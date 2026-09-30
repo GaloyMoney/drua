@@ -19,13 +19,14 @@ mod workflow;
 
 use std::convert::Infallible;
 
-use async_graphql::{extensions, Schema};
+use async_graphql::{extensions, Schema, ServerError};
 use async_graphql_axum::{GraphQLRequest, GraphQLResponse};
 use axum::{
     extract::State,
+    http::StatusCode,
     response::{
         sse::{Event, Sse},
-        IntoResponse,
+        IntoResponse, Response,
     },
     routing::post,
     Extension, Json, Router,
@@ -73,6 +74,15 @@ async fn graphql_handler(
     let auth_subject = auth
         .map(|Extension(sub)| sub)
         .unwrap_or(domain::auth::AuthSubject::Anonymous);
+
+    if is_mcp_credential(&auth_subject) {
+        return async_graphql::Response::from_errors(vec![ServerError::new(
+            MCP_CREDENTIAL_REJECTION_MESSAGE,
+            None,
+        )])
+        .into();
+    }
+
     request = request.data(auth_subject);
 
     // Replace the REST middleware's generic "api: POST /graphql" entrypoint
@@ -91,10 +101,14 @@ async fn graphql_sse_handler(
     Extension(schema): Extension<AgentsSchema>,
     auth: Option<Extension<domain::auth::AuthSubject>>,
     Json(req): Json<async_graphql::Request>,
-) -> impl IntoResponse {
+) -> Response {
     let auth_subject = auth
         .map(|Extension(sub)| sub)
         .unwrap_or(domain::auth::AuthSubject::Anonymous);
+
+    if is_mcp_credential(&auth_subject) {
+        return (StatusCode::UNAUTHORIZED, MCP_CREDENTIAL_REJECTION_MESSAGE).into_response();
+    }
 
     let request = req.data(state.app.clone()).data(auth_subject);
 
@@ -117,7 +131,16 @@ async fn graphql_sse_handler(
         Event::default().event("complete").data(""),
     )]);
 
-    Sse::new(events.chain(complete))
+    Sse::new(events.chain(complete)).into_response()
 }
+
+/// MCP credentials (`ExportedAgent`) are issued for the `/mcp` tool
+/// gateway; nothing legitimately replays one against GraphQL, so it's
+/// rejected here rather than trusted to per-resolver checks.
+fn is_mcp_credential(subject: &domain::auth::AuthSubject) -> bool {
+    matches!(subject, domain::auth::AuthSubject::ExportedAgent(_, _, _))
+}
+
+const MCP_CREDENTIAL_REJECTION_MESSAGE: &str = "MCP credentials cannot be used on this endpoint";
 
 use drua_core as domain;
