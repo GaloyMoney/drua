@@ -292,6 +292,17 @@ pub struct GitEngine {
     /// reads at HEAD check it before serving.
     #[allow(dead_code)] // read starting the "space reads at HEAD wait" commit
     outbox: obix::Outbox<MainHead>,
+    /// Oid of `refs/heads/main` in THIS clone, as last observed by the
+    /// fetcher ([`Self::fetch_and_head`]) or the writer
+    /// ([`Self::process_batch`]). `None` until the first fetch.
+    local_main: tokio::sync::watch::Sender<Option<String>>,
+    /// Bumped after every completed fetch; draft waiters re-resolve
+    /// their ref on each change instead of polling.
+    fetch_generation: tokio::sync::watch::Sender<u64>,
+    /// Upper bound a read or a draft handle waits for this replica to
+    /// catch up to an acked write before failing with `StaleReplica`.
+    #[allow(dead_code)] // read starting the "space reads at HEAD wait" commit
+    catch_up_timeout: Duration,
     _writer: OwnedTaskHandle,
     _listener: OwnedTaskHandle,
 }
@@ -313,6 +324,7 @@ impl GitEngine {
         repo_path: PathBuf,
         github_app: Option<Arc<GitHubAppTokenProvider>>,
         pool: PgPool,
+        read_catch_up_timeout_ms: u64,
     ) -> Result<Self, LibraryError> {
         if repo_url.is_empty() {
             return Err(LibraryError::Config("repo_url is empty".into()));
@@ -341,6 +353,8 @@ impl GitEngine {
         let repo_mutex = Arc::new(Mutex::new(()));
         let (write_tx, write_rx) = mpsc::channel(QUEUE_CAPACITY);
         let commit_notify = Arc::new(Notify::new());
+        let (local_main, _) = tokio::sync::watch::channel(None);
+        let (fetch_generation, _) = tokio::sync::watch::channel(0u64);
         let writer = tokio::spawn(Self::run_writer(
             repo_path.clone(),
             github_app.clone(),
@@ -349,6 +363,7 @@ impl GitEngine {
             write_rx,
             pool.clone(),
             outbox.clone(),
+            local_main.clone(),
         ));
         let listener = Self::spawn_peer_listener(&outbox, Arc::clone(&commit_notify));
 
@@ -360,6 +375,9 @@ impl GitEngine {
             github_app,
             path_dates: Arc::new(std::sync::Mutex::new(HashMap::new())),
             outbox,
+            local_main,
+            fetch_generation,
+            catch_up_timeout: Duration::from_millis(read_catch_up_timeout_ms),
             _writer: OwnedTaskHandle::new(writer),
             _listener: OwnedTaskHandle::new(listener),
         })
@@ -998,7 +1016,7 @@ impl GitEngine {
         let token = Self::fresh_token(self.github_app.as_ref()).await;
         let path = self.repo_path.clone();
 
-        tokio::task::spawn_blocking(move || -> Result<Option<String>, LibraryError> {
+        let head = tokio::task::spawn_blocking(move || -> Result<Option<String>, LibraryError> {
             let repo = git2::Repository::open_bare(&path)
                 .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
             Self::fetch_origin(&repo, token.as_deref())?;
@@ -1009,7 +1027,11 @@ impl GitEngine {
             Ok(head)
         })
         .await
-        .map_err(|e| LibraryError::Git(format!("fetch_and_head join: {e}")))?
+        .map_err(|e| LibraryError::Git(format!("fetch_and_head join: {e}")))??;
+
+        self.local_main.send_replace(head.clone());
+        self.fetch_generation.send_modify(|g| *g += 1);
+        Ok(head)
     }
 
     #[tracing::instrument(name = "library.git.resolve_ref", skip_all, fields(%refname))]
@@ -1480,6 +1502,7 @@ impl GitEngine {
     /// Drains the queue forever: takes the first op, waits up to
     /// [`BATCH_WINDOW`] for siblings, then runs the whole batch as
     /// N commits + 1 push under the [`Self::repo_mutex`].
+    #[allow(clippy::too_many_arguments)]
     async fn run_writer(
         repo_path: PathBuf,
         github_app: Option<Arc<GitHubAppTokenProvider>>,
@@ -1488,6 +1511,7 @@ impl GitEngine {
         mut rx: mpsc::Receiver<QueuedOp>,
         pool: PgPool,
         outbox: obix::Outbox<MainHead>,
+        local_main: tokio::sync::watch::Sender<Option<String>>,
     ) {
         // A ref-level op that arrives mid-collection closes the batch
         // being filled and carries over as the next batch's first op,
@@ -1531,6 +1555,7 @@ impl GitEngine {
                 &repo_mutex,
                 &pool,
                 &outbox,
+                &local_main,
                 batch,
             )
             .await;
@@ -1547,6 +1572,7 @@ impl GitEngine {
         repo_mutex: &Mutex<()>,
         pool: &PgPool,
         outbox: &obix::Outbox<MainHead>,
+        local_main: &tokio::sync::watch::Sender<Option<String>>,
         batch: Vec<QueuedOp>,
     ) -> bool {
         let _guard = repo_mutex.lock().await;
@@ -1611,9 +1637,11 @@ impl GitEngine {
         // `Ok` result from the main group becomes `FencePublish` rather
         // than silently reporting success a peer might not observe.
         if let Some(main_tip) = accepted.get("refs/heads/main") {
-            if let Err(e) = Self::publish_main_head(outbox, main_tip).await {
-                tracing::warn!(error = %e, "library fence publish failed; retrying once");
-                if let Err(e) = Self::publish_main_head(outbox, main_tip).await {
+            match Self::publish_main_head_with_retry(outbox, main_tip).await {
+                Ok(()) => {
+                    local_main.send_replace(Some(main_tip.clone()));
+                }
+                Err(e) => {
                     tracing::error!(error = %e, "library fence publish failed twice; failing the main group's writes");
                     let msg = e.to_string();
                     for (i, refname) in op_refnames.iter().enumerate() {
@@ -1688,6 +1716,19 @@ impl GitEngine {
                 },
             )
             .await
+    }
+
+    /// [`Self::publish_main_head`] with one retry (OQ-4) before giving
+    /// up. Logs the first failure; the second is left for the caller.
+    async fn publish_main_head_with_retry(
+        outbox: &obix::Outbox<MainHead>,
+        oid: &str,
+    ) -> Result<(), sqlx::Error> {
+        if let Err(e) = Self::publish_main_head(outbox, oid).await {
+            tracing::warn!(error = %e, "library fence publish failed; retrying once");
+            Self::publish_main_head(outbox, oid).await?;
+        }
+        Ok(())
     }
 
     /// Apply N ops as N commits, then push once. On non-FF push, fetch
@@ -3913,6 +3954,70 @@ mod tests {
         .await
         .expect("fence row exists");
         assert_eq!(payload["oid"], "cafef00d00000000000000000000000000000000");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires postgres; run with --ignored"]
+    async fn local_main_tracks_fetch_and_push() {
+        let pool = test_pool().await;
+        let (origin_dir, _local_dir, local_repo) = origin_and_clone("local-main-tracking");
+        let main_oid = local_repo
+            .find_reference("refs/heads/main")
+            .unwrap()
+            .target()
+            .unwrap()
+            .to_string();
+
+        let data_dir = unique_dir("local-main-tracking-engine");
+        let engine = GitEngine::init(
+            &origin_dir.to_string_lossy(),
+            data_dir.clone(),
+            None,
+            pool.clone(),
+            5_000,
+        )
+        .await
+        .expect("engine init");
+
+        // `init` clones but never fetches again on its own, and no write
+        // has gone through the writer yet.
+        assert_eq!(*engine.local_main.borrow(), None, "unset before any fetch");
+        assert_eq!(*engine.fetch_generation.borrow(), 0);
+
+        let fetched = engine.fetch_and_head().await.expect("fetch");
+        assert_eq!(fetched.as_deref(), Some(main_oid.as_str()));
+        assert_eq!(
+            engine.local_main.borrow().clone(),
+            fetched,
+            "fetch_and_head updates local_main"
+        );
+        assert_eq!(
+            *engine.fetch_generation.borrow(),
+            1,
+            "fetch_and_head bumps fetch_generation"
+        );
+
+        engine
+            .write_file(
+                "a.md".into(),
+                b"hi".to_vec(),
+                "add a".into(),
+                CommitAttribution::library_default(),
+            )
+            .await
+            .expect("write");
+        // `write_file`'s response is only sent after `process_batch` has
+        // already updated `local_main` (on a successful fence publish),
+        // so no polling is needed here — the push's enqueue/response
+        // round trip IS the synchronization.
+        let after_write = engine.local_main.borrow().clone();
+        assert!(
+            after_write.is_some() && after_write.as_deref() != Some(main_oid.as_str()),
+            "the writer's own push updates local_main to the new tip, not just a fetch"
+        );
+
+        let _ = std::fs::remove_dir_all(&origin_dir);
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     #[test]

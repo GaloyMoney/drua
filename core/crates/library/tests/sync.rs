@@ -8,6 +8,7 @@ use drua_library::{CommitAttribution, Library, LibraryConfig};
 
 const PG_CON: &str = "postgres://user:password@localhost:5432/drua";
 const FETCH_INTERVAL_MS: u64 = 100;
+const READ_CATCH_UP_TIMEOUT_MS: u64 = 5_000;
 
 async fn pool() -> sqlx::PgPool {
     let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| PG_CON.to_string());
@@ -35,6 +36,7 @@ async fn space_file_imports_into_search_store() {
         data_dir: data_dir.to_string_lossy().to_string(),
         repo_url: fixture.path().to_string_lossy().to_string(),
         fetch_interval_ms: FETCH_INTERVAL_MS,
+        read_catch_up_timeout_ms: READ_CATCH_UP_TIMEOUT_MS,
     };
 
     let library = Library::init(&pool, &config, embedder, &mut jobs, None)
@@ -117,6 +119,7 @@ async fn non_prose_files_are_not_indexed_for_search() {
         data_dir: data_dir.to_string_lossy().to_string(),
         repo_url: fixture.path().to_string_lossy().to_string(),
         fetch_interval_ms: FETCH_INTERVAL_MS,
+        read_catch_up_timeout_ms: READ_CATCH_UP_TIMEOUT_MS,
     };
 
     let library = Library::init(&pool, &config, embedder, &mut jobs, None)

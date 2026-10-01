@@ -13,6 +13,7 @@ fn attr() -> CommitAttribution {
 
 const PG_CON: &str = "postgres://user:password@localhost:5432/drua";
 const FETCH_INTERVAL_MS: u64 = 100;
+const READ_CATCH_UP_TIMEOUT_MS: u64 = 5_000;
 
 /// Fixed day boundaries so `date_naive()` comparisons never straddle a
 /// UTC midnight by accident. `T0` = 2025-01-01T00:00:00Z.
@@ -51,6 +52,7 @@ async fn fresh_library(test_name: &str) -> (TestRepo, Library, job::Jobs, sqlx::
         data_dir: data_dir.to_string_lossy().to_string(),
         repo_url: fixture.path().to_string_lossy().to_string(),
         fetch_interval_ms: FETCH_INTERVAL_MS,
+        read_catch_up_timeout_ms: READ_CATCH_UP_TIMEOUT_MS,
     };
     let library = Library::init(&pool, &config, embedder, &mut jobs, None)
         .await

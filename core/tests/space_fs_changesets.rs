@@ -176,6 +176,7 @@ async fn setup_with_upstream(test_name: &str) -> (App, AuthSubject, PathBuf) {
             data_dir: Some(data_dir.to_string_lossy().into_owned()),
             repo_url: Some(upstream.to_string_lossy().into_owned()),
             skill_sync_interval_secs: 1,
+            ..Default::default()
         },
         ..Default::default()
     };
