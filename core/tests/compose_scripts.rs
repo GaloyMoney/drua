@@ -85,7 +85,8 @@ async fn reset_db(pool: &sqlx::PgPool) {
             session_threads, session_thread_events, \
             agent_sessions, agent_session_events, \
             agents, agent_events, \
-            projects, project_events \
+            projects, project_events, \
+            ephemeral_outbox_events \
         RESTART IDENTITY CASCADE";
     sqlx::query(stmt)
         .execute(pool)

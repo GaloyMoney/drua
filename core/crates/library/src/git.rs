@@ -290,8 +290,10 @@ pub struct GitEngine {
     /// Cross-replica read-your-write fence. The writer publishes the
     /// pushed `refs/heads/main` oid here (see [`Self::process_batch`]);
     /// reads at HEAD check it before serving.
-    #[allow(dead_code)] // read starting the "space reads at HEAD wait" commit
     outbox: obix::Outbox<MainHead>,
+    /// For the one-row authoritative fence read in
+    /// [`Self::ensure_main_current`].
+    pool: PgPool,
     /// Oid of `refs/heads/main` in THIS clone, as last observed by the
     /// fetcher ([`Self::fetch_and_head`]) or the writer
     /// ([`Self::process_batch`]). `None` until the first fetch.
@@ -301,7 +303,6 @@ pub struct GitEngine {
     fetch_generation: tokio::sync::watch::Sender<u64>,
     /// Upper bound a read or a draft handle waits for this replica to
     /// catch up to an acked write before failing with `StaleReplica`.
-    #[allow(dead_code)] // read starting the "space reads at HEAD wait" commit
     catch_up_timeout: Duration,
     _writer: OwnedTaskHandle,
     _listener: OwnedTaskHandle,
@@ -375,6 +376,7 @@ impl GitEngine {
             github_app,
             path_dates: Arc::new(std::sync::Mutex::new(HashMap::new())),
             outbox,
+            pool,
             local_main,
             fetch_generation,
             catch_up_timeout: Duration::from_millis(read_catch_up_timeout_ms),
@@ -614,10 +616,119 @@ impl GitEngine {
         Ok(deltas)
     }
 
+    /// Reads the current fence row (at most one, since `event_type` is
+    /// UNIQUE) through obix's own default `MailboxTables` impl. Reached
+    /// purely by type inference from `self.outbox`'s own `Tables`
+    /// parameter, never by naming `DefaultMailboxTables` — it is
+    /// private in obix 0.9.0 (`mod tables;` has no `pub` in
+    /// `obix::lib.rs`), so no path to it exists outside the obix
+    /// crate. `Tbl` is a "voldemort type": inferred, never spelled.
+    /// Would become `self.outbox.latest_ephemeral(&MAIN_HEAD_EVENT)`
+    /// after the obix 0.9.0 → ≥0.13 upgrade (handoff §9 item 2.1).
+    async fn load_main_head_row<Tbl>(
+        outbox: &obix::Outbox<MainHead, Tbl>,
+        pool: &PgPool,
+    ) -> Result<Option<MainHead>, sqlx::Error>
+    where
+        Tbl: obix::MailboxTables,
+    {
+        let _ = outbox; // the anchor only pins `Tbl`; the read itself is a free function on it
+        let mut rows = Tbl::load_ephemeral_events::<MainHead>(pool, Some(MAIN_HEAD_EVENT)).await?;
+        debug_assert!(
+            rows.len() <= 1,
+            "event_type is UNIQUE; a load_ephemeral_events filtered by it returns at most one row"
+        );
+        Ok(rows.pop().map(|e| e.payload))
+    }
+
+    /// Whether `refname`'s current tip is `ancestor_oid` or a
+    /// descendant of it. `false` (not an error) when `refname` doesn't
+    /// resolve, or when `ancestor_oid`'s commit hasn't been fetched
+    /// into this clone yet — both mean "can't confirm current", the
+    /// same thing a genuinely-behind replica looks like.
+    async fn descends_from(&self, refname: &str, ancestor_oid: &str) -> Result<bool, LibraryError> {
+        let repo_path = self.repo_path.clone();
+        let refname = refname.to_string();
+        let ancestor_oid = ancestor_oid.to_string();
+        tokio::task::spawn_blocking(move || -> Result<bool, LibraryError> {
+            let repo = git2::Repository::open_bare(&repo_path)
+                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
+            let tip = match repo.find_reference(&refname) {
+                Ok(r) => r.target(),
+                Err(e) if e.code() == git2::ErrorCode::NotFound => None,
+                Err(e) => return Err(LibraryError::Git(format!("descends_from resolve: {e}"))),
+            };
+            let Some(tip) = tip else {
+                return Ok(false);
+            };
+            let ancestor = git2::Oid::from_str(&ancestor_oid)
+                .map_err(|e| LibraryError::Git(format!("descends_from parse ancestor: {e}")))?;
+            if repo.find_commit(ancestor).is_err() {
+                // Not fetched into this clone yet.
+                return Ok(false);
+            }
+            if tip == ancestor {
+                return Ok(true);
+            }
+            repo.graph_descendant_of(tip, ancestor)
+                .map_err(|e| LibraryError::Git(format!("descends_from graph_descendant_of: {e}")))
+        })
+        .await
+        .map_err(|e| LibraryError::Git(format!("descends_from join: {e}")))?
+    }
+
+    /// Gate for every read at `refs/heads/main` HEAD: checks the
+    /// published fence against this replica's locally observed head,
+    /// waking the fetcher and parking (one fetch serving every waiter)
+    /// if this replica is behind, rather than fetching itself. See the
+    /// design notes in the "space reads at HEAD wait for the published
+    /// main head" commit body for the full argument.
+    async fn ensure_main_current(&self) -> Result<(), LibraryError> {
+        let fence = Self::load_main_head_row(&self.outbox, &self.pool)
+            .await?
+            .map(|h| h.oid);
+        let Some(fence) = fence else {
+            // Nothing ever published — no drua write has landed on
+            // main yet (or the fence row was manually cleared).
+            return Ok(());
+        };
+        if self.local_main.borrow().as_deref() == Some(fence.as_str()) {
+            return Ok(()); // hot path
+        }
+        if self.descends_from("refs/heads/main", &fence).await? {
+            return Ok(()); // ahead of the fence (human push, or a later commit)
+        }
+
+        self.commit_notify.notify_one();
+        let mut rx = self.local_main.subscribe();
+        let waited = tokio::time::timeout(self.catch_up_timeout, async {
+            loop {
+                if rx.borrow().as_deref() == Some(fence.as_str())
+                    || self.descends_from("refs/heads/main", &fence).await?
+                {
+                    return Ok::<(), LibraryError>(());
+                }
+                rx.changed()
+                    .await
+                    .map_err(|_| LibraryError::Git("local_main watch closed".into()))?;
+            }
+        })
+        .await;
+        match waited {
+            Ok(result) => result,
+            Err(_) => Err(LibraryError::StaleReplica {
+                refname: "refs/heads/main".to_string(),
+                required: fence,
+                local: self.local_main.borrow().clone(),
+            }),
+        }
+    }
+
     /// Read the blob at `path` from HEAD's tree. `Ok(None)` when the
     /// path doesn't exist (or HEAD is unborn).
     #[tracing::instrument(name = "library.git.read_blob_at_head", skip_all, fields(%path))]
     pub async fn read_blob_at_head(&self, path: &str) -> Result<Option<Vec<u8>>, LibraryError> {
+        self.ensure_main_current().await?;
         let repo_path = self.repo_path.clone();
         let path = path.to_string();
         tokio::task::spawn_blocking(move || -> Result<Option<Vec<u8>>, LibraryError> {
@@ -659,6 +770,7 @@ impl GitEngine {
         &self,
         dir_path: &str,
     ) -> Result<Option<Vec<DirEntry>>, LibraryError> {
+        self.ensure_main_current().await?;
         let repo_path = self.repo_path.clone();
         let dir_path = dir_path.to_string();
         tokio::task::spawn_blocking(move || -> Result<Option<Vec<DirEntry>>, LibraryError> {
@@ -703,6 +815,7 @@ impl GitEngine {
         &self,
         dir_path: &str,
     ) -> Result<Option<BlobEntries>, LibraryError> {
+        self.ensure_main_current().await?;
         let repo_path = self.repo_path.clone();
         let dir_path = dir_path.to_string();
         tokio::task::spawn_blocking(move || -> Result<Option<BlobEntries>, LibraryError> {
@@ -863,6 +976,7 @@ impl GitEngine {
         &self,
         prefix: &str,
     ) -> Result<Option<Arc<PathDatesMap>>, LibraryError> {
+        self.ensure_main_current().await?;
         let repo_path = self.repo_path.clone();
         let prefix = prefix.to_string();
         let cache = Arc::clone(&self.path_dates);

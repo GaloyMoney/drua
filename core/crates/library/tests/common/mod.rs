@@ -74,6 +74,14 @@ pub async fn reset_library_db_state(pool: &sqlx::PgPool) {
         .execute(pool)
         .await
         .expect("delete spaces");
+    // The read-your-write fence (library_main_head) is one global row —
+    // not scoped per test fixture — so a prior test's oid would
+    // otherwise leak in here and point `ensure_main_current` at a
+    // commit this fixture's fresh repo can never descend from.
+    sqlx::query("DELETE FROM ephemeral_outbox_events WHERE event_type = 'library_main_head'")
+        .execute(pool)
+        .await
+        .expect("delete library_main_head fence row");
 }
 
 fn fixtures_root() -> PathBuf {
