@@ -152,27 +152,48 @@ impl Spaces {
         let path = format!("spaces/{slug}/{relative_path}");
         // Existence is checked against the ref's CURRENT tip, not a
         // caller-supplied oid — a draft handle resolved earlier in the
-        // request may already be stale by the time this runs.
-        let exists = match target_ref(target) {
-            Some(refname) => {
-                let Some(oid) = self
+        // request may already be stale by the time this runs. If this
+        // replica's resolved tip is behind the handle's (the handle was
+        // resolved on a peer, or by an earlier call on this replica
+        // that has since raced ahead), wait for a fetch rather than
+        // reading at a tip older than what the caller already knows
+        // about; if it's ahead of the handle, use it as is.
+        let exists = match target {
+            SpaceTarget::Draft(handle) => {
+                let refname = handle.name().git_ref();
+                let mut oid = self
                     .git
                     .resolve_ref(&refname)
                     .await
                     .map_err(|e| SpaceError::Git(e.to_string()))?
-                else {
-                    return Err(SpaceError::PathNotFound {
+                    .ok_or_else(|| SpaceError::PathNotFound {
                         slug: slug.to_string(),
                         path: relative_path.to_string(),
-                    });
-                };
+                    })?;
+                if oid != handle.tip()
+                    && !self
+                        .git
+                        .descends_from(&refname, handle.tip())
+                        .await
+                        .map_err(|e| SpaceError::Git(e.to_string()))?
+                {
+                    oid = self
+                        .git
+                        .wait_for_ref(&refname, handle.tip())
+                        .await
+                        .map_err(|e| SpaceError::Git(e.to_string()))?
+                        .ok_or_else(|| SpaceError::PathNotFound {
+                            slug: slug.to_string(),
+                            path: relative_path.to_string(),
+                        })?;
+                }
                 self.git
                     .read_blob_at(&oid, &path)
                     .await
                     .map_err(|e| SpaceError::Git(e.to_string()))?
                     .is_some()
             }
-            None => self
+            SpaceTarget::Main => self
                 .git
                 .read_blob_at_head(&path)
                 .await

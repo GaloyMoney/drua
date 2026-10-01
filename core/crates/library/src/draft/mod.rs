@@ -44,7 +44,10 @@ impl Drafts {
     }
 
     /// Resolves `name` to its current tip, recreating the ref at
-    /// `known_head` if it's missing.
+    /// `known_head` if it's missing, and waiting for this replica to
+    /// catch up if the ref exists but is behind `known_head` (it was
+    /// resolved on this replica before a peer's write that this
+    /// replica hasn't fetched yet).
     pub async fn handle(
         &self,
         name: DraftName,
@@ -52,6 +55,18 @@ impl Drafts {
     ) -> Result<DraftHandle, LibraryError> {
         let git_ref = name.git_ref();
         if let Some(tip) = self.git.resolve_ref(&git_ref).await? {
+            if tip == known_head || self.git.descends_from(&git_ref, known_head).await? {
+                return Ok(DraftHandle { name, tip });
+            }
+            let tip = self
+                .git
+                .wait_for_ref(&git_ref, known_head)
+                .await?
+                .ok_or_else(|| {
+                    LibraryError::Git(format!(
+                        "drafts.handle: {git_ref} deleted while waiting to catch up to {known_head}"
+                    ))
+                })?;
             return Ok(DraftHandle { name, tip });
         }
         if let Err(e) = self.git.create_ref(&git_ref, known_head).await {

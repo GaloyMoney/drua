@@ -4,7 +4,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::{library_data_dir, reset_library_db_state, TestRepo};
-use drua_library::{CommitAttribution, Library, LibraryConfig, LibraryError, SpaceTarget};
+use drua_library::{
+    CommitAttribution, DraftHandle, DraftName, Library, LibraryConfig, LibraryError, SpaceTarget,
+};
 
 fn attr() -> CommitAttribution {
     CommitAttribution::library_default()
@@ -216,4 +218,117 @@ async fn stale_reader_times_out_rather_than_serving_stale_content() {
         elapsed < Duration::from_millis(READ_CATCH_UP_TIMEOUT_MS) + Duration::from_secs(2),
         "must fail within the catch-up timeout plus a small epsilon, not hang: {elapsed:?}"
     );
+}
+
+/// Red-first requirement (handoff §6): applied to the draft path
+/// WITHOUT the `Drafts::handle` fix, this must fail specifically in
+/// the "ref exists locally but is behind" case — round 2 below, where
+/// B already resolved the ref once (round 1) and so has it locally,
+/// but hasn't fetched the second write. That is the case the
+/// already-handled "ref missing" path does not cover. See the "draft
+/// handles wait for a replica that is behind head_oid" commit body
+/// for the captured failure output.
+#[tokio::test]
+#[ignore = "requires postgres + writes to tests/.library; run with --ignored"]
+async fn reader_draft_handle_waits_for_a_replica_that_is_behind_head_oid() {
+    let test_name = "reader_draft_handle_waits_for_a_replica_that_is_behind_head_oid";
+    let fixture = TestRepo::init(&[("README.md", "init\n")]);
+    let pool = pool().await;
+    reset_library_db_state(&pool).await;
+    let repo_url = fixture.path().to_string_lossy().to_string();
+
+    let (writer, _jobs_w) = init_replica(
+        test_name,
+        "writer",
+        &repo_url,
+        &pool,
+        WRITER_FETCH_INTERVAL_MS,
+        true,
+    )
+    .await;
+    let (reader, _jobs_r) = init_replica(
+        test_name,
+        "reader",
+        &repo_url,
+        &pool,
+        READER_FETCH_INTERVAL_MS,
+        false,
+    )
+    .await;
+
+    let slug = "ryw-draft";
+    writer
+        .spaces()
+        .create(slug.into(), None, attr())
+        .await
+        .expect("create space");
+
+    let base = writer.drafts().fresh_base().await.expect("fresh base");
+    let name = DraftName::from(uuid::Uuid::new_v4());
+    writer.drafts().open(name, &base).await.expect("open draft");
+
+    // Round 1: A writes the draft's first content. B resolves the ref
+    // for the first time (it doesn't exist in B's clone yet) — this is
+    // the already-handled "missing ref" case, done here to put the ref
+    // in B's clone for round 2.
+    let tip1 = writer
+        .spaces()
+        .write_file(
+            slug,
+            "note.md",
+            "round 1\n".into(),
+            attr(),
+            &SpaceTarget::Draft(DraftHandle::new(name, base.clone())),
+        )
+        .await
+        .expect("write 1")
+        .expect("real commit");
+
+    let handle_b1 = reader
+        .drafts()
+        .handle(name, &tip1)
+        .await
+        .expect("round 1: handle resolves (ref missing -> fetch)");
+    assert_eq!(handle_b1.tip(), tip1, "round 1: handle is at the new tip");
+    let read1 = reader
+        .spaces()
+        .read_file(slug, "note.md", &SpaceTarget::Draft(handle_b1))
+        .await
+        .expect("round 1: read");
+    assert_eq!(read1, Some(b"round 1\n".to_vec()));
+
+    // Round 2: A writes again, advancing the draft. B's ref now EXISTS
+    // locally (from round 1) but is BEHIND tip2 — the case that
+    // distinguishes the real bug from round 1's missing-ref case.
+    let tip2 = writer
+        .spaces()
+        .write_file(
+            slug,
+            "note.md",
+            "round 2\n".into(),
+            attr(),
+            &SpaceTarget::Draft(DraftHandle::new(name, tip1.clone())),
+        )
+        .await
+        .expect("write 2")
+        .expect("real commit");
+    assert_ne!(tip1, tip2, "round 2 must actually advance the draft");
+
+    // One handle() call, no sleeps/polling/retries around it.
+    let handle_b2 = reader
+        .drafts()
+        .handle(name, &tip2)
+        .await
+        .expect("round 2: handle must wait for the fetch, not return the stale tip");
+    assert_eq!(
+        handle_b2.tip(),
+        tip2,
+        "round 2: handle must be the new tip, not the stale local one"
+    );
+    let read2 = reader
+        .spaces()
+        .read_file(slug, "note.md", &SpaceTarget::Draft(handle_b2))
+        .await
+        .expect("round 2: read");
+    assert_eq!(read2, Some(b"round 2\n".to_vec()));
 }

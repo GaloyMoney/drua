@@ -646,7 +646,11 @@ impl GitEngine {
     /// resolve, or when `ancestor_oid`'s commit hasn't been fetched
     /// into this clone yet — both mean "can't confirm current", the
     /// same thing a genuinely-behind replica looks like.
-    async fn descends_from(&self, refname: &str, ancestor_oid: &str) -> Result<bool, LibraryError> {
+    pub async fn descends_from(
+        &self,
+        refname: &str,
+        ancestor_oid: &str,
+    ) -> Result<bool, LibraryError> {
         let repo_path = self.repo_path.clone();
         let refname = refname.to_string();
         let ancestor_oid = ancestor_oid.to_string();
@@ -720,6 +724,52 @@ impl GitEngine {
                 refname: "refs/heads/main".to_string(),
                 required: fence,
                 local: self.local_main.borrow().clone(),
+            }),
+        }
+    }
+
+    /// Parks until `refname` resolves to `required` or a descendant of
+    /// it, waking the fetcher and polling only on `fetch_generation`
+    /// changes (one fetch serving every waiter) rather than fetching
+    /// itself. The draft counterpart of [`Self::ensure_main_current`] —
+    /// unlike main, a draft ref has no obix fence; `required` is
+    /// `changesets.head_oid`, already durable in Postgres, so the wait
+    /// only needs to re-resolve the ref on each fetch.
+    ///
+    /// `Ok(None)` means `refname` resolved to nothing after a fetch — a
+    /// genuinely deleted ref, not a replica that is merely behind; the
+    /// caller should treat that the same as "missing" today, not as
+    /// `StaleReplica`. `Err(StaleReplica)` after `catch_up_timeout`.
+    pub async fn wait_for_ref(
+        &self,
+        refname: &str,
+        required: &str,
+    ) -> Result<Option<String>, LibraryError> {
+        self.commit_notify.notify_one();
+        let mut rx = self.fetch_generation.subscribe();
+        let mut last_seen: Option<String> = None;
+        let waited = tokio::time::timeout(self.catch_up_timeout, async {
+            loop {
+                let tip = self.resolve_ref(refname).await?;
+                last_seen = tip.clone();
+                match &tip {
+                    None => return Ok(tip),
+                    Some(t) if t == required => return Ok(tip),
+                    Some(_) if self.descends_from(refname, required).await? => return Ok(tip),
+                    _ => {}
+                }
+                rx.changed()
+                    .await
+                    .map_err(|_| LibraryError::Git("fetch_generation watch closed".into()))?;
+            }
+        })
+        .await;
+        match waited {
+            Ok(result) => result,
+            Err(_) => Err(LibraryError::StaleReplica {
+                refname: refname.to_string(),
+                required: required.to_string(),
+                local: last_seen,
             }),
         }
     }
