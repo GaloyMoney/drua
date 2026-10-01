@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use sqlx::{PgConnection, PgPool};
+use futures::StreamExt;
+use sqlx::PgPool;
 use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use tokio::task::JoinHandle;
 
@@ -27,13 +28,6 @@ const QUEUE_CAPACITY: usize = 256;
 /// repo per deployment); `0x64727561` = "drua". A `hashtext` collision
 /// between two refs only costs extra serialization, never correctness.
 const LIBRARY_PUSH_LOCK_NAMESPACE: i32 = 0x6472_7561;
-
-/// PG NOTIFY channel fired after a successful push. Every replica's
-/// fetcher LISTENs on it, so a write on one replica is visible
-/// cluster-wide in milliseconds instead of after each replica's fetch
-/// ticker (`fetch_interval_ms`). Payload is empty; the wake-up is
-/// purely a hint, the ticker remains the backstop.
-const LIBRARY_HEAD_NOTIFY_CHANNEL: &str = "library_head_changed";
 
 /// obix ephemeral event type carrying the oid last pushed to
 /// `refs/heads/main` — the cross-replica read-your-write fence. Published
@@ -356,7 +350,7 @@ impl GitEngine {
             pool.clone(),
             outbox.clone(),
         ));
-        let listener = tokio::spawn(Self::run_head_listener(pool, Arc::clone(&commit_notify)));
+        let listener = Self::spawn_peer_listener(&outbox, Arc::clone(&commit_notify));
 
         Ok(Self {
             repo_path,
@@ -372,34 +366,24 @@ impl GitEngine {
     }
 
     /// Cluster-wide counterpart of the writer's local wake-up: any
-    /// replica's successful push `pg_notify`s [`LIBRARY_HEAD_NOTIFY_CHANNEL`],
-    /// waking this replica's fetcher immediately. While PG is
-    /// unreachable, sync degrades to ticker cadence.
-    async fn run_head_listener(pool: PgPool, commit_notify: Arc<Notify>) {
-        loop {
-            let mut listener = match sqlx::postgres::PgListener::connect_with(&pool).await {
-                Ok(l) => l,
-                Err(e) => {
-                    tracing::warn!(error = %e, "library head listener: connect failed; retrying");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    continue;
-                }
-            };
-            if let Err(e) = listener.listen(LIBRARY_HEAD_NOTIFY_CHANNEL).await {
-                tracing::warn!(error = %e, "library head listener: LISTEN failed; retrying");
-                tokio::time::sleep(Duration::from_secs(1)).await;
-                continue;
-            }
-            loop {
-                match listener.recv().await {
-                    Ok(_) => commit_notify.notify_one(),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "library head listener: recv failed; reconnecting");
-                        break;
-                    }
+    /// replica's successful push publishes [`MAIN_HEAD_EVENT`]; every
+    /// replica's `listen_ephemeral()` stream observes it (obix backfills
+    /// the current row on subscribe, which costs one spurious wake at
+    /// boot) and wakes this replica's fetcher immediately. While obix's
+    /// underlying LISTEN connection is down, sync degrades to ticker
+    /// cadence — obix itself handles reconnection.
+    fn spawn_peer_listener(
+        outbox: &obix::Outbox<MainHead>,
+        commit_notify: Arc<Notify>,
+    ) -> JoinHandle<()> {
+        let mut events = outbox.listen_ephemeral();
+        tokio::spawn(async move {
+            while let Some(ev) = events.next().await {
+                if ev.event_type == MAIN_HEAD_EVENT {
+                    commit_notify.notify_one();
                 }
             }
-        }
+        })
     }
 
     /// Diff between two commits (None `from` = walk all of `to`'s tree as Added)
@@ -1618,9 +1602,6 @@ impl GitEngine {
         });
 
         let any_ok = results.iter().any(|r| r.is_ok());
-        if any_ok {
-            Self::notify_cluster_push(pool, lock_conn.as_deref_mut()).await;
-        }
 
         // Publish the fence AFTER the push is confirmed upstream (the
         // per-ref lock for `refs/heads/main` is still held here), so the
@@ -1690,29 +1671,6 @@ impl GitEngine {
             }
         }
         Some(conn)
-    }
-
-    /// Wake peer replicas' fetchers after a successful push so
-    /// cross-replica reads converge in milliseconds instead of after
-    /// each replica's fetch ticker. Best effort: failure degrades to
-    /// ticker-cadence convergence. Prefers the advisory-lock connection
-    /// (already held) over a fresh pool checkout.
-    async fn notify_cluster_push(pool: &PgPool, lock_conn: Option<&mut PgConnection>) {
-        let res = match lock_conn {
-            Some(conn) => sqlx::query("SELECT pg_notify($1, '')")
-                .bind(LIBRARY_HEAD_NOTIFY_CHANNEL)
-                .execute(conn)
-                .await
-                .map(|_| ()),
-            None => sqlx::query("SELECT pg_notify($1, '')")
-                .bind(LIBRARY_HEAD_NOTIFY_CHANNEL)
-                .execute(pool)
-                .await
-                .map(|_| ()),
-        };
-        if let Err(e) = res {
-            tracing::warn!(error = %e, "library head notify failed; peers converge on ticker");
-        }
     }
 
     /// Upserts the cross-replica fence row (`event_type` is UNIQUE, so
