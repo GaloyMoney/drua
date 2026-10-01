@@ -35,6 +35,19 @@ const LIBRARY_PUSH_LOCK_NAMESPACE: i32 = 0x6472_7561;
 /// purely a hint, the ticker remains the backstop.
 const LIBRARY_HEAD_NOTIFY_CHANNEL: &str = "library_head_changed";
 
+/// obix ephemeral event type carrying the oid last pushed to
+/// `refs/heads/main` — the cross-replica read-your-write fence. Published
+/// by the writer inside `process_batch`, under the per-ref push lock, right
+/// after a successful push (see [`GitEngine::process_batch`]).
+const MAIN_HEAD_EVENT: obix::out::EphemeralEventType =
+    obix::out::EphemeralEventType::new("library_main_head");
+
+/// Payload of [`MAIN_HEAD_EVENT`].
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct MainHead {
+    oid: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeltaKind {
     Added,
@@ -46,6 +59,11 @@ pub enum DeltaKind {
 pub type BlobEntries = Vec<(String, Vec<u8>)>;
 
 type WriteResult = Result<Option<String>, LibraryError>;
+
+/// `refname -> tip oid` for every ref a batch actually pushed
+/// successfully, so the caller can tell whether `refs/heads/main`
+/// advanced and, if so, to what — see [`GitEngine::process_batch`].
+type AcceptedRefs = HashMap<String, String>;
 
 /// One immediate child of a tree at HEAD. Returned by `list_dir_at_head`.
 #[derive(Debug, Clone)]
@@ -275,6 +293,11 @@ pub struct GitEngine {
     /// results are correct for the HEAD they were computed at, so
     /// there is deliberately no per-prefix lock.
     path_dates: Arc<std::sync::Mutex<HashMap<String, CachedPathDates>>>,
+    /// Cross-replica read-your-write fence. The writer publishes the
+    /// pushed `refs/heads/main` oid here (see [`Self::process_batch`]);
+    /// reads at HEAD check it before serving.
+    #[allow(dead_code)] // read starting the "space reads at HEAD wait" commit
+    outbox: obix::Outbox<MainHead>,
     _writer: OwnedTaskHandle,
     _listener: OwnedTaskHandle,
 }
@@ -310,6 +333,17 @@ impl GitEngine {
         .await
         .map_err(|e| LibraryError::Git(format!("init join: {e}")))??;
 
+        // Only the ephemeral `library_main_head` row is ever used — no
+        // persistent events are published on this mailbox — so every
+        // `MailboxConfig` field keeps its obix default.
+        let outbox = obix::Outbox::<MainHead>::init(
+            &pool,
+            obix::MailboxConfig::builder()
+                .build()
+                .map_err(|e| LibraryError::Config(format!("mailbox config: {e}")))?,
+        )
+        .await?;
+
         let repo_mutex = Arc::new(Mutex::new(()));
         let (write_tx, write_rx) = mpsc::channel(QUEUE_CAPACITY);
         let commit_notify = Arc::new(Notify::new());
@@ -320,6 +354,7 @@ impl GitEngine {
             Arc::clone(&commit_notify),
             write_rx,
             pool.clone(),
+            outbox.clone(),
         ));
         let listener = tokio::spawn(Self::run_head_listener(pool, Arc::clone(&commit_notify)));
 
@@ -330,6 +365,7 @@ impl GitEngine {
             commit_notify,
             github_app,
             path_dates: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            outbox,
             _writer: OwnedTaskHandle::new(writer),
             _listener: OwnedTaskHandle::new(listener),
         })
@@ -1467,6 +1503,7 @@ impl GitEngine {
         commit_notify: Arc<Notify>,
         mut rx: mpsc::Receiver<QueuedOp>,
         pool: PgPool,
+        outbox: obix::Outbox<MainHead>,
     ) {
         // A ref-level op that arrives mid-collection closes the batch
         // being filled and carries over as the next batch's first op,
@@ -1504,9 +1541,15 @@ impl GitEngine {
                 }
                 batch
             };
-            let any_ok =
-                Self::process_batch(&repo_path, github_app.as_ref(), &repo_mutex, &pool, batch)
-                    .await;
+            let any_ok = Self::process_batch(
+                &repo_path,
+                github_app.as_ref(),
+                &repo_mutex,
+                &pool,
+                &outbox,
+                batch,
+            )
+            .await;
             if any_ok {
                 commit_notify.notify_one();
             }
@@ -1519,6 +1562,7 @@ impl GitEngine {
         github_app: Option<&Arc<GitHubAppTokenProvider>>,
         repo_mutex: &Mutex<()>,
         pool: &PgPool,
+        outbox: &obix::Outbox<MainHead>,
         batch: Vec<QueuedOp>,
     ) -> bool {
         let _guard = repo_mutex.lock().await;
@@ -1548,23 +1592,56 @@ impl GitEngine {
         let token = Self::fresh_token(github_app).await;
         let path = repo_path.to_path_buf();
         let n = batch.len();
+        // Captured before `batch` is consumed below, so a fence-publish
+        // failure (after the blocking commit/push closure returns) can be
+        // mapped back onto exactly the ops that targeted `refs/heads/main`
+        // without threading index/group bookkeeping out of that closure.
+        let op_refnames: Vec<String> = batch
+            .iter()
+            .map(|q| Self::ref_name(q.op.target_ref.as_deref()))
+            .collect();
         let (ops, responders): (Vec<BatchOp>, Vec<oneshot::Sender<WriteResult>>) =
             batch.into_iter().map(|q| (q.op, q.response)).unzip();
 
-        let results = tokio::task::spawn_blocking(move || -> Vec<WriteResult> {
+        let (mut results, accepted) = tokio::task::spawn_blocking(move || {
             Self::commit_each_then_push_blocking(&path, ops, token.as_deref())
         })
         .await
         .unwrap_or_else(|e| {
             let msg = format!("commit_each_then_push join: {e}");
-            (0..n)
-                .map(|_| Err(LibraryError::Git(msg.clone())))
-                .collect()
+            (
+                (0..n)
+                    .map(|_| Err(LibraryError::Git(msg.clone())))
+                    .collect(),
+                HashMap::new(),
+            )
         });
 
         let any_ok = results.iter().any(|r| r.is_ok());
         if any_ok {
             Self::notify_cluster_push(pool, lock_conn.as_deref_mut()).await;
+        }
+
+        // Publish the fence AFTER the push is confirmed upstream (the
+        // per-ref lock for `refs/heads/main` is still held here), so the
+        // published oid is never ahead of what a reader can actually fetch.
+        // One retry per OQ-4; if both attempts fail, the commits are still
+        // upstream, but no peer is guaranteed to see them yet, so every
+        // `Ok` result from the main group becomes `FencePublish` rather
+        // than silently reporting success a peer might not observe.
+        if let Some(main_tip) = accepted.get("refs/heads/main") {
+            if let Err(e) = Self::publish_main_head(outbox, main_tip).await {
+                tracing::warn!(error = %e, "library fence publish failed; retrying once");
+                if let Err(e) = Self::publish_main_head(outbox, main_tip).await {
+                    tracing::error!(error = %e, "library fence publish failed twice; failing the main group's writes");
+                    let msg = e.to_string();
+                    for (i, refname) in op_refnames.iter().enumerate() {
+                        if refname == "refs/heads/main" && results[i].is_ok() {
+                            results[i] = Err(LibraryError::FencePublish(msg.clone()));
+                        }
+                    }
+                }
+            }
         }
 
         if let Some(mut conn) = lock_conn.take() {
@@ -1638,6 +1715,23 @@ impl GitEngine {
         }
     }
 
+    /// Upserts the cross-replica fence row (`event_type` is UNIQUE, so
+    /// this overwrites rather than accumulates — see
+    /// [`MAIN_HEAD_EVENT`]) and wakes every subscribed peer listener.
+    async fn publish_main_head(
+        outbox: &obix::Outbox<MainHead>,
+        oid: &str,
+    ) -> Result<(), sqlx::Error> {
+        outbox
+            .publish_ephemeral(
+                MAIN_HEAD_EVENT,
+                MainHead {
+                    oid: oid.to_string(),
+                },
+            )
+            .await
+    }
+
     /// Apply N ops as N commits, then push once. On non-FF push, fetch
     /// origin, reset local main, and replay every op against the new
     /// HEAD; second push failure rolls local main back to the
@@ -1649,23 +1743,31 @@ impl GitEngine {
         repo_path: &Path,
         ops: Vec<BatchOp>,
         token: Option<&str>,
-    ) -> Vec<WriteResult> {
+    ) -> (Vec<WriteResult>, AcceptedRefs) {
         if ops.is_empty() {
-            return Vec::new();
+            return (Vec::new(), AcceptedRefs::new());
         }
         let repo = match git2::Repository::open_bare(repo_path) {
             Ok(r) => r,
             Err(e) => {
                 let msg = format!("open bare: {e}");
-                return ops
-                    .iter()
-                    .map(|_| Err(LibraryError::Git(msg.clone())))
-                    .collect();
+                return (
+                    ops.iter()
+                        .map(|_| Err(LibraryError::Git(msg.clone())))
+                        .collect(),
+                    AcceptedRefs::new(),
+                );
             }
         };
 
         if ops.len() == 1 && ops[0].kind.is_ref_level() {
-            return vec![Self::apply_ref_level_op_blocking(&repo, token, &ops[0])];
+            let result = Self::apply_ref_level_op_blocking(&repo, token, &ops[0]);
+            let mut accepted = AcceptedRefs::new();
+            if let Ok(Some(oid)) = &result {
+                let refname = Self::ref_name(ops[0].target_ref.as_deref());
+                accepted.insert(refname, oid.clone());
+            }
+            return (vec![result], accepted);
         }
 
         let mut order: Vec<String> = Vec::new();
@@ -1699,10 +1801,11 @@ impl GitEngine {
         groups: &HashMap<String, Vec<usize>>,
         ops: &[BatchOp],
         token: Option<&str>,
-    ) -> Vec<WriteResult> {
+    ) -> (Vec<WriteResult>, AcceptedRefs) {
         const MAX_ATTEMPTS: u32 = 2;
 
         let mut results: Vec<Option<WriteResult>> = (0..ops.len()).map(|_| None).collect();
+        let mut accepted: AcceptedRefs = AcceptedRefs::new();
         let mut initial_oid: HashMap<String, git2::Oid> = HashMap::new();
         let mut pending: Vec<String> = Vec::new();
         for refname in order {
@@ -1738,6 +1841,7 @@ impl GitEngine {
 
             let mut per_ref: HashMap<String, Vec<WriteResult>> = HashMap::new();
             let mut to_push: Vec<String> = Vec::new();
+            let mut tip_after: HashMap<String, git2::Oid> = HashMap::new();
             for refname in &pending {
                 let indices = &groups[refname];
                 let start_oid = match Self::ref_oid(repo, refname) {
@@ -1769,6 +1873,7 @@ impl GitEngine {
                 if current != start_oid {
                     to_push.push(refname.clone());
                 }
+                tip_after.insert(refname.clone(), current);
                 per_ref.insert(refname.clone(), per_op);
             }
 
@@ -1796,7 +1901,13 @@ impl GitEngine {
                     continue;
                 }
                 match outcomes.get(refname) {
-                    None | Some(None) => Self::finalize_group(&mut results, indices, per_op),
+                    None | Some(None) => {
+                        Self::finalize_group(&mut results, indices, per_op);
+                        // `to_push` only contains refs that actually got a
+                        // new commit (`current != start_oid`), so every
+                        // success reaching here is a genuine advance.
+                        accepted.insert(refname.clone(), tip_after[refname].to_string());
+                    }
                     Some(Some(_)) if attempt < MAX_ATTEMPTS => next_pending.push(refname.clone()),
                     Some(Some(status)) => {
                         let _ = repo.reference(
@@ -1852,10 +1963,11 @@ impl GitEngine {
             pending = next_pending;
         }
 
-        results
+        let results = results
             .into_iter()
             .map(|r| r.expect("every op index assigned by its group"))
-            .collect()
+            .collect();
+        (results, accepted)
     }
 
     /// Writes `per_op`'s results into `results` at `indices`, in order.
@@ -3094,7 +3206,8 @@ mod tests {
             attribution: CommitAttribution::library_default(),
             target_ref: Some("refs/heads/drua/x".into()),
         };
-        let mut results = GitEngine::commit_each_then_push_blocking(&local_dir, vec![op], None);
+        let (mut results, _accepted) =
+            GitEngine::commit_each_then_push_blocking(&local_dir, vec![op], None);
         let new_oid = results.remove(0).unwrap().expect("real commit");
 
         let origin_repo = git2::Repository::open_bare(&origin_dir).unwrap();
@@ -3167,13 +3280,23 @@ mod tests {
             attribution: CommitAttribution::library_default(),
             target_ref: Some("refs/heads/drua/y".into()),
         };
-        let results =
+        let (results, accepted) =
             GitEngine::commit_each_then_push_blocking(&local_dir, vec![op_main, op_branch], None);
         assert_eq!(results.len(), 2);
         assert!(results[0].as_ref().unwrap().is_some(), "main op committed");
         assert!(
             results[1].as_ref().unwrap().is_some(),
             "branch op committed"
+        );
+        assert_eq!(
+            accepted.get("refs/heads/main"),
+            results[0].as_ref().unwrap().as_ref(),
+            "accepted carries main's pushed tip"
+        );
+        assert_eq!(
+            accepted.get("refs/heads/drua/y"),
+            results[1].as_ref().unwrap().as_ref(),
+            "accepted carries the branch's pushed tip"
         );
 
         let origin_repo = git2::Repository::open_bare(&origin_dir).unwrap();
@@ -3275,7 +3398,7 @@ mod tests {
             attribution: CommitAttribution::library_default(),
             target_ref: Some("refs/heads/drua/stale".into()),
         };
-        let mut results = GitEngine::commit_each_then_push_blocking(
+        let (mut results, accepted) = GitEngine::commit_each_then_push_blocking(
             &local_dir,
             vec![op_main, op_clean, op_stale],
             None,
@@ -3292,6 +3415,12 @@ mod tests {
             .remove(0)
             .unwrap()
             .expect("main unaffected by the other ref's rejection");
+        // All three eventually land (the stale ref via refetch-and-retry),
+        // so `accepted` carries the FINAL tip for each — not the oid from
+        // the rejected first attempt.
+        assert_eq!(accepted.get("refs/heads/main"), Some(&main_after_oid));
+        assert_eq!(accepted.get("refs/heads/drua/clean"), Some(&clean_oid));
+        assert_eq!(accepted.get("refs/heads/drua/stale"), Some(&stale_oid));
 
         let main_tree = origin_repo
             .find_reference("refs/heads/main")
@@ -3369,7 +3498,7 @@ mod tests {
             attribution: CommitAttribution::library_default(),
             target_ref: Some("refs/heads/drua/never-created".into()),
         };
-        let mut results =
+        let (mut results, accepted) =
             GitEngine::commit_each_then_push_blocking(&local_dir, vec![op_main, op_gone], None);
         let gone_result = results.remove(1);
         let main_result = results.remove(0);
@@ -3378,6 +3507,15 @@ mod tests {
         let main_oid = main_result
             .expect("main's op is unaffected by the other ref's failure")
             .expect("real commit");
+        assert_eq!(
+            accepted.get("refs/heads/main"),
+            Some(&main_oid),
+            "accepted carries the ref that actually pushed"
+        );
+        assert!(
+            !accepted.contains_key("refs/heads/drua/never-created"),
+            "a ref that never resolved is never in the accepted set"
+        );
 
         let origin_repo = git2::Repository::open_bare(&origin_dir).unwrap();
         assert_eq!(
@@ -3435,7 +3573,8 @@ mod tests {
             attribution: CommitAttribution::library_default(),
             target_ref: Some("refs/heads/drua/z".into()),
         };
-        let mut results = GitEngine::commit_each_then_push_blocking(&local_dir, vec![op], None);
+        let (mut results, _accepted) =
+            GitEngine::commit_each_then_push_blocking(&local_dir, vec![op], None);
         let new_oid = results
             .remove(0)
             .unwrap()
@@ -3772,6 +3911,52 @@ mod tests {
         drop(holder);
     }
 
+    #[tokio::test]
+    #[ignore = "requires postgres; run with --ignored"]
+    async fn publish_main_head_upserts_the_fence_row() {
+        let pool = test_pool().await;
+        sqlx::query("DELETE FROM ephemeral_outbox_events WHERE event_type = 'library_main_head'")
+            .execute(&pool)
+            .await
+            .expect("clear fence row");
+        let outbox =
+            obix::Outbox::<MainHead>::init(&pool, obix::MailboxConfig::builder().build().unwrap())
+                .await
+                .expect("outbox init");
+
+        GitEngine::publish_main_head(&outbox, "deadbeef00000000000000000000000000000000")
+            .await
+            .expect("publish");
+        let payload: serde_json::Value = sqlx::query_scalar(
+            "SELECT payload FROM ephemeral_outbox_events WHERE event_type = 'library_main_head'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("fence row exists");
+        assert_eq!(payload["oid"], "deadbeef00000000000000000000000000000000");
+
+        // `event_type` is UNIQUE and the insert is `ON CONFLICT DO UPDATE`
+        // (obix-macros/src/tables.rs:166 at obix 0.9.0) — a second publish
+        // overwrites the row rather than accumulating a second one.
+        GitEngine::publish_main_head(&outbox, "cafef00d00000000000000000000000000000000")
+            .await
+            .expect("publish again");
+        let rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM ephemeral_outbox_events WHERE event_type = 'library_main_head'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count rows");
+        assert_eq!(rows, 1, "the fence row is an upsert, not an accumulation");
+        let payload: serde_json::Value = sqlx::query_scalar(
+            "SELECT payload FROM ephemeral_outbox_events WHERE event_type = 'library_main_head'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("fence row exists");
+        assert_eq!(payload["oid"], "cafef00d00000000000000000000000000000000");
+    }
+
     #[test]
     fn merge_trees_blocking_reports_conflict_paths() {
         let dir = unique_dir("merge-conflict");
@@ -3922,7 +4107,8 @@ mod tests {
             attribution: CommitAttribution::library_default(),
             target_ref: None,
         };
-        let mut results = GitEngine::commit_each_then_push_blocking(&local_dir, vec![op], None);
+        let (mut results, _accepted) =
+            GitEngine::commit_each_then_push_blocking(&local_dir, vec![op], None);
         let merge_oid = results.remove(0).unwrap().expect("merge produced a commit");
 
         let origin_repo = git2::Repository::open_bare(&origin_dir).unwrap();
@@ -3981,7 +4167,8 @@ mod tests {
             attribution: CommitAttribution::library_default(),
             target_ref: None,
         };
-        let mut results = GitEngine::commit_each_then_push_blocking(&local_dir, vec![op], None);
+        let (mut results, _accepted) =
+            GitEngine::commit_each_then_push_blocking(&local_dir, vec![op], None);
         let merge_oid = results.remove(0).unwrap().expect("merge produced a commit");
 
         let origin_repo = git2::Repository::open_bare(&origin_dir).unwrap();
@@ -4047,7 +4234,8 @@ mod tests {
             attribution: CommitAttribution::library_default(),
             target_ref: None,
         };
-        let mut results = GitEngine::commit_each_then_push_blocking(&local_dir, vec![op], None);
+        let (mut results, _accepted) =
+            GitEngine::commit_each_then_push_blocking(&local_dir, vec![op], None);
         let err = results.remove(0).expect_err("conflicting merge must fail");
         assert!(
             matches!(&err, LibraryError::MergeConflicts { paths } if paths == &vec!["feature.md".to_string()]),

@@ -20,6 +20,8 @@ pgvector = { workspace = true }
 es-entity = { workspace = true }
 derive_builder = "0.20"
 chrono = { version = "0.4", features = ["clock", "serde"], default-features = false }
+obix = { workspace = true }
+futures = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -20,6 +20,8 @@ pub enum LibraryError {
     MergeConflicts { paths: Vec<String> },
     #[error("main has no commits yet")]
     MainUnborn,
+    #[error("head fence publish: {0}")]
+    FencePublish(String),
     #[error("job: {0}")]
     Job(#[from] job::error::JobError),
     #[error("sqlx: {0}")]
