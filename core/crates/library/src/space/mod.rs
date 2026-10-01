@@ -161,23 +161,21 @@ impl Spaces {
         let exists = match target {
             SpaceTarget::Draft(handle) => {
                 let refname = handle.name().git_ref();
-                let mut oid = self
+                // `resolve_current` resolves and classifies in one
+                // blocking call, rather than a separate resolve +
+                // descends_from pair — the latter has a TOCTOU window
+                // where a concurrent fetch between the two calls could
+                // advance the ref, leaving this preflight checking
+                // existence at a stale oid it only verified was
+                // current one call ago.
+                let oid = match self
                     .git
-                    .resolve_ref(&refname)
+                    .resolve_current(&refname, handle.tip())
                     .await
                     .map_err(|e| SpaceError::Git(e.to_string()))?
-                    .ok_or_else(|| SpaceError::PathNotFound {
-                        slug: slug.to_string(),
-                        path: relative_path.to_string(),
-                    })?;
-                if oid != handle.tip()
-                    && !self
-                        .git
-                        .descends_from(&refname, handle.tip())
-                        .await
-                        .map_err(|e| SpaceError::Git(e.to_string()))?
                 {
-                    oid = self
+                    Some((oid, true)) => oid,
+                    Some((_, false)) => self
                         .git
                         .wait_for_ref(&refname, handle.tip())
                         .await
@@ -185,8 +183,14 @@ impl Spaces {
                         .ok_or_else(|| SpaceError::PathNotFound {
                             slug: slug.to_string(),
                             path: relative_path.to_string(),
-                        })?;
-                }
+                        })?,
+                    None => {
+                        return Err(SpaceError::PathNotFound {
+                            slug: slug.to_string(),
+                            path: relative_path.to_string(),
+                        })
+                    }
+                };
                 self.git
                     .read_blob_at(&oid, &path)
                     .await

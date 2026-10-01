@@ -54,8 +54,14 @@ impl Drafts {
         known_head: &str,
     ) -> Result<DraftHandle, LibraryError> {
         let git_ref = name.git_ref();
-        if let Some(tip) = self.git.resolve_ref(&git_ref).await? {
-            if tip == known_head || self.git.descends_from(&git_ref, known_head).await? {
+        // `resolve_current` resolves and classifies in one blocking
+        // call, rather than a separate resolve + descends_from pair —
+        // the latter has a TOCTOU window where a concurrent fetch
+        // between the two calls could advance the ref, leaving the
+        // caller holding the resolve's stale tip having only verified
+        // the (newer) descends_from's.
+        if let Some((tip, current)) = self.git.resolve_current(&git_ref, known_head).await? {
+            if current {
                 return Ok(DraftHandle { name, tip });
             }
             let tip = self

@@ -681,6 +681,55 @@ impl GitEngine {
         .map_err(|e| LibraryError::Git(format!("descends_from join: {e}")))?
     }
 
+    /// Resolves `refname`'s current tip and classifies it against
+    /// `required` in a SINGLE blocking call (one repo open, one
+    /// resolve). `Ok(None)` when `refname` doesn't resolve; otherwise
+    /// `Ok(Some((tip, current)))`, `current` meaning `tip` is
+    /// `required` or a descendant of it.
+    ///
+    /// Callers that need the tip they just verified (a draft handle, a
+    /// delete preflight) must use this rather than a separate
+    /// `resolve_ref` + `descends_from` pair: a concurrent fetch landing
+    /// between two independent blocking calls can advance the ref, so
+    /// `descends_from` would re-read a newer tip than the one
+    /// `resolve_ref` returned — the caller then embeds the STALE tip
+    /// having only verified the FRESH one.
+    pub async fn resolve_current(
+        &self,
+        refname: &str,
+        required: &str,
+    ) -> Result<Option<(String, bool)>, LibraryError> {
+        let repo_path = self.repo_path.clone();
+        let refname = refname.to_string();
+        let required_owned = required.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<(String, bool)>, LibraryError> {
+            let repo = git2::Repository::open_bare(&repo_path)
+                .map_err(|e| LibraryError::Git(format!("open bare: {e}")))?;
+            let tip = match repo.find_reference(&refname) {
+                Ok(r) => r.target(),
+                Err(e) if e.code() == git2::ErrorCode::NotFound => None,
+                Err(e) => return Err(LibraryError::Git(format!("resolve_current resolve: {e}"))),
+            };
+            let Some(tip) = tip else {
+                return Ok(None);
+            };
+            let ancestor = git2::Oid::from_str(&required_owned)
+                .map_err(|e| LibraryError::Git(format!("resolve_current parse required: {e}")))?;
+            let current = if tip == ancestor {
+                true
+            } else if repo.find_commit(ancestor).is_err() {
+                false // `required`'s commit not fetched into this clone yet
+            } else {
+                repo.graph_descendant_of(tip, ancestor).map_err(|e| {
+                    LibraryError::Git(format!("resolve_current graph_descendant_of: {e}"))
+                })?
+            };
+            Ok(Some((tip.to_string(), current)))
+        })
+        .await
+        .map_err(|e| LibraryError::Git(format!("resolve_current join: {e}")))?
+    }
+
     /// Gate for every read at `refs/heads/main` HEAD: checks the
     /// published fence against this replica's locally observed head,
     /// waking the fetcher and parking (one fetch serving every waiter)
@@ -750,13 +799,22 @@ impl GitEngine {
         let mut last_seen: Option<String> = None;
         let waited = tokio::time::timeout(self.catch_up_timeout, async {
             loop {
-                let tip = self.resolve_ref(refname).await?;
-                last_seen = tip.clone();
-                match &tip {
-                    None => return Ok(tip),
-                    Some(t) if t == required => return Ok(tip),
-                    Some(_) if self.descends_from(refname, required).await? => return Ok(tip),
-                    _ => {}
+                // `resolve_current` resolves and classifies `refname`
+                // in one blocking call; a separate resolve +
+                // descends_from pair here would have the same TOCTOU a
+                // concurrent fetch could exploit as the one this
+                // method exists to close for its callers (see
+                // `resolve_current`'s doc).
+                match self.resolve_current(refname, required).await? {
+                    None => {
+                        last_seen = None;
+                        return Ok(None);
+                    }
+                    Some((tip, true)) => {
+                        last_seen = Some(tip.clone());
+                        return Ok(Some(tip));
+                    }
+                    Some((tip, false)) => last_seen = Some(tip),
                 }
                 rx.changed()
                     .await
