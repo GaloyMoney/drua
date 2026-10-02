@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -243,11 +245,29 @@ impl BatchOpKind {
     }
 }
 
+/// Runs on the writer task after this op's commit is pushed and before the
+/// per-ref lock is released and the caller is answered. Receives the op's
+/// own commit oid. Must be short and must not enqueue git work (it runs
+/// under `repo_mutex` and the per-ref push lock — calling back into
+/// `GitEngine`/`Spaces`/`Drafts` would deadlock on the writer queue). An
+/// `Err` is logged and never fails the op — the commit is already upstream.
+pub type OnCommitted = Box<
+    dyn FnOnce(
+            String,
+        ) -> Pin<
+            Box<dyn Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send>,
+        > + Send,
+>;
+
 pub struct BatchOp {
     pub commit_message: String,
     pub kind: BatchOpKind,
     pub attribution: CommitAttribution,
     pub target_ref: Option<String>,
+    /// Journals the commit under this op's own ref lock — see
+    /// [`OnCommitted`]. `None` for everything that isn't a draft write
+    /// (main writes, importers, ref-level ops).
+    pub on_committed: Option<OnCommitted>,
 }
 
 struct QueuedOp {
@@ -1321,6 +1341,7 @@ impl GitEngine {
             },
             attribution: CommitAttribution::library_default(),
             target_ref: Some(refname.to_string()),
+            on_committed: None,
         })
         .await
         .map(|_| ())
@@ -1333,6 +1354,7 @@ impl GitEngine {
             kind: BatchOpKind::DeleteRef { push },
             attribution: CommitAttribution::library_default(),
             target_ref: Some(refname.to_string()),
+            on_committed: None,
         })
         .await
         .map(|_| ())
@@ -1447,6 +1469,7 @@ impl GitEngine {
                 },
                 attribution,
                 target_ref: None,
+                on_committed: None,
             })
             .await?;
         oid.ok_or_else(|| LibraryError::Git("merge_into_main: produced no commit".into()))
@@ -1482,6 +1505,7 @@ impl GitEngine {
                 },
                 attribution,
                 target_ref: Some(refname.to_string()),
+                on_committed: None,
             })
             .await;
         match result {
@@ -1506,6 +1530,7 @@ impl GitEngine {
             kind: BatchOpKind::Write { path, content },
             attribution,
             target_ref: None,
+            on_committed: None,
         })
         .await
         .map(|_| ())
@@ -1519,12 +1544,14 @@ impl GitEngine {
         content: Vec<u8>,
         commit_message: String,
         attribution: CommitAttribution,
+        on_committed: Option<OnCommitted>,
     ) -> Result<Option<String>, LibraryError> {
         self.enqueue(BatchOp {
             commit_message,
             kind: BatchOpKind::Write { path, content },
             attribution,
             target_ref,
+            on_committed,
         })
         .await
     }
@@ -1542,6 +1569,7 @@ impl GitEngine {
             kind: BatchOpKind::Delete { path },
             attribution,
             target_ref: None,
+            on_committed: None,
         })
         .await
         .map(|_| ())
@@ -1554,12 +1582,14 @@ impl GitEngine {
         path: String,
         commit_message: String,
         attribution: CommitAttribution,
+        on_committed: Option<OnCommitted>,
     ) -> Result<Option<String>, LibraryError> {
         self.enqueue(BatchOp {
             commit_message,
             kind: BatchOpKind::Delete { path },
             attribution,
             target_ref,
+            on_committed,
         })
         .await
     }
@@ -1580,6 +1610,7 @@ impl GitEngine {
             kind: BatchOpKind::Rmw { path, update },
             attribution,
             target_ref: None,
+            on_committed: None,
         })
         .await
         .map(|_| ())
@@ -1593,12 +1624,14 @@ impl GitEngine {
         update: BatchRmwFn,
         commit_message: String,
         attribution: CommitAttribution,
+        on_committed: Option<OnCommitted>,
     ) -> Result<Option<String>, LibraryError> {
         self.enqueue(BatchOp {
             commit_message,
             kind: BatchOpKind::Rmw { path, update },
             attribution,
             target_ref,
+            on_committed,
         })
         .await
     }
@@ -1618,6 +1651,7 @@ impl GitEngine {
             kind: BatchOpKind::Move { from, to },
             attribution,
             target_ref: None,
+            on_committed: None,
         })
         .await
         .map(|_| ())
@@ -1631,12 +1665,14 @@ impl GitEngine {
         to: String,
         commit_message: String,
         attribution: CommitAttribution,
+        on_committed: Option<OnCommitted>,
     ) -> Result<Option<String>, LibraryError> {
         self.enqueue(BatchOp {
             commit_message,
             kind: BatchOpKind::Move { from, to },
             attribution,
             target_ref,
+            on_committed,
         })
         .await
     }
@@ -1662,6 +1698,7 @@ impl GitEngine {
             },
             attribution,
             target_ref: None,
+            on_committed: None,
         })
         .await
         .map(|_| ())
@@ -1681,6 +1718,7 @@ impl GitEngine {
             kind: BatchOpKind::DeleteDir { path: dir_path },
             attribution,
             target_ref: None,
+            on_committed: None,
         })
         .await
         .map(|_| ())
@@ -1704,6 +1742,7 @@ impl GitEngine {
             kind: BatchOpKind::MultiFile { changes },
             attribution,
             target_ref: None,
+            on_committed: None,
         })
         .await
         .map(|_| ())
@@ -1832,8 +1871,10 @@ impl GitEngine {
             .iter()
             .map(|q| Self::ref_name(q.op.target_ref.as_deref()))
             .collect();
-        let (ops, responders): (Vec<BatchOp>, Vec<oneshot::Sender<WriteResult>>) =
+        let (mut ops, responders): (Vec<BatchOp>, Vec<oneshot::Sender<WriteResult>>) =
             batch.into_iter().map(|q| (q.op, q.response)).unzip();
+        let callbacks: Vec<Option<OnCommitted>> =
+            ops.iter_mut().map(|o| o.on_committed.take()).collect();
 
         let (mut results, accepted) = tokio::task::spawn_blocking(move || {
             Self::commit_each_then_push_blocking(&path, ops, token.as_deref())
@@ -1871,6 +1912,22 @@ impl GitEngine {
                             results[i] = Err(LibraryError::FencePublish(msg.clone()));
                         }
                     }
+                }
+            }
+        }
+
+        // Journal the commit while this ref's push lock is still held —
+        // the same serialization that orders the pushes also orders these
+        // callbacks, so two journal writes for one draft can never
+        // collide. Only `Ok(Some(oid))` gets a callback: an `Err` was
+        // never pushed, a `None` was a no-op (nothing to journal), and a
+        // result the fence-publish block above downgraded to
+        // `FencePublish` has no `Ok` left to match either — consistent
+        // with how its own caller sees it.
+        for (cb, res) in callbacks.into_iter().zip(results.iter()) {
+            if let (Some(cb), Ok(Some(oid))) = (cb, res) {
+                if let Err(e) = cb(oid.clone()).await {
+                    tracing::warn!(error = %e, oid, "git batch: on_committed callback failed; the commit is upstream, the journal will catch up on the next write or observe tick");
                 }
             }
         }
@@ -3426,6 +3483,7 @@ mod tests {
             },
             attribution: CommitAttribution::library_default(),
             target_ref: Some("refs/heads/drua/x".into()),
+            on_committed: None,
         };
         let (mut results, _accepted) =
             GitEngine::commit_each_then_push_blocking(&local_dir, vec![op], None);
@@ -3491,6 +3549,7 @@ mod tests {
             },
             attribution: CommitAttribution::library_default(),
             target_ref: None,
+            on_committed: None,
         };
         let op_branch = BatchOp {
             commit_message: "changeset: add b".into(),
@@ -3500,6 +3559,7 @@ mod tests {
             },
             attribution: CommitAttribution::library_default(),
             target_ref: Some("refs/heads/drua/y".into()),
+            on_committed: None,
         };
         let (results, accepted) =
             GitEngine::commit_each_then_push_blocking(&local_dir, vec![op_main, op_branch], None);
@@ -3600,6 +3660,7 @@ mod tests {
             },
             attribution: CommitAttribution::library_default(),
             target_ref: None,
+            on_committed: None,
         };
         let op_clean = BatchOp {
             commit_message: "changeset: add b".into(),
@@ -3609,6 +3670,7 @@ mod tests {
             },
             attribution: CommitAttribution::library_default(),
             target_ref: Some("refs/heads/drua/clean".into()),
+            on_committed: None,
         };
         let op_stale = BatchOp {
             commit_message: "changeset: add c".into(),
@@ -3618,6 +3680,7 @@ mod tests {
             },
             attribution: CommitAttribution::library_default(),
             target_ref: Some("refs/heads/drua/stale".into()),
+            on_committed: None,
         };
         let (mut results, accepted) = GitEngine::commit_each_then_push_blocking(
             &local_dir,
@@ -3707,6 +3770,7 @@ mod tests {
             },
             attribution: CommitAttribution::library_default(),
             target_ref: None,
+            on_committed: None,
         };
         // A discarded/never-created draft's ref, batched alongside a main
         // write in the same 25ms window: its ops must fail in isolation.
@@ -3718,6 +3782,7 @@ mod tests {
             },
             attribution: CommitAttribution::library_default(),
             target_ref: Some("refs/heads/drua/never-created".into()),
+            on_committed: None,
         };
         let (mut results, accepted) =
             GitEngine::commit_each_then_push_blocking(&local_dir, vec![op_main, op_gone], None);
@@ -3793,6 +3858,7 @@ mod tests {
             },
             attribution: CommitAttribution::library_default(),
             target_ref: Some("refs/heads/drua/z".into()),
+            on_committed: None,
         };
         let (mut results, _accepted) =
             GitEngine::commit_each_then_push_blocking(&local_dir, vec![op], None);
@@ -4391,6 +4457,7 @@ mod tests {
             },
             attribution: CommitAttribution::library_default(),
             target_ref: None,
+            on_committed: None,
         };
         let (mut results, _accepted) =
             GitEngine::commit_each_then_push_blocking(&local_dir, vec![op], None);
@@ -4451,6 +4518,7 @@ mod tests {
             },
             attribution: CommitAttribution::library_default(),
             target_ref: None,
+            on_committed: None,
         };
         let (mut results, _accepted) =
             GitEngine::commit_each_then_push_blocking(&local_dir, vec![op], None);
@@ -4518,6 +4586,7 @@ mod tests {
             },
             attribution: CommitAttribution::library_default(),
             target_ref: None,
+            on_committed: None,
         };
         let (mut results, _accepted) =
             GitEngine::commit_each_then_push_blocking(&local_dir, vec![op], None);

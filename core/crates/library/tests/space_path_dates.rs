@@ -152,6 +152,7 @@ async fn move_keeps_created() {
             "efforts/e/a.md",
             attr(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await
         .expect("move");
@@ -228,7 +229,7 @@ async fn deleted_then_readded_restarts_created() {
 
     library
         .spaces()
-        .delete_file(slug, "a.md", attr(), &drua_library::SpaceTarget::Main)
+        .delete_file(slug, "a.md", attr(), &drua_library::SpaceTarget::Main, None)
         .await
         .expect("delete");
 

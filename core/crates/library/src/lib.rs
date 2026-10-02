@@ -32,7 +32,7 @@ pub use space::{NewSpace, Space, SpaceError, SpaceEvent, Spaces, SPACE_DOC_TYPE}
 pub use synced::LibrarySynced;
 
 use self::git::GitEngine;
-pub use self::git::{BlobEntries, DeltaKind, DirEntry, PathDates, PathDatesMap};
+pub use self::git::{BlobEntries, DeltaKind, DirEntry, OnCommitted, PathDates, PathDatesMap};
 use self::job::{
     CommitTick, HeadAdvancedHooks, ImporterRegistry, LibraryEmbedConfig,
     LibraryEmbedJobInitializer, LibrarySyncConfig, LibrarySyncJobInitializer, LibraryWriteConfig,

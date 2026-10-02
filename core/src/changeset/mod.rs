@@ -472,20 +472,16 @@ impl Changesets {
         })
     }
 
-    /// Records a write against `id`'s draft and returns its refreshed
-    /// [`DraftInfo`] — the touched-file count reflects `head_oid`.
-    #[instrument(name = "domain.changeset.commit_recorded", skip(self))]
-    pub async fn commit_recorded(
-        &self,
-        id: ChangesetId,
-        head_oid: String,
-        action: &str,
-        path: &str,
-    ) -> Result<DraftInfo, ChangesetError> {
-        self.record_commit(id, head_oid, action, path).await?;
+    /// Read-only [`DraftInfo`] refresh for `id` — the touched-file count
+    /// reflects whatever the draft's `head_oid` currently is. Used to
+    /// render the post-write stamp once the commit's journal row is
+    /// already in (the `on_committed` callback records it under the
+    /// git engine's push lock before the write entry point returns).
+    #[instrument(name = "domain.changeset.draft_info", skip(self))]
+    pub async fn draft_info(&self, id: ChangesetId) -> Result<DraftInfo, ChangesetError> {
         let cs = self.repo.find_by_id(id).await?;
         let touched = self.touched_count(&cs).await.unwrap_or_else(|e| {
-            tracing::warn!(error = %e, changeset_id = %cs.id, "commit_recorded: touched_count failed; reporting 0");
+            tracing::warn!(error = %e, changeset_id = %cs.id, "draft_info: touched_count failed; reporting 0");
             0
         });
         Ok(DraftInfo {

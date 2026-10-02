@@ -183,6 +183,7 @@ async fn setup(test_name: &str) -> (App, AuthSubject, AuthSubject) {
             "hello\n".into(),
             CommitAttribution::library_default(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await
         .expect("write a.md");
@@ -274,6 +275,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "return {relative: (a,b) => a + b};".into(),
             CommitAttribution::library_default(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await
         .unwrap();
@@ -290,6 +292,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "return 7;".into(),
             CommitAttribution::library_default(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await
         .unwrap();
@@ -300,6 +303,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "return await loadScript('space:private/helper.js');".into(),
             CommitAttribution::library_default(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await
         .unwrap();
@@ -311,6 +315,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "return {run: async () => await tools.caller_probe({})};".into(),
             CommitAttribution::library_default(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await
         .unwrap();
@@ -379,7 +384,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
         async {
             let resume = changes.recv().await.unwrap();
             for path in ["helper.js", "fresh.js"] {
-                spaces.write_file("docs", path, "return {version: 2};".into(), CommitAttribution::library_default(), &drua_library::SpaceTarget::Main).await.unwrap();
+                spaces.write_file("docs", path, "return {version: 2};".into(), CommitAttribution::library_default(), &drua_library::SpaceTarget::Main, None).await.unwrap();
             }
             resume.send(()).unwrap();
         }
@@ -408,6 +413,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "child".into(),
             CommitAttribution::library_default(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await
         .unwrap();
@@ -429,6 +435,7 @@ async fn scripts_use_ordinary_reads_and_invocation_local_caches() {
             "throw new Error('attributed failure');".into(),
             CommitAttribution::library_default(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await
         .unwrap();
@@ -533,6 +540,7 @@ async fn scripts_read_exact_text_while_mcp_read_stays_numbered() {
             fixture.into(),
             CommitAttribution::library_default(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await
         .unwrap();
@@ -626,6 +634,7 @@ async fn scripts_read_lifts_the_view_cap_but_mcp_read_still_enforces_it() {
             "x".repeat(FIXTURE_LEN),
             CommitAttribution::library_default(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await
         .unwrap();
@@ -872,6 +881,7 @@ return {
             source.into(),
             CommitAttribution::library_default(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await
         .unwrap();
@@ -892,6 +902,7 @@ return {
             "return {};".into(),
             CommitAttribution::library_default(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await
         .unwrap();

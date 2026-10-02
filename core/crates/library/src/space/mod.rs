@@ -126,6 +126,7 @@ impl Spaces {
         content: String,
         attribution: CommitAttribution,
         target: &SpaceTarget,
+        on_committed: Option<crate::git::OnCommitted>,
     ) -> Result<Option<String>, SpaceError> {
         let path = format!("spaces/{slug}/{relative_path}");
         self.git
@@ -135,6 +136,7 @@ impl Spaces {
                 content.into_bytes(),
                 format!("space:{slug}: write {relative_path}"),
                 attribution,
+                on_committed,
             )
             .await
             .map_err(|e| SpaceError::Git(e.to_string()))
@@ -148,6 +150,7 @@ impl Spaces {
         relative_path: &str,
         attribution: CommitAttribution,
         target: &SpaceTarget,
+        on_committed: Option<crate::git::OnCommitted>,
     ) -> Result<Option<String>, SpaceError> {
         let path = format!("spaces/{slug}/{relative_path}");
         // Existence is checked against the ref's CURRENT tip, not a
@@ -216,12 +219,14 @@ impl Spaces {
                 path,
                 format!("space:{slug}: delete {relative_path}"),
                 attribution,
+                on_committed,
             )
             .await
             .map_err(|e| SpaceError::Git(e.to_string()))
     }
 
     /// Read–modify–write substitution: errors if `old_str` doesn't appear
+    #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(name = "library.spaces.str_replace", skip_all, fields(%slug, %relative_path, target = ?target))]
     pub async fn str_replace(
         &self,
@@ -231,6 +236,7 @@ impl Spaces {
         new_str: String,
         attribution: CommitAttribution,
         target: &SpaceTarget,
+        on_committed: Option<crate::git::OnCommitted>,
     ) -> Result<Option<String>, SpaceError> {
         let path = format!("spaces/{slug}/{relative_path}");
         let path_for_err = path.clone();
@@ -267,6 +273,7 @@ impl Spaces {
                 update,
                 format!("space:{slug}: edit {relative_path}"),
                 attribution,
+                on_committed,
             )
             .await
             .map_err(|e| match e {
@@ -276,6 +283,7 @@ impl Spaces {
     }
 
     /// Read–modify–write insert. `line_number == 0` inserts at the
+    #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(name = "library.spaces.insert", skip_all, fields(%slug, %relative_path, target = ?target))]
     pub async fn insert(
         &self,
@@ -285,6 +293,7 @@ impl Spaces {
         text: String,
         attribution: CommitAttribution,
         target: &SpaceTarget,
+        on_committed: Option<crate::git::OnCommitted>,
     ) -> Result<Option<String>, SpaceError> {
         let path = format!("spaces/{slug}/{relative_path}");
         let path_for_err = path.clone();
@@ -317,6 +326,7 @@ impl Spaces {
                 update,
                 format!("space:{slug}: insert {relative_path}"),
                 attribution,
+                on_committed,
             )
             .await
             .map_err(|e| match e {
@@ -456,6 +466,7 @@ impl Spaces {
         to: &str,
         attribution: CommitAttribution,
         target: &SpaceTarget,
+        on_committed: Option<crate::git::OnCommitted>,
     ) -> Result<Option<String>, SpaceError> {
         let from_path = format!("spaces/{slug}/{from}");
         let to_path = format!("spaces/{slug}/{to}");
@@ -466,6 +477,7 @@ impl Spaces {
                 to_path,
                 format!("space:{slug}: move {from} -> {to}"),
                 attribution,
+                on_committed,
             )
             .await
             .map_err(|e| match e {

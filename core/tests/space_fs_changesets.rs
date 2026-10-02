@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
+use tokio::task::JoinSet;
+
 use drua_core::agent::{AgentRole, AgentsConfig, ModelDefaults, RoleConfig};
 use drua_core::auth::AuthScope;
 use drua_core::changeset::repo::ChangesetRepo;
@@ -212,6 +214,7 @@ async fn project_with_space(
             "main content\n".into(),
             CommitAttribution::library_default(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await
         .expect("seed main");
@@ -246,6 +249,7 @@ async fn project_with_space_and_lead(
             "main content\n".into(),
             CommitAttribution::library_default(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await
         .expect("seed main");
@@ -1554,4 +1558,314 @@ async fn spaces_tool_has_no_draft_commands() {
             "{command}: expected a schema/argument-parse error, got: {err}"
         );
     }
+}
+
+// §6 tests 5-8 (handoff: changeset-record-commit-race). Red-first against
+// unfixed code: 5 and 6 reproduce `ChangesetModifyError::ConcurrentModification`
+// on a write that landed — see the handoff's revision-2 fix (the
+// `on_committed` callback journaling under the git engine's push lock).
+
+/// §6 test 5: six concurrent writes to six different files in one draft.
+/// Every write must land and be journaled — no `ConcurrentModification`,
+/// no undercount. Fails today (pre-fix) with one write's `commit_recorded`
+/// losing the `changeset_events (id, sequence)` race.
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn six_concurrent_writes_six_files_all_land_and_are_journaled() {
+    let (app, user) = setup("six_concurrent_writes_six_files").await;
+    project_with_space(&app, &user, "proj-six-writes", "docs").await;
+    let fs = space_fs(&app);
+
+    let mut set = JoinSet::new();
+    for ch in ['a', 'b', 'c', 'd', 'e', 'f'] {
+        let fs = fs.clone();
+        let user = user.clone();
+        set.spawn(async move {
+            (
+                ch,
+                fs.write_file(
+                    &user,
+                    &format!("draft:docs/{ch}.md"),
+                    format!("content {ch}\n"),
+                )
+                .await,
+            )
+        });
+    }
+    while let Some(joined) = set.join_next().await {
+        let (ch, result) = joined.expect("join");
+        result
+            .unwrap_or_else(|e| panic!("write {ch}.md failed: {e}"))
+            .unwrap_or_else(|| panic!("write {ch}.md: not a space path"));
+    }
+
+    let cs = app
+        .changesets()
+        .open_draft_for(&user)
+        .await
+        .expect("open_draft_for")
+        .expect("draft still open");
+    let status = app.changesets().status(&user, cs.id).await.expect("status");
+    assert_eq!(
+        status.commits, 6,
+        "journal must record all six commits, not undercount from a race"
+    );
+    assert_eq!(
+        status.touched.len(),
+        6,
+        "all six files must show as touched"
+    );
+
+    let refname = format!("refs/heads/{}", cs.draft_name().branch());
+    let tip_output = Command::new("git")
+        .args(["rev-parse", &refname])
+        .current_dir(app.library().repo_path())
+        .output()
+        .expect("git rev-parse");
+    let tip = String::from_utf8(tip_output.stdout)
+        .unwrap()
+        .trim()
+        .to_string();
+    assert_eq!(
+        status.head_oid, tip,
+        "journaled head_oid must equal the ref's actual tip"
+    );
+}
+
+/// §6 test 6: six concurrent `str_replace` on one file, disjoint anchors
+/// (each replaces its own unique line, so no two ops conflict on
+/// content — only on the journal's `(id, sequence)`). All six must land
+/// and be journaled. Fails today (pre-fix) the same way as test 5.
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn six_concurrent_str_replace_on_one_file_all_land() {
+    let (app, user) = setup("six_concurrent_str_replace").await;
+    project_with_space(&app, &user, "proj-six-replace", "docs").await;
+
+    let seed: String = (0..6).map(|i| format!("line{i}\n")).collect();
+    app.library()
+        .spaces()
+        .write_file(
+            "docs",
+            "r.md",
+            seed,
+            CommitAttribution::library_default(),
+            &drua_library::SpaceTarget::Main,
+            None,
+        )
+        .await
+        .expect("seed r.md on main");
+
+    let fs = space_fs(&app);
+    let mut set = JoinSet::new();
+    for i in 0..6 {
+        let fs = fs.clone();
+        let user = user.clone();
+        set.spawn(async move {
+            (
+                i,
+                fs.str_replace(
+                    &user,
+                    "draft:docs/r.md",
+                    format!("line{i}\n"),
+                    format!("LINE{i}\n"),
+                )
+                .await,
+            )
+        });
+    }
+    while let Some(joined) = set.join_next().await {
+        let (i, result) = joined.expect("join");
+        result
+            .unwrap_or_else(|e| panic!("str_replace line{i} failed: {e}"))
+            .unwrap_or_else(|| panic!("str_replace line{i}: not a space path"));
+    }
+
+    let (view, _stamp) = fs
+        .view_file(&user, "draft:docs/r.md", None)
+        .await
+        .expect("view_file dispatch")
+        .expect("space path");
+    let text = match view {
+        drua_core::space_fs::FileView::File(s) => s,
+        drua_core::space_fs::FileView::Dir(_) => panic!("expected a file, got a directory"),
+    };
+    for i in 0..6 {
+        assert!(
+            text.contains(&format!("LINE{i}\n")),
+            "missing LINE{i} edit: {text:?}"
+        );
+    }
+
+    let cs = app
+        .changesets()
+        .open_draft_for(&user)
+        .await
+        .expect("open_draft_for")
+        .expect("draft still open");
+    let status = app.changesets().status(&user, cs.id).await.expect("status");
+    assert_eq!(
+        status.commits, 6,
+        "journal must record all six str_replace commits"
+    );
+}
+
+/// §6 test 7: after six concurrent writes land (test 5's scenario,
+/// reproduced here standalone), the `commit_recorded` events' `head_oid`s
+/// in sequence order must equal the branch's actual commit order
+/// (`git rev-list --reverse base..tip`) — the journal can never record
+/// out of order, because callbacks run in op order = commit order under
+/// the ref's push lock.
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn journal_order_equals_commit_order_under_concurrent_writes() {
+    let (app, user) = setup("journal_order_equals_commit_order").await;
+    project_with_space(&app, &user, "proj-journal-order", "docs").await;
+    let fs = space_fs(&app);
+
+    let mut set = JoinSet::new();
+    for ch in ['a', 'b', 'c', 'd', 'e', 'f'] {
+        let fs = fs.clone();
+        let user = user.clone();
+        set.spawn(async move {
+            (
+                ch,
+                fs.write_file(
+                    &user,
+                    &format!("draft:docs/{ch}.md"),
+                    format!("content {ch}\n"),
+                )
+                .await,
+            )
+        });
+    }
+    while let Some(joined) = set.join_next().await {
+        let (ch, result) = joined.expect("join");
+        result
+            .unwrap_or_else(|e| panic!("write {ch}.md failed: {e}"))
+            .unwrap_or_else(|| panic!("write {ch}.md: not a space path"));
+    }
+
+    let cs = app
+        .changesets()
+        .open_draft_for(&user)
+        .await
+        .expect("open_draft_for")
+        .expect("draft still open");
+
+    let pool = pool().await;
+    let journaled: Vec<String> = sqlx::query_scalar(
+        "SELECT event->>'head_oid' FROM changeset_events \
+         WHERE id = $1 AND event_type = 'commit_recorded' ORDER BY sequence",
+    )
+    .bind(cs.id)
+    .fetch_all(&pool)
+    .await
+    .expect("query changeset_events");
+
+    let refname = format!("refs/heads/{}", cs.draft_name().branch());
+    let range = format!("{}..{}", cs.base_oid, refname);
+    let output = Command::new("git")
+        .args(["rev-list", "--reverse", &range])
+        .current_dir(app.library().repo_path())
+        .output()
+        .expect("git rev-list");
+    let branch_commits: Vec<String> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+
+    assert_eq!(
+        journaled.len(),
+        6,
+        "expected 6 journaled commit_recorded events, got {journaled:?}"
+    );
+    assert_eq!(
+        journaled, branch_commits,
+        "journal order must equal the branch's actual commit order"
+    );
+}
+
+/// §6 test 8: flipping the changeset to `Discarded` concurrently with a
+/// write to its draft — between `resolve` (which captures the draft id
+/// the `on_committed` callback will journal against) and the push
+/// landing — makes `record_commit` fail with `InvalidTransition` inside
+/// the callback. That must be a `tracing::warn!`, never a tool error:
+/// the commit is already upstream.
+///
+/// The status flip goes through `ChangesetRepo` directly rather than
+/// `Changesets::discard` — the service method also best-effort deletes
+/// the draft ref, which races the write's own fetch/push of that same
+/// ref and fails it at the git layer instead, a different failure mode
+/// than the one this test targets. Flipping only the DB status leaves
+/// the ref alone, isolating the journal-failure path.
+///
+/// The race is biased toward the intended outcome by construction:
+/// `resolve`'s own `open_draft_for` is a single `SELECT`, issued before
+/// the status-flip transition's first statement (`tokio::join!` polls
+/// the write future first), so it reads the draft as open; the flip
+/// then completes in a handful of round trips, comfortably inside the
+/// git engine's 25ms batch window plus the commit+push the write still
+/// has to clear before its callback runs. The post-hoc assertion below
+/// confirms the race actually landed as intended.
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn journal_failure_during_on_committed_does_not_fail_the_write() {
+    let (app, user) = setup("journal_failure_not_tool_error").await;
+    project_with_space(&app, &user, "proj-journal-fail", "docs").await;
+    let cs = app
+        .changesets()
+        .draft_for(
+            &user,
+            Some("will be discarded mid-write".into()),
+            None,
+            None,
+        )
+        .await
+        .expect("open changeset");
+    let fs = space_fs(&app);
+    let pool = pool().await;
+
+    let flip_to_discarded = async {
+        let repo = ChangesetRepo::new(&pool);
+        let mut op = repo.begin_op().await.expect("begin op");
+        let mut discarded = repo
+            .find_by_id_in_op(&mut op, cs.id)
+            .await
+            .expect("find changeset");
+        discarded
+            .discard(None)
+            .expect("discard transition")
+            .did_execute();
+        repo.update_in_op(&mut op, &mut discarded)
+            .await
+            .expect("update changeset");
+        op.commit().await.expect("commit op");
+    };
+
+    let (write_result, ()) = tokio::join!(
+        fs.write_file(&user, "draft:docs/a.md", "staged\n".into()),
+        flip_to_discarded,
+    );
+
+    write_result
+        .expect("write must succeed even though its journal write failed")
+        .expect("space path");
+
+    assert!(
+        app.changesets()
+            .open_draft_for(&user)
+            .await
+            .expect("open_draft_for")
+            .is_none(),
+        "the write must have targeted the discarded draft, not silently opened a fresh one \
+         (if this fails, the race landed the other way — rerun)"
+    );
+
+    let refname = format!("refs/heads/{}", cs.draft_name().branch());
+    assert!(
+        ref_exists(app.library().repo_path(), &refname),
+        "the commit must be on the ref regardless of the journal outcome"
+    );
 }
