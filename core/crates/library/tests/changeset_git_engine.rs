@@ -72,6 +72,7 @@ async fn open_write_and_read_at_tip_leave_main_untouched() {
             "staged content".into(),
             attr(),
             &draft_target,
+            None,
         )
         .await
         .expect("write to draft ref")
@@ -115,6 +116,7 @@ async fn apply_lands_draft_content_at_head() {
             "lands on main".into(),
             attr(),
             &draft_target,
+            None,
         )
         .await
         .unwrap()
@@ -162,6 +164,7 @@ async fn rebase_squashes_onto_moved_main() {
             "from changeset".into(),
             attr(),
             &draft_target,
+            None,
         )
         .await
         .unwrap()
@@ -175,6 +178,7 @@ async fn rebase_squashes_onto_moved_main() {
             "from main".into(),
             attr(),
             &SpaceTarget::Main,
+            None,
         )
         .await
         .unwrap();
@@ -270,7 +274,7 @@ async fn observe_reports_merged_into_when_head_landed_on_main() {
     let draft_target = SpaceTarget::Draft(DraftHandle::new(name, base.clone()));
     let tip = library
         .spaces()
-        .write_file("demo", "a.md", "a".into(), attr(), &draft_target)
+        .write_file("demo", "a.md", "a".into(), attr(), &draft_target, None)
         .await
         .unwrap()
         .unwrap();
@@ -308,7 +312,7 @@ async fn observe_reports_advanced_when_the_ref_moved_without_merging() {
     let draft_target = SpaceTarget::Draft(DraftHandle::new(name, base.clone()));
     let recorded_head = library
         .spaces()
-        .write_file("demo", "a.md", "a".into(), attr(), &draft_target)
+        .write_file("demo", "a.md", "a".into(), attr(), &draft_target, None)
         .await
         .unwrap()
         .unwrap();
@@ -317,7 +321,7 @@ async fn observe_reports_advanced_when_the_ref_moved_without_merging() {
     let advanced_target = SpaceTarget::Draft(DraftHandle::new(name, recorded_head.clone()));
     let advanced_tip = library
         .spaces()
-        .write_file("demo", "b.md", "b".into(), attr(), &advanced_target)
+        .write_file("demo", "b.md", "b".into(), attr(), &advanced_target, None)
         .await
         .unwrap()
         .unwrap();

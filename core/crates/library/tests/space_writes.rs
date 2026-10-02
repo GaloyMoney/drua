@@ -102,6 +102,7 @@ async fn write_then_str_replace_happy_path() {
             "alpha bravo charlie\n".into(),
             attr(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await
         .expect("write");
@@ -120,6 +121,7 @@ async fn write_then_str_replace_happy_path() {
             "BRAVO".into(),
             attr(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await
         .expect("str_replace");
@@ -148,6 +150,7 @@ async fn str_replace_errors_when_old_str_absent_or_ambiguous() {
             "alpha bravo bravo\n".into(),
             attr(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await
         .expect("write");
@@ -161,6 +164,7 @@ async fn str_replace_errors_when_old_str_absent_or_ambiguous() {
             "ZULU".into(),
             attr(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await;
     assert!(
@@ -177,6 +181,7 @@ async fn str_replace_errors_when_old_str_absent_or_ambiguous() {
             "BRAVO".into(),
             attr(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await;
     assert!(
@@ -203,6 +208,7 @@ async fn move_then_delete() {
             "content\n".into(),
             attr(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await
         .expect("write");
@@ -215,6 +221,7 @@ async fn move_then_delete() {
             "new.md",
             attr(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await
         .expect("move");
@@ -235,6 +242,7 @@ async fn move_then_delete() {
             "new.md",
             attr(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await;
     assert!(matches!(dup, Err(SpaceError::Validation(_))), "{dup:?}");
@@ -247,6 +255,7 @@ async fn move_then_delete() {
             "elsewhere.md",
             attr(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await;
     assert!(
@@ -256,7 +265,13 @@ async fn move_then_delete() {
 
     library
         .spaces()
-        .delete_file(slug, "new.md", attr(), &drua_library::SpaceTarget::Main)
+        .delete_file(
+            slug,
+            "new.md",
+            attr(),
+            &drua_library::SpaceTarget::Main,
+            None,
+        )
         .await
         .expect("delete");
     assert!(!path_exists(
@@ -283,6 +298,7 @@ async fn insert_at_line_number() {
             "one\ntwo\nthree\n".into(),
             attr(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await
         .expect("write");
@@ -296,6 +312,7 @@ async fn insert_at_line_number() {
             "one-and-a-half".into(),
             attr(),
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await
         .expect("insert");
@@ -344,6 +361,7 @@ async fn write_renders_rich_attribution_into_commit() {
             "hello\n".into(),
             rich,
             &drua_library::SpaceTarget::Main,
+            None,
         )
         .await
         .expect("write doc.md");

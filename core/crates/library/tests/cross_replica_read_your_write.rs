@@ -106,7 +106,14 @@ async fn reader_sees_writer_main_writes_without_a_fetch_ticker() {
         let body = format!("round {round}\n");
         writer
             .spaces()
-            .write_file(slug, "doc.md", body.clone(), attr(), &SpaceTarget::Main)
+            .write_file(
+                slug,
+                "doc.md",
+                body.clone(),
+                attr(),
+                &SpaceTarget::Main,
+                None,
+            )
             .await
             .expect("write");
 
@@ -170,7 +177,14 @@ async fn stale_reader_times_out_rather_than_serving_stale_content() {
         .expect("create space");
     writer
         .spaces()
-        .write_file(slug, "doc.md", "first\n".into(), attr(), &SpaceTarget::Main)
+        .write_file(
+            slug,
+            "doc.md",
+            "first\n".into(),
+            attr(),
+            &SpaceTarget::Main,
+            None,
+        )
         .await
         .expect("write 1");
 
@@ -202,6 +216,7 @@ async fn stale_reader_times_out_rather_than_serving_stale_content() {
             "second\n".into(),
             attr(),
             &SpaceTarget::Main,
+            None,
         )
         .await
         .expect("write 2");
@@ -279,6 +294,7 @@ async fn reader_draft_handle_waits_for_a_replica_that_is_behind_head_oid() {
             "round 1\n".into(),
             attr(),
             &SpaceTarget::Draft(DraftHandle::new(name, base.clone())),
+            None,
         )
         .await
         .expect("write 1")
@@ -308,6 +324,7 @@ async fn reader_draft_handle_waits_for_a_replica_that_is_behind_head_oid() {
             "round 2\n".into(),
             attr(),
             &SpaceTarget::Draft(DraftHandle::new(name, tip1.clone())),
+            None,
         )
         .await
         .expect("write 2")
