@@ -10,7 +10,6 @@ pub use primitives::{
 use crate::attribution::CommitAttribution;
 use crate::error::LibraryError;
 use crate::git::GitEngine;
-use crate::head_fence::HeadFence;
 
 const DRAFT_REF_PREFIX: &str = "refs/heads/drua/";
 
@@ -21,14 +20,12 @@ const DRAFT_REF_PREFIX: &str = "refs/heads/drua/";
 #[derive(Clone)]
 pub struct Drafts {
     git: Arc<GitEngine>,
-    fence: HeadFence,
 }
 
 impl Drafts {
-    pub(crate) fn new(git: &Arc<GitEngine>, fence: &HeadFence) -> Self {
+    pub(crate) fn new(git: &Arc<GitEngine>) -> Self {
         Self {
             git: Arc::clone(git),
-            fence: fence.clone(),
         }
     }
 
@@ -68,8 +65,8 @@ impl Drafts {
                 return Ok(DraftHandle { name, tip });
             }
             let tip = self
-                .fence
-                .wait_for_ref(&self.git, &git_ref, known_head)
+                .git
+                .wait_for_ref(&git_ref, known_head)
                 .await?
                 .ok_or_else(|| {
                     LibraryError::Git(format!(
