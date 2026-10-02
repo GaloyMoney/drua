@@ -3,6 +3,7 @@ mod config;
 mod draft;
 mod error;
 mod git;
+mod head_fence;
 mod importer;
 mod job;
 pub mod primitives;
@@ -33,6 +34,7 @@ pub use synced::LibrarySynced;
 
 use self::git::GitEngine;
 pub use self::git::{BlobEntries, DeltaKind, DirEntry, PathDates, PathDatesMap};
+use self::head_fence::HeadFence;
 use self::job::{
     CommitTick, HeadAdvancedHooks, ImporterRegistry, LibraryEmbedConfig,
     LibraryEmbedJobInitializer, LibrarySyncConfig, LibrarySyncJobInitializer, LibraryWriteConfig,
@@ -48,6 +50,10 @@ pub struct Library {
     embedder: Arc<code_assistant_core::embedder::Embedder>,
     github_app: Option<Arc<GitHubAppTokenProvider>>,
     git: Arc<GitEngine>,
+    /// Held for `Library`'s own raw `*_at_head` pass-throughs below —
+    /// `Spaces`/`Drafts` hold their own clone and gate `Space`-scoped
+    /// reads, which most callers should prefer instead.
+    fence: HeadFence,
     search: SearchStore,
     spaces: Spaces,
     drafts: Drafts,
@@ -59,6 +65,10 @@ pub struct Library {
     /// can be `Clone` (consumers store it directly rather than via a
     /// further `Arc` wrapper).
     _fetcher: Arc<tokio::task::JoinHandle<()>>,
+    /// Same `Arc`-for-`Clone` reasoning as `_fetcher`: wakes this
+    /// replica's fetcher on any peer's push to `refs/heads/main` (see
+    /// [`HeadFence::spawn_peer_listener`]).
+    _fence_listener: Arc<tokio::task::JoinHandle<()>>,
 }
 
 impl Library {
@@ -70,20 +80,22 @@ impl Library {
         github_app: Option<Arc<GitHubAppTokenProvider>>,
     ) -> Result<Self, LibraryError> {
         let repo_path = PathBuf::from(&config.data_dir);
+        let fence = HeadFence::init(pool, config.read_catch_up_timeout_ms).await?;
         let git = Arc::new(
             GitEngine::init(
                 &config.repo_url,
                 repo_path,
                 github_app.clone(),
                 pool.clone(),
-                config.read_catch_up_timeout_ms,
+                fence.clone(),
             )
             .await?,
         );
+        let fence_listener = fence.spawn_peer_listener(git.commit_notify());
 
         let search = SearchStore::new(pool, Arc::clone(&embedder));
-        let spaces = Spaces::new(&git, pool);
-        let drafts = Drafts::new(&git);
+        let spaces = Spaces::new(&git, pool, &fence);
+        let drafts = Drafts::new(&git, &fence);
 
         let embed_spawner = jobs.add_initializer(LibraryEmbedJobInitializer::new(
             search.clone(),
@@ -135,6 +147,7 @@ impl Library {
             embedder,
             github_app,
             git,
+            fence,
             search,
             spaces,
             drafts,
@@ -143,6 +156,7 @@ impl Library {
             write_spawner,
             embed_spawner,
             _fetcher: Arc::new(fetcher),
+            _fence_listener: Arc::new(fence_listener),
         })
     }
 
@@ -220,40 +234,50 @@ impl Library {
     }
 
     /// Read a blob's bytes at HEAD. `Ok(None)` when the path doesn't
-    /// exist (or HEAD is unborn).
+    /// exist (or HEAD is unborn). Gated on the cross-replica fence, same
+    /// as `Spaces::read_file` — this is a raw escape hatch for callers
+    /// (tests, mainly) that don't go through a `Space`, not a faster
+    /// unfenced path.
     pub async fn read_blob_at_head(&self, path: &str) -> Result<Option<Vec<u8>>, LibraryError> {
+        self.fence.ensure_main_current(&self.git).await?;
         self.git.read_blob_at_head(path).await
     }
 
     /// List immediate children of a tree path at HEAD. `Ok(None)` when
     /// the directory doesn't exist. Empty `dir_path` lists the repo
-    /// root.
+    /// root. Gated on the cross-replica fence — see
+    /// [`Self::read_blob_at_head`].
     pub async fn list_dir_at_head(
         &self,
         dir_path: &str,
     ) -> Result<Option<Vec<DirEntry>>, LibraryError> {
+        self.fence.ensure_main_current(&self.git).await?;
         self.git.list_dir_at_head(dir_path).await
     }
 
     /// Recursively walk every blob under `dir_path` at HEAD. Returns
     /// `(path, content)` pairs (paths relative to repo root); a `dir_path`
     /// naming a blob yields just that blob. `Ok(None)` when the path
-    /// doesn't exist.
+    /// doesn't exist. Gated on the cross-replica fence — see
+    /// [`Self::read_blob_at_head`].
     pub async fn walk_blobs_at_head(
         &self,
         dir_path: &str,
     ) -> Result<Option<BlobEntries>, LibraryError> {
+        self.fence.ensure_main_current(&self.git).await?;
         self.git.walk_blobs_at_head(dir_path).await
     }
 
     /// Dates for every blob under `prefix` (repo-relative, trailing
     /// slash optional) at HEAD, keyed relative to `prefix`. `Ok(None)`
     /// when HEAD is unborn. See [`GitEngine::path_dates_at_head`] for
-    /// the caching and rename-tracking contract.
+    /// the caching and rename-tracking contract. Gated on the
+    /// cross-replica fence — see [`Self::read_blob_at_head`].
     pub async fn path_dates_at_head(
         &self,
         prefix: &str,
     ) -> Result<Option<Arc<PathDatesMap>>, LibraryError> {
+        self.fence.ensure_main_current(&self.git).await?;
         self.git.path_dates_at_head(prefix).await
     }
 

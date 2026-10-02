@@ -11,6 +11,7 @@ use self::repo::SpaceRepo;
 use crate::attribution::CommitAttribution;
 use crate::draft::SpaceTarget;
 use crate::git::GitEngine;
+use crate::head_fence::HeadFence;
 use crate::importer::{DocType, GitFileHash, LibraryImporter, UpsertError};
 use crate::SearchableFields;
 
@@ -64,13 +65,15 @@ const SPACE_DOC_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
 #[derive(Clone)]
 pub struct Spaces {
     git: Arc<GitEngine>,
+    fence: HeadFence,
     repo: SpaceRepo,
 }
 
 impl Spaces {
-    pub fn new(git: &Arc<GitEngine>, pool: &sqlx::PgPool) -> Self {
+    pub fn new(git: &Arc<GitEngine>, pool: &sqlx::PgPool, fence: &HeadFence) -> Self {
         Self {
             git: Arc::clone(git),
+            fence: fence.clone(),
             repo: SpaceRepo::new(pool),
         }
     }
@@ -176,8 +179,8 @@ impl Spaces {
                 {
                     Some((oid, true)) => oid,
                     Some((_, false)) => self
-                        .git
-                        .wait_for_ref(&refname, handle.tip())
+                        .fence
+                        .wait_for_ref(&self.git, &refname, handle.tip())
                         .await
                         .map_err(|e| SpaceError::Git(e.to_string()))?
                         .ok_or_else(|| SpaceError::PathNotFound {
@@ -197,12 +200,17 @@ impl Spaces {
                     .map_err(|e| SpaceError::Git(e.to_string()))?
                     .is_some()
             }
-            SpaceTarget::Main => self
-                .git
-                .read_blob_at_head(&path)
-                .await
-                .map_err(|e| SpaceError::Git(e.to_string()))?
-                .is_some(),
+            SpaceTarget::Main => {
+                self.fence
+                    .ensure_main_current(&self.git)
+                    .await
+                    .map_err(|e| SpaceError::Git(e.to_string()))?;
+                self.git
+                    .read_blob_at_head(&path)
+                    .await
+                    .map_err(|e| SpaceError::Git(e.to_string()))?
+                    .is_some()
+            }
         };
         if !exists {
             return Err(SpaceError::PathNotFound {
@@ -353,11 +361,17 @@ impl Spaces {
         target: &SpaceTarget,
     ) -> Result<Option<Vec<u8>>, SpaceError> {
         let path = format!("spaces/{slug}/{rel_path}");
-        match target_at(target) {
+        let result = match target_at(target) {
             Some(oid) => self.git.read_blob_at(oid, &path).await,
-            None => self.git.read_blob_at_head(&path).await,
-        }
-        .map_err(|e| SpaceError::Git(e.to_string()))
+            None => {
+                self.fence
+                    .ensure_main_current(&self.git)
+                    .await
+                    .map_err(|e| SpaceError::Git(e.to_string()))?;
+                self.git.read_blob_at_head(&path).await
+            }
+        };
+        result.map_err(|e| SpaceError::Git(e.to_string()))
     }
 
     /// Lists immediate children under `spaces/<slug>/<rel_path>` at
@@ -373,11 +387,17 @@ impl Spaces {
         } else {
             format!("spaces/{slug}/{rel_path}")
         };
-        match target_at(target) {
+        let result = match target_at(target) {
             Some(oid) => self.git.list_dir_at(oid, &path).await,
-            None => self.git.list_dir_at_head(&path).await,
-        }
-        .map_err(|e| SpaceError::Git(e.to_string()))
+            None => {
+                self.fence
+                    .ensure_main_current(&self.git)
+                    .await
+                    .map_err(|e| SpaceError::Git(e.to_string()))?;
+                self.git.list_dir_at_head(&path).await
+            }
+        };
+        result.map_err(|e| SpaceError::Git(e.to_string()))
     }
 
     #[tracing::instrument(name = "library.spaces.walk", skip_all, fields(%slug, %rel_path, target = ?target))]
@@ -395,7 +415,13 @@ impl Spaces {
         let strip = format!("spaces/{slug}/");
         let walked = match target_at(target) {
             Some(oid) => self.git.walk_blobs_at(oid, &path).await,
-            None => self.git.walk_blobs_at_head(&path).await,
+            None => {
+                self.fence
+                    .ensure_main_current(&self.git)
+                    .await
+                    .map_err(|e| SpaceError::Git(e.to_string()))?;
+                self.git.walk_blobs_at_head(&path).await
+            }
         }
         .map_err(|e| SpaceError::Git(e.to_string()))?;
         let Some(mut blobs) = walked else {
@@ -418,6 +444,10 @@ impl Spaces {
         &self,
         slug: &str,
     ) -> Result<Option<Arc<crate::git::PathDatesMap>>, SpaceError> {
+        self.fence
+            .ensure_main_current(&self.git)
+            .await
+            .map_err(|e| SpaceError::Git(e.to_string()))?;
         self.git
             .path_dates_at_head(&format!("spaces/{slug}/"))
             .await
