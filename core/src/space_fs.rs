@@ -20,7 +20,9 @@ use std::sync::Arc;
 
 use tracing::instrument;
 
-use drua_library::{BlobEntries, PathDates, PathDatesMap, Space, SpaceError, SpaceTarget, Spaces};
+use drua_library::{
+    BlobEntries, OnCommitted, PathDates, PathDatesMap, Space, SpaceError, SpaceTarget, Spaces,
+};
 
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
@@ -437,6 +439,38 @@ impl SpaceFs {
         Ok(Some((joined, resolved.stamp)))
     }
 
+    /// Builds the callback the git engine runs under the draft ref's push
+    /// lock once this write's commit is pushed — see
+    /// [`drua_library::OnCommitted`]. `None` outside a draft (nothing to
+    /// journal). `record_path` is the path `record_commit` attributes
+    /// the edit to — the destination for `move_file`, `rel_path`
+    /// otherwise.
+    fn on_committed_for(
+        &self,
+        resolved: &Resolved,
+        action: &'static str,
+        record_path: String,
+    ) -> Option<OnCommitted> {
+        let draft = resolved.draft.as_ref()?;
+        let changesets = Arc::clone(&self.changesets);
+        let id = draft.id;
+        Some(Box::new(move |oid: String| {
+            Box::pin(async move {
+                changesets
+                    .record_commit(id, oid, action, &record_path)
+                    .await
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error + Send + Sync>)
+            })
+                as std::pin::Pin<
+                    Box<
+                        dyn std::future::Future<
+                                Output = Result<(), Box<dyn std::error::Error + Send + Sync>>,
+                            > + Send,
+                    >,
+                >
+        }))
+    }
+
     #[instrument(name = "library.space_fs.write_file", skip(self, sub, content))]
     pub async fn write_file(
         &self,
@@ -450,6 +484,8 @@ impl SpaceFs {
         Audit::record_action_if_unset("space.write_file");
         Self::record_changeset_audit(resolved.draft.as_ref());
         let attribution = self.users.commit_attribution().await;
+        let on_committed =
+            self.on_committed_for(&resolved, "write_file", resolved.rel_path.clone());
         let oid = self
             .spaces
             .write_file(
@@ -458,13 +494,11 @@ impl SpaceFs {
                 content,
                 attribution,
                 &resolved.target,
+                on_committed,
             )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
-        let rel_path = resolved.rel_path.clone();
-        let stamp = self
-            .stamp_after_write(sub, path, &resolved, oid, "write_file", &rel_path)
-            .await?;
+        let stamp = self.stamp_after_write(sub, path, &resolved, oid).await?;
         Ok(Some(stamp))
     }
 
@@ -488,6 +522,8 @@ impl SpaceFs {
         Audit::record_action_if_unset("space.str_replace");
         Self::record_changeset_audit(resolved.draft.as_ref());
         let attribution = self.users.commit_attribution().await;
+        let on_committed =
+            self.on_committed_for(&resolved, "str_replace", resolved.rel_path.clone());
         let oid = self
             .spaces
             .str_replace(
@@ -497,13 +533,11 @@ impl SpaceFs {
                 new_str,
                 attribution,
                 &resolved.target,
+                on_committed,
             )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
-        let rel_path = resolved.rel_path.clone();
-        let stamp = self
-            .stamp_after_write(sub, path, &resolved, oid, "str_replace", &rel_path)
-            .await?;
+        let stamp = self.stamp_after_write(sub, path, &resolved, oid).await?;
         Ok(Some(stamp))
     }
 
@@ -523,6 +557,7 @@ impl SpaceFs {
         Audit::record_action_if_unset("space.insert");
         Self::record_changeset_audit(resolved.draft.as_ref());
         let attribution = self.users.commit_attribution().await;
+        let on_committed = self.on_committed_for(&resolved, "insert", resolved.rel_path.clone());
         let oid = self
             .spaces
             .insert(
@@ -532,13 +567,11 @@ impl SpaceFs {
                 text,
                 attribution,
                 &resolved.target,
+                on_committed,
             )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
-        let rel_path = resolved.rel_path.clone();
-        let stamp = self
-            .stamp_after_write(sub, path, &resolved, oid, "insert", &rel_path)
-            .await?;
+        let stamp = self.stamp_after_write(sub, path, &resolved, oid).await?;
         Ok(Some(stamp))
     }
 
@@ -556,6 +589,8 @@ impl SpaceFs {
         Audit::record_action_if_unset("space.delete_file");
         Self::record_changeset_audit(resolved.draft.as_ref());
         let attribution = self.users.commit_attribution().await;
+        let on_committed =
+            self.on_committed_for(&resolved, "delete_file", resolved.rel_path.clone());
         let oid = self
             .spaces
             .delete_file(
@@ -563,13 +598,11 @@ impl SpaceFs {
                 &resolved.rel_path,
                 attribution,
                 &resolved.target,
+                on_committed,
             )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
-        let rel_path = resolved.rel_path.clone();
-        let stamp = self
-            .stamp_after_write(sub, path, &resolved, oid, "delete_file", &rel_path)
-            .await?;
+        let stamp = self.stamp_after_write(sub, path, &resolved, oid).await?;
         Ok(Some(stamp))
     }
 
@@ -636,6 +669,9 @@ impl SpaceFs {
         Audit::record_action_if_unset("space.move_file");
         Self::record_changeset_audit(from_resolved.draft.as_ref());
         let attribution = self.users.commit_attribution().await;
+        // The destination, not `from_resolved.rel_path` — `record_commit`
+        // attributes the move to where the file ends up.
+        let on_committed = self.on_committed_for(&from_resolved, "move_file", to_rel.clone());
         let oid = self
             .spaces
             .move_file(
@@ -644,11 +680,12 @@ impl SpaceFs {
                 &to_rel,
                 attribution,
                 &from_resolved.target,
+                on_committed,
             )
             .await
             .map_err(|e| -> ProjectError { e.into() })?;
         let stamp = self
-            .stamp_after_write(sub, from, &from_resolved, oid, "move_file", &to_rel)
+            .stamp_after_write(sub, from, &from_resolved, oid)
             .await?;
         Ok(Some(stamp))
     }
@@ -744,14 +781,15 @@ impl SpaceFs {
         }
     }
 
-    /// Records the commit on the draft (when there is one and the write
-    /// wasn't a no-op) and renders a fresh stamp from it. `record_path`
-    /// is the path `commit_recorded` attributes the edit to — the
-    /// destination for `move_file`, `rel_path` otherwise.
+    /// Renders a fresh stamp from the draft's current `DraftInfo`, once
+    /// there is one and the write wasn't a no-op. By the time this runs,
+    /// the commit is already journaled: the `on_committed` callback
+    /// built by [`Self::on_committed_for`] records it under the git
+    /// engine's push lock, and the engine answers the write's caller
+    /// only after that callback has run. This is a read-only refresh —
+    /// `Changesets::draft_info` — not a second write.
     ///
-    /// The commit is recorded unconditionally whenever there's a draft
-    /// and a real oid — even on a draft's first write — but the
-    /// re-rendered stamp is discarded in favour of the pre-write one
+    /// The re-rendered stamp is discarded in favour of the pre-write one
     /// when the draft just started, since that one already says
     /// "started" rather than a touched-file count.
     async fn stamp_after_write(
@@ -760,19 +798,20 @@ impl SpaceFs {
         path: &str,
         resolved: &Resolved,
         oid: Option<String>,
-        action: &str,
-        record_path: &str,
     ) -> Result<String, ProjectError> {
         let Some(draft) = &resolved.draft else {
             return Ok(resolved.stamp.clone());
         };
-        let Some(head_oid) = oid else {
+        if oid.is_none() {
             return Ok(resolved.stamp.clone());
+        }
+        let refreshed = match self.changesets.draft_info(draft.id).await {
+            Ok(info) => info,
+            Err(e) => {
+                tracing::warn!(error = %e, changeset_id = %draft.id, "stamp_after_write: refresh failed; stamp rendered from the pre-write draft info");
+                return Ok(resolved.stamp.clone());
+            }
         };
-        let refreshed = self
-            .changesets
-            .commit_recorded(draft.id, head_oid, action, record_path)
-            .await?;
         if draft.just_started {
             return Ok(resolved.stamp.clone());
         }
