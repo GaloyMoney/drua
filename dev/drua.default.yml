@@ -58,6 +58,7 @@ library:
   data_dir: null
   repo_url: null
   skill_sync_interval_secs: 20
+  read_catch_up_timeout_ms: 5000
 changeset:
   pr_poll_interval_secs: 60
 git_proxy:

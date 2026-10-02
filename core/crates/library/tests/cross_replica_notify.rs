@@ -9,8 +9,11 @@ use drua_library::{CommitAttribution, Library, LibraryConfig};
 const PG_CON: &str = "postgres://user:password@localhost:5432/drua";
 
 /// Ticker effectively disabled: convergence can only come from the
-/// cross-replica `library_head_changed` PG NOTIFY wake-up.
+/// obix `library_main_head` ephemeral-event wake-up
+/// (`GitEngine::spawn_peer_listener`) that replaced the hand-rolled
+/// PG NOTIFY channel this test originally covered.
 const FETCH_INTERVAL_MS: u64 = 3_600_000;
+const READ_CATCH_UP_TIMEOUT_MS: u64 = 5_000;
 
 async fn pool() -> sqlx::PgPool {
     let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| PG_CON.to_string());
@@ -35,6 +38,7 @@ async fn init_replica(
         data_dir: data_dir.to_string_lossy().to_string(),
         repo_url: repo_url.to_string(),
         fetch_interval_ms: FETCH_INTERVAL_MS,
+        read_catch_up_timeout_ms: READ_CATCH_UP_TIMEOUT_MS,
     };
     let library = Library::init(pool, &config, embedder, &mut jobs, None)
         .await
@@ -59,9 +63,19 @@ async fn write_on_one_replica_is_visible_on_peer_without_ticker() {
     let pool = pool().await;
     reset_library_db_state(&pool).await;
 
+    // This test's contract is strictly weaker than
+    // cross_replica_read_your_write.rs's main-rounds test (it polls B
+    // in a loop rather than asserting a single read converges
+    // immediately, so in practice the two would fail together if the
+    // obix wake-up broke). Kept deliberately rather than folded in: a
+    // passing cross-replica test deleted in the same change that lands
+    // the feature it was guarding is not reversible by review, and
+    // this one predates ensure_main_current's wait — removing it is a
+    // separate decision from landing the fix.
+    //
     // Only replica A polls jobs, so A is guaranteed to execute the
     // library.write job; B has no poller and a disabled ticker, so it
-    // can only converge via the `library_head_changed` PG NOTIFY.
+    // can only converge via the obix ephemeral-event wake-up.
     let repo_url = fixture.path().to_string_lossy().to_string();
     let (replica_a, _jobs_a) = init_replica(test_name, "a", &repo_url, &pool, true).await;
     let (replica_b, _jobs_b) = init_replica(test_name, "b", &repo_url, &pool, false).await;

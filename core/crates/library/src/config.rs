@@ -4,6 +4,10 @@ pub struct LibraryConfig {
     pub repo_url: String,
     /// How often the fetcher task pulls from origin.
     pub fetch_interval_ms: u64,
+    /// Upper bound a read at HEAD, or a draft handle, waits for this
+    /// replica to catch up to an acked write before failing with
+    /// `StaleReplica`.
+    pub read_catch_up_timeout_ms: u64,
 }
 
 impl LibraryConfig {
@@ -31,6 +35,7 @@ mod tests {
             data_dir: "/tmp/x".to_string(),
             repo_url: repo_url.to_string(),
             fetch_interval_ms: 1000,
+            read_catch_up_timeout_ms: 5000,
         }
     }
 

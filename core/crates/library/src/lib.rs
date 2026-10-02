@@ -76,6 +76,7 @@ impl Library {
                 repo_path,
                 github_app.clone(),
                 pool.clone(),
+                config.read_catch_up_timeout_ms,
             )
             .await?,
         );
@@ -128,6 +129,7 @@ impl Library {
                 data_dir: config.data_dir.clone(),
                 repo_url: config.repo_url.clone(),
                 fetch_interval_ms: config.fetch_interval_ms,
+                read_catch_up_timeout_ms: config.read_catch_up_timeout_ms,
             },
             pool: pool.clone(),
             embedder,

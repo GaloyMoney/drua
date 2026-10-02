@@ -103,7 +103,8 @@ async fn reset_db(pool: &sqlx::PgPool) {
             session_threads, session_thread_events, \
             agent_sessions, agent_session_events, \
             agents, agent_events, \
-            projects, project_events \
+            projects, project_events, \
+            ephemeral_outbox_events \
         RESTART IDENTITY CASCADE";
     sqlx::query(stmt)
         .execute(pool)
@@ -176,6 +177,7 @@ async fn setup_with_upstream(test_name: &str) -> (App, AuthSubject, PathBuf) {
             data_dir: Some(data_dir.to_string_lossy().into_owned()),
             repo_url: Some(upstream.to_string_lossy().into_owned()),
             skill_sync_interval_secs: 1,
+            ..Default::default()
         },
         ..Default::default()
     };

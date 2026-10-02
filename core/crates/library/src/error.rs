@@ -20,6 +20,16 @@ pub enum LibraryError {
     MergeConflicts { paths: Vec<String> },
     #[error("main has no commits yet")]
     MainUnborn,
+    #[error("head fence publish: {0}")]
+    FencePublish(String),
+    #[error(
+        "replica behind acked write on {refname}: needs {required}, has {local:?}; catch-up timed out"
+    )]
+    StaleReplica {
+        refname: String,
+        required: String,
+        local: Option<String>,
+    },
     #[error("job: {0}")]
     Job(#[from] job::error::JobError),
     #[error("sqlx: {0}")]

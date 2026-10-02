@@ -17,6 +17,9 @@ use crate::primitives::SpaceId;
 use crate::user::Users;
 
 const DEFAULT_SKILL_SYNC_INTERVAL_SECS: u64 = 20;
+/// OQ-1: interactive tool call budget, not the 10s the prior
+/// read-your-write prototype used.
+const DEFAULT_READ_CATCH_UP_TIMEOUT_MS: u64 = 5_000;
 
 #[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub struct LibraryConfig {
@@ -28,6 +31,11 @@ pub struct LibraryConfig {
     /// Default 20s. Reused as the upstream-fetch interval.
     #[serde(default = "default_skill_sync_interval_secs")]
     pub skill_sync_interval_secs: u64,
+    /// Upper bound a space read at HEAD, or a draft handle, waits for
+    /// this replica to catch up to an acked write before failing.
+    /// Default 5000.
+    #[serde(default = "default_read_catch_up_timeout_ms")]
+    pub read_catch_up_timeout_ms: u64,
 }
 
 impl Default for LibraryConfig {
@@ -36,12 +44,17 @@ impl Default for LibraryConfig {
             data_dir: None,
             repo_url: None,
             skill_sync_interval_secs: DEFAULT_SKILL_SYNC_INTERVAL_SECS,
+            read_catch_up_timeout_ms: DEFAULT_READ_CATCH_UP_TIMEOUT_MS,
         }
     }
 }
 
 fn default_skill_sync_interval_secs() -> u64 {
     DEFAULT_SKILL_SYNC_INTERVAL_SECS
+}
+
+fn default_read_catch_up_timeout_ms() -> u64 {
+    DEFAULT_READ_CATCH_UP_TIMEOUT_MS
 }
 
 impl LibraryConfig {
@@ -58,6 +71,7 @@ impl LibraryConfig {
             data_dir,
             repo_url: self.repo_url.unwrap_or_default(),
             fetch_interval_ms: self.skill_sync_interval_secs.saturating_mul(1000).max(1000),
+            read_catch_up_timeout_ms: self.read_catch_up_timeout_ms,
         }
     }
 }

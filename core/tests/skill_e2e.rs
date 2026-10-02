@@ -105,7 +105,8 @@ async fn reset_db(pool: &sqlx::PgPool) {
             session_threads, session_thread_events, \
             agent_sessions, agent_session_events, \
             agents, agent_events, \
-            projects, project_events \
+            projects, project_events, \
+            ephemeral_outbox_events \
         RESTART IDENTITY CASCADE";
     sqlx::query(stmt)
         .execute(pool)
@@ -177,6 +178,7 @@ async fn skill_create_propagates_to_search_and_upstream() {
             // doesn't depend on the fetch tick — only the inbound
             // (reverse) sync would.
             skill_sync_interval_secs: 1,
+            ..Default::default()
         },
         ..Default::default()
     };
