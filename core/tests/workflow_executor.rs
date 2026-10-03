@@ -343,6 +343,7 @@ fn max_tokens_response() -> PromptResponse {
         upstream_provider: None,
         finish_reason: Some("length".to_string()),
         upstream_error: None,
+        malformed_tool_calls: Vec::new(),
     }
 }
 
@@ -355,6 +356,7 @@ fn empty_stop_response() -> PromptResponse {
         upstream_provider: None,
         finish_reason: Some("stop".to_string()),
         upstream_error: None,
+        malformed_tool_calls: Vec::new(),
     }
 }
 
@@ -370,6 +372,7 @@ fn incomplete_response() -> PromptResponse {
         upstream_provider: None,
         finish_reason: Some("error".to_string()),
         upstream_error: None,
+        malformed_tool_calls: Vec::new(),
     }
 }
 
@@ -390,6 +393,7 @@ fn thinking_only_response() -> PromptResponse {
         upstream_provider: None,
         finish_reason: Some("stop".to_string()),
         upstream_error: None,
+        malformed_tool_calls: Vec::new(),
     }
 }
 
@@ -406,6 +410,7 @@ fn submit_output_response(id: &str, args: serde_json::Value) -> PromptResponse {
         upstream_provider: None,
         finish_reason: Some("tool_calls".to_string()),
         upstream_error: None,
+        malformed_tool_calls: Vec::new(),
     }
 }
 
@@ -422,6 +427,7 @@ fn tool_use_response(id: &str, name: &str) -> PromptResponse {
         upstream_provider: None,
         finish_reason: Some("tool_calls".to_string()),
         upstream_error: None,
+        malformed_tool_calls: Vec::new(),
     }
 }
 
@@ -942,6 +948,7 @@ async fn end_turn_without_submit_output_still_triggers_forced_nudge() {
             upstream_provider: None,
             finish_reason: Some("stop".to_string()),
             upstream_error: None,
+            malformed_tool_calls: Vec::new(),
         })))
         .expect("send response");
 

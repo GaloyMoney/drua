@@ -13,7 +13,7 @@ pub use request::{
     PromptError, PromptRequest, PromptRequestChannel, PromptResponseChannel, PromptResult,
     StreamHandle, TerminalKind, TransientKind,
 };
-pub use response::{PromptResponse, RequestToolUse, StopReason, Usage};
+pub use response::{MalformedToolCall, PromptResponse, RequestToolUse, StopReason, Usage};
 pub use spec::{ModelChain, ModelSpec, ReasoningEffort};
 pub use tool::{
     ToolUseError, ToolUseRequest, ToolUseRequestChannel, ToolUseResponseChannel, ToolUseResult,
