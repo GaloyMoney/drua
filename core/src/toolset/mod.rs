@@ -179,15 +179,25 @@ fn is_nullable_property(
     properties: Option<&serde_json::Map<String, serde_json::Value>>,
     key: &str,
 ) -> bool {
-    let Some(ty) = properties
-        .and_then(|p| p.get(key))
-        .and_then(|p| p.get("type"))
-    else {
+    let Some(schema) = properties.and_then(|p| p.get(key)) else {
         return false;
     };
+    if type_allows_null(schema.get("type")) {
+        return true;
+    }
+    // schemars emits `Option<T>` for non-primitive `T` (a `$ref`, enum, or
+    // other type without a top-level `type` keyword) as `anyOf`/`oneOf` with
+    // a `{"type": "null"}` branch rather than folding `null` into `type`.
+    ["anyOf", "oneOf"]
+        .into_iter()
+        .filter_map(|combinator| schema.get(combinator)?.as_array())
+        .any(|variants| variants.iter().any(|v| type_allows_null(v.get("type"))))
+}
+
+fn type_allows_null(ty: Option<&serde_json::Value>) -> bool {
     match ty {
-        serde_json::Value::String(s) => s == "null",
-        serde_json::Value::Array(types) => types.iter().any(|t| t.as_str() == Some("null")),
+        Some(serde_json::Value::String(s)) => s == "null",
+        Some(serde_json::Value::Array(types)) => types.iter().any(|t| t.as_str() == Some("null")),
         _ => false,
     }
 }
@@ -1629,6 +1639,52 @@ mod tests {
         );
         assert_eq!(omits_real_field.len(), 1);
         assert!(omits_real_field[0].reason.contains("'output' is required"));
+    }
+
+    /// `schemars` represents an optional non-primitive field (a `$ref`,
+    /// enum, or anything without a top-level `type`) as `anyOf`/`oneOf` with
+    /// a `{"type": "null"}` branch rather than folding `null` into `type`.
+    /// `is_nullable_property` must recognize that form too, or a strict-mode
+    /// `required` entry for such a field gets judged as hard-required.
+    #[test]
+    fn validate_tool_calls_treats_any_of_null_required_as_optional() {
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_top_level(RequiredFieldTool::new(
+            "submit_output",
+            serde_json::json!({ "type": "object", "additionalProperties": true }),
+        ));
+        let real_schema = llm::prompt::Tool {
+            name: "submit_output".to_string(),
+            description: None,
+            input_schema: serde_json::json!({
+                "type": "object",
+                "required": ["success", "detail"],
+                "properties": {
+                    "success": { "type": "boolean" },
+                    "detail": {
+                        "anyOf": [
+                            { "$ref": "#/definitions/Detail" },
+                            { "type": "null" },
+                        ],
+                    },
+                },
+            }),
+            strict: true,
+        };
+
+        let omits_optional_field = toolsets.validate_tool_calls(
+            &[tool_use(
+                "1",
+                "submit_output",
+                serde_json::json!({"success": true}),
+            )],
+            &[],
+            std::slice::from_ref(&real_schema),
+        );
+        assert!(
+            omits_optional_field.is_empty(),
+            "omitting an anyOf-nullable field must not be flagged: {omits_optional_field:?}"
+        );
     }
 
     #[test]

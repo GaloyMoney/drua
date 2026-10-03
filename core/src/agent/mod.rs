@@ -1656,21 +1656,19 @@ impl Agents {
                                 let prompt = match sessions.pending_prompt(id).await {
                                     Ok(Some(p)) => p,
                                     Ok(None) => {
-                                        emit_event(
-                                            &tx,
-                                            ChatOutputEvent::Error {
-                                                message: "discard recorded but no pending prompt to resend".to_string(),
-                                            },
-                                        );
+                                        let msg = "discard recorded but no pending prompt to resend".to_string();
+                                        let _ = sessions
+                                            .assistant_response_failed(id, current_model.clone(), msg.clone())
+                                            .await;
+                                        emit_event(&tx, ChatOutputEvent::Error { message: msg });
                                         return;
                                     }
                                     Err(e) => {
-                                        emit_event(
-                                            &tx,
-                                            ChatOutputEvent::Error {
-                                                message: e.to_string(),
-                                            },
-                                        );
+                                        let msg = e.to_string();
+                                        let _ = sessions
+                                            .assistant_response_failed(id, current_model.clone(), msg.clone())
+                                            .await;
+                                        emit_event(&tx, ChatOutputEvent::Error { message: msg });
                                         return;
                                     }
                                 };
@@ -1679,12 +1677,11 @@ impl Agents {
                                 prompt.trace_run_id = workflow_run_id.map(|r| r.to_string());
                                 let (request, rx_next) = llm::PromptRequest::new(prompt);
                                 if prompt_requests.send(request).await.is_err() {
-                                    emit_event(
-                                        &tx,
-                                        ChatOutputEvent::Error {
-                                            message: "prompt request channel closed".to_string(),
-                                        },
-                                    );
+                                    let msg = "prompt request channel closed".to_string();
+                                    let _ = sessions
+                                        .assistant_response_failed(id, current_model.clone(), msg.clone())
+                                        .await;
+                                    emit_event(&tx, ChatOutputEvent::Error { message: msg });
                                     return;
                                 }
                                 next = rx_next.await;
