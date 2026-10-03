@@ -46,7 +46,6 @@ pub(super) fn event_belongs_to_thread(
         | AgentSessionEvent::OutputSubmitted { .. }
         | AgentSessionEvent::ModelChainUpdated { .. }
         | AgentSessionEvent::ModelChainAdvanced { .. }
-        // D2: compaction must never try to mask or prune inside a discard.
         | AgentSessionEvent::AssistantResponseDiscarded { .. } => false,
     }
 }
