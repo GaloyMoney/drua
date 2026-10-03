@@ -121,6 +121,9 @@ data:
             {{- if hasKey . "maxTurnsPerPrompt" }}
             max_turns_per_prompt: {{ .maxTurnsPerPrompt }}
             {{- end }}
+            {{- if hasKey . "maxToolCallDiscards" }}
+            max_tool_call_discards: {{ .maxToolCallDiscards }}
+            {{- end }}
           {{- end }}
         {{- with .Values.galoyAgents.config.agents.agent }}
         agent:
@@ -172,6 +175,9 @@ data:
             {{- end }}
             {{- if hasKey . "maxTurnsPerPrompt" }}
             max_turns_per_prompt: {{ .maxTurnsPerPrompt }}
+            {{- end }}
+            {{- if hasKey . "maxToolCallDiscards" }}
+            max_tool_call_discards: {{ .maxToolCallDiscards }}
             {{- end }}
           {{- end }}
         {{- end }}
@@ -225,6 +231,9 @@ data:
             {{- end }}
             {{- if hasKey . "maxTurnsPerPrompt" }}
             max_turns_per_prompt: {{ .maxTurnsPerPrompt }}
+            {{- end }}
+            {{- if hasKey . "maxToolCallDiscards" }}
+            max_tool_call_discards: {{ .maxToolCallDiscards }}
             {{- end }}
           {{- end }}
         {{- end }}

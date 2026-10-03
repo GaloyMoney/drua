@@ -206,6 +206,7 @@ async fn send_message_round_trip_via_prompt_channel() {
             upstream_provider: None,
             finish_reason: None,
             upstream_error: None,
+            malformed_tool_calls: Vec::new(),
         })))
         .expect("send response");
 
@@ -385,6 +386,7 @@ async fn send_message_dispatches_registered_tool_call() {
             upstream_provider: None,
             finish_reason: None,
             upstream_error: None,
+            malformed_tool_calls: Vec::new(),
         })))
         .expect("send first response");
 
@@ -410,6 +412,7 @@ async fn send_message_dispatches_registered_tool_call() {
             upstream_provider: None,
             finish_reason: None,
             upstream_error: None,
+            malformed_tool_calls: Vec::new(),
         })))
         .expect("send second response");
 
@@ -617,6 +620,7 @@ async fn identical_failing_tool_calls_advance_chain_to_fallback() {
                 upstream_provider: None,
                 finish_reason: None,
                 upstream_error: None,
+                malformed_tool_calls: Vec::new(),
             })))
             .unwrap_or_else(|_| panic!("send response #{i}"));
     }
@@ -642,6 +646,7 @@ async fn identical_failing_tool_calls_advance_chain_to_fallback() {
             upstream_provider: None,
             finish_reason: None,
             upstream_error: None,
+            malformed_tool_calls: Vec::new(),
         })))
         .expect("send fallback response");
 
@@ -746,6 +751,7 @@ async fn identical_failing_tool_calls_without_fallback_error_the_turn() {
                 upstream_provider: None,
                 finish_reason: None,
                 upstream_error: None,
+                malformed_tool_calls: Vec::new(),
             })))
             .unwrap_or_else(|_| panic!("send response #{i}"));
     }
@@ -919,6 +925,7 @@ async fn resume_message_continues_past_interrupted_tool_call() {
             upstream_provider: None,
             finish_reason: None,
             upstream_error: None,
+            malformed_tool_calls: Vec::new(),
         })))
         .expect("send first response");
 
@@ -974,6 +981,7 @@ async fn resume_message_continues_past_interrupted_tool_call() {
             upstream_provider: None,
             finish_reason: None,
             upstream_error: None,
+            malformed_tool_calls: Vec::new(),
         })))
         .expect("send continuation response");
 

@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use crate::prompt::AssistantBlock;
-use crate::{PromptResponse, StopReason, Usage};
+use crate::{MalformedToolCall, PromptResponse, StopReason, Usage};
 
 /// Block boundaries are inferred from the deltas themselves; providers emit
 /// only the events that map naturally to their wire format. `Usage` is
@@ -191,16 +191,26 @@ impl StreamAccumulator {
             content.push(AssistantBlock::Text { text });
         }
 
+        let mut malformed_tool_calls = Vec::new();
         for tc in self.tool_calls {
             // Zero-parameter tools receive no InputJsonDelta events; default
             // to "{}" so the Anthropic API doesn't reject a null input.
-            let json_str = if tc.json_buf.is_empty() {
-                "{}".to_string()
+            let input = if tc.json_buf.is_empty() {
+                serde_json::Value::Object(serde_json::Map::new())
             } else {
-                tc.json_buf
+                match serde_json::from_str(&tc.json_buf) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        malformed_tool_calls.push(MalformedToolCall {
+                            id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            buffer_bytes: tc.json_buf.len(),
+                            error: e.to_string(),
+                        });
+                        serde_json::Value::Object(serde_json::Map::new())
+                    }
+                }
             };
-            let input = serde_json::from_str(&json_str)
-                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
             content.push(AssistantBlock::ToolUse {
                 id: tc.id,
                 name: tc.name,
@@ -216,6 +226,7 @@ impl StreamAccumulator {
             upstream_provider: self.upstream_provider,
             finish_reason: self.finish_reason,
             upstream_error: self.upstream_error,
+            malformed_tool_calls,
         }
     }
 }
@@ -321,6 +332,60 @@ mod tests {
             _ => panic!("expected tool use block"),
         }
         assert_eq!(resp.stop_reason, Some(StopReason::ToolUse));
+    }
+
+    #[test]
+    fn finish_reports_malformed_tool_call_arguments() {
+        let mut acc = StreamAccumulator::new();
+        acc.process(&StreamDelta::ToolCallStart {
+            id: "tu_1".to_string(),
+            name: "Edit".to_string(),
+        });
+        acc.process(&StreamDelta::ToolCallDelta {
+            id: "tu_1".to_string(),
+            partial_json: r#"{"path": "x", "file_text": "abc"#.to_string(),
+        });
+        acc.process(&StreamDelta::Done {
+            stop_reason: Some(StopReason::ToolUse),
+            finish_reason: Some("tool_calls".to_string()),
+            upstream_error: None,
+        });
+
+        let resp = acc.finish();
+        assert_eq!(resp.content.len(), 1);
+        match &resp.content[0] {
+            AssistantBlock::ToolUse { input, .. } => {
+                assert_eq!(input, &serde_json::json!({}));
+            }
+            _ => panic!("expected tool use block"),
+        }
+        assert_eq!(resp.malformed_tool_calls.len(), 1);
+        assert_eq!(resp.malformed_tool_calls[0].id, "tu_1");
+        assert_eq!(resp.malformed_tool_calls[0].name, "Edit");
+        assert_eq!(resp.malformed_tool_calls[0].buffer_bytes, 31);
+    }
+
+    #[test]
+    fn finish_keeps_empty_buffer_as_empty_object_without_malformed_entry() {
+        let mut acc = StreamAccumulator::new();
+        acc.process(&StreamDelta::ToolCallStart {
+            id: "tu_1".to_string(),
+            name: "no_args_tool".to_string(),
+        });
+        acc.process(&StreamDelta::Done {
+            stop_reason: Some(StopReason::ToolUse),
+            finish_reason: Some("tool_calls".to_string()),
+            upstream_error: None,
+        });
+
+        let resp = acc.finish();
+        match &resp.content[0] {
+            AssistantBlock::ToolUse { input, .. } => {
+                assert_eq!(input, &serde_json::json!({}));
+            }
+            _ => panic!("expected tool use block"),
+        }
+        assert!(resp.malformed_tool_calls.is_empty());
     }
 
     #[test]

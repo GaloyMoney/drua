@@ -63,6 +63,14 @@ pub trait TopLevelTool: Send + Sync {
         ToolOutputShape::default()
     }
 
+    /// Rejects arguments the tool cannot possibly execute beyond what the
+    /// JSON-Schema `required` list already says (per-command fields, say).
+    /// Runs before dispatch so the agent loop can treat an un-executable
+    /// call as a transport failure rather than a model error.
+    fn validate_arguments(&self, _arguments: Option<&JsonObject>) -> Result<(), String> {
+        Ok(())
+    }
+
     async fn call(
         &self,
         subject: &AuthSubject,

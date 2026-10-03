@@ -219,6 +219,10 @@ impl TopLevelTool for TextEditor {
         subject.can_use_agent_file_tools()
     }
 
+    fn validate_arguments(&self, arguments: Option<&JsonObject>) -> Result<(), String> {
+        validate_text_editor_arguments(arguments)
+    }
+
     async fn call(
         &self,
         subject: &AuthSubject,
@@ -235,5 +239,66 @@ impl TopLevelTool for TextEditor {
     ) -> Result<CallToolResult, ToolSetsError> {
         let input: TextEditorInput = parse_params(arguments)?;
         self.edit(subject, input, false).await
+    }
+}
+
+/// Same deserialize-then-[`TextEditorInput::resolve`] path `call`/
+/// `call_from_script` run (via [`parse_params`]), so what pre-dispatch
+/// validation flags is exactly what dispatch would have rejected.
+fn validate_text_editor_arguments(arguments: Option<&JsonObject>) -> Result<(), String> {
+    let args = arguments.ok_or("arguments are required")?;
+    let input: TextEditorInput = serde_json::from_value(serde_json::Value::Object(args.clone()))
+        .map_err(|e| e.to_string())?;
+    input.resolve().map(|_| ()).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn obj(v: serde_json::Value) -> JsonObject {
+        v.as_object().expect("object").clone()
+    }
+
+    /// The §1.1 production shape: valid JSON, correct top-level fields,
+    /// the one large string absent.
+    #[test]
+    fn validate_text_editor_arguments_rejects_create_missing_file_text() {
+        let args = obj(serde_json::json!({
+            "command": "create",
+            "path": "/tmp/x",
+            "view_range": null,
+        }));
+        let err = validate_text_editor_arguments(Some(&args)).expect_err("missing file_text");
+        assert!(err.contains("file_text"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_text_editor_arguments_rejects_str_replace_missing_old_str() {
+        let args = obj(serde_json::json!({
+            "command": "str_replace",
+            "path": "/tmp/x",
+        }));
+        let err = validate_text_editor_arguments(Some(&args)).expect_err("missing old_str");
+        assert!(err.contains("old_str"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_text_editor_arguments_accepts_complete_create_call() {
+        let args = obj(serde_json::json!({
+            "command": "create",
+            "path": "/tmp/x",
+            "file_text": "hello",
+        }));
+        assert!(validate_text_editor_arguments(Some(&args)).is_ok());
+    }
+
+    #[test]
+    fn validate_text_editor_arguments_accepts_view_with_no_extra_fields() {
+        let args = obj(serde_json::json!({
+            "command": "view",
+            "path": "/tmp/x",
+        }));
+        assert!(validate_text_editor_arguments(Some(&args)).is_ok());
     }
 }

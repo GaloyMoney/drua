@@ -27,6 +27,21 @@ pub struct PromptResponse {
     /// a normal finish.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_error: Option<String>,
+    /// Tool calls whose argument buffer was non-empty but not valid JSON.
+    /// Their `ToolUse.input` in `content` is `{}`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub malformed_tool_calls: Vec<MalformedToolCall>,
+}
+
+/// A tool call whose argument buffer arrived non-empty but failed to parse
+/// as JSON — the bytes that reached the client could not have been what the
+/// model wrote, since every provider emits syntactically valid JSON deltas.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MalformedToolCall {
+    pub id: String,
+    pub name: String,
+    pub buffer_bytes: usize,
+    pub error: String,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]

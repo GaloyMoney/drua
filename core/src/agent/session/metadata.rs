@@ -141,6 +141,7 @@ mod tests {
             upstream_provider: Some("Anthropic".to_string()),
             finish_reason: None,
             upstream_error: None,
+            malformed_tool_calls: Vec::new(),
         };
         let mut metadata = AssistantResponseMetadata::from(response.usage);
         metadata.upstream_provider = response.upstream_provider;
@@ -159,6 +160,7 @@ mod tests {
             upstream_provider: None,
             finish_reason: None,
             upstream_error: None,
+            malformed_tool_calls: Vec::new(),
         };
         let mut metadata = AssistantResponseMetadata::from(response.usage);
         metadata.upstream_provider = response.upstream_provider;

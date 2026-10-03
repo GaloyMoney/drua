@@ -184,6 +184,15 @@ pub struct ToolResultInput {
     pub is_error: bool,
 }
 
+/// Session-local mirror of `crate::toolset::UnusableToolCall` — a tool call
+/// a discarded response could not have executed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnusableToolCallRecord {
+    pub id: String,
+    pub name: String,
+    pub reason: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StopReason {

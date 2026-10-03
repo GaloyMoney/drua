@@ -282,6 +282,51 @@ impl Sessions {
         result
     }
 
+    /// D1/D2: records a response whose tool-call arguments could not have
+    /// succeeded as a discard rather than a received turn — see
+    /// `AgentSession::assistant_response_discarded`.
+    #[instrument(
+        name = "domain.agent_session.assistant_response_discarded",
+        skip(self, response, unusable)
+    )]
+    pub async fn assistant_response_discarded(
+        &self,
+        agent_id: AgentId,
+        response: llm::PromptResponse,
+        model: String,
+        unusable: Vec<crate::toolset::UnusableToolCall>,
+    ) -> Result<DiscardOutcome, AgentSessionError> {
+        let mut op = self.repo.begin_op().await?;
+        let mut session = self.repo.find_by_agent_id_in_op(&mut op, agent_id).await?;
+        let thread_id = session
+            .current_main_thread_id()
+            .ok_or(AgentSessionError::ThreadNotFound)?;
+
+        let content: Vec<AssistantBlock> = response
+            .content
+            .into_iter()
+            .map(AssistantBlock::from)
+            .collect();
+        let mut metadata = AssistantResponseMetadata::from(response.usage);
+        metadata.model = model;
+        metadata.upstream_provider = response.upstream_provider;
+        metadata.finish_reason = response.finish_reason;
+
+        let unusable: Vec<UnusableToolCallRecord> = unusable
+            .into_iter()
+            .map(|u| UnusableToolCallRecord {
+                id: u.id,
+                name: u.name,
+                reason: u.reason,
+            })
+            .collect();
+
+        let result = session.assistant_response_discarded(thread_id, content, metadata, unusable);
+        self.repo.update_in_op(&mut op, &mut session).await?;
+        op.commit().await?;
+        result
+    }
+
     /// Records a failed assistant turn. Without this the thread stays in
     /// `AwaitingAssistantResponse` after an LLM error and every subsequent
     /// user message bounces with "session is waiting for an assistant

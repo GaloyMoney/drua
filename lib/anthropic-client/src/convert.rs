@@ -284,6 +284,7 @@ pub(crate) fn accumulated_to_response(acc: AccumulatedResponse) -> PromptRespons
         upstream_provider: None,
         finish_reason,
         upstream_error: None,
+        malformed_tool_calls: Vec::new(),
     }
 }
 

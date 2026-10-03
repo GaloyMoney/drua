@@ -129,6 +129,79 @@ fn normalize_for_strict_in_place(value: &mut serde_json::Value) {
     obj.insert("additionalProperties".to_string(), serde_json::json!(false));
 }
 
+/// A tool call the agent loop must not dispatch: its arguments either never
+/// arrived intact (`malformed`) or fail the schema/tool's own required-field
+/// check. Produced by [`ToolSets::validate_tool_calls`].
+#[derive(Debug, Clone)]
+pub struct UnusableToolCall {
+    pub id: String,
+    pub name: String,
+    pub reason: String,
+}
+
+/// Checks only the JSON-Schema `required` list against `arguments` — no
+/// recursion into nested objects, no type checking (serde does that at
+/// dispatch, and a type mismatch is a model error, not a transport one).
+/// No `required` array, or `arguments: None` with an empty `required`,
+/// is `Ok(())`.
+///
+/// A `required` key whose own property schema allows `null`
+/// ([`is_nullable_property`]) is skipped: `top_level_tool_defs`'s strict-
+/// mode normalization (`normalize_for_strict_in_place`) lists every
+/// property as `required` and makes the originally-optional ones
+/// nullable instead, so the schema the model was shown is stricter than
+/// what dispatch actually validates against (`submit_output`'s real
+/// `OutputSchema::validate`, in particular). Treating that wire-format
+/// artifact as a hard requirement would flag calls that genuinely omit
+/// an optional field — not a provider that stripped bytes.
+fn schema_required_check(
+    schema: &serde_json::Value,
+    arguments: Option<&JsonObject>,
+) -> Result<(), String> {
+    let Some(required) = schema.get("required").and_then(|r| r.as_array()) else {
+        return Ok(());
+    };
+    let properties = schema.get("properties").and_then(|p| p.as_object());
+    for key in required {
+        let Some(key) = key.as_str() else { continue };
+        if is_nullable_property(properties, key) {
+            continue;
+        }
+        let present = arguments.is_some_and(|a| a.contains_key(key));
+        if !present {
+            return Err(format!("'{key}' is required"));
+        }
+    }
+    Ok(())
+}
+
+fn is_nullable_property(
+    properties: Option<&serde_json::Map<String, serde_json::Value>>,
+    key: &str,
+) -> bool {
+    let Some(schema) = properties.and_then(|p| p.get(key)) else {
+        return false;
+    };
+    if type_allows_null(schema.get("type")) {
+        return true;
+    }
+    // schemars emits `Option<T>` for non-primitive `T` (a `$ref`, enum, or
+    // other type without a top-level `type` keyword) as `anyOf`/`oneOf` with
+    // a `{"type": "null"}` branch rather than folding `null` into `type`.
+    ["anyOf", "oneOf"]
+        .into_iter()
+        .filter_map(|combinator| schema.get(combinator)?.as_array())
+        .any(|variants| variants.iter().any(|v| type_allows_null(v.get("type"))))
+}
+
+fn type_allows_null(ty: Option<&serde_json::Value>) -> bool {
+    match ty {
+        Some(serde_json::Value::String(s)) => s == "null",
+        Some(serde_json::Value::Array(types)) => types.iter().any(|t| t.as_str() == Some("null")),
+        _ => false,
+    }
+}
+
 pub struct ToolSets {
     compose: RwLock<Option<Arc<ComposeTool>>>,
     sets: Arc<RwLock<Vec<Arc<dyn SearchableToolSet>>>>,
@@ -606,6 +679,75 @@ impl ToolSets {
         }
 
         defs
+    }
+
+    /// Pre-dispatch structural check (D1): flags tool calls whose arguments
+    /// could not possibly have succeeded, so the caller can discard the
+    /// whole response instead of recording a call it already knows will
+    /// fail. Applies the same normalisations dispatch applies (schema-driven
+    /// arg coercion, `{arguments: {…}}` envelope recovery) so nothing this
+    /// flags would have been recovered by [`Self::call_top_level_instance`].
+    /// Judges `required` against `prompt_tools` (the schema the model was
+    /// shown) when the tool's name appears there, since some tools (e.g.
+    /// `submit_output`) register a permissive placeholder and have their
+    /// real schema substituted only into the prompt.
+    pub fn validate_tool_calls(
+        &self,
+        calls: &[llm::RequestToolUse],
+        malformed: &[llm::MalformedToolCall],
+        prompt_tools: &[llm::prompt::Tool],
+    ) -> Vec<UnusableToolCall> {
+        let mut out: Vec<UnusableToolCall> = malformed
+            .iter()
+            .map(|m| UnusableToolCall {
+                id: m.id.clone(),
+                name: m.name.clone(),
+                reason: format!(
+                    "arguments were not valid JSON ({} bytes: {})",
+                    m.buffer_bytes, m.error
+                ),
+            })
+            .collect();
+
+        let map = self.top_level.read().expect("top_level lock poisoned");
+        for call in calls {
+            if malformed.iter().any(|m| m.id == call.id) {
+                continue;
+            }
+            let Some(tool) = map.get(&call.name) else {
+                continue; // unknown tool: model error, dispatch reports it
+            };
+            let Some(mut args) = call.input.as_object().cloned() else {
+                continue;
+            };
+            let shown_schema = prompt_tools
+                .iter()
+                .find(|t| t.name == call.name)
+                .map(|t| &t.input_schema);
+            let schema = shown_schema.unwrap_or_else(|| tool.input_schema());
+            auto_parse_args::coerce_args_to_schema(&mut args, tool.input_schema());
+
+            let judge = |a: &JsonObject| -> Result<(), String> {
+                schema_required_check(schema, Some(a))?;
+                tool.validate_arguments(Some(a))
+            };
+            if judge(&args).is_ok() {
+                continue;
+            }
+            if let Some(inner) =
+                crate::arguments_envelope::strip_for_dispatch(&args, tool.input_schema())
+            {
+                if judge(&inner).is_ok() {
+                    continue;
+                }
+            }
+            out.push(UnusableToolCall {
+                id: call.id.clone(),
+                name: call.name.clone(),
+                reason: judge(&args).expect_err("just failed above"),
+            });
+        }
+        out
     }
 
     /// Records an audit entry when an [`Audit`] has been wired via [`set_audit`].
@@ -1314,6 +1456,381 @@ mod tests {
 
     fn obj(v: serde_json::Value) -> JsonObject {
         v.as_object().expect("object").clone()
+    }
+
+    /// Registered under a configurable name/schema; models tools (e.g.
+    /// `submit_output`) whose real `required` list is only visible in the
+    /// prompt's `Tool` entry, not the registered placeholder.
+    struct RequiredFieldTool {
+        name: String,
+        schema: serde_json::Value,
+    }
+
+    impl RequiredFieldTool {
+        fn new(name: &str, schema: serde_json::Value) -> Self {
+            Self {
+                name: name.to_string(),
+                schema,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TopLevelTool for RequiredFieldTool {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn description(&self) -> &str {
+            "stub"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            &self.schema
+        }
+        async fn call(
+            &self,
+            _subject: &AuthSubject,
+            _arguments: Option<JsonObject>,
+        ) -> Result<CallToolResult, ToolSetsError> {
+            unreachable!("stub: call should not be invoked by validate_tool_calls tests")
+        }
+    }
+
+    fn tool_use(id: &str, name: &str, input: serde_json::Value) -> llm::RequestToolUse {
+        llm::RequestToolUse {
+            id: id.to_string(),
+            name: name.to_string(),
+            input,
+        }
+    }
+
+    #[test]
+    fn validate_tool_calls_uses_schema_required_for_default_tools() {
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_top_level(RequiredFieldTool::new(
+            "needs_q",
+            serde_json::json!({ "type": "object", "required": ["q"] }),
+        ));
+
+        let missing = toolsets.validate_tool_calls(
+            &[tool_use("1", "needs_q", serde_json::json!({}))],
+            &[],
+            &[],
+        );
+        assert_eq!(missing.len(), 1);
+        assert!(missing[0].reason.contains("'q' is required"));
+
+        let complete = toolsets.validate_tool_calls(
+            &[tool_use("2", "needs_q", serde_json::json!({ "q": 1 }))],
+            &[],
+            &[],
+        );
+        assert!(complete.is_empty());
+    }
+
+    #[test]
+    fn validate_tool_calls_uses_prompt_schema_for_submit_output() {
+        let toolsets = ToolSets::empty_for_test();
+        // Registered placeholder: no `required`, so the registered schema
+        // alone would never flag a bare `{}` call — the real check has to
+        // come from `prompt_tools`.
+        toolsets.register_top_level(RequiredFieldTool::new(
+            "submit_output",
+            serde_json::json!({ "type": "object", "additionalProperties": true }),
+        ));
+        let real_schema = llm::prompt::Tool {
+            name: "submit_output".to_string(),
+            description: None,
+            input_schema: serde_json::json!({ "type": "object", "required": ["success"] }),
+            strict: true,
+        };
+
+        let missing = toolsets.validate_tool_calls(
+            &[tool_use("1", "submit_output", serde_json::json!({}))],
+            &[],
+            std::slice::from_ref(&real_schema),
+        );
+        assert_eq!(missing.len(), 1);
+        assert!(missing[0].reason.contains("'success' is required"));
+
+        let complete = toolsets.validate_tool_calls(
+            &[tool_use(
+                "2",
+                "submit_output",
+                serde_json::json!({ "success": true }),
+            )],
+            &[],
+            &[real_schema],
+        );
+        assert!(complete.is_empty());
+
+        // No prompt entry at all: falls back to the permissive placeholder.
+        let no_prompt_tools = toolsets.validate_tool_calls(
+            &[tool_use("3", "submit_output", serde_json::json!({}))],
+            &[],
+            &[],
+        );
+        assert!(no_prompt_tools.is_empty());
+    }
+
+    /// Regression: `top_level_tool_defs` runs every custom `output_schema`
+    /// through `normalize_for_strict`, which lists ALL properties as
+    /// `required` and makes the originally-optional ones nullable instead
+    /// of dropping them — OpenAI strict mode has no other way to express
+    /// "optional". Judging the model-shown schema's `required` array
+    /// literally (ignoring nullability) flags a call that omitted a
+    /// genuinely optional field, even though dispatch (`SubmitOutputTool`
+    /// validates against the pre-normalization `OutputSchema`) would
+    /// accept it.
+    #[test]
+    fn validate_tool_calls_treats_strict_mode_nullable_required_as_optional() {
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_top_level(RequiredFieldTool::new(
+            "submit_output",
+            serde_json::json!({ "type": "object", "additionalProperties": true }),
+        ));
+        let strict_schema = normalize_for_strict(serde_json::json!({
+            "type": "object",
+            "required": ["success", "output"],
+            "properties": {
+                "success": { "type": "boolean" },
+                "reason": { "type": "string" },
+                "output": { "type": "string" },
+            },
+        }));
+        assert_eq!(
+            strict_schema["required"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect::<std::collections::HashSet<_>>(),
+            ["success", "reason", "output"].into_iter().collect(),
+            "sanity: strict mode lists the originally-optional field too"
+        );
+        let real_schema = llm::prompt::Tool {
+            name: "submit_output".to_string(),
+            description: None,
+            input_schema: strict_schema,
+            strict: true,
+        };
+
+        let omits_optional_field = toolsets.validate_tool_calls(
+            &[tool_use(
+                "1",
+                "submit_output",
+                serde_json::json!({"success": true, "output": "hi"}),
+            )],
+            &[],
+            std::slice::from_ref(&real_schema),
+        );
+        assert!(
+            omits_optional_field.is_empty(),
+            "omitting a strict-mode-nullable field must not be flagged: {omits_optional_field:?}"
+        );
+
+        let omits_real_field = toolsets.validate_tool_calls(
+            &[tool_use(
+                "2",
+                "submit_output",
+                serde_json::json!({"success": true}),
+            )],
+            &[],
+            &[real_schema],
+        );
+        assert_eq!(omits_real_field.len(), 1);
+        assert!(omits_real_field[0].reason.contains("'output' is required"));
+    }
+
+    /// `schemars` represents an optional non-primitive field (a `$ref`,
+    /// enum, or anything without a top-level `type`) as `anyOf`/`oneOf` with
+    /// a `{"type": "null"}` branch rather than folding `null` into `type`.
+    /// `is_nullable_property` must recognize that form too, or a strict-mode
+    /// `required` entry for such a field gets judged as hard-required.
+    #[test]
+    fn validate_tool_calls_treats_any_of_null_required_as_optional() {
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_top_level(RequiredFieldTool::new(
+            "submit_output",
+            serde_json::json!({ "type": "object", "additionalProperties": true }),
+        ));
+        let real_schema = llm::prompt::Tool {
+            name: "submit_output".to_string(),
+            description: None,
+            input_schema: serde_json::json!({
+                "type": "object",
+                "required": ["success", "detail"],
+                "properties": {
+                    "success": { "type": "boolean" },
+                    "detail": {
+                        "anyOf": [
+                            { "$ref": "#/definitions/Detail" },
+                            { "type": "null" },
+                        ],
+                    },
+                },
+            }),
+            strict: true,
+        };
+
+        let omits_optional_field = toolsets.validate_tool_calls(
+            &[tool_use(
+                "1",
+                "submit_output",
+                serde_json::json!({"success": true}),
+            )],
+            &[],
+            std::slice::from_ref(&real_schema),
+        );
+        assert!(
+            omits_optional_field.is_empty(),
+            "omitting an anyOf-nullable field must not be flagged: {omits_optional_field:?}"
+        );
+    }
+
+    #[test]
+    fn validate_tool_calls_unwraps_arguments_envelope_before_judging() {
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_top_level(RequiredFieldTool::new(
+            "needs_q",
+            serde_json::json!({ "type": "object", "required": ["q"] }),
+        ));
+        let wrapped = toolsets.validate_tool_calls(
+            &[tool_use(
+                "1",
+                "needs_q",
+                serde_json::json!({ "arguments": { "q": 1 } }),
+            )],
+            &[],
+            &[],
+        );
+        assert!(
+            wrapped.is_empty(),
+            "envelope should be unwrapped before judging"
+        );
+    }
+
+    #[test]
+    fn validate_tool_calls_reports_malformed_entries() {
+        let toolsets = ToolSets::empty_for_test();
+        let malformed = vec![llm::MalformedToolCall {
+            id: "1".to_string(),
+            name: "Edit".to_string(),
+            buffer_bytes: 151,
+            error: "EOF while parsing a string".to_string(),
+        }];
+        let out = toolsets.validate_tool_calls(&[], &malformed, &[]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].id, "1");
+        assert_eq!(out[0].name, "Edit");
+        assert!(out[0].reason.contains("not valid JSON"));
+    }
+
+    #[test]
+    fn validate_tool_calls_ignores_unknown_tool_and_non_object_input() {
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_top_level(RequiredFieldTool::new(
+            "needs_q",
+            serde_json::json!({ "type": "object", "required": ["q"] }),
+        ));
+        let out = toolsets.validate_tool_calls(
+            &[
+                tool_use("1", "ghost", serde_json::json!({})),
+                tool_use("2", "needs_q", serde_json::json!(null)),
+            ],
+            &[],
+            &[],
+        );
+        assert!(
+            out.is_empty(),
+            "unknown tool names and non-object input are today's dispatch errors, not discards"
+        );
+    }
+
+    /// A call already covered by a `malformed_tool_calls` entry is not
+    /// double-judged against its (necessarily empty, `{}`) recorded input.
+    #[test]
+    fn validate_tool_calls_skips_schema_check_for_already_malformed_calls() {
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_top_level(RequiredFieldTool::new(
+            "needs_q",
+            serde_json::json!({ "type": "object", "required": ["q"] }),
+        ));
+        let malformed = vec![llm::MalformedToolCall {
+            id: "1".to_string(),
+            name: "needs_q".to_string(),
+            buffer_bytes: 10,
+            error: "EOF".to_string(),
+        }];
+        let out = toolsets.validate_tool_calls(
+            &[tool_use("1", "needs_q", serde_json::json!({}))],
+            &malformed,
+            &[],
+        );
+        assert_eq!(out.len(), 1, "one entry, not two, for the same call id");
+    }
+
+    /// Models `TextEditor`: schema has no `required` (per-command fields
+    /// can't be expressed there), so the real check lives in the
+    /// `validate_arguments` override hook.
+    struct CommandAwareTool;
+
+    #[async_trait::async_trait]
+    impl TopLevelTool for CommandAwareTool {
+        fn name(&self) -> &str {
+            "command_aware"
+        }
+        fn description(&self) -> &str {
+            "stub"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static S: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            S.get_or_init(|| serde_json::json!({ "type": "object" }))
+        }
+        fn validate_arguments(&self, arguments: Option<&JsonObject>) -> Result<(), String> {
+            let args = arguments.ok_or("arguments are required")?;
+            if args.get("command").and_then(|v| v.as_str()) == Some("create")
+                && !args.contains_key("file_text")
+            {
+                return Err("'file_text' is required for command 'create'".to_string());
+            }
+            Ok(())
+        }
+        async fn call(
+            &self,
+            _subject: &AuthSubject,
+            _arguments: Option<JsonObject>,
+        ) -> Result<CallToolResult, ToolSetsError> {
+            unreachable!("stub: call should not be invoked by validate_tool_calls tests")
+        }
+    }
+
+    #[test]
+    fn validate_tool_calls_runs_the_tools_validate_arguments_override() {
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_top_level(CommandAwareTool);
+
+        let missing = toolsets.validate_tool_calls(
+            &[tool_use(
+                "1",
+                "command_aware",
+                serde_json::json!({ "command": "create", "path": "/x" }),
+            )],
+            &[],
+            &[],
+        );
+        assert_eq!(missing.len(), 1);
+        assert!(missing[0].reason.contains("file_text"));
+
+        let complete = toolsets.validate_tool_calls(
+            &[tool_use(
+                "2",
+                "command_aware",
+                serde_json::json!({ "command": "create", "path": "/x", "file_text": "hi" }),
+            )],
+            &[],
+            &[],
+        );
+        assert!(complete.is_empty());
     }
 
     #[tokio::test]

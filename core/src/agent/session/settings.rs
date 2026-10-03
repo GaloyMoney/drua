@@ -95,6 +95,11 @@ pub struct BreakerConfig {
     /// chain (D7). `0` disables it.
     pub consecutive_empty_turns: usize,
     pub max_turns_per_prompt: usize,
+    /// Consecutive discarded responses (un-executable tool arguments) on
+    /// one thread, since the last `PromptSent`, before a response is
+    /// dispatched instead of re-prompted. `0` disables discarding —
+    /// every such response is dispatched (and errors) immediately.
+    pub max_tool_call_discards: usize,
 }
 
 impl Default for BreakerConfig {
@@ -106,6 +111,7 @@ impl Default for BreakerConfig {
             consecutive_max_tokens: 3,
             consecutive_empty_turns: 2,
             max_turns_per_prompt: 250,
+            max_tool_call_discards: 2,
         }
     }
 }

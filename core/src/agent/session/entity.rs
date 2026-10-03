@@ -127,6 +127,18 @@ pub enum AgentSessionEvent {
         from_model: String,
         to_model: String,
     },
+    /// A model response the loop refused to dispatch because a tool call's
+    /// arguments could not have been executed (not valid JSON, or missing a
+    /// field the tool requires). Kept for cost accounting and forensics;
+    /// never materialized into the prompt, never a breaker turn — the
+    /// thread stays on the same `PromptSent` and is re-prompted.
+    AssistantResponseDiscarded {
+        thread_id: SessionThreadId,
+        content: Vec<AssistantBlock>,
+        metadata: AssistantResponseMetadata,
+        unusable: Vec<UnusableToolCallRecord>,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,6 +190,16 @@ pub enum AgentSessionResponse {
     AwaitingToolUsageComplete,
     ToolUseRequest(Vec<ToolUseRequest>),
     Done,
+}
+
+/// Outcome of [`AgentSession::assistant_response_discarded`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiscardOutcome {
+    /// Recorded as `AssistantResponseDiscarded`; re-prompt the same model.
+    Discarded { consecutive: usize },
+    /// The thread's discard budget on this `PromptSent` is exhausted;
+    /// dispatch the response through `assistant_response_received` instead.
+    BudgetExhausted { consecutive: usize },
 }
 
 #[derive(Debug)]
@@ -1382,6 +1404,110 @@ impl AgentSession {
         Ok(response)
     }
 
+    /// Discards recorded on `thread_id` since its last `PromptSent` or
+    /// `AssistantResponseReceived`, walked back from the newest event.
+    fn consecutive_discards(&self, thread_id: SessionThreadId) -> usize {
+        let mut n = 0usize;
+        for event in self.events.iter_all().rev() {
+            match event {
+                AgentSessionEvent::AssistantResponseDiscarded { thread_id: tid, .. }
+                    if *tid == thread_id =>
+                {
+                    n += 1;
+                }
+                AgentSessionEvent::PromptSent { thread_id: tid, .. } if *tid == thread_id => break,
+                AgentSessionEvent::AssistantResponseReceived { thread_id: tid, .. }
+                    if *tid == thread_id =>
+                {
+                    break;
+                }
+                _ => {}
+            }
+        }
+        n
+    }
+
+    /// Records a model response as unusable (D1/D2) rather than as an
+    /// `AssistantResponseReceived`: it carries no breaker-visible turn, the
+    /// thread stays on its current `PromptSent`, and `pending_prompt()`
+    /// rebuilds the identical prompt for a re-send to the same model. Once
+    /// `BreakerConfig.max_tool_call_discards` consecutive discards have
+    /// accumulated since the last `PromptSent` on `thread_id`, the budget is
+    /// exhausted and the caller must dispatch the response through the
+    /// ordinary `assistant_response_received` path instead.
+    pub fn assistant_response_discarded(
+        &mut self,
+        thread_id: SessionThreadId,
+        content: Vec<AssistantBlock>,
+        metadata: AssistantResponseMetadata,
+        unusable: Vec<UnusableToolCallRecord>,
+    ) -> Result<DiscardOutcome, AgentSessionError> {
+        let thread = self
+            .threads
+            .get_persisted(&thread_id)
+            .ok_or(AgentSessionError::ThreadNotFound)?;
+        if !thread.is_assistant_turn() {
+            return Err(AgentSessionError::NotAssistantTurn);
+        }
+
+        let prior = self.consecutive_discards(thread_id);
+        let max = if self.breaker_config.enabled {
+            self.breaker_config.max_tool_call_discards
+        } else {
+            0
+        };
+        if prior >= max {
+            return Ok(DiscardOutcome::BudgetExhausted { consecutive: prior });
+        }
+
+        let reason = Self::describe_discard(&unusable, &metadata, &content);
+        self.events
+            .push(AgentSessionEvent::AssistantResponseDiscarded {
+                thread_id,
+                content,
+                metadata,
+                unusable,
+                reason,
+            });
+        Ok(DiscardOutcome::Discarded {
+            consecutive: prior + 1,
+        })
+    }
+
+    /// Human-readable reason stored on the event and surfaced in tracing /
+    /// the eventual tool-error hint. Carries the §1.4 billing-ratio numbers
+    /// as diagnostic text, never as the discard trigger.
+    fn describe_discard(
+        unusable: &[UnusableToolCallRecord],
+        metadata: &AssistantResponseMetadata,
+        content: &[AssistantBlock],
+    ) -> String {
+        let received_bytes: usize = content
+            .iter()
+            .map(|block| match block {
+                AssistantBlock::ToolUse { input, .. } => {
+                    serde_json::to_string(input).map(|s| s.len()).unwrap_or(0)
+                }
+                AssistantBlock::Text { text } => text.len(),
+                AssistantBlock::Thinking { .. } => 0,
+            })
+            .sum();
+        let billed = metadata
+            .usage
+            .output
+            .saturating_sub(metadata.usage.reasoning);
+        let lead = unusable
+            .first()
+            .map(|u| format!("{} arguments did not arrive: {}", u.name, u.reason))
+            .unwrap_or_else(|| "tool arguments did not arrive".to_string());
+        format!(
+            "{lead} (billed {billed} non-reasoning output tokens, received {received_bytes} \
+             bytes of tool input, upstream_provider={}, finish_reason={})",
+            metadata.upstream_provider.as_deref().unwrap_or("unknown"),
+            metadata.finish_reason.as_deref().unwrap_or("unknown"),
+        )
+    }
+
     fn try_prune(
         &mut self,
         current_thread_id: SessionThreadId,
@@ -1594,6 +1720,7 @@ impl TryFromEvents<AgentSessionEvent> for AgentSession {
                 AgentSessionEvent::ModelChainAdvanced { .. } => {
                     advance += 1;
                 }
+                AgentSessionEvent::AssistantResponseDiscarded { .. } => {}
             }
         }
 
@@ -3080,6 +3207,298 @@ mod tests {
 
         let pending = session.pending_prompt().expect("pending_prompt query");
         assert!(pending.is_none());
+    }
+
+    fn one_unusable_edit_call() -> Vec<UnusableToolCallRecord> {
+        vec![UnusableToolCallRecord {
+            id: "t1".into(),
+            name: "Edit".into(),
+            reason: "'file_text' is required for command 'create'".into(),
+        }]
+    }
+
+    #[test]
+    fn discard_keeps_thread_awaiting_assistant_and_pending_prompt_intact() {
+        let mut session = new_session();
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Hello".into())
+            .unwrap();
+        let before = session.next_prompt(TargetThread::Main).unwrap();
+        let thread_id = session.current_main_thread.unwrap();
+        hydrate_threads(&mut session);
+
+        let outcome = session
+            .assistant_response_discarded(
+                thread_id,
+                vec![AssistantBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "Edit".into(),
+                    input: serde_json::json!({"command": "create", "path": "/x"}),
+                }],
+                dummy_metadata(),
+                one_unusable_edit_call(),
+            )
+            .expect("assistant_response_discarded");
+        assert_eq!(outcome, DiscardOutcome::Discarded { consecutive: 1 });
+
+        assert!(
+            session
+                .threads
+                .get_persisted(&thread_id)
+                .unwrap()
+                .is_assistant_turn(),
+            "a discard must leave the thread awaiting the assistant, not advance it"
+        );
+        let after = session
+            .pending_prompt()
+            .expect("pending_prompt query")
+            .expect("prompt still pending after a discard");
+        assert_eq!(
+            serde_json::to_value(&before).unwrap(),
+            serde_json::to_value(&after).unwrap(),
+            "pending_prompt must rebuild the identical prompt, not one containing the discard"
+        );
+    }
+
+    #[test]
+    fn discard_is_not_materialized_into_prompt() {
+        let mut session = new_session();
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Hello".into())
+            .unwrap();
+        let before = session.next_prompt(TargetThread::Main).unwrap();
+        let thread_id = session.current_main_thread.unwrap();
+        hydrate_threads(&mut session);
+
+        session
+            .assistant_response_discarded(
+                thread_id,
+                vec![AssistantBlock::Text {
+                    text: "the model must never see this again".into(),
+                }],
+                dummy_metadata(),
+                one_unusable_edit_call(),
+            )
+            .unwrap();
+
+        let after = session.pending_prompt().unwrap().unwrap();
+        assert_eq!(
+            before.messages.len(),
+            after.messages.len(),
+            "a discarded block must not be materialized into the next prompt"
+        );
+    }
+
+    #[test]
+    fn discard_budget_exhausts_after_configured_count() {
+        let breaker = BreakerConfig {
+            max_tool_call_discards: 2,
+            ..BreakerConfig::default()
+        };
+        let mut session = new_session_with(
+            ModelChain {
+                primary: model_defaults("m"),
+                fallbacks: vec![],
+            },
+            breaker,
+        );
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Hello".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+        let thread_id = session.current_main_thread.unwrap();
+        hydrate_threads(&mut session);
+
+        let first = session
+            .assistant_response_discarded(
+                thread_id,
+                vec![],
+                dummy_metadata(),
+                one_unusable_edit_call(),
+            )
+            .unwrap();
+        assert_eq!(first, DiscardOutcome::Discarded { consecutive: 1 });
+
+        let second = session
+            .assistant_response_discarded(
+                thread_id,
+                vec![],
+                dummy_metadata(),
+                one_unusable_edit_call(),
+            )
+            .unwrap();
+        assert_eq!(second, DiscardOutcome::Discarded { consecutive: 2 });
+
+        let third = session
+            .assistant_response_discarded(
+                thread_id,
+                vec![],
+                dummy_metadata(),
+                one_unusable_edit_call(),
+            )
+            .unwrap();
+        assert_eq!(third, DiscardOutcome::BudgetExhausted { consecutive: 2 });
+    }
+
+    #[test]
+    fn discard_with_breaker_disabled_is_budget_exhausted_immediately() {
+        let breaker = BreakerConfig {
+            enabled: false,
+            ..BreakerConfig::default()
+        };
+        let mut session = new_session_with(
+            ModelChain {
+                primary: model_defaults("m"),
+                fallbacks: vec![],
+            },
+            breaker,
+        );
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Hello".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+        let thread_id = session.current_main_thread.unwrap();
+        hydrate_threads(&mut session);
+
+        let outcome = session
+            .assistant_response_discarded(
+                thread_id,
+                vec![],
+                dummy_metadata(),
+                one_unusable_edit_call(),
+            )
+            .unwrap();
+        assert_eq!(outcome, DiscardOutcome::BudgetExhausted { consecutive: 0 });
+    }
+
+    #[test]
+    fn discard_counter_resets_on_recorded_response() {
+        let mut session = new_session();
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Hello".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+        let thread_id = session.current_main_thread.unwrap();
+        hydrate_threads(&mut session);
+
+        let first = session
+            .assistant_response_discarded(
+                thread_id,
+                vec![],
+                dummy_metadata(),
+                one_unusable_edit_call(),
+            )
+            .unwrap();
+        assert_eq!(first, DiscardOutcome::Discarded { consecutive: 1 });
+
+        session
+            .assistant_response_received(
+                thread_id,
+                vec![AssistantBlock::Text { text: "ok".into() }],
+                StopReason::Stop,
+                None,
+                dummy_metadata(),
+            )
+            .unwrap();
+        session
+            .add_user_input(TargetThread::Main, user_source(), "again".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+        hydrate_threads(&mut session);
+        let thread_id = session.current_main_thread.unwrap();
+
+        let next = session
+            .assistant_response_discarded(
+                thread_id,
+                vec![],
+                dummy_metadata(),
+                one_unusable_edit_call(),
+            )
+            .unwrap();
+        assert_eq!(
+            next,
+            DiscardOutcome::Discarded { consecutive: 1 },
+            "a recorded response followed by a fresh PromptSent must reset the counter"
+        );
+    }
+
+    #[test]
+    fn discards_are_invisible_to_identical_failing_call_breaker() {
+        let chain = ModelChain {
+            primary: model_defaults("primary-model"),
+            fallbacks: vec![model_defaults("fallback-model")],
+        };
+        // Threshold of 1: if a discard were ever routed through the same
+        // detector as a real turn, even one would trip it.
+        let breaker = BreakerConfig {
+            identical_failing_calls: 1,
+            max_tool_call_discards: 10,
+            ..BreakerConfig::default()
+        };
+        let mut session = new_session_with(chain, breaker);
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Hello".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+        let thread_id = session.current_main_thread.unwrap();
+        hydrate_threads(&mut session);
+
+        for _ in 0..5 {
+            session
+                .assistant_response_discarded(
+                    thread_id,
+                    vec![],
+                    dummy_metadata(),
+                    one_unusable_edit_call(),
+                )
+                .unwrap();
+        }
+
+        assert!(
+            session.last_chain_advance().is_none(),
+            "discards must never be visible to identical_failing_call_trip"
+        );
+    }
+
+    #[test]
+    fn assistant_response_discarded_event_serde_roundtrips() {
+        let event = AgentSessionEvent::AssistantResponseDiscarded {
+            thread_id: SessionThreadId::new(),
+            content: vec![AssistantBlock::Text { text: "x".into() }],
+            metadata: dummy_metadata(),
+            unusable: one_unusable_edit_call(),
+            reason: "Edit arguments did not arrive".into(),
+        };
+        let json = serde_json::to_string(&event).expect("serialize");
+        let roundtripped: AgentSessionEvent = serde_json::from_str(&json).expect("deserialize");
+        assert!(matches!(
+            roundtripped,
+            AgentSessionEvent::AssistantResponseDiscarded { .. }
+        ));
+    }
+
+    #[test]
+    fn try_from_events_hydrates_through_a_discard() {
+        let mut session = new_session();
+        session
+            .add_user_input(TargetThread::Main, user_source(), "Hello".into())
+            .unwrap();
+        let _ = session.next_prompt(TargetThread::Main).unwrap();
+        let thread_id = session.current_main_thread.unwrap();
+        hydrate_threads(&mut session);
+
+        session
+            .assistant_response_discarded(
+                thread_id,
+                vec![AssistantBlock::Text { text: "x".into() }],
+                dummy_metadata(),
+                one_unusable_edit_call(),
+            )
+            .unwrap();
+
+        let events = session.events;
+        let rehydrated = AgentSession::try_from_events(events).expect("hydrate through a discard");
+        assert_eq!(rehydrated.current_main_thread_id(), Some(thread_id));
     }
 
     #[test]

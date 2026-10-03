@@ -1130,6 +1130,7 @@ return {
                 upstream_provider: None,
                 finish_reason: None,
                 upstream_error: None,
+                malformed_tool_calls: Vec::new(),
             })))
             .unwrap();
     };
