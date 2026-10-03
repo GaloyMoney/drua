@@ -1537,6 +1537,7 @@ impl Agents {
         use es_entity::context::{EventContext, WithEventContext};
 
         let model_name = prompt_state.chain.primary.name.clone();
+        let initial_tools = prompt_state.tools.clone();
         prompt_state.trace_agent_id = Some(id.to_string());
         prompt_state.trace_run_id = workflow_run_id.map(|r| r.to_string());
         let (request, response_rx) = llm::PromptRequest::new(prompt_state);
@@ -1562,6 +1563,7 @@ impl Agents {
                 let mut input_tokens: u32 = 0;
                 let mut output_tokens: u32 = 0;
                 let mut current_model = model_name;
+                let mut current_tools = initial_tools;
                 loop {
                     turn += 1;
                     let result = match next {
@@ -1602,6 +1604,116 @@ impl Agents {
                     input_tokens += response.usage.input_tokens;
                     output_tokens += response.usage.output_tokens;
 
+                    let tool_calls: Vec<llm::RequestToolUse> = response
+                        .content
+                        .iter()
+                        .filter_map(|b| match b {
+                            llm::prompt::AssistantBlock::ToolUse { id, name, input } => {
+                                Some(llm::RequestToolUse {
+                                    id: id.clone(),
+                                    name: name.clone(),
+                                    input: input.clone(),
+                                })
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    let unusable = toolsets.validate_tool_calls(
+                        &tool_calls,
+                        &response.malformed_tool_calls,
+                        &current_tools,
+                    );
+
+                    let mut discard_hint: Option<String> = None;
+                    if !unusable.is_empty() {
+                        match sessions
+                            .assistant_response_discarded(
+                                id,
+                                response.clone(),
+                                current_model.clone(),
+                                unusable.clone(),
+                            )
+                            .await
+                        {
+                            Ok(session::DiscardOutcome::Discarded { consecutive }) => {
+                                tracing::warn!(
+                                    agent_id = %id,
+                                    model = %current_model,
+                                    upstream_provider = ?response.upstream_provider,
+                                    tools = ?unusable.iter().map(|u| u.name.as_str()).collect::<Vec<_>>(),
+                                    consecutive,
+                                    "agent_loop: discarded response with un-executable tool arguments, re-prompting"
+                                );
+                                emit_event(
+                                    &tx,
+                                    ChatOutputEvent::Service {
+                                        message: format!(
+                                            "discarded a response whose {} arguments did not arrive; retrying ({consecutive})",
+                                            unusable[0].name
+                                        ),
+                                    },
+                                );
+                                let prompt = match sessions.pending_prompt(id).await {
+                                    Ok(Some(p)) => p,
+                                    Ok(None) => {
+                                        emit_event(
+                                            &tx,
+                                            ChatOutputEvent::Error {
+                                                message: "discard recorded but no pending prompt to resend".to_string(),
+                                            },
+                                        );
+                                        return;
+                                    }
+                                    Err(e) => {
+                                        emit_event(
+                                            &tx,
+                                            ChatOutputEvent::Error {
+                                                message: e.to_string(),
+                                            },
+                                        );
+                                        return;
+                                    }
+                                };
+                                let mut prompt = prompt;
+                                prompt.trace_agent_id = Some(id.to_string());
+                                prompt.trace_run_id = workflow_run_id.map(|r| r.to_string());
+                                let (request, rx_next) = llm::PromptRequest::new(prompt);
+                                if prompt_requests.send(request).await.is_err() {
+                                    emit_event(
+                                        &tx,
+                                        ChatOutputEvent::Error {
+                                            message: "prompt request channel closed".to_string(),
+                                        },
+                                    );
+                                    return;
+                                }
+                                next = rx_next.await;
+                                // A discard is not a turn the session acted on;
+                                // the top of the loop increments `turn` again.
+                                turn -= 1;
+                                continue;
+                            }
+                            Ok(session::DiscardOutcome::BudgetExhausted { consecutive }) => {
+                                tracing::error!(
+                                    agent_id = %id,
+                                    model = %current_model,
+                                    consecutive,
+                                    "agent_loop: discard budget exhausted, dispatching un-executable call"
+                                );
+                                discard_hint = Some(discard_budget_exhausted_hint(consecutive + 1));
+                            }
+                            Err(e) => {
+                                emit_event(
+                                    &tx,
+                                    ChatOutputEvent::Error {
+                                        message: e.to_string(),
+                                    },
+                                );
+                                return;
+                            }
+                        }
+                    }
+
                     let session_response = match sessions
                         .assistant_response_received(id, response.clone(), current_model.clone())
                         .await
@@ -1633,9 +1745,20 @@ impl Agents {
                                     input: tu.input,
                                 })
                                 .collect();
-                            let results =
+                            let mut results =
                                 fan_out_tool_calls(&toolsets, &agent_subject, tool_calls, &tx)
                                     .await;
+
+                            if let Some(hint) = &discard_hint {
+                                for result in results.iter_mut() {
+                                    if result.is_error
+                                        && unusable.iter().any(|u| u.id == result.tool_use_id)
+                                    {
+                                        result.content.push('\n');
+                                        result.content.push_str(hint);
+                                    }
+                                }
+                            }
 
                             // The session detects a terminal `submit_output`
                             // call inside `add_tool_results` and returns
@@ -1689,6 +1812,7 @@ impl Agents {
                     };
 
                     current_model = next_prompt.chain.primary.name.clone();
+                    current_tools = next_prompt.tools.clone();
                     next_prompt.trace_agent_id = Some(id.to_string());
                     next_prompt.trace_run_id = workflow_run_id.map(|r| r.to_string());
                     let (request, rx_next) = llm::PromptRequest::new(next_prompt);
@@ -1838,6 +1962,19 @@ async fn fan_out_tool_calls(
         results.push(result);
     }
     results
+}
+
+/// Appended to a dispatched tool-error result when the discard budget
+/// (`BreakerConfig.max_tool_call_discards`) is exhausted (D3): the model
+/// has now seen the same un-executable call bounce `consecutive` times, so
+/// name the likely cause instead of letting it look like an ordinary
+/// validation error.
+fn discard_budget_exhausted_hint(consecutive: usize) -> String {
+    format!(
+        "drua: this argument was missing in {consecutive} consecutive responses — the \
+         provider may be dropping large string arguments. Retry with a shorter argument \
+         (write the file in pieces with `insert`, or use a shorter `old_str`)."
+    )
 }
 
 /// Render an error chain to a single concise line for the model.
