@@ -3,7 +3,7 @@ use drua_library::{GitFileHash, LivenessRef, SearchableFields, WriteOp};
 use llm::ModelChain;
 use serde::{Deserialize, Serialize};
 
-use crate::agent::session::CompactionOverride;
+use crate::agent::session::{deserialize_double_option, CompactionOverride};
 
 use es_entity::*;
 
@@ -56,8 +56,16 @@ pub enum WorkflowDefinitionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_chain: Option<Option<ModelChain>>,
         /// `Some(Some(_))` sets / replaces; `Some(None)` clears.
-        /// `None` leaves the field untouched.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// `None` leaves the field untouched. Needs
+        /// `deserialize_double_option`, not plain `#[serde(default)]` —
+        /// otherwise an explicit `null` (a real clear) collapses to the
+        /// same outer `None` as an absent key on the JSON round-trip
+        /// through the event log, and the clear is lost on hydration.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_double_option",
+            skip_serializing_if = "Option::is_none"
+        )]
         compaction: Option<Option<CompactionOverride>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         space_writes: Option<SpaceWritesDecl>,
@@ -738,8 +746,27 @@ mod tests {
             compaction: Some(None),
             space_writes: None,
         });
-        let hydrated = WorkflowDefinition::try_from_events(events).unwrap();
+        let hydrated = WorkflowDefinition::try_from_events(events.clone()).unwrap();
         assert_eq!(hydrated.compaction, None);
+
+        // Second bugbot finding on the same commit: a naive
+        // `Option<Option<_>>` with only `#[serde(default)]` collapses an
+        // explicit `null` to the same outer `None` as an absent key once
+        // it round-trips through JSON (how events are actually persisted
+        // in the `events` JSONB column) — so the clear above would be
+        // silently undone on the next load. Round-trip every event
+        // through `serde_json` the way a real reload would and re-check.
+        let round_tripped: Vec<WorkflowDefinitionEvent> = events
+            .iter_all()
+            .map(|e| serde_json::to_value(e).unwrap())
+            .map(|v| serde_json::from_value(v).unwrap())
+            .collect();
+        let round_tripped = EntityEvents::init(*events.id(), round_tripped);
+        let hydrated = WorkflowDefinition::try_from_events(round_tripped).unwrap();
+        assert_eq!(
+            hydrated.compaction, None,
+            "clear must survive the JSON round-trip, not revert to the prior override"
+        );
     }
 
     #[test]

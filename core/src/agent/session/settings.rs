@@ -168,7 +168,9 @@ pub struct CompactionOverride {
 /// `None`); this handles a *present* key, wrapping whatever `Option<T>`
 /// deserializes to (including `None` from an explicit `null`) in an
 /// outer `Some` so the two cases stay distinguishable.
-fn deserialize_double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub(crate) fn deserialize_double_option<'de, D, T>(
+    deserializer: D,
+) -> Result<Option<Option<T>>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
