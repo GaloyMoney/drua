@@ -72,6 +72,7 @@ async fn build_agents(pool: &sqlx::PgPool) -> (Agents, Arc<Sandboxes>) {
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
             effort: None,
+            cache_ttl_seconds: None,
         },
     );
     let config = AgentsConfig {
@@ -136,6 +137,7 @@ async fn send_message_round_trip_via_prompt_channel() {
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
             effort: None,
+            cache_ttl_seconds: None,
         },
     );
     let config = AgentsConfig {
@@ -305,6 +307,7 @@ async fn send_message_dispatches_registered_tool_call() {
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
             effort: None,
+            cache_ttl_seconds: None,
         },
     );
     let config = AgentsConfig {
@@ -541,6 +544,7 @@ async fn identical_failing_tool_calls_advance_chain_to_fallback() {
                 max_tokens_per_response: 1024,
                 context_window_tokens: 200_000,
                 effort: None,
+                cache_ttl_seconds: None,
             },
         );
     }
@@ -677,6 +681,7 @@ async fn identical_failing_tool_calls_without_fallback_error_the_turn() {
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
             effort: None,
+            cache_ttl_seconds: None,
         },
     );
     let config = AgentsConfig {
@@ -852,6 +857,7 @@ async fn resume_message_continues_past_interrupted_tool_call() {
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
             effort: None,
+            cache_ttl_seconds: None,
         },
     );
     let config = AgentsConfig {

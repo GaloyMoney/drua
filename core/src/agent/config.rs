@@ -30,6 +30,12 @@ pub struct ModelDefaults {
     pub context_window_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReasoningEffort>,
+    /// Provider prompt-cache window for this model. Feeds the compaction
+    /// cold-window floor (`CompactionConfig::determine_action`) as
+    /// `max(role.prune_after_seconds, this)`. `None` defers entirely to
+    /// the role setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_ttl_seconds: Option<u64>,
 }
 
 impl Default for ModelDefaults {
@@ -39,6 +45,7 @@ impl Default for ModelDefaults {
             max_tokens_per_response: 4096,
             context_window_tokens: 200_000,
             effort: None,
+            cache_ttl_seconds: None,
         }
     }
 }
@@ -182,6 +189,7 @@ mod tests {
             max_tokens_per_response: 4096,
             context_window_tokens: 100_000,
             effort: None,
+            cache_ttl_seconds: None,
         }
     }
 
@@ -254,6 +262,7 @@ mod tests {
                 max_tokens_per_response: 8192,
                 context_window_tokens: 200_000,
                 effort: None,
+                cache_ttl_seconds: None,
             },
         );
         cfg.models.insert(
@@ -263,6 +272,7 @@ mod tests {
                 max_tokens_per_response: 4096,
                 context_window_tokens: 128_000,
                 effort: None,
+                cache_ttl_seconds: None,
             },
         );
         cfg.builtin_roles
@@ -294,6 +304,7 @@ mod tests {
                 max_tokens_per_response: 8192,
                 context_window_tokens: 200_000,
                 effort: None,
+                cache_ttl_seconds: None,
             },
         );
         cfg.models.insert(
@@ -303,6 +314,7 @@ mod tests {
                 max_tokens_per_response: 4096,
                 context_window_tokens: 128_000,
                 effort: None,
+                cache_ttl_seconds: None,
             },
         );
         cfg.builtin_roles
@@ -341,6 +353,7 @@ mod tests {
                 max_tokens_per_response: 4096,
                 context_window_tokens: 100_000,
                 effort: Some(ReasoningEffort::Medium),
+                cache_ttl_seconds: None,
             },
         );
         cfg.builtin_roles
@@ -527,5 +540,28 @@ breaker:
         let round_tripped: RoleConfig = serde_yaml::from_str(&reserialized).unwrap();
         assert!(!round_tripped.breaker.enabled);
         assert_eq!(round_tripped.breaker.consecutive_error_turns, 7);
+    }
+
+    #[test]
+    fn model_defaults_deserialises_cache_ttl_seconds_when_present() {
+        let yaml = r#"
+model: "deepseek/deepseek-v4-pro"
+max_tokens_per_response: 8192
+context_window_tokens: 1048576
+cache_ttl_seconds: 3600
+"#;
+        let defaults: ModelDefaults = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(defaults.cache_ttl_seconds, Some(3600));
+    }
+
+    #[test]
+    fn model_defaults_cache_ttl_seconds_defaults_to_none_when_absent() {
+        let yaml = r#"
+model: "anthropic/sonnet"
+max_tokens_per_response: 8192
+context_window_tokens: 200000
+"#;
+        let defaults: ModelDefaults = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(defaults.cache_ttl_seconds, None);
     }
 }

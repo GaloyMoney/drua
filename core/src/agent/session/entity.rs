@@ -1790,6 +1790,7 @@ mod tests {
                     max_tokens_per_response: 1024,
                     context_window_tokens: 200_000,
                     effort: None,
+                    cache_ttl_seconds: None,
                 },
                 fallbacks: Vec::new(),
             })
@@ -1844,6 +1845,7 @@ mod tests {
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
             effort: None,
+            cache_ttl_seconds: None,
         }
     }
 
@@ -3879,6 +3881,7 @@ mod tests {
                     max_tokens_per_response: 1024,
                     context_window_tokens: 100,
                     effort: None,
+                    cache_ttl_seconds: None,
                 },
                 fallbacks: Vec::new(),
             })

@@ -167,6 +167,7 @@ async fn build_stack_inner(
                 max_tokens_per_response: 1024,
                 context_window_tokens: 200_000,
                 effort: None,
+                cache_ttl_seconds: None,
             },
         );
     }
