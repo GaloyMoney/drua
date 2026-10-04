@@ -100,6 +100,7 @@ async fn test_app(pool: &sqlx::PgPool) -> drua_core::App {
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
             effort: None,
+            cache_ttl_seconds: None,
         },
     );
 
@@ -610,6 +611,7 @@ async fn workflow_definitions_query_exposes_yaml_and_structured_fields() {
                 sandbox_mode: None,
                 timeout_seconds: Some(60),
                 model_chain: None,
+                compaction: None,
                 output_schema: Box::new(drua_core::workflow::default_output_schema()),
                 condition: None,
             }],
@@ -691,6 +693,7 @@ async fn workflow_trigger_mutation_returns_run_or_filtered() {
             sandbox_mode: None,
             timeout_seconds: Some(60),
             model_chain: None,
+            compaction: None,
             output_schema: Box::new(drua_core::workflow::default_output_schema()),
             condition: None,
         }]

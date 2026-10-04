@@ -278,6 +278,7 @@ async fn seed_one_step_run(
         sandbox_mode: None,
         timeout_seconds: None,
         model_chain: Some(chain),
+        compaction: None,
         output_schema: Box::new(default_output_schema()),
         condition: None,
     }];

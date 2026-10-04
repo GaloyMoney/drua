@@ -419,6 +419,7 @@ impl Workflows {
             steps,
             sandboxes,
             model_chain,
+            compaction,
             space_writes,
             original_path,
             rendered,
@@ -517,6 +518,7 @@ impl Workflows {
             .steps(steps)
             .sandboxes(sandboxes)
             .model_chain(model_chain)
+            .compaction(compaction)
             .space_writes(space_writes);
         if let Some(project) = project_name {
             builder = builder.project_name(project);
@@ -1793,6 +1795,7 @@ mod tests {
             sandbox_mode: None,
             timeout_seconds: None,
             model_chain: None,
+            compaction: None,
             output_schema: Box::new(default_output_schema()),
             condition: None,
         }

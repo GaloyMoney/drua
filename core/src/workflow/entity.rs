@@ -3,6 +3,8 @@ use drua_library::{GitFileHash, LivenessRef, SearchableFields, WriteOp};
 use llm::ModelChain;
 use serde::{Deserialize, Serialize};
 
+use crate::agent::session::CompactionOverride;
+
 use es_entity::*;
 
 use crate::primitives::*;
@@ -31,6 +33,10 @@ pub enum WorkflowDefinitionEvent {
         /// the role/config default when unset.
         #[serde(default)]
         model_chain: Option<ModelChain>,
+        /// Per-step `compaction` overrides this; both fall through to
+        /// role config when unset (`resolve_step_compaction`).
+        #[serde(default)]
+        compaction: Option<CompactionOverride>,
         /// On-disk path before sync canonicalisation; the
         /// `WriteToRuntime` job uses it to remove the old file.
         #[serde(default)]
@@ -71,6 +77,12 @@ pub struct WorkflowDefinition {
     /// Per-step `model_chain` wins; both fall through to role/config.
     #[builder(default)]
     pub model_chain: Option<ModelChain>,
+    /// Per-step `compaction` wins; both fall through to role config.
+    /// Set at creation time only (from the workflow YAML's top-level
+    /// `compaction:` key) — unlike `model_chain`, there is currently
+    /// no update path, since curate-live's own need is step-level.
+    #[builder(default)]
+    pub compaction: Option<CompactionOverride>,
     #[builder(default)]
     pub(crate) original_path: Option<String>,
     #[builder(default)]
@@ -115,6 +127,7 @@ impl WorkflowDefinition {
             &self.steps,
             &self.sandboxes,
             self.model_chain.as_ref(),
+            self.compaction.as_ref(),
             &self.space_writes,
             &self.created_at().to_rfc3339(),
             &self.updated_at().to_rfc3339(),
@@ -279,6 +292,35 @@ impl WorkflowDefinition {
             .cloned()
             .or_else(|| self.model_chain.clone())
     }
+
+    /// Precedence: step `compaction` > workflow `compaction` > None —
+    /// mirrors `resolve_step_chain`, but merges rather than replaces
+    /// when both are set, so a workflow-wide `{enabled: false}` plus a
+    /// step-level `{keep_recent_tool_results: 20}` does what it reads
+    /// as, instead of the step silently discarding the workflow's
+    /// `enabled: false`.
+    pub fn resolve_step_compaction(&self, step: &WorkflowStepDef) -> Option<CompactionOverride> {
+        match (step.compaction(), &self.compaction) {
+            (None, None) => None,
+            (Some(step_override), None) => Some(step_override.clone()),
+            (None, Some(workflow_override)) => Some(workflow_override.clone()),
+            (Some(step_override), Some(workflow_override)) => Some(CompactionOverride {
+                enabled: step_override.enabled.or(workflow_override.enabled),
+                token_threshold_fraction: step_override
+                    .token_threshold_fraction
+                    .or(workflow_override.token_threshold_fraction),
+                keep_recent_tool_results: step_override
+                    .keep_recent_tool_results
+                    .or(workflow_override.keep_recent_tool_results),
+                prune_after_seconds: step_override
+                    .prune_after_seconds
+                    .or(workflow_override.prune_after_seconds),
+                reset_time_delta_seconds: step_override
+                    .reset_time_delta_seconds
+                    .or(workflow_override.reset_time_delta_seconds),
+            }),
+        }
+    }
 }
 
 impl core::fmt::Display for WorkflowDefinition {
@@ -360,6 +402,7 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     steps,
                     sandboxes,
                     model_chain,
+                    compaction,
                     original_path,
                     space_writes,
                     ..
@@ -374,6 +417,7 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                         .steps(steps.clone())
                         .sandboxes(sandboxes.clone())
                         .model_chain(model_chain.clone())
+                        .compaction(compaction.clone())
                         .original_path(original_path.clone())
                         .space_writes(space_writes.clone());
                 }
@@ -435,6 +479,8 @@ pub struct NewWorkflowDefinition {
     pub(super) sandboxes: Vec<WorkflowSandboxDecl>,
     #[builder(default)]
     pub(super) model_chain: Option<ModelChain>,
+    #[builder(default)]
+    pub(super) compaction: Option<CompactionOverride>,
     #[builder(default, setter(into, strip_option))]
     pub(super) original_path: Option<String>,
     #[builder(default)]
@@ -470,6 +516,7 @@ impl IntoEvents<WorkflowDefinitionEvent> for NewWorkflowDefinition {
                 steps: self.steps,
                 sandboxes: self.sandboxes,
                 model_chain: self.model_chain,
+                compaction: self.compaction,
                 original_path: self.original_path,
                 space_writes: self.space_writes,
             }],
@@ -492,6 +539,7 @@ mod tests {
             sandbox_mode: None,
             timeout_seconds: Some(60),
             model_chain: None,
+            compaction: None,
             output_schema: Box::new(default_output_schema()),
             condition: None,
         }
@@ -534,6 +582,7 @@ mod tests {
             sandbox_mode: None,
             timeout_seconds: None,
             model_chain: Some(step_chain.clone()),
+            compaction: None,
             output_schema: Box::new(default_output_schema()),
             condition: None,
         }];
@@ -549,6 +598,7 @@ mod tests {
             sandbox_mode: None,
             timeout_seconds: None,
             model_chain: None,
+            compaction: None,
             output_schema: Box::new(default_output_schema()),
             condition: None,
         }];
@@ -559,6 +609,57 @@ mod tests {
 
         def.model_chain = None;
         assert!(def.resolve_step_chain(&def.steps[0]).is_none());
+    }
+
+    #[test]
+    fn resolve_step_compaction_step_overrides_workflow_overrides_default() {
+        let step_override = CompactionOverride {
+            keep_recent_tool_results: Some(20),
+            ..Default::default()
+        };
+        let workflow_override = CompactionOverride {
+            enabled: Some(false),
+            ..Default::default()
+        };
+
+        let mut def = build();
+        def.compaction = Some(workflow_override.clone());
+        def.steps = vec![WorkflowStepDef::AgentStep {
+            name: "s".into(),
+            skill: "k".into(),
+            sandbox: None,
+            sandbox_mode: None,
+            timeout_seconds: None,
+            model_chain: None,
+            compaction: Some(step_override.clone()),
+            output_schema: Box::new(default_output_schema()),
+            condition: None,
+        }];
+        // Merge, not replace: a workflow-wide `{enabled: false}` plus a
+        // step-level `{keep_recent_tool_results: 20}` does what it reads
+        // as — both survive.
+        let merged = def.resolve_step_compaction(&def.steps[0]).unwrap();
+        assert_eq!(merged.enabled, Some(false));
+        assert_eq!(merged.keep_recent_tool_results, Some(20));
+
+        def.steps = vec![WorkflowStepDef::AgentStep {
+            name: "s".into(),
+            skill: "k".into(),
+            sandbox: None,
+            sandbox_mode: None,
+            timeout_seconds: None,
+            model_chain: None,
+            compaction: None,
+            output_schema: Box::new(default_output_schema()),
+            condition: None,
+        }];
+        assert_eq!(
+            def.resolve_step_compaction(&def.steps[0]),
+            Some(workflow_override)
+        );
+
+        def.compaction = None;
+        assert!(def.resolve_step_compaction(&def.steps[0]).is_none());
     }
 
     #[test]

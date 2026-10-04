@@ -858,6 +858,7 @@ mod tests {
             sandbox_mode: None,
             timeout_seconds: None,
             model_chain: None,
+            compaction: None,
             output_schema: Box::new(default_output_schema()),
             condition: None,
         }

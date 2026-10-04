@@ -868,6 +868,7 @@ impl Executor {
                         None => Vec::new(),
                     };
                     let chain_override = definition.resolve_step_chain(step);
+                    let compaction_override = definition.resolve_step_compaction(step);
                     let agent = self
                         .agents
                         .create_for_workflow_run_in_op(
@@ -878,6 +879,7 @@ impl Executor {
                             &agent_name,
                             attach_sandbox,
                             chain_override,
+                            compaction_override,
                             output_schema.as_ref().clone(),
                             definition.space_writes.mode,
                         )

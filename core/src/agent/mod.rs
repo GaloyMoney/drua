@@ -262,6 +262,7 @@ impl Agents {
                 None,
                 None,
                 None,
+                None,
             )
             .await?;
         op.commit().await?;
@@ -299,6 +300,7 @@ impl Agents {
                 chain_override,
                 None,
                 None,
+                None,
             )
             .await?;
         op.commit().await?;
@@ -320,6 +322,7 @@ impl Agents {
         name: impl Into<String> + std::fmt::Debug,
         attach_sandbox: Option<(SandboxId, SandboxAgentMode)>,
         chain_override: Option<llm::ModelChain>,
+        compaction_override: Option<session::CompactionOverride>,
         output_schema: crate::workflow::OutputSchema,
         space_writes_mode: crate::workflow::SpaceWritesMode,
     ) -> Result<Agent, AgentError> {
@@ -341,6 +344,7 @@ impl Agents {
             Some(workflow_id),
             Some(workflow_run_id),
             chain_override,
+            compaction_override,
             Some(output_schema),
             Some(space_writes_mode),
         )
@@ -392,6 +396,7 @@ impl Agents {
             None,
             None,
             None,
+            None,
         )
         .await
     }
@@ -410,6 +415,7 @@ impl Agents {
         workflow_id: Option<WorkflowDefinitionId>,
         workflow_run_id: Option<WorkflowRunId>,
         chain_override: Option<llm::ModelChain>,
+        compaction_override: Option<session::CompactionOverride>,
         output_schema: Option<crate::workflow::OutputSchema>,
         space_writes_mode: Option<crate::workflow::SpaceWritesMode>,
     ) -> Result<Agent, AgentError> {
@@ -529,13 +535,16 @@ impl Agents {
             });
         }
 
+        let compaction = compaction_override
+            .map(|o| role_config.compaction.with_override(&o))
+            .unwrap_or_else(|| role_config.compaction.clone());
         self.sessions
             .create_in_op(
                 op,
                 agent.id,
                 agent_role,
                 chain_override,
-                role_config.compaction.clone(),
+                compaction,
                 role_config.breaker.clone(),
                 system_blocks,
                 tool_defs,

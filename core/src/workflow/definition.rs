@@ -10,6 +10,7 @@ use llm::ModelChain;
 use schemars::schema::{InstanceType, RootSchema, Schema, SingleOrVec};
 use serde::{Deserialize, Deserializer, Serialize};
 
+use crate::agent::session::CompactionOverride;
 use crate::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
 
 /// JSON Schema for an AgentStep's structured output, validated at
@@ -277,6 +278,16 @@ pub enum WorkflowStepDef {
         /// Highest-precedence chain override; beats workflow + defaults.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_chain: Option<ModelChain>,
+        /// Highest-precedence compaction override; beats workflow +
+        /// role config (same precedence as `model_chain`). Partial —
+        /// unset fields inherit. `{enabled: false}` is the minimal
+        /// form for a step where no tool result is ever safe to
+        /// prune: it disables *all* pruning, including the
+        /// token-budget path (see `CompactionConfig::with_override`),
+        /// so a step that outgrows its context window fails loudly
+        /// instead of silently losing inputs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compaction: Option<CompactionOverride>,
         /// JSON Schema describing the structured payload the agent
         /// must submit via the synthesised `submit_output` tool. The
         /// root is guaranteed `type: "object"` (enforced by
@@ -379,6 +390,15 @@ impl WorkflowStepDef {
     pub fn model_chain(&self) -> Option<&ModelChain> {
         match self {
             WorkflowStepDef::AgentStep { model_chain, .. } => model_chain.as_ref(),
+            WorkflowStepDef::ScriptStep { .. }
+            | WorkflowStepDef::ToolStep { .. }
+            | WorkflowStepDef::Wait { .. } => None,
+        }
+    }
+
+    pub fn compaction(&self) -> Option<&CompactionOverride> {
+        match self {
+            WorkflowStepDef::AgentStep { compaction, .. } => compaction.as_ref(),
             WorkflowStepDef::ScriptStep { .. }
             | WorkflowStepDef::ToolStep { .. }
             | WorkflowStepDef::Wait { .. } => None,
@@ -615,6 +635,7 @@ mod tests {
             sandbox_mode: None,
             timeout_seconds: None,
             model_chain: None,
+            compaction: None,
             output_schema: Box::new(custom),
             condition: None,
         };
@@ -706,6 +727,7 @@ mod tests {
             sandbox_mode: None,
             timeout_seconds: None,
             model_chain: None,
+            compaction: None,
             output_schema: Box::new(default_output_schema()),
             condition: None,
         };

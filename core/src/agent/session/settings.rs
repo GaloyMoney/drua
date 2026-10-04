@@ -1,11 +1,11 @@
 use std::time::Duration;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::compaction::trigger::CompactionAction;
 
 /// `serde(transparent)` for bare-integer (de)serialization in YAML / JSONB.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(transparent)]
 pub struct ResetTimeDeltaSeconds(pub u32);
 
@@ -127,6 +127,79 @@ impl Default for BreakerConfig {
     }
 }
 
+/// Partial override of a role's [`CompactionConfig`], applied once at
+/// agent creation — step beats workflow beats role config, the same
+/// precedence as `model_chain`. Every field is optional; an unset
+/// field inherits the role's value unchanged.
+///
+/// `prune_after_seconds` and `reset_time_delta_seconds` are doubly
+/// optional: the outer `Option` distinguishes "not set in this
+/// override" (inherit) from "set", and the inner `Option` is the
+/// field's own value — so `Some(None)` explicitly clears it (disables
+/// the time path / the idle-reset path) rather than inheriting.
+/// Plain serde cannot tell an explicit `null` apart from an absent key
+/// here without `deserialize_double_option`, for the same reason the
+/// chart's `with` -> `hasKey` fix exists: a naive `Option<Option<T>>`
+/// collapses `null` to the outer `None` (inherit), silently discarding
+/// the author's intent to disable.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CompactionOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_threshold_fraction: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub keep_recent_tool_results: Option<usize>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub prune_after_seconds: Option<Option<u64>>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub reset_time_delta_seconds: Option<Option<ResetTimeDeltaSeconds>>,
+}
+
+/// `#[serde(default)]` on the field handles an absent key (-> outer
+/// `None`); this handles a *present* key, wrapping whatever `Option<T>`
+/// deserializes to (including `None` from an explicit `null`) in an
+/// outer `Some` so the two cases stay distinguishable.
+fn deserialize_double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Deserialize::deserialize(deserializer).map(Some)
+}
+
+impl CompactionConfig {
+    /// `enabled: Some(false)` disables *all* pruning, including the
+    /// token-budget path — not just the time path. A step that opts
+    /// out via `{enabled: false}` and then genuinely outgrows the
+    /// context window fails loudly (a provider context-length error)
+    /// rather than silently losing inputs to a prune it asked not to
+    /// have; the fix is a smaller workload, not re-enabling pruning.
+    pub fn with_override(&self, o: &CompactionOverride) -> Self {
+        Self {
+            enabled: o.enabled.unwrap_or(self.enabled),
+            token_threshold_fraction: o
+                .token_threshold_fraction
+                .unwrap_or(self.token_threshold_fraction),
+            keep_recent_tool_results: o
+                .keep_recent_tool_results
+                .unwrap_or(self.keep_recent_tool_results),
+            prune_after_seconds: o.prune_after_seconds.unwrap_or(self.prune_after_seconds),
+            reset_time_delta_seconds: o
+                .reset_time_delta_seconds
+                .unwrap_or(self.reset_time_delta_seconds),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -168,5 +241,82 @@ mod tests {
 
         let role: RoleConfig = serde_yaml::from_str("{}").unwrap();
         assert_eq!(role.compaction.prune_after_seconds, Some(300));
+    }
+
+    #[test]
+    fn empty_override_is_identity() {
+        let role = CompactionConfig {
+            enabled: true,
+            token_threshold_fraction: 0.6,
+            keep_recent_tool_results: 10,
+            reset_time_delta_seconds: Some(ResetTimeDeltaSeconds(600)),
+            prune_after_seconds: Some(300),
+        };
+        let merged = role.with_override(&CompactionOverride::default());
+        assert_eq!(merged.enabled, role.enabled);
+        assert_eq!(
+            merged.token_threshold_fraction,
+            role.token_threshold_fraction
+        );
+        assert_eq!(
+            merged.keep_recent_tool_results,
+            role.keep_recent_tool_results
+        );
+        assert_eq!(
+            merged.reset_time_delta_seconds,
+            role.reset_time_delta_seconds
+        );
+        assert_eq!(merged.prune_after_seconds, role.prune_after_seconds);
+    }
+
+    #[test]
+    fn enabled_false_override_short_circuits_determine_action_for_every_input() {
+        let role = CompactionConfig::default();
+        let overridden = role.with_override(&CompactionOverride {
+            enabled: Some(false),
+            ..Default::default()
+        });
+        assert_eq!(
+            overridden.determine_action(999_999, 200_000, Duration::from_secs(99_999), None),
+            CompactionAction::None,
+            "enabled: false disables the token path too (D7), not just the time path"
+        );
+    }
+
+    #[test]
+    fn prune_after_seconds_double_none_clears_the_time_path() {
+        let role = CompactionConfig::default(); // prune_after_seconds: Some(300)
+        let overridden = role.with_override(&CompactionOverride {
+            prune_after_seconds: Some(None),
+            ..Default::default()
+        });
+        assert_eq!(overridden.prune_after_seconds, None);
+        // Threshold path is untouched by the override.
+        assert_eq!(
+            overridden.determine_action(150_000, 200_000, Duration::from_secs(9_999), None),
+            CompactionAction::PruneThenSummarize
+        );
+    }
+
+    #[test]
+    fn override_prune_after_seconds_null_deserialises_as_explicit_clear() {
+        let o: CompactionOverride = serde_yaml::from_str("prune_after_seconds: null").unwrap();
+        assert_eq!(
+            o.prune_after_seconds,
+            Some(None),
+            "present-with-null must be distinguishable from the key being absent"
+        );
+    }
+
+    #[test]
+    fn override_prune_after_seconds_absent_key_means_inherit() {
+        let o: CompactionOverride = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(o.prune_after_seconds, None, "absent key means \"inherit\"");
+    }
+
+    #[test]
+    fn override_prune_after_seconds_set_value_deserialises_as_explicit_set() {
+        let o: CompactionOverride = serde_yaml::from_str("prune_after_seconds: 3600").unwrap();
+        assert_eq!(o.prune_after_seconds, Some(Some(3600)));
     }
 }

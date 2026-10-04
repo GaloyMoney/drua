@@ -1287,6 +1287,7 @@ async fn step_agent_can_discard_its_own_lazily_created_draft() {
             "inventory",
             None,
             None,
+            None,
             drua_core::workflow::default_output_schema(),
             drua_core::workflow::SpaceWritesMode::default(),
         )
