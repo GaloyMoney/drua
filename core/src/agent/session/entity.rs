@@ -34,6 +34,22 @@ pub enum ThreadStartReason {
     },
 }
 
+/// Which branch of `CompactionConfig::determine_action` fired, and the
+/// numbers that decided it — so a later read doesn't have to
+/// reconstruct the reason for a compaction from `execution_time_ms`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionTrigger {
+    Opportunistic {
+        idle_seconds: u64,
+        cold_after_seconds: u64,
+    },
+    Threshold {
+        estimated_tokens: u64,
+        threshold_tokens: u64,
+    },
+}
+
 #[derive(EsEvent, Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 #[es_event(id = "AgentSessionId")]
@@ -109,6 +125,11 @@ pub enum AgentSessionEvent {
         cleared_thinking: Vec<MessageBlockIndex>,
         stripped_user_messages: Vec<MessageBlockIndex>,
         estimated_tokens_saved: u64,
+        /// Which `CompactionAction` branch fired and the numbers that
+        /// decided it. `None` on events persisted before this field
+        /// existed — old rows deserialise fine, this is append-only JSONB.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trigger: Option<CompactionTrigger>,
     },
     /// Terminal event for a workflow agent step: the agent called the
     /// synthesised `submit_output` tool and the runtime captured the
