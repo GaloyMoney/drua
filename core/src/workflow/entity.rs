@@ -55,6 +55,10 @@ pub enum WorkflowDefinitionEvent {
         /// `None` leaves the field untouched.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_chain: Option<Option<ModelChain>>,
+        /// `Some(Some(_))` sets / replaces; `Some(None)` clears.
+        /// `None` leaves the field untouched.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compaction: Option<Option<CompactionOverride>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         space_writes: Option<SpaceWritesDecl>,
     },
@@ -78,9 +82,8 @@ pub struct WorkflowDefinition {
     #[builder(default)]
     pub model_chain: Option<ModelChain>,
     /// Per-step `compaction` wins; both fall through to role config.
-    /// Set at creation time only (from the workflow YAML's top-level
-    /// `compaction:` key) — unlike `model_chain`, there is currently
-    /// no update path, since curate-live's own need is step-level.
+    /// From the workflow YAML's top-level `compaction:` key; kept in
+    /// sync with the file via [`Self::update_from_library`].
     #[builder(default)]
     pub compaction: Option<CompactionOverride>,
     #[builder(default)]
@@ -152,6 +155,7 @@ impl WorkflowDefinition {
         steps: Option<Vec<WorkflowStepDef>>,
         sandboxes: Option<Vec<WorkflowSandboxDecl>>,
         model_chain: Option<Option<ModelChain>>,
+        compaction: Option<Option<CompactionOverride>>,
         space_writes: Option<SpaceWritesDecl>,
         incoming_file_hash: GitFileHash,
     ) -> Idempotent<()> {
@@ -194,6 +198,9 @@ impl WorkflowDefinition {
         if let Some(mc) = &model_chain {
             self.model_chain = mc.clone();
         }
+        if let Some(c) = &compaction {
+            self.compaction = c.clone();
+        }
         if let Some(sw) = &space_writes {
             self.space_writes = sw.clone();
         }
@@ -205,6 +212,7 @@ impl WorkflowDefinition {
             steps,
             sandboxes,
             model_chain,
+            compaction,
             space_writes,
         });
         Idempotent::Executed(())
@@ -281,6 +289,7 @@ impl WorkflowDefinition {
             steps,
             sandboxes,
             model_chain,
+            compaction: None,
             space_writes,
         });
         Idempotent::Executed(())
@@ -428,6 +437,7 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     steps,
                     sandboxes,
                     model_chain,
+                    compaction,
                     space_writes,
                     ..
                 } => {
@@ -448,6 +458,9 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     }
                     if let Some(mc) = model_chain {
                         builder = builder.model_chain(mc.clone());
+                    }
+                    if let Some(c) = compaction {
+                        builder = builder.compaction(c.clone());
                     }
                     if let Some(sw) = space_writes {
                         builder = builder.space_writes(sw.clone());
@@ -660,6 +673,73 @@ mod tests {
 
         def.compaction = None;
         assert!(def.resolve_step_compaction(&def.steps[0]).is_none());
+    }
+
+    /// Bugbot finding: `import_from_library`'s existing-workflow branch
+    /// didn't pass `compaction` into `update_from_library`, and `Updated`
+    /// had no `compaction` field to carry it — so a reverse-sync of an
+    /// edited YAML silently dropped a workflow-wide `compaction:` change,
+    /// and since `rendered()` kept emitting the stale value, the next
+    /// sync tick would overwrite the file right back. This pins the
+    /// hydration half directly: an `Updated` event setting `compaction`
+    /// must be applied by the builder, and `Some(None)` must clear it —
+    /// mirroring `model_chain`'s existing double-option semantics.
+    #[test]
+    fn updated_event_hydrates_compaction_override() {
+        let base = build();
+        let mut events = base.events.clone();
+
+        let override_a = CompactionOverride {
+            enabled: Some(false),
+            ..Default::default()
+        };
+        events.push(WorkflowDefinitionEvent::Updated {
+            name: None,
+            description: None,
+            trigger: None,
+            steps: None,
+            sandboxes: None,
+            model_chain: None,
+            compaction: Some(Some(override_a.clone())),
+            space_writes: None,
+        });
+        let hydrated = WorkflowDefinition::try_from_events(events.clone()).unwrap();
+        assert_eq!(hydrated.compaction, Some(override_a));
+
+        // A later sync tick changes the YAML's top-level `compaction:` —
+        // the new value must win, not the one from the first update.
+        let override_b = CompactionOverride {
+            keep_recent_tool_results: Some(5),
+            ..Default::default()
+        };
+        events.push(WorkflowDefinitionEvent::Updated {
+            name: None,
+            description: None,
+            trigger: None,
+            steps: None,
+            sandboxes: None,
+            model_chain: None,
+            compaction: Some(Some(override_b.clone())),
+            space_writes: None,
+        });
+        let hydrated = WorkflowDefinition::try_from_events(events.clone()).unwrap();
+        assert_eq!(hydrated.compaction, Some(override_b));
+
+        // Clearing the key entirely (`Some(None)`) must clear the field,
+        // not leave the prior override in place (`None` would mean
+        // "untouched" — this must be distinguishable from that).
+        events.push(WorkflowDefinitionEvent::Updated {
+            name: None,
+            description: None,
+            trigger: None,
+            steps: None,
+            sandboxes: None,
+            model_chain: None,
+            compaction: Some(None),
+            space_writes: None,
+        });
+        let hydrated = WorkflowDefinition::try_from_events(events).unwrap();
+        assert_eq!(hydrated.compaction, None);
     }
 
     #[test]

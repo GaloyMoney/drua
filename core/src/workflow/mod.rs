@@ -482,6 +482,7 @@ impl Workflows {
                     Some(steps),
                     Some(sandboxes),
                     Some(model_chain.clone()),
+                    Some(compaction.clone()),
                     Some(space_writes.clone()),
                     file_hash,
                 )
