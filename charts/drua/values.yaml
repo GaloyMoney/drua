@@ -100,10 +100,13 @@ galoyAgents:
           resetTimeDeltaSeconds: 600
           ## Cache-aware opportunistic prune trigger: once this many
           ## seconds have passed since the last assistant response the
-          ## provider's prompt cache is cold, so pruning is free.
-          ## Anthropic's default cache window is ≈ 300s. Omit / leave
-          ## unset to disable the time-based path entirely (token-budget
-          ## pruning still applies).
+          ## provider's prompt cache is cold, so pruning is free — this
+          ## is a floor; a model's own `cacheTtlSeconds` (under
+          ## `providers.*.models`) can only raise it, never lower it.
+          ## Anthropic's default cache window is ≈ 300s. Set to `null`
+          ## to disable the time-based path entirely (token-budget
+          ## pruning still applies); omitting the key keeps the binary
+          ## default (300).
           pruneAfterSeconds: 300
       agent:
         compaction:

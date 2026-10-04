@@ -43,11 +43,19 @@ pub struct CompactionConfig {
 impl CompactionConfig {
     /// Cache-aware: pruning invalidates the provider cache, so avoid it
     /// while hot. `Orphan` (idle reset) takes priority over token checks.
+    ///
+    /// The cold window is `max(prune_after_seconds, model_cache_ttl)` — the
+    /// role setting is a floor, never a ceiling: a model whose provider
+    /// cache outlives the role's window keeps the thread hot for longer,
+    /// but the role window can only be *extended*, never shortened, by the
+    /// model. `prune_after_seconds: None` disables the time-based path
+    /// entirely regardless of `model_cache_ttl`.
     pub fn determine_action(
         &self,
         estimated_tokens: u64,
         context_window_tokens: u64,
         time_since_last_turn: Duration,
+        model_cache_ttl: Option<Duration>,
     ) -> CompactionAction {
         if !self.enabled {
             return CompactionAction::None;
@@ -60,9 +68,12 @@ impl CompactionConfig {
         }
 
         let threshold = (context_window_tokens as f64 * self.token_threshold_fraction) as u64;
-        let cache_cold = self
-            .prune_after_seconds
-            .is_some_and(|secs| time_since_last_turn > Duration::from_secs(secs));
+        let cold_after = match (self.prune_after_seconds, model_cache_ttl) {
+            (None, _) => None,
+            (Some(role), None) => Some(Duration::from_secs(role)),
+            (Some(role), Some(model)) => Some(Duration::from_secs(role).max(model)),
+        };
+        let cache_cold = cold_after.is_some_and(|window| time_since_last_turn > window);
 
         match (estimated_tokens > threshold, cache_cold) {
             (false, false) => CompactionAction::None,
@@ -113,5 +124,49 @@ impl Default for BreakerConfig {
             max_turns_per_prompt: 250,
             max_tool_call_discards: 2,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// This is the behaviour the chart's `with` -> `hasKey` fix relies on:
+    /// an explicit `null` must reach here as `None` (disabling the
+    /// time-based path).
+    #[test]
+    fn prune_after_seconds_null_deserialises_to_none() {
+        let cfg: CompactionConfig = serde_yaml::from_str("prune_after_seconds: null").unwrap();
+        assert_eq!(cfg.prune_after_seconds, None);
+    }
+
+    /// Contrary to the field doc's `#[serde(default)]` reading in
+    /// isolation: `prune_after_seconds` carries its own field-level
+    /// `#[serde(default)]`, which takes precedence over
+    /// `CompactionConfig`'s struct-level one *for this field* — a key
+    /// missing from an otherwise-present `compaction` map resolves via
+    /// `Option::default()` (`None`), not the struct's `Some(300)`.
+    /// Verified against serde's actual behaviour here, not assumed.
+    #[test]
+    fn prune_after_seconds_omitted_from_a_present_map_also_deserialises_to_none() {
+        let cfg: CompactionConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(cfg.prune_after_seconds, None);
+    }
+
+    /// The actual chart-level failure mode is one level up: `RoleConfig`'s
+    /// `compaction: CompactionConfig` field is *also* a bare
+    /// `#[serde(default)]`, but there the missing-field fallback uses
+    /// `CompactionConfig::default()` as a whole (`Some(300)`) because the
+    /// container, not a leaf field, is what's missing. Helm's override
+    /// merge deletes a key set to `null`; for a role whose `compaction`
+    /// block has only `pruneAfterSeconds` configured (`workflow_step_agent`
+    /// today), nulling that one key collapses the entire `compaction` map,
+    /// which is indistinguishable here from "role never set compaction".
+    #[test]
+    fn compaction_key_entirely_absent_from_role_falls_back_to_the_300s_default() {
+        use crate::agent::RoleConfig;
+
+        let role: RoleConfig = serde_yaml::from_str("{}").unwrap();
+        assert_eq!(role.compaction.prune_after_seconds, Some(300));
     }
 }

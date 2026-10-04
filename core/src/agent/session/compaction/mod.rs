@@ -77,11 +77,16 @@ pub(super) fn maybe_prune(
     );
 
     let time_since_last_turn = time_since_last_response_on_thread(events, current_thread_id);
+    let model_cache_ttl = model_chain
+        .primary
+        .cache_ttl_seconds
+        .map(Duration::from_secs);
 
     let action = config.determine_action(
         estimated_tokens,
         model_chain.primary.context_window_tokens,
         time_since_last_turn,
+        model_cache_ttl,
     );
 
     match action {
