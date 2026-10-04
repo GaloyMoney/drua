@@ -4,6 +4,7 @@
 
 use llm::ModelChain;
 
+use crate::agent::session::CompactionOverride;
 use crate::primitives::WorkflowDefinitionId;
 use crate::sandbox::{SandboxAgentMode, SandboxMode, SandboxSpecs};
 
@@ -29,6 +30,8 @@ struct WorkflowYaml {
     trigger: WorkflowTriggerYaml,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     model_chain: Option<ModelChain>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compaction: Option<CompactionOverride>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     sandboxes: Vec<WorkflowSandboxYaml>,
     #[serde(default, skip_serializing_if = "SpaceWritesDecl::is_default")]
@@ -246,6 +249,8 @@ enum WorkflowStepYaml {
         timeout_seconds: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_chain: Option<ModelChain>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compaction: Option<CompactionOverride>,
         #[serde(default = "default_output_schema_boxed")]
         output_schema: Box<OutputSchema>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -298,6 +303,7 @@ impl WorkflowStepYaml {
                 sandbox_mode,
                 timeout_seconds,
                 model_chain,
+                compaction,
                 output_schema,
                 condition,
             } => WorkflowStepYaml::AgentStep {
@@ -307,6 +313,7 @@ impl WorkflowStepYaml {
                 sandbox_mode: *sandbox_mode,
                 timeout_seconds: *timeout_seconds,
                 model_chain: model_chain.clone(),
+                compaction: compaction.clone(),
                 output_schema: output_schema.clone(),
                 condition: condition.clone(),
             },
@@ -367,6 +374,7 @@ impl WorkflowStepYaml {
                 sandbox_mode,
                 timeout_seconds,
                 model_chain,
+                compaction,
                 output_schema,
                 condition,
             } => WorkflowStepDef::AgentStep {
@@ -376,6 +384,7 @@ impl WorkflowStepYaml {
                 sandbox_mode,
                 timeout_seconds,
                 model_chain,
+                compaction,
                 output_schema,
                 condition,
             },
@@ -437,6 +446,7 @@ pub fn render_workflow_yaml(
     steps: &[WorkflowStepDef],
     sandboxes: &[WorkflowSandboxDecl],
     model_chain: Option<&ModelChain>,
+    compaction: Option<&CompactionOverride>,
     space_writes: &SpaceWritesDecl,
     created_at: &str,
     updated_at: &str,
@@ -447,6 +457,7 @@ pub fn render_workflow_yaml(
         description: description.map(|s| s.to_string()),
         trigger: WorkflowTriggerYaml::from_runtime(trigger),
         model_chain: model_chain.cloned(),
+        compaction: compaction.cloned(),
         sandboxes: sandboxes
             .iter()
             .map(WorkflowSandboxYaml::from_runtime)
@@ -471,6 +482,7 @@ pub struct ParsedWorkflow {
     pub steps: Vec<WorkflowStepDef>,
     pub sandboxes: Vec<WorkflowSandboxDecl>,
     pub model_chain: Option<ModelChain>,
+    pub compaction: Option<CompactionOverride>,
     pub space_writes: SpaceWritesDecl,
     pub created_at: String,
     pub updated_at: String,
@@ -542,6 +554,7 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
 
     let description = yaml.description;
     let model_chain = yaml.model_chain;
+    let compaction = yaml.compaction;
     let space_writes = yaml.space_writes;
 
     let rendered = render_workflow_yaml(
@@ -552,6 +565,7 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
         &steps,
         &sandboxes,
         model_chain.as_ref(),
+        compaction.as_ref(),
         &space_writes,
         &yaml.created,
         &yaml.updated,
@@ -569,6 +583,7 @@ pub fn parse_workflow_yaml(content: &str, path: &str) -> Option<ParsedWorkflow> 
         steps,
         sandboxes,
         model_chain,
+        compaction,
         space_writes,
         created_at: yaml.created,
         updated_at: yaml.updated,
@@ -614,6 +629,7 @@ mod tests {
             sandbox_mode: None,
             timeout_seconds: Some(120),
             model_chain: None,
+            compaction: None,
             output_schema: Box::new(default_output_schema()),
             condition: None,
         }]
@@ -641,6 +657,7 @@ mod tests {
             trigger,
             &sample_steps(),
             sandboxes,
+            None,
             None,
             &SpaceWritesDecl::default(),
             "2026-04-29T00:00:00Z",
@@ -747,6 +764,7 @@ mod tests {
                 &sample_steps(),
                 &[],
                 None,
+                None,
                 &decl,
                 "2026-09-26T00:00:00Z",
                 "2026-09-26T00:00:00Z",
@@ -778,6 +796,7 @@ mod tests {
             &sample_steps(),
             &[],
             None,
+            None,
             &decl,
             "2026-09-26T00:00:00Z",
             "2026-09-26T00:00:00Z",
@@ -795,6 +814,7 @@ mod tests {
             &WorkflowTrigger::Manual { condition: None },
             &sample_steps(),
             &[],
+            None,
             None,
             &SpaceWritesDecl::default(),
             "2026-09-24T00:00:00Z",
@@ -919,6 +939,7 @@ steps:
             sandbox_mode: None,
             timeout_seconds: None,
             model_chain: None,
+            compaction: None,
             output_schema: Box::new(schema),
             condition: None,
         }];
@@ -929,6 +950,7 @@ steps:
             &WorkflowTrigger::Manual { condition: None },
             &steps,
             &[],
+            None,
             None,
             &SpaceWritesDecl::default(),
             "2026-05-06T00:00:00Z",
@@ -949,6 +971,105 @@ steps:
                 assert!(props.contains_key("success"), "success injected");
                 assert!(props.contains_key("reason"), "reason injected");
             }
+            other => panic!("expected AgentStep, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workflow_yaml_roundtrip_step_compaction_enabled_false() {
+        use crate::agent::session::CompactionOverride;
+
+        let id = WorkflowDefinitionId::new();
+        let steps = vec![WorkflowStepDef::AgentStep {
+            name: "plan".to_string(),
+            skill: "curate".to_string(),
+            sandbox: None,
+            sandbox_mode: None,
+            timeout_seconds: None,
+            model_chain: None,
+            compaction: Some(CompactionOverride {
+                enabled: Some(false),
+                ..Default::default()
+            }),
+            output_schema: Box::new(default_output_schema()),
+            condition: None,
+        }];
+        let content = render_workflow_yaml(
+            id,
+            "curate-live",
+            None,
+            &WorkflowTrigger::Manual { condition: None },
+            &steps,
+            &[],
+            None,
+            None,
+            &SpaceWritesDecl::default(),
+            "2026-10-04T00:00:00Z",
+            "2026-10-04T00:00:00Z",
+        );
+        assert!(content.contains("enabled: false"));
+
+        let path = canonical_workflow_path("curate-live", None);
+        let parsed = parse_workflow_yaml(&content, &path).expect("parses");
+        match &parsed.steps[0] {
+            WorkflowStepDef::AgentStep { compaction, .. } => {
+                assert_eq!(compaction.as_ref().unwrap().enabled, Some(false));
+            }
+            other => panic!("expected AgentStep, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn workflow_yaml_roundtrip_step_compaction_prune_after_seconds_null() {
+        // Pins the double-Option spelling: an explicit `null` on the
+        // step's `compaction.prune_after_seconds` must survive the
+        // round trip as `Some(None)` (explicit clear), not collapse to
+        // `None` (inherit from the role) — the same distinction the
+        // chart's `with` -> `hasKey` fix exists to preserve.
+        let yaml_with_explicit_null = "\
+name: curate-live
+trigger:
+  type: manual
+steps:
+  - type: agent_step
+    name: plan
+    skill: curate
+    compaction:
+      prune_after_seconds: null
+";
+        let path = "runtime/workflows/curate-live.yml";
+        let parsed = parse_workflow_yaml(yaml_with_explicit_null, path).expect("parses");
+        match &parsed.steps[0] {
+            WorkflowStepDef::AgentStep { compaction, .. } => {
+                assert_eq!(compaction.as_ref().unwrap().prune_after_seconds, Some(None));
+            }
+            other => panic!("expected AgentStep, got {other:?}"),
+        }
+
+        // Re-rendered YAML round-trips the same explicit clear.
+        let reparsed = parse_workflow_yaml(&parsed.rendered, path).expect("re-parses");
+        match &reparsed.steps[0] {
+            WorkflowStepDef::AgentStep { compaction, .. } => {
+                assert_eq!(compaction.as_ref().unwrap().prune_after_seconds, Some(None));
+            }
+            other => panic!("expected AgentStep, got {other:?}"),
+        }
+
+        // An override with no `compaction` key at all leaves the step's
+        // override absent (inherit), not an explicit clear.
+        let yaml_without_compaction = "\
+name: other-flow
+trigger:
+  type: manual
+steps:
+  - type: agent_step
+    name: step
+    skill: my-skill
+";
+        let parsed2 = parse_workflow_yaml(yaml_without_compaction, "runtime/workflows/x.yml")
+            .expect("parses");
+        match &parsed2.steps[0] {
+            WorkflowStepDef::AgentStep { compaction, .. } => assert!(compaction.is_none()),
             other => panic!("expected AgentStep, got {other:?}"),
         }
     }

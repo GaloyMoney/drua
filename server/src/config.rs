@@ -67,6 +67,8 @@ pub struct ProviderModelConfig {
     pub context_window_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effort: Option<ReasoningEffort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_ttl_seconds: Option<u64>,
 }
 
 fn default_context_window() -> u64 {
@@ -284,6 +286,7 @@ impl Config {
                         max_tokens_per_response: model.max_tokens_per_response,
                         context_window_tokens: model.context_window_tokens,
                         effort: model.effort,
+                        cache_ttl_seconds: model.cache_ttl_seconds,
                     },
                 );
             }

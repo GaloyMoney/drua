@@ -100,8 +100,13 @@ data:
             {{- with .resetTimeDeltaSeconds }}
             reset_time_delta_seconds: {{ . }}
             {{- end }}
-            {{- with .pruneAfterSeconds }}
-            prune_after_seconds: {{ . }}
+            {{- /* hasKey, not `with`: `prune_after_seconds: null` must
+                   disable the time-based path, but `with` is falsy on
+                   both `null` and `0`, so omitting the key (as `with`
+                   does for null) silently falls back to the Rust-side
+                   default of 300 instead of actually disabling it. */}}
+            {{- if hasKey . "pruneAfterSeconds" }}
+            prune_after_seconds: {{ .pruneAfterSeconds }}
             {{- end }}
           {{- end }}
           {{- with .Values.galoyAgents.config.agents.projectLead.breaker }}
@@ -155,8 +160,13 @@ data:
             {{- with .resetTimeDeltaSeconds }}
             reset_time_delta_seconds: {{ . }}
             {{- end }}
-            {{- with .pruneAfterSeconds }}
-            prune_after_seconds: {{ . }}
+            {{- /* hasKey, not `with`: `prune_after_seconds: null` must
+                   disable the time-based path, but `with` is falsy on
+                   both `null` and `0`, so omitting the key (as `with`
+                   does for null) silently falls back to the Rust-side
+                   default of 300 instead of actually disabling it. */}}
+            {{- if hasKey . "pruneAfterSeconds" }}
+            prune_after_seconds: {{ .pruneAfterSeconds }}
             {{- end }}
           {{- end }}
           {{- with .breaker }}
@@ -211,8 +221,13 @@ data:
             {{- with .resetTimeDeltaSeconds }}
             reset_time_delta_seconds: {{ . }}
             {{- end }}
-            {{- with .pruneAfterSeconds }}
-            prune_after_seconds: {{ . }}
+            {{- /* hasKey, not `with`: `prune_after_seconds: null` must
+                   disable the time-based path, but `with` is falsy on
+                   both `null` and `0`, so omitting the key (as `with`
+                   does for null) silently falls back to the Rust-side
+                   default of 300 instead of actually disabling it. */}}
+            {{- if hasKey . "pruneAfterSeconds" }}
+            prune_after_seconds: {{ .pruneAfterSeconds }}
             {{- end }}
           {{- end }}
           {{- with .breaker }}

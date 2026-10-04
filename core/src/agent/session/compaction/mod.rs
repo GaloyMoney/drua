@@ -9,7 +9,7 @@ use es_entity::EntityEvents;
 
 use crate::agent::config::ModelChain;
 
-use super::entity::{AgentSessionEvent, ThreadStartReason};
+use super::entity::{AgentSessionEvent, CompactionTrigger, ThreadStartReason};
 use super::message::{CompactionMetadata, SandboxOperation, TargetThread};
 use super::settings::CompactionConfig;
 use super::thread::{NewSessionThread, SessionThreadId};
@@ -77,12 +77,39 @@ pub(super) fn maybe_prune(
     );
 
     let time_since_last_turn = time_since_last_response_on_thread(events, current_thread_id);
+    let model_cache_ttl = model_chain
+        .primary
+        .cache_ttl_seconds
+        .map(Duration::from_secs);
 
     let action = config.determine_action(
         estimated_tokens,
         model_chain.primary.context_window_tokens,
         time_since_last_turn,
+        model_cache_ttl,
     );
+
+    let threshold_tokens =
+        (model_chain.primary.context_window_tokens as f64 * config.token_threshold_fraction) as u64;
+    // Mirrors `CompactionConfig::determine_action`'s composition so the
+    // trigger recorded below matches the decision actually made there.
+    let cold_after_seconds = match (config.prune_after_seconds, model_cache_ttl) {
+        (None, _) => None,
+        (Some(role), None) => Some(role),
+        (Some(role), Some(model)) => Some(role.max(model.as_secs())),
+    };
+
+    if action != CompactionAction::None {
+        tracing::info!(
+            session_id = %session_id,
+            thread_id = %current_thread_id,
+            ?action,
+            estimated_tokens,
+            threshold_tokens,
+            idle_seconds = time_since_last_turn.as_secs(),
+            "compaction decision"
+        );
+    }
 
     match action {
         CompactionAction::None => return None,
@@ -169,6 +196,19 @@ pub(super) fn maybe_prune(
     let stripped_user_messages: Vec<MessageBlockIndex> =
         plan.stripped_user_messages.into_iter().collect();
 
+    // `action` is `PruneOpportunistic` or `PruneThenSummarize` here — the
+    // `None` and `Orphan` branches both returned above.
+    let trigger = match action {
+        CompactionAction::PruneThenSummarize => Some(CompactionTrigger::Threshold {
+            estimated_tokens,
+            threshold_tokens,
+        }),
+        _ => cold_after_seconds.map(|cold_after_seconds| CompactionTrigger::Opportunistic {
+            idle_seconds: time_since_last_turn.as_secs(),
+            cold_after_seconds,
+        }),
+    };
+
     let mut session_events = Vec::new();
 
     // Emit masked tool results first so they participate in block indexing
@@ -186,6 +226,7 @@ pub(super) fn maybe_prune(
         cleared_thinking,
         stripped_user_messages,
         estimated_tokens_saved: plan.estimated_tokens_saved,
+        trigger,
     });
     session_events.push(AgentSessionEvent::ThreadStarted {
         thread_id: new_thread_id,

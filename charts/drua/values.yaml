@@ -100,10 +100,13 @@ galoyAgents:
           resetTimeDeltaSeconds: 600
           ## Cache-aware opportunistic prune trigger: once this many
           ## seconds have passed since the last assistant response the
-          ## provider's prompt cache is cold, so pruning is free.
-          ## Anthropic's default cache window is ≈ 300s. Omit / leave
-          ## unset to disable the time-based path entirely (token-budget
-          ## pruning still applies).
+          ## provider's prompt cache is cold, so pruning is free — this
+          ## is a floor; a model's own `cacheTtlSeconds` (under
+          ## `providers.*.models`) can only raise it, never lower it.
+          ## Anthropic's default cache window is ≈ 300s. Set to `null`
+          ## to disable the time-based path entirely (token-budget
+          ## pruning still applies); omitting the key keeps the binary
+          ## default (300).
           pruneAfterSeconds: 300
       agent:
         compaction:
@@ -115,8 +118,14 @@ galoyAgents:
         ## step sessions are short-lived (one terminal `submit_output`
         ## call); the time-based thread reset only makes sense for
         ## long-lived interactive `projectLead` sessions.
+        ##
+        ## 3600s (not 300s): workflow-step tool calls routinely run
+        ## minutes (a `compose` research batch averaged 65s, peaked at
+        ## 344s in the run that motivated this change) — 300s treated a
+        ## slow tool call as idle and pruned mid-use. The token-budget
+        ## path (60% of the context window) remains the safety net.
         compaction:
-          pruneAfterSeconds: 300
+          pruneAfterSeconds: 3600
     codeAssistant:
       dbPath: "/data/code-assistant/code-assistant.db"
     concourse:

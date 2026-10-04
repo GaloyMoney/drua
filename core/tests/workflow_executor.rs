@@ -167,6 +167,7 @@ async fn build_stack_inner(
                 max_tokens_per_response: 1024,
                 context_window_tokens: 200_000,
                 effort: None,
+                cache_ttl_seconds: None,
             },
         );
     }
@@ -277,6 +278,7 @@ async fn seed_one_step_run(
         sandbox_mode: None,
         timeout_seconds: None,
         model_chain: Some(chain),
+        compaction: None,
         output_schema: Box::new(default_output_schema()),
         condition: None,
     }];

@@ -14,6 +14,7 @@ use serde::Deserialize;
 
 use drua_library::{Space, SpaceError, SPACE_DOC_TYPE};
 
+use crate::agent::session::CompactionOverride;
 use crate::agent::{Agent, AgentRole, Agents};
 use crate::audit::{Audit, AuditEntry, AuditLogQuery};
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
@@ -372,6 +373,13 @@ enum WorkflowStepParams {
         timeout_seconds: Option<u64>,
         #[serde(default)]
         model_chain: Option<llm::ModelChain>,
+        /// Highest-precedence compaction override for this step (beats
+        /// workflow-wide, beats role config). Partial — unset fields
+        /// inherit. `{enabled: false}` disables all pruning, including
+        /// the token-budget path, for steps where no tool result is
+        /// ever safe to discard.
+        #[serde(default)]
+        compaction: Option<CompactionOverride>,
         /// JSON Schema (root must be `type: object`) for this step's
         /// structured output. Omit to fall back to the default
         /// `{success, output, reason}` schema.
@@ -434,6 +442,7 @@ impl WorkflowStepParams {
                 sandbox_mode,
                 timeout_seconds,
                 model_chain,
+                compaction,
                 output_schema,
                 condition,
             } => {
@@ -452,6 +461,7 @@ impl WorkflowStepParams {
                     sandbox_mode,
                     timeout_seconds,
                     model_chain,
+                    compaction,
                     output_schema: Box::new(output_schema),
                     condition,
                 })
@@ -3246,11 +3256,13 @@ mod tests {
                     sandbox_mode: None,
                     timeout_seconds: None,
                     model_chain: None,
+                    compaction: None,
                     output_schema: Box::new(crate::workflow::default_output_schema()),
                     condition: None,
                 }],
                 sandboxes: vec![],
                 model_chain: None,
+                compaction: None,
                 original_path: None,
                 space_writes,
             }],
@@ -3344,6 +3356,7 @@ mod tests {
                 sandbox_mode: None,
                 timeout_seconds: None,
                 model_chain: None,
+                compaction: None,
                 output_schema: Box::new(crate::workflow::default_output_schema()),
                 condition: None,
             }])

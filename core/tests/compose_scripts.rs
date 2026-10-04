@@ -131,6 +131,7 @@ fn agents_config_for_tests() -> AgentsConfig {
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
             effort: None,
+            cache_ttl_seconds: None,
         },
     );
     AgentsConfig {
@@ -1284,6 +1285,7 @@ async fn step_agent_can_discard_its_own_lazily_created_draft() {
             definition.id,
             run.id,
             "inventory",
+            None,
             None,
             None,
             drua_core::workflow::default_output_schema(),

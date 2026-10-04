@@ -3,6 +3,7 @@ use std::sync::{Arc, LazyLock};
 use rmcp::model::{CallToolResult, Content, JsonObject};
 use serde::Deserialize;
 
+use crate::agent::session::CompactionOverride;
 use crate::audit::Audit;
 use crate::auth::{AuthResource, AuthSubject, AuthVerb};
 use crate::primitives::{WorkflowDefinitionId, WorkflowRunId};
@@ -229,6 +230,11 @@ enum WorkflowStepParam {
         timeout_seconds: Option<u64>,
         #[serde(default)]
         model_chain: Option<llm::ModelChain>,
+        /// Highest-precedence compaction override for this step. See
+        /// `drua_admin_workflow`'s `AgentStep.compaction` for the full
+        /// contract — `{enabled: false}` disables all pruning.
+        #[serde(default)]
+        compaction: Option<CompactionOverride>,
         /// JSON Schema (root must be `type: object`) for the step's
         /// structured output. Omit to fall back to the default
         /// `{success, output, reason}` schema.
@@ -268,6 +274,7 @@ impl WorkflowStepParam {
                 sandbox_mode,
                 timeout_seconds,
                 model_chain,
+                compaction,
                 output_schema,
                 condition,
             } => {
@@ -286,6 +293,7 @@ impl WorkflowStepParam {
                     sandbox_mode,
                     timeout_seconds,
                     model_chain,
+                    compaction,
                     output_schema: Box::new(output_schema),
                     condition,
                 })
@@ -839,6 +847,7 @@ impl TopLevelTool for WorkflowTool {
                         sandbox_mode,
                         timeout_seconds,
                         model_chain: None,
+                        compaction: None,
                         output_schema: Box::new(crate::workflow::default_output_schema()),
                         condition: None,
                     }]
@@ -1842,11 +1851,13 @@ mod space_writes_tests {
                     sandbox_mode: None,
                     timeout_seconds: None,
                     model_chain: None,
+                    compaction: None,
                     output_schema: Box::new(crate::workflow::default_output_schema()),
                     condition: None,
                 }],
                 sandboxes: vec![],
                 model_chain: None,
+                compaction: None,
                 original_path: None,
                 space_writes,
             }],
@@ -1933,6 +1944,7 @@ mod space_writes_tests {
                 sandbox_mode: None,
                 timeout_seconds: None,
                 model_chain: None,
+                compaction: None,
                 output_schema: Box::new(crate::workflow::default_output_schema()),
                 condition: None,
             }])

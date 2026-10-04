@@ -3,6 +3,8 @@ use drua_library::{GitFileHash, LivenessRef, SearchableFields, WriteOp};
 use llm::ModelChain;
 use serde::{Deserialize, Serialize};
 
+use crate::agent::session::{deserialize_double_option, CompactionOverride};
+
 use es_entity::*;
 
 use crate::primitives::*;
@@ -31,6 +33,10 @@ pub enum WorkflowDefinitionEvent {
         /// the role/config default when unset.
         #[serde(default)]
         model_chain: Option<ModelChain>,
+        /// Per-step `compaction` overrides this; both fall through to
+        /// role config when unset (`resolve_step_compaction`).
+        #[serde(default)]
+        compaction: Option<CompactionOverride>,
         /// On-disk path before sync canonicalisation; the
         /// `WriteToRuntime` job uses it to remove the old file.
         #[serde(default)]
@@ -49,6 +55,18 @@ pub enum WorkflowDefinitionEvent {
         /// `None` leaves the field untouched.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model_chain: Option<Option<ModelChain>>,
+        /// `Some(Some(_))` sets / replaces; `Some(None)` clears.
+        /// `None` leaves the field untouched. Needs
+        /// `deserialize_double_option`, not plain `#[serde(default)]` —
+        /// otherwise an explicit `null` (a real clear) collapses to the
+        /// same outer `None` as an absent key on the JSON round-trip
+        /// through the event log, and the clear is lost on hydration.
+        #[serde(
+            default,
+            deserialize_with = "deserialize_double_option",
+            skip_serializing_if = "Option::is_none"
+        )]
+        compaction: Option<Option<CompactionOverride>>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         space_writes: Option<SpaceWritesDecl>,
     },
@@ -71,6 +89,11 @@ pub struct WorkflowDefinition {
     /// Per-step `model_chain` wins; both fall through to role/config.
     #[builder(default)]
     pub model_chain: Option<ModelChain>,
+    /// Per-step `compaction` wins; both fall through to role config.
+    /// From the workflow YAML's top-level `compaction:` key; kept in
+    /// sync with the file via [`Self::update_from_library`].
+    #[builder(default)]
+    pub compaction: Option<CompactionOverride>,
     #[builder(default)]
     pub(crate) original_path: Option<String>,
     #[builder(default)]
@@ -115,6 +138,7 @@ impl WorkflowDefinition {
             &self.steps,
             &self.sandboxes,
             self.model_chain.as_ref(),
+            self.compaction.as_ref(),
             &self.space_writes,
             &self.created_at().to_rfc3339(),
             &self.updated_at().to_rfc3339(),
@@ -139,6 +163,7 @@ impl WorkflowDefinition {
         steps: Option<Vec<WorkflowStepDef>>,
         sandboxes: Option<Vec<WorkflowSandboxDecl>>,
         model_chain: Option<Option<ModelChain>>,
+        compaction: Option<Option<CompactionOverride>>,
         space_writes: Option<SpaceWritesDecl>,
         incoming_file_hash: GitFileHash,
     ) -> Idempotent<()> {
@@ -181,6 +206,9 @@ impl WorkflowDefinition {
         if let Some(mc) = &model_chain {
             self.model_chain = mc.clone();
         }
+        if let Some(c) = &compaction {
+            self.compaction = c.clone();
+        }
         if let Some(sw) = &space_writes {
             self.space_writes = sw.clone();
         }
@@ -192,6 +220,7 @@ impl WorkflowDefinition {
             steps,
             sandboxes,
             model_chain,
+            compaction,
             space_writes,
         });
         Idempotent::Executed(())
@@ -268,6 +297,7 @@ impl WorkflowDefinition {
             steps,
             sandboxes,
             model_chain,
+            compaction: None,
             space_writes,
         });
         Idempotent::Executed(())
@@ -278,6 +308,35 @@ impl WorkflowDefinition {
         step.model_chain()
             .cloned()
             .or_else(|| self.model_chain.clone())
+    }
+
+    /// Precedence: step `compaction` > workflow `compaction` > None —
+    /// mirrors `resolve_step_chain`, but merges rather than replaces
+    /// when both are set, so a workflow-wide `{enabled: false}` plus a
+    /// step-level `{keep_recent_tool_results: 20}` does what it reads
+    /// as, instead of the step silently discarding the workflow's
+    /// `enabled: false`.
+    pub fn resolve_step_compaction(&self, step: &WorkflowStepDef) -> Option<CompactionOverride> {
+        match (step.compaction(), &self.compaction) {
+            (None, None) => None,
+            (Some(step_override), None) => Some(step_override.clone()),
+            (None, Some(workflow_override)) => Some(workflow_override.clone()),
+            (Some(step_override), Some(workflow_override)) => Some(CompactionOverride {
+                enabled: step_override.enabled.or(workflow_override.enabled),
+                token_threshold_fraction: step_override
+                    .token_threshold_fraction
+                    .or(workflow_override.token_threshold_fraction),
+                keep_recent_tool_results: step_override
+                    .keep_recent_tool_results
+                    .or(workflow_override.keep_recent_tool_results),
+                prune_after_seconds: step_override
+                    .prune_after_seconds
+                    .or(workflow_override.prune_after_seconds),
+                reset_time_delta_seconds: step_override
+                    .reset_time_delta_seconds
+                    .or(workflow_override.reset_time_delta_seconds),
+            }),
+        }
     }
 }
 
@@ -360,6 +419,7 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     steps,
                     sandboxes,
                     model_chain,
+                    compaction,
                     original_path,
                     space_writes,
                     ..
@@ -374,6 +434,7 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                         .steps(steps.clone())
                         .sandboxes(sandboxes.clone())
                         .model_chain(model_chain.clone())
+                        .compaction(compaction.clone())
                         .original_path(original_path.clone())
                         .space_writes(space_writes.clone());
                 }
@@ -384,6 +445,7 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     steps,
                     sandboxes,
                     model_chain,
+                    compaction,
                     space_writes,
                     ..
                 } => {
@@ -404,6 +466,9 @@ impl TryFromEvents<WorkflowDefinitionEvent> for WorkflowDefinition {
                     }
                     if let Some(mc) = model_chain {
                         builder = builder.model_chain(mc.clone());
+                    }
+                    if let Some(c) = compaction {
+                        builder = builder.compaction(c.clone());
                     }
                     if let Some(sw) = space_writes {
                         builder = builder.space_writes(sw.clone());
@@ -435,6 +500,8 @@ pub struct NewWorkflowDefinition {
     pub(super) sandboxes: Vec<WorkflowSandboxDecl>,
     #[builder(default)]
     pub(super) model_chain: Option<ModelChain>,
+    #[builder(default)]
+    pub(super) compaction: Option<CompactionOverride>,
     #[builder(default, setter(into, strip_option))]
     pub(super) original_path: Option<String>,
     #[builder(default)]
@@ -470,6 +537,7 @@ impl IntoEvents<WorkflowDefinitionEvent> for NewWorkflowDefinition {
                 steps: self.steps,
                 sandboxes: self.sandboxes,
                 model_chain: self.model_chain,
+                compaction: self.compaction,
                 original_path: self.original_path,
                 space_writes: self.space_writes,
             }],
@@ -492,6 +560,7 @@ mod tests {
             sandbox_mode: None,
             timeout_seconds: Some(60),
             model_chain: None,
+            compaction: None,
             output_schema: Box::new(default_output_schema()),
             condition: None,
         }
@@ -534,6 +603,7 @@ mod tests {
             sandbox_mode: None,
             timeout_seconds: None,
             model_chain: Some(step_chain.clone()),
+            compaction: None,
             output_schema: Box::new(default_output_schema()),
             condition: None,
         }];
@@ -549,6 +619,7 @@ mod tests {
             sandbox_mode: None,
             timeout_seconds: None,
             model_chain: None,
+            compaction: None,
             output_schema: Box::new(default_output_schema()),
             condition: None,
         }];
@@ -559,6 +630,143 @@ mod tests {
 
         def.model_chain = None;
         assert!(def.resolve_step_chain(&def.steps[0]).is_none());
+    }
+
+    #[test]
+    fn resolve_step_compaction_step_overrides_workflow_overrides_default() {
+        let step_override = CompactionOverride {
+            keep_recent_tool_results: Some(20),
+            ..Default::default()
+        };
+        let workflow_override = CompactionOverride {
+            enabled: Some(false),
+            ..Default::default()
+        };
+
+        let mut def = build();
+        def.compaction = Some(workflow_override.clone());
+        def.steps = vec![WorkflowStepDef::AgentStep {
+            name: "s".into(),
+            skill: "k".into(),
+            sandbox: None,
+            sandbox_mode: None,
+            timeout_seconds: None,
+            model_chain: None,
+            compaction: Some(step_override.clone()),
+            output_schema: Box::new(default_output_schema()),
+            condition: None,
+        }];
+        // Merge, not replace: a workflow-wide `{enabled: false}` plus a
+        // step-level `{keep_recent_tool_results: 20}` does what it reads
+        // as — both survive.
+        let merged = def.resolve_step_compaction(&def.steps[0]).unwrap();
+        assert_eq!(merged.enabled, Some(false));
+        assert_eq!(merged.keep_recent_tool_results, Some(20));
+
+        def.steps = vec![WorkflowStepDef::AgentStep {
+            name: "s".into(),
+            skill: "k".into(),
+            sandbox: None,
+            sandbox_mode: None,
+            timeout_seconds: None,
+            model_chain: None,
+            compaction: None,
+            output_schema: Box::new(default_output_schema()),
+            condition: None,
+        }];
+        assert_eq!(
+            def.resolve_step_compaction(&def.steps[0]),
+            Some(workflow_override)
+        );
+
+        def.compaction = None;
+        assert!(def.resolve_step_compaction(&def.steps[0]).is_none());
+    }
+
+    /// Bugbot finding: `import_from_library`'s existing-workflow branch
+    /// didn't pass `compaction` into `update_from_library`, and `Updated`
+    /// had no `compaction` field to carry it — so a reverse-sync of an
+    /// edited YAML silently dropped a workflow-wide `compaction:` change,
+    /// and since `rendered()` kept emitting the stale value, the next
+    /// sync tick would overwrite the file right back. This pins the
+    /// hydration half directly: an `Updated` event setting `compaction`
+    /// must be applied by the builder, and `Some(None)` must clear it —
+    /// mirroring `model_chain`'s existing double-option semantics.
+    #[test]
+    fn updated_event_hydrates_compaction_override() {
+        let base = build();
+        let mut events = base.events.clone();
+
+        let override_a = CompactionOverride {
+            enabled: Some(false),
+            ..Default::default()
+        };
+        events.push(WorkflowDefinitionEvent::Updated {
+            name: None,
+            description: None,
+            trigger: None,
+            steps: None,
+            sandboxes: None,
+            model_chain: None,
+            compaction: Some(Some(override_a.clone())),
+            space_writes: None,
+        });
+        let hydrated = WorkflowDefinition::try_from_events(events.clone()).unwrap();
+        assert_eq!(hydrated.compaction, Some(override_a));
+
+        // A later sync tick changes the YAML's top-level `compaction:` —
+        // the new value must win, not the one from the first update.
+        let override_b = CompactionOverride {
+            keep_recent_tool_results: Some(5),
+            ..Default::default()
+        };
+        events.push(WorkflowDefinitionEvent::Updated {
+            name: None,
+            description: None,
+            trigger: None,
+            steps: None,
+            sandboxes: None,
+            model_chain: None,
+            compaction: Some(Some(override_b.clone())),
+            space_writes: None,
+        });
+        let hydrated = WorkflowDefinition::try_from_events(events.clone()).unwrap();
+        assert_eq!(hydrated.compaction, Some(override_b));
+
+        // Clearing the key entirely (`Some(None)`) must clear the field,
+        // not leave the prior override in place (`None` would mean
+        // "untouched" — this must be distinguishable from that).
+        events.push(WorkflowDefinitionEvent::Updated {
+            name: None,
+            description: None,
+            trigger: None,
+            steps: None,
+            sandboxes: None,
+            model_chain: None,
+            compaction: Some(None),
+            space_writes: None,
+        });
+        let hydrated = WorkflowDefinition::try_from_events(events.clone()).unwrap();
+        assert_eq!(hydrated.compaction, None);
+
+        // Second bugbot finding on the same commit: a naive
+        // `Option<Option<_>>` with only `#[serde(default)]` collapses an
+        // explicit `null` to the same outer `None` as an absent key once
+        // it round-trips through JSON (how events are actually persisted
+        // in the `events` JSONB column) — so the clear above would be
+        // silently undone on the next load. Round-trip every event
+        // through `serde_json` the way a real reload would and re-check.
+        let round_tripped: Vec<WorkflowDefinitionEvent> = events
+            .iter_all()
+            .map(|e| serde_json::to_value(e).unwrap())
+            .map(|v| serde_json::from_value(v).unwrap())
+            .collect();
+        let round_tripped = EntityEvents::init(*events.id(), round_tripped);
+        let hydrated = WorkflowDefinition::try_from_events(round_tripped).unwrap();
+        assert_eq!(
+            hydrated.compaction, None,
+            "clear must survive the JSON round-trip, not revert to the prior override"
+        );
     }
 
     #[test]

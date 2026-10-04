@@ -72,6 +72,7 @@ async fn build_agents(pool: &sqlx::PgPool) -> (Agents, Arc<Sandboxes>) {
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
             effort: None,
+            cache_ttl_seconds: None,
         },
     );
     let config = AgentsConfig {
@@ -136,6 +137,7 @@ async fn send_message_round_trip_via_prompt_channel() {
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
             effort: None,
+            cache_ttl_seconds: None,
         },
     );
     let config = AgentsConfig {
@@ -305,6 +307,7 @@ async fn send_message_dispatches_registered_tool_call() {
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
             effort: None,
+            cache_ttl_seconds: None,
         },
     );
     let config = AgentsConfig {
@@ -541,6 +544,7 @@ async fn identical_failing_tool_calls_advance_chain_to_fallback() {
                 max_tokens_per_response: 1024,
                 context_window_tokens: 200_000,
                 effort: None,
+                cache_ttl_seconds: None,
             },
         );
     }
@@ -677,6 +681,7 @@ async fn identical_failing_tool_calls_without_fallback_error_the_turn() {
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
             effort: None,
+            cache_ttl_seconds: None,
         },
     );
     let config = AgentsConfig {
@@ -852,6 +857,7 @@ async fn resume_message_continues_past_interrupted_tool_call() {
             max_tokens_per_response: 1024,
             context_window_tokens: 200_000,
             effort: None,
+            cache_ttl_seconds: None,
         },
     );
     let config = AgentsConfig {
@@ -1298,6 +1304,7 @@ async fn detach_conflicting_writer_skips_workflow_owned_writer_from_other_workfl
             "wf-writer",
             Some((sandbox_id, SandboxAgentMode::Write)),
             None,
+            None,
             drua_core::workflow::default_output_schema(),
             drua_core::workflow::SpaceWritesMode::default(),
         )
@@ -1364,6 +1371,7 @@ async fn detach_conflicting_writer_steals_from_same_workflow_writer() {
             prior_run_id,
             "wf-stale",
             Some((sandbox_id, SandboxAgentMode::Write)),
+            None,
             None,
             drua_core::workflow::default_output_schema(),
             drua_core::workflow::SpaceWritesMode::default(),
@@ -1442,6 +1450,7 @@ async fn list_for_project_returns_lead_past_100_workflow_agents() {
                 &format!("wf-step-{i}"),
                 None,
                 None,
+                None,
                 drua_core::workflow::default_output_schema(),
                 drua_core::workflow::SpaceWritesMode::default(),
             )
@@ -1478,6 +1487,7 @@ async fn update_session_chain_rejects_workflow_agents() {
             "wf-step",
             None,
             None,
+            None,
             drua_core::workflow::default_output_schema(),
             drua_core::workflow::SpaceWritesMode::default(),
         )
@@ -1508,6 +1518,7 @@ async fn delete_rejects_workflow_agents() {
             workflow_id,
             run_id,
             "wf-step",
+            None,
             None,
             None,
             drua_core::workflow::default_output_schema(),
