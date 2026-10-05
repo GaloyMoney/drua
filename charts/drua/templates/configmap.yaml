@@ -293,14 +293,17 @@ data:
         {{- with .model }}
         model: {{ . | quote }}
         {{- end }}
-        {{- with .timeoutMs }}
-        timeout_ms: {{ printf "%d" (int .) }}
+        {{- /* hasKey, not `with`: an explicit 0 is a real limit (immediate
+        timeout, or reject every decide call) and Helm's `with` treats 0 as
+        empty, which would silently fall back to the crate default instead. */}}
+        {{- if hasKey . "timeoutMs" }}
+        timeout_ms: {{ printf "%d" (int .timeoutMs) }}
         {{- end }}
-        {{- with .maxQuestions }}
-        max_questions: {{ printf "%d" (int .) }}
+        {{- if hasKey . "maxQuestions" }}
+        max_questions: {{ printf "%d" (int .maxQuestions) }}
         {{- end }}
-        {{- with .maxStateBytes }}
-        max_state_bytes: {{ printf "%d" (int .) }}
+        {{- if hasKey . "maxStateBytes" }}
+        max_state_bytes: {{ printf "%d" (int .maxStateBytes) }}
         {{- end }}
       {{- end }}
       {{- with .Values.galoyAgents.config.compose }}
