@@ -316,6 +316,17 @@ impl Config {
             config.toolsets.zenduty.api_token = val.trim().to_string();
         }
 
+        // `DECIDE_API_KEY` exists for TypeSafe-direct or a separately
+        // metered key; the OpenRouter fallback is what makes prod work
+        // with no new secret — the OpenRouter key already lives in
+        // `openai_api_key` (`ci/deploy/drua/main.tf` maps
+        // `openrouter_api_key` into that slot).
+        if let Ok(val) = std::env::var("DECIDE_API_KEY") {
+            config.toolsets.decide.api_key = val.trim().to_string();
+        } else if config.toolsets.decide.endpoint_url.contains("openrouter.ai") {
+            config.toolsets.decide.api_key = config.openai_api_key.clone();
+        }
+
         // {NAME}_AUTH_HEADER env vars override upstream MCP auth headers.
         for upstream in &mut config.toolsets.mcp_upstreams {
             let env_key = format!("{}_AUTH_HEADER", upstream.name.to_uppercase());

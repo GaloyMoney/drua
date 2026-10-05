@@ -48,8 +48,8 @@ use prompt_executor::PromptExecutor;
 use sandbox::Sandboxes;
 use skill::Skills;
 use toolset::{
-    AdminToolSet, Bash, CodeAssistantToolSet, Delete, GlobTool, Grep, LibraryToolSet, Ls, MoveFile,
-    NotesTool, ProjectAgent, ProjectLog, ProjectSandbox, Read, SkillTool, SpacesTool,
+    AdminToolSet, Bash, CodeAssistantToolSet, DecideTool, Delete, GlobTool, Grep, LibraryToolSet,
+    Ls, MoveFile, NotesTool, ProjectAgent, ProjectLog, ProjectSandbox, Read, SkillTool, SpacesTool,
     SubmitOutputTool, TextEditor, ToolSets, ToolSetsError, UseSkillTool, WorkflowTool,
 };
 use tracing::instrument;
@@ -147,6 +147,7 @@ impl App {
             config.tool_caching.clone(),
         ));
         let compose_config = config.toolsets.compose.clone();
+        let decide_config = config.toolsets.decide.clone();
         let toolsets = ToolSets::init(
             config.toolsets,
             Some(Arc::clone(&audit)),
@@ -378,6 +379,30 @@ impl App {
         toolsets.register_top_level(NotesTool::new(Arc::clone(&notes), Arc::clone(&projects)));
         toolsets.register_top_level(UseSkillTool::new(Arc::clone(&skills)));
         toolsets.register_top_level(SkillTool::new(Arc::clone(&skills), Arc::clone(&projects)));
+
+        if decide_config.enabled {
+            if decide_config.api_key.is_empty() {
+                tracing::warn!(
+                    "decide is enabled but no API key is configured — set DECIDE_API_KEY or \
+                     OPENAI_API_KEY (OpenRouter); tool not registered"
+                );
+            } else {
+                let client = decision_client::DecisionClient::new(
+                    decide_config.api_key.clone(),
+                    decide_config.endpoint_url.clone(),
+                    std::time::Duration::from_millis(decide_config.timeout_ms),
+                    decision_client::DecisionLimits {
+                        max_questions: decide_config.max_questions,
+                        max_state_bytes: decide_config.max_state_bytes,
+                    },
+                );
+                toolsets.register_top_level(DecideTool::new(
+                    Arc::new(client),
+                    decide_config.model.clone(),
+                ));
+            }
+        }
+
         toolsets.register_top_level(WorkflowTool::new(
             Arc::clone(&workflows),
             Arc::clone(&projects),
