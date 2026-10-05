@@ -825,6 +825,61 @@ async fn workflow_scripts_validate_execute_and_preserve_provenance() {
         .await
         .is_err());
 
+    // decide step validation — same `validate_steps` contract as
+    // script_step above: registered tool, well-formed questions,
+    // min_confidence in range, no forward `${{ … }}` references.
+    let decide_base = json!({
+        "type": "decide", "name": "triage", "state": "x",
+        "questions": { "q": { "type": "noul", "instructions": "ok" } }
+    });
+    for patch in [
+        json!({"questions": {"bad-key": {"type":"noul","instructions":"ok"}}}),
+        json!({"questions": {"q": {"type":"choice","instructions":"pick",
+                                     "criteria": {"only":"the only option"}}}}),
+        json!({"min_confidence": 1.5}),
+        json!({"questions": {"q": {"type":"noul",
+                                     "instructions":"${{ steps.later.outputs.x }}"}}}),
+    ] {
+        let mut value = decide_base.clone();
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(patch.as_object().unwrap().clone());
+        let result = app
+            .workflows()
+            .create(
+                &user,
+                project,
+                "proj-workflow-scripts",
+                "invalid-decide".into(),
+                None,
+                WorkflowTrigger::Manual { condition: None },
+                vec![serde_json::from_value(value).unwrap()],
+                vec![],
+                None,
+                Default::default(),
+            )
+            .await;
+        assert!(result.is_err(), "accepted invalid decide step {patch}");
+    }
+    let valid_decide = app
+        .workflows()
+        .create(
+            &user,
+            project,
+            "proj-workflow-scripts",
+            "valid-decide".into(),
+            None,
+            WorkflowTrigger::Manual { condition: None },
+            vec![serde_json::from_value(decide_base.clone()).unwrap()],
+            vec![],
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(valid_decide.steps[0].name(), "triage");
+
     let users = Arc::new(drua_core::user::Users::new(&pool));
     let fs = Arc::new(drua_core::space_fs::SpaceFs::new(
         Arc::new(app.library().spaces().clone()),
