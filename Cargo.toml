@@ -14,6 +14,7 @@ members = [
   "lib/tracing-utils",
   "lib/anthropic-client",
   "lib/openai-client",
+  "lib/decision-client",
   "lib/llm",
   "lib/js-engine",
   "lib/json-schema-ts",
@@ -62,6 +63,7 @@ code-assistant-core = { path = "code-assistant/crates/core" }
 llm = { path = "lib/llm" }
 anthropic-client = { path = "lib/anthropic-client" }
 openai-client = { path = "lib/openai-client" }
+decision-client = { path = "lib/decision-client" }
 github-app = { path = "lib/github-app" }
 fake-mcp-upstream = { path = "lib/fake-mcp-upstream" }
 drua-git-proxy = { path = "lib/git-proxy" }
