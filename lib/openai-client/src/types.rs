@@ -24,6 +24,22 @@ pub(crate) struct OpenAiRequest {
     pub reasoning_effort: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderRouting>,
+}
+
+/// OpenRouter upstream routing. Names are the provider display names
+/// reported in `usage.provider` (e.g. `Relace`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderRouting {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ignore: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub only: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_fallbacks: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]

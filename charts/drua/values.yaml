@@ -44,6 +44,8 @@ galoyAgents:
           - name: deepseek/deepseek-v4-pro-0813
             maxTokensPerResponse: 16384
             contextWindowTokens: 1048576
+            routing:
+              ignore: ["Relace"]
           - name: deepseek/deepseek-v4.1-flash
             maxTokensPerResponse: 16384
             contextWindowTokens: 1048576

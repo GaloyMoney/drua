@@ -8,7 +8,7 @@ use drua_core::agent::{AgentsConfig, ModelDefaults};
 use drua_core::changeset::ChangesetConfig;
 use drua_core::library::LibraryConfig;
 use drua_core::prompt_executor::{
-    ModelConfig, OpenAiResponsesAuth, PromptExecutorConfig, Provider,
+    ModelConfig, OpenAiResponsesAuth, PromptExecutorConfig, Provider, ProviderRouting,
 };
 use drua_core::sandbox::SandboxConfig;
 use drua_core::toolset::ToolSetsConfig;
@@ -69,6 +69,8 @@ pub struct ProviderModelConfig {
     pub effort: Option<ReasoningEffort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_ttl_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing: Option<ProviderRouting>,
 }
 
 fn default_context_window() -> u64 {
@@ -108,6 +110,7 @@ impl Config {
                     name: model.name.clone(),
                     provider: provider.clone(),
                     default_max_tokens: None,
+                    routing: model.routing.clone(),
                 });
             }
         }

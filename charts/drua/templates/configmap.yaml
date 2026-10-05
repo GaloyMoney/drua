@@ -43,6 +43,21 @@ data:
             {{- if hasKey . "cacheTtlSeconds" }}
             cache_ttl_seconds: {{ printf "%d" (int .cacheTtlSeconds) }}
             {{- end }}
+            {{- with .routing }}
+            routing:
+              {{- with .ignore }}
+              ignore: {{ toJson . }}
+              {{- end }}
+              {{- with .only }}
+              only: {{ toJson . }}
+              {{- end }}
+              {{- with .order }}
+              order: {{ toJson . }}
+              {{- end }}
+              {{- if hasKey . "allowFallbacks" }}
+              allow_fallbacks: {{ .allowFallbacks }}
+              {{- end }}
+            {{- end }}
         {{- end }}
     {{- end }}
     {{- end }}

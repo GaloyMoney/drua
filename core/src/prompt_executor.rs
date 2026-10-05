@@ -12,6 +12,7 @@ use llm::{
     Prompt, PromptError, PromptRequest, PromptRequestChannel, PromptResponseChannel, PromptResult,
     StreamHandle,
 };
+pub use openai_client::ProviderRouting;
 use openai_client::{
     OpenAiClient, OpenAiResponsesAuth as ClientOpenAiResponsesAuth, OpenAiResponsesClient,
 };
@@ -28,6 +29,8 @@ pub struct ModelConfig {
     pub provider: Provider,
     #[serde(default)]
     pub default_max_tokens: Option<u32>,
+    #[serde(default)]
+    pub routing: Option<ProviderRouting>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,13 +339,16 @@ struct ResolvedModel {
 
 impl ResolvedModel {
     fn from_config(config: ModelConfig) -> Self {
+        let routing = config.routing;
         let client: Arc<dyn LlmProvider> = match config.provider {
             Provider::Anthropic { api_key, base_url } => {
                 Arc::new(AnthropicClient::new(api_key).with_base_url(base_url))
             }
-            Provider::OpenAi { api_key, base_url } => {
-                Arc::new(OpenAiClient::new(api_key).with_base_url(base_url))
-            }
+            Provider::OpenAi { api_key, base_url } => Arc::new(
+                OpenAiClient::new(api_key)
+                    .with_base_url(base_url)
+                    .with_routing(routing),
+            ),
             Provider::OpenAiResponses { auth, base_url } => Arc::new(
                 OpenAiResponsesClient::new(match auth {
                     OpenAiResponsesAuth::ApiKey { api_key } => {
