@@ -246,10 +246,15 @@ impl ZendutyClient {
         team_id: &str,
         schedule_id: &str,
     ) -> Result<Schedule, ZendutyError> {
-        self.get(&format!(
-            "/api/account/teams/{team_id}/schedules/{schedule_id}/"
-        ))
-        .await
+        let mut schedule: Schedule = self
+            .get(&format!(
+                "/api/account/teams/{team_id}/schedules/{schedule_id}/"
+            ))
+            .await?;
+        schedule.on_call_now = self
+            .get(&format!("/api/account/teams/{team_id}/oncall/"))
+            .await?;
+        Ok(schedule)
     }
 }
 
