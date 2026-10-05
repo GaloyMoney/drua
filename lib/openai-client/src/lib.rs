@@ -20,6 +20,7 @@ use crate::convert::{prompt_to_request, DeltaSynthesizer, ReasoningDialect, EMPT
 use crate::sse::{parse_sse_stream, SseError};
 
 pub use responses::{OpenAiResponsesAuth, OpenAiResponsesClient, OpenAiResponsesError};
+pub use types::ProviderRouting;
 
 const DEFAULT_API_URL: &str = "https://api.openai.com/v1/chat/completions";
 const API_PATH: &str = "/v1/chat/completions";
@@ -81,6 +82,7 @@ pub struct OpenAiClient {
     api_key: String,
     api_url: String,
     reasoning_dialect: ReasoningDialect,
+    routing: Option<ProviderRouting>,
 }
 
 impl OpenAiClient {
@@ -90,6 +92,7 @@ impl OpenAiClient {
             api_key: api_key.into(),
             api_url: DEFAULT_API_URL.to_string(),
             reasoning_dialect: ReasoningDialect::OpenAi,
+            routing: None,
         }
     }
 
@@ -99,6 +102,11 @@ impl OpenAiClient {
             let base = base.trim_end_matches('/');
             self.api_url = format!("{base}{API_PATH}");
         }
+        self
+    }
+
+    pub fn with_routing(mut self, routing: Option<ProviderRouting>) -> Self {
+        self.routing = routing;
         self
     }
 
@@ -215,7 +223,8 @@ impl OpenAiClient {
         }
         span.record("model_used", prompt.chain.primary.name.as_str());
 
-        let request_body = prompt_to_request(prompt, self.reasoning_dialect);
+        let mut request_body = prompt_to_request(prompt, self.reasoning_dialect);
+        request_body.provider = self.routing.clone();
         let body_bytes = Arc::new(
             serde_json::to_vec(&request_body)
                 .map_err(|e| OpenAiChatCompletionsError::Stream(format!("body serialize: {e}")))?,

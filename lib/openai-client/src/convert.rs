@@ -83,6 +83,7 @@ pub(crate) fn prompt_to_request(
         }),
         reasoning_effort,
         reasoning,
+        provider: None,
     };
 
     if request.model.starts_with(ANTHROPIC_MODEL_PREFIX) {
@@ -537,6 +538,7 @@ impl DeltaSynthesizer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::ProviderRouting;
 
     fn content_text(msg: &OpenAiMessage) -> Option<String> {
         match msg.content.as_ref()? {
@@ -621,6 +623,23 @@ mod tests {
             "unset effort must omit reasoning, not send low: {json}"
         );
         assert!(json.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn provider_routing_serializes_only_when_set() {
+        let mut req = prompt_to_request(&sample_prompt(), ReasoningDialect::OpenAi);
+        let value = serde_json::to_value(&req).unwrap();
+        assert!(value.get("provider").is_none());
+
+        req.provider = Some(ProviderRouting {
+            ignore: vec!["Relace".to_string()],
+            ..Default::default()
+        });
+        let value = serde_json::to_value(&req).unwrap();
+        assert_eq!(
+            value["provider"],
+            serde_json::json!({ "ignore": ["Relace"] })
+        );
     }
 
     #[test]

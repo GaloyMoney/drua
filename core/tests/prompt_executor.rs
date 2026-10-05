@@ -19,6 +19,7 @@ async fn anthropic_round_trip_via_executor() {
                 base_url: None,
             },
             default_max_tokens: Some(64),
+            routing: None,
         }],
     };
 

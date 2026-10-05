@@ -20,6 +20,8 @@ providers:
       - name: deepseek/deepseek-v4-pro-0813
         max_tokens_per_response: 16384
         context_window_tokens: 1048576
+        routing:
+          ignore: ["Relace"]
       - name: deepseek/deepseek-v4.1-flash
         max_tokens_per_response: 16384
         context_window_tokens: 1048576
