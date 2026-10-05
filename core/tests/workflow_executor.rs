@@ -1944,3 +1944,312 @@ async fn executor_respects_a_raised_consecutive_empty_turns_threshold() {
     let run = runs.find_by_id(run_id).await.expect("reload run");
     assert_eq!(run.state, WorkflowRunState::Succeeded);
 }
+
+// ── `decide` step ──
+//
+// First `ToolStep`-family integration test in this file — kept small.
+// `tool_step`'s own dispatch/timeout/error semantics are exercised by
+// `execute_tool_step` unit tests and the `dispatch_step` tests above;
+// these only cover what `execute_decide_step` adds on top: confidence
+// annotation and condition-gating a downstream step.
+
+/// A stub `decide` top-level tool. Always answers a single `choice`
+/// question `route` at `confidence: 0.5` — below any threshold above
+/// 0.5 — so a two-step workflow's `min_confidence: 0.9` leaves
+/// `confident: false`. Mirrors what `ToolCaching::cache` would wrap a
+/// real `DecideTool` response in (`{"result": …}`), since this test
+/// harness has no `ToolCaching` wired (`build_stack_inner` passes
+/// `None`), unlike `PingTool` above, which doesn't need to.
+struct StubDecideTool {
+    schema: serde_json::Value,
+}
+
+impl StubDecideTool {
+    fn new() -> Self {
+        Self {
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": { "model": {}, "answers": {}, "usage": {} },
+            }),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TopLevelTool for StubDecideTool {
+    fn name(&self) -> &str {
+        "decide"
+    }
+    fn description(&self) -> &str {
+        "Stub decide tool. Test-only."
+    }
+    fn input_schema(&self) -> &serde_json::Value {
+        &self.schema
+    }
+    fn inner_output_schema(&self) -> Option<&serde_json::Value> {
+        Some(&self.schema)
+    }
+    async fn call(
+        &self,
+        _subject: &AuthSubject,
+        _arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        drua_core::audit::Audit::record_action("decide");
+        drua_core::audit::Audit::merge_metadata(serde_json::json!({ "model": "stub" }));
+        let mut result = CallToolResult::success(vec![Content::text("stub")]);
+        result.structured_content = Some(serde_json::json!({
+            "result": {
+                "model": "stub",
+                "answers": {
+                    "route": {
+                        "type": "choice", "choice": "a", "confidence": 0.5,
+                        "probabilities": { "a": 0.5, "b": 0.5 }
+                    }
+                },
+                "usage": {}
+            }
+        }));
+        Ok(result)
+    }
+}
+
+/// A stub `decide` tool that always fails the call, to exercise the
+/// `is_error: true` -> `StepErrored` path `dispatch_step` already
+/// covers for `tool_step`.
+struct FailingDecideTool {
+    schema: serde_json::Value,
+}
+
+impl FailingDecideTool {
+    fn new() -> Self {
+        Self {
+            schema: serde_json::json!({ "type": "object", "properties": {} }),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TopLevelTool for FailingDecideTool {
+    fn name(&self) -> &str {
+        "decide"
+    }
+    fn description(&self) -> &str {
+        "Stub decide tool that always fails. Test-only."
+    }
+    fn input_schema(&self) -> &serde_json::Value {
+        &self.schema
+    }
+    fn inner_output_schema(&self) -> Option<&serde_json::Value> {
+        Some(&self.schema)
+    }
+    async fn call(
+        &self,
+        _subject: &AuthSubject,
+        _arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        Ok(CallToolResult::error(vec![Content::text(
+            "decide failed: upstream overloaded",
+        )]))
+    }
+}
+
+/// Seeds a two-step `decide` -> `tool_step` run, no skill / agent
+/// involved — both steps are deterministic dispatch.
+async fn seed_decide_then_tool_run(
+    definitions: &WorkflowDefinitionRepo,
+    runs: &WorkflowRunRepo,
+    project_id: ProjectId,
+    min_confidence: f64,
+) -> drua_core::primitives::WorkflowRunId {
+    let mut questions = std::collections::BTreeMap::new();
+    questions.insert(
+        "route".to_string(),
+        decision_client::Question::Choice {
+            instructions: "which route?".into(),
+            criteria: std::collections::BTreeMap::from([
+                ("a".to_string(), "Route A".to_string()),
+                ("b".to_string(), "Route B".to_string()),
+            ]),
+        },
+    );
+
+    let steps = vec![
+        WorkflowStepDef::Decide {
+            name: "triage".to_string(),
+            state: serde_json::json!({ "doc": "some text" }),
+            questions,
+            model: None,
+            min_confidence: Some(min_confidence),
+            timeout_seconds: None,
+            condition: None,
+        },
+        WorkflowStepDef::ToolStep {
+            name: "file_it".to_string(),
+            tool: "ping".to_string(),
+            params: serde_json::json!({}),
+            timeout_seconds: None,
+            condition: Some("steps.triage.outputs.confident".to_string()),
+        },
+    ];
+
+    let new_definition = NewWorkflowDefinition::builder()
+        .project_id(project_id)
+        .name(format!("test-wf-{}", uuid::Uuid::new_v4()))
+        .trigger(WorkflowTrigger::Manual { condition: None })
+        .steps(steps.clone())
+        .space_writes(drua_core::workflow::SpaceWritesDecl {
+            mode: drua_core::workflow::SpaceWritesMode::ReadOnly,
+            ..Default::default()
+        })
+        .build()
+        .expect("build definition");
+    let mut op = definitions.begin_op().await.expect("begin op");
+    let definition = definitions
+        .create_in_op(&mut op, new_definition)
+        .await
+        .expect("create definition");
+    op.commit().await.expect("commit");
+
+    let new_run = NewWorkflowRun::builder()
+        .definition_id(definition.id)
+        .project_id(project_id)
+        .trigger_context(serde_json::json!({}))
+        .steps_snapshot(steps)
+        .build()
+        .expect("build run");
+    runs.create(new_run).await.expect("create run").id
+}
+
+#[tokio::test]
+async fn decide_step_dispatches_and_exposes_confident_to_conditions() {
+    let pool = pool().await;
+    let (executor, definitions, runs, _skills, project_id, _sub, _prompt_rx) = build_stack_inner(
+        &pool,
+        ModelChain::new("claude-haiku-4-5-20251001"),
+        BreakerConfig::default(),
+        None,
+        |toolsets| {
+            toolsets.register_top_level(StubDecideTool::new());
+            toolsets.register_top_level(PingTool::new());
+        },
+    )
+    .await;
+
+    // Stub always answers at confidence 0.5; 0.9 leaves it unconfident.
+    let run_id = seed_decide_then_tool_run(&definitions, &runs, project_id, 0.9).await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    executor
+        .run(run_id, cancel)
+        .await
+        .expect("run completes without erroring");
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(run.state, WorkflowRunState::Succeeded);
+
+    let triage = run
+        .step_results
+        .iter()
+        .find(|r| r.name == "triage")
+        .expect("triage step result");
+    let output = triage.output.as_ref().expect("triage has output");
+    assert_eq!(output["success"], true);
+    assert_eq!(output["confident"], false);
+    assert_eq!(output["low_confidence"], serde_json::json!(["route"]));
+
+    let file_it = run
+        .step_results
+        .iter()
+        .find(|r| r.name == "file_it")
+        .expect("file_it step result");
+    assert_eq!(
+        file_it.step_state(),
+        drua_core::workflow::WorkflowStepState::Skipped,
+        "condition on an unconfident decide should skip the next step: {file_it:?}"
+    );
+}
+
+#[tokio::test]
+async fn decide_step_dispatch_failure_errors_the_run() {
+    let pool = pool().await;
+    let (executor, definitions, runs, _skills, project_id, _sub, _prompt_rx) = build_stack_inner(
+        &pool,
+        ModelChain::new("claude-haiku-4-5-20251001"),
+        BreakerConfig::default(),
+        None,
+        |toolsets| {
+            toolsets.register_top_level(FailingDecideTool::new());
+            toolsets.register_top_level(PingTool::new());
+        },
+    )
+    .await;
+
+    let run_id = seed_decide_then_tool_run(&definitions, &runs, project_id, 0.9).await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    executor
+        .run(run_id, cancel)
+        .await
+        .expect("run() returns Ok even when a step errors — error is recorded on the run");
+
+    let run = runs.find_by_id(run_id).await.expect("reload run");
+    assert_eq!(run.state, WorkflowRunState::Errored);
+    let triage = run
+        .step_results
+        .iter()
+        .find(|r| r.name == "triage")
+        .expect("triage step result");
+    let error = triage.error.as_ref().expect("triage step errored");
+    assert!(
+        error.contains("upstream overloaded"),
+        "step error should name the tool's text: {error}"
+    );
+}
+
+#[tokio::test]
+async fn decide_step_tool_call_is_audited() {
+    let pool = pool().await;
+    let audit = Arc::new(drua_core::audit::Audit::new(&pool));
+    let (executor, definitions, runs, _skills, project_id, _sub, _prompt_rx) = build_stack_inner(
+        &pool,
+        ModelChain::new("claude-haiku-4-5-20251001"),
+        BreakerConfig::default(),
+        Some(Arc::clone(&audit)),
+        |toolsets| {
+            toolsets.register_top_level(StubDecideTool::new());
+            toolsets.register_top_level(PingTool::new());
+        },
+    )
+    .await;
+
+    let run_id = seed_decide_then_tool_run(&definitions, &runs, project_id, 0.9).await;
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    executor.run(run_id, cancel).await.expect("run completes");
+
+    let query = drua_core::audit::primitives::AuditLogQuery {
+        workflow_run_id: Some(run_id),
+        workflow_step: Some("triage".to_string()),
+        entrypoint: Some("mcp: decide".to_string()),
+        limit: 10,
+        ..Default::default()
+    };
+    let entries = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let entries = audit.find(&query).await.expect("query audit_entries");
+            if !entries.is_empty() {
+                return entries;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("timed out waiting for the decide audit row");
+
+    assert_eq!(
+        entries.len(),
+        1,
+        "exactly one decide tool call: {entries:?}"
+    );
+    assert_eq!(entries[0].metadata["model"], "stub");
+}

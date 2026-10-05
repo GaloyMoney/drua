@@ -165,6 +165,21 @@ galoyAgents:
       enabled: false
       url: ""
       defaultTeam: ""
+    ## `decide` top-level tool + workflow step: a provider-agnostic
+    ## decision-model client (TypeSafe Jev / OpenRouter / Clef). Disabled
+    ## by default. No new secret needed when `endpointUrl` stays on
+    ## OpenRouter — the server falls back to the existing OpenAI/OpenRouter
+    ## key (`openai-api-key`) when `DECIDE_API_KEY` is unset. `maxStateBytes`
+    ## is quoted for the same reason `compose`'s byte-valued limits below
+    ## are: Helm's serializer otherwise promotes a large integer to
+    ## float64, which Rust serde rejects for a `usize` field.
+    decide:
+      enabled: false
+      endpointUrl: "https://openrouter.ai/api/alpha/decisions"
+      model: "typesafe/jev-1.13"
+      timeoutMs: 30000
+      maxQuestions: 64
+      maxStateBytes: "131072"
     ## JS-engine sandbox limits for the `compose` top-level tool. Each
     ## key maps 1:1 to a JsEngine setter; missing keys fall back to the
     ## drua-core defaults (50 calls / 32 MiB per inner tool result /

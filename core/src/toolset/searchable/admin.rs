@@ -406,6 +406,21 @@ enum WorkflowStepParams {
         #[serde(default)]
         condition: Option<String>,
     },
+    /// Deterministic dispatch to the `decide` tool. Output shape is fixed
+    /// by the tool — there is no `output_schema` field.
+    Decide {
+        name: String,
+        state: serde_json::Value,
+        questions: std::collections::BTreeMap<String, decision_client::Question>,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        min_confidence: Option<f64>,
+        #[serde(default)]
+        timeout_seconds: Option<u64>,
+        #[serde(default)]
+        condition: Option<String>,
+    },
     ScriptStep {
         name: String,
         script: String,
@@ -476,6 +491,23 @@ impl WorkflowStepParams {
                 name,
                 tool,
                 params,
+                timeout_seconds,
+                condition,
+            }),
+            WorkflowStepParams::Decide {
+                name,
+                state,
+                questions,
+                model,
+                min_confidence,
+                timeout_seconds,
+                condition,
+            } => Ok(WorkflowStepDef::Decide {
+                name,
+                state,
+                questions,
+                model,
+                min_confidence,
                 timeout_seconds,
                 condition,
             }),
@@ -3699,5 +3731,37 @@ mod script_step_tests {
             Ok(_) => panic!("unknown key `run_id` must be rejected, but parsed successfully"),
             Err(e) => panic!("expected InvalidArgument, got a different error: {e}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod decide_step_tests {
+    use super::*;
+
+    #[test]
+    fn admin_workflow_accepts_and_reports_decide_steps() {
+        let input: WorkflowStepParams = serde_json::from_value(serde_json::json!({
+            "type": "decide", "name": "triage",
+            "state": "${{ steps.prep.outputs.result }}",
+            "questions": {
+                "duplicate": { "type": "noul", "instructions": "Is this a duplicate?" }
+            },
+            "min_confidence": 0.8
+        }))
+        .unwrap();
+        let WorkflowStepDef::Decide {
+            state,
+            min_confidence,
+            ..
+        } = input.into_step().unwrap()
+        else {
+            panic!("expected Decide");
+        };
+        assert_eq!(
+            state,
+            serde_json::json!("${{ steps.prep.outputs.result }}"),
+            "template reference must survive parsing unresolved"
+        );
+        assert_eq!(min_confidence, Some(0.8));
     }
 }

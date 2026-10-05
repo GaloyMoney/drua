@@ -266,6 +266,19 @@ enum WorkflowStepYaml {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         condition: Option<String>,
     },
+    Decide {
+        name: String,
+        state: serde_json::Value,
+        questions: std::collections::BTreeMap<String, decision_client::Question>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_confidence: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_seconds: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        condition: Option<String>,
+    },
     ScriptStep {
         name: String,
         script: String,
@@ -327,6 +340,23 @@ impl WorkflowStepYaml {
                 name: name.clone(),
                 tool: tool.clone(),
                 params: params.clone(),
+                timeout_seconds: *timeout_seconds,
+                condition: condition.clone(),
+            },
+            WorkflowStepDef::Decide {
+                name,
+                state,
+                questions,
+                model,
+                min_confidence,
+                timeout_seconds,
+                condition,
+            } => WorkflowStepYaml::Decide {
+                name: name.clone(),
+                state: state.clone(),
+                questions: questions.clone(),
+                model: model.clone(),
+                min_confidence: *min_confidence,
                 timeout_seconds: *timeout_seconds,
                 condition: condition.clone(),
             },
@@ -398,6 +428,23 @@ impl WorkflowStepYaml {
                 name,
                 tool,
                 params,
+                timeout_seconds,
+                condition,
+            },
+            WorkflowStepYaml::Decide {
+                name,
+                state,
+                questions,
+                model,
+                min_confidence,
+                timeout_seconds,
+                condition,
+            } => WorkflowStepDef::Decide {
+                name,
+                state,
+                questions,
+                model,
+                min_confidence,
                 timeout_seconds,
                 condition,
             },
@@ -1249,6 +1296,7 @@ steps:
             "type: tool_step\nname: step\ntool: whoami\n",
             "type: script_step\nname: step\nscript: space:docs/x.js\n",
             "type: wait\nname: step\nprovider: concourse\nresume_condition: \"true\"\n",
+            "type: decide\nname: step\nstate: x\nquestions:\n  q:\n    type: noul\n    instructions: ok\n",
         ] {
             assert!(
                 serde_yaml::from_str::<WorkflowStepYaml>(yaml).is_ok(),
@@ -1264,6 +1312,7 @@ steps:
             "type: tool_step\nname: step\ntool: whoami\nbogus: true\n",
             "type: script_step\nname: step\nscript: space:docs/x.js\nbogus: true\n",
             "type: wait\nname: step\nprovider: concourse\nresume_condition: \"true\"\nbogus: true\n",
+            "type: decide\nname: step\nstate: x\nquestions:\n  q:\n    type: noul\n    instructions: ok\nbogus: true\n",
         ] {
             assert!(
                 serde_yaml::from_str::<WorkflowStepYaml>(yaml).is_err(),

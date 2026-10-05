@@ -8,6 +8,7 @@ use std::process::Command;
 use drua_core::agent::{AgentRole, AgentsConfig, ModelDefaults, RoleConfig};
 use drua_core::library::LibraryConfig;
 use drua_core::primitives::{AuthSubject, UserId};
+use drua_core::toolset::{DecideToolSetConfig, ToolSetsConfig};
 use drua_core::{App, AppConfig};
 use drua_library::CommitAttribution;
 
@@ -154,6 +155,18 @@ async fn setup(test_name: &str) -> (App, AuthSubject, AuthSubject) {
             data_dir: Some(data_dir.to_string_lossy().into_owned()),
             repo_url: Some(upstream.to_string_lossy().into_owned()),
             skill_sync_interval_secs: 1,
+            ..Default::default()
+        },
+        // Enabled (with a dummy key, never dialled — these tests only
+        // enumerate visible tools) so `decide` registers and the
+        // workflow-script visibility assertion below has something real
+        // to check.
+        toolsets: ToolSetsConfig {
+            decide: DecideToolSetConfig {
+                enabled: true,
+                api_key: "test-key".to_string(),
+                ..Default::default()
+            },
             ..Default::default()
         },
         ..Default::default()
@@ -714,7 +727,9 @@ async fn workflow_scripts_validate_execute_and_preserve_provenance() {
         .top_level_tool_arcs(&script_subject)
         .map(|t| t.name().to_owned())
         .collect();
-    for name in ["Read", "LS", "Glob", "Grep", "Edit", "Move", "Delete"] {
+    for name in [
+        "Read", "LS", "Glob", "Grep", "Edit", "Move", "Delete", "decide",
+    ] {
         assert!(
             visible.iter().any(|n| n == name),
             "missing {name}: {visible:?}"

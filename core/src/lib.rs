@@ -330,6 +330,10 @@ impl App {
             Arc::clone(&users),
             Arc::clone(&toolsets),
             compose_config.script_step,
+            decision_client::DecisionLimits {
+                max_questions: decide_config.max_questions,
+                max_state_bytes: decide_config.max_state_bytes,
+            },
             Arc::clone(&changesets),
             &mut jobs,
         ));

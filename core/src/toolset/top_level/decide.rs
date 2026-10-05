@@ -219,13 +219,18 @@ mod tests {
     #[test]
     fn decide_output_schema_is_an_object_with_result_wrapper() {
         let tool = tool();
-        let schema = tool.output_schema().expect("decide declares an output schema");
+        let schema = tool
+            .output_schema()
+            .expect("decide declares an output schema");
         let result = schema
             .get("properties")
             .and_then(|p| p.get("result"))
             .expect("wrapped output schema has properties.result");
         assert!(
-            result.get("properties").and_then(|p| p.get("answers")).is_some(),
+            result
+                .get("properties")
+                .and_then(|p| p.get("answers"))
+                .is_some(),
             "properties.result.properties.answers must be present, got {result}"
         );
     }

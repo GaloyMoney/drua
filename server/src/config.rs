@@ -323,7 +323,12 @@ impl Config {
         // `openrouter_api_key` into that slot).
         if let Ok(val) = std::env::var("DECIDE_API_KEY") {
             config.toolsets.decide.api_key = val.trim().to_string();
-        } else if config.toolsets.decide.endpoint_url.contains("openrouter.ai") {
+        } else if config
+            .toolsets
+            .decide
+            .endpoint_url
+            .contains("openrouter.ai")
+        {
             config.toolsets.decide.api_key = config.openai_api_key.clone();
         }
 

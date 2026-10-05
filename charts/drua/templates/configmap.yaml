@@ -284,6 +284,25 @@ data:
         default_team: {{ . | quote }}
         {{- end }}
       {{- end }}
+      {{- with .Values.galoyAgents.config.decide }}
+      decide:
+        enabled: {{ .enabled | default false }}
+        {{- with .endpointUrl }}
+        endpoint_url: {{ . | quote }}
+        {{- end }}
+        {{- with .model }}
+        model: {{ . | quote }}
+        {{- end }}
+        {{- with .timeoutMs }}
+        timeout_ms: {{ printf "%d" (int .) }}
+        {{- end }}
+        {{- with .maxQuestions }}
+        max_questions: {{ printf "%d" (int .) }}
+        {{- end }}
+        {{- with .maxStateBytes }}
+        max_state_bytes: {{ printf "%d" (int .) }}
+        {{- end }}
+      {{- end }}
       {{- with .Values.galoyAgents.config.compose }}
       compose:
         max_tool_calls: {{ printf "%d" (int .maxToolCalls) }}
