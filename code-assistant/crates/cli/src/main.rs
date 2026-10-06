@@ -65,6 +65,9 @@ enum Command {
     /// Mine PR review comments from GitHub repos for anti-pattern extraction
     MineReviews,
 
+    /// Triage raw inline review comments into a curated anti-pattern catalog (TUI)
+    TriageAntiPatterns,
+
     /// Run the Telegram bot for label review
     TelegramReview {
         /// Re-review only chunks flagged by audit-labels
@@ -124,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
         } => commands::index::run(&config, &repo_path, &name, collection.as_deref()).await,
         Command::Review { confused } => commands::review::run(&config, confused),
         Command::MineReviews => commands::mine_reviews::run(&config).await,
+        Command::TriageAntiPatterns => commands::triage_anti_patterns::run(&config),
         Command::TelegramReview { confused } => {
             commands::telegram_review::run(&config, confused).await
         }

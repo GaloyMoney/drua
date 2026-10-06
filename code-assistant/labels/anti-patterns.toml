@@ -1,0 +1,4 @@
+[[pattern]]
+slug = "check-then-insert"
+canonical_comment = "Don't list-and-filter to check existence before inserting. Attempt the insert and let the unique index reject the duplicate. The pre-check is redundant, racy (TOCTOU), and scans all rows to find one."
+active = true
