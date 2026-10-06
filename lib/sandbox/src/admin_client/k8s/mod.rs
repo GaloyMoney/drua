@@ -10,14 +10,16 @@ use k8s_openapi::api::core::v1::{
     VolumeMount, VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
-use kube::api::{Api, AttachParams, AttachedProcess, DeleteParams, ListParams, PostParams};
+use kube::api::{
+    Api, AttachParams, AttachedProcess, DeleteParams, ListParams, Patch, PatchParams, PostParams,
+};
 use kube::Client;
 use tracing::instrument;
 
 use self::types::*;
 use crate::admin_client::AdminClient;
 use crate::error::AdminError;
-use crate::types::{Sandbox as SandboxView, SandboxSpecs};
+use crate::types::{parse_k8s_quantity, Sandbox as SandboxView, SandboxSpecs};
 
 const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
 const MANAGED_BY_VALUE: &str = "drua";
@@ -421,6 +423,71 @@ impl K8sAdminClient {
         Ok(())
     }
 
+    /// Patch the workspace PVC's `storage` request to `new_size`. Only
+    /// the workspace PVC is grown — the `volumeClaimTemplate`-owned
+    /// `nix-store` PVC tracks the cluster-wide config and isn't part
+    /// of the per-sandbox spec. Idempotent: PVCs already sized at or
+    /// above `new_size` short-circuit without an API call. Whether the
+    /// underlying StorageClass actually honours `allowVolumeExpansion`
+    /// is up to the cluster operator; failures bubble up as
+    /// `AdminError::Kube` so callers can log and continue.
+    #[instrument(name = "sandbox.admin.k8s.resize_pvc", skip_all, fields(%name, %new_size))]
+    pub async fn resize_pvc(&self, name: &str, new_size: &str) -> Result<(), AdminError> {
+        let Some(_) = self.persistence.as_ref() else {
+            return Ok(());
+        };
+        let pvc_name = format!("workspace-{name}");
+        let pvcs: Api<PersistentVolumeClaim> =
+            Api::namespaced(self.client.clone(), &self.namespace);
+        let existing = pvcs.get(&pvc_name).await.map_err(|e| match &e {
+            kube::Error::Api(resp) if resp.code == 404 => AdminError::NotFound(pvc_name.clone()),
+            _ => AdminError::Kube(e),
+        })?;
+        let current = existing
+            .spec
+            .as_ref()
+            .and_then(|s| s.resources.as_ref())
+            .and_then(|r| r.requests.as_ref())
+            .and_then(|m| m.get("storage"))
+            .map(|q| q.0.clone());
+        // Compare numerically so a no-op resize against a PVC that was
+        // grown ahead of the entity record (e.g. operator scaled disk
+        // by hand) doesn't issue a shrink patch — k8s rejects shrinks
+        // outright and the patch would leave entity vs cluster state
+        // inconsistent. Fall back to string equality only when either
+        // side fails to parse, so a malformed quantity still
+        // short-circuits the identical case.
+        let skip = match (
+            current.as_deref().and_then(parse_k8s_quantity),
+            parse_k8s_quantity(new_size),
+        ) {
+            (Some(c), Some(n)) => c >= n,
+            _ => current.as_deref() == Some(new_size),
+        };
+        if skip {
+            tracing::info!(
+                pvc = %pvc_name,
+                current = ?current,
+                requested = %new_size,
+                "PVC resize is a no-op — storage already at or above requested size"
+            );
+            return Ok(());
+        }
+        let patch = serde_json::json!({
+            "spec": {
+                "resources": {
+                    "requests": {
+                        "storage": new_size,
+                    }
+                }
+            }
+        });
+        pvcs.patch(&pvc_name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await?;
+        tracing::info!(pvc = %pvc_name, size = %new_size, "PVC resize patched");
+        Ok(())
+    }
+
     /// Delete every PVC labeled `sandbox-name=<name>` (workspace PVC plus
     /// any controller-owned `volumeClaimTemplate` PVCs — both carry the
     /// label, see `ensure_pvc` and `nix_store_claim_template`). Pod-bound
@@ -708,6 +775,10 @@ impl AdminClient for K8sAdminClient {
 
     async fn delete_pvcs(&self, name: &str) -> Result<(), AdminError> {
         K8sAdminClient::delete_pvcs(self, name).await
+    }
+
+    async fn resize_pvc(&self, name: &str, new_size: &str) -> Result<(), AdminError> {
+        K8sAdminClient::resize_pvc(self, name, new_size).await
     }
 
     async fn get_sandbox(&self, name: &str) -> Result<SandboxView, AdminError> {
