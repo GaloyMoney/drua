@@ -338,6 +338,13 @@ pub struct Workflows {
     /// from `ToolSets` per validation) so `validate_steps` doesn't
     /// depend on the compose tool being registered.
     script_step_limits: crate::toolset::ScriptStepLimits,
+    /// `decide` step question/state ceilings, mirrored from
+    /// `DecideToolSetConfig` at init — same reasoning as
+    /// `script_step_limits`: held here so `validate_steps` doesn't depend
+    /// on the `decide` tool being registered. Defaults are used when
+    /// `decide` is disabled; validation then fails on `find_for_workflow`
+    /// first, with the clearer "tool not registered" message.
+    decide_limits: decision_client::DecisionLimits,
     changesets: Arc<crate::changeset::Changesets>,
     execute_run_spawner: ::job::JobSpawner<ExecuteRunConfig>,
     cron_spawner: ::job::JobSpawner<TriggerCronConfig>,
@@ -358,6 +365,7 @@ impl Workflows {
         users: Arc<Users>,
         toolsets: Arc<ToolSets>,
         script_step_limits: crate::toolset::ScriptStepLimits,
+        decide_limits: decision_client::DecisionLimits,
         changesets: Arc<crate::changeset::Changesets>,
         jobs: &mut ::job::Jobs,
     ) -> Self {
@@ -385,6 +393,7 @@ impl Workflows {
             agents,
             sandboxes,
             script_step_limits,
+            decide_limits,
             changesets,
             execute_run_spawner,
             cron_spawner,
@@ -735,6 +744,48 @@ impl Workflows {
                     let refs = template::extract_refs_in_value(params).map_err(|e| {
                         WorkflowError::InvalidTemplateRef(format!("tool_step '{name}': {e}"))
                     })?;
+                    for r in &refs {
+                        validate_ref_against_prior_steps(name, r, &seen_step_names)?;
+                    }
+                }
+                WorkflowStepDef::Decide {
+                    name,
+                    state,
+                    questions,
+                    min_confidence,
+                    ..
+                } => {
+                    // Same contract-in-one-place reasoning as the
+                    // `ToolStep` arm above: registered, composable,
+                    // declares an output_schema.
+                    self.toolsets.find_for_workflow("decide").map_err(|e| {
+                        WorkflowError::InvalidStep(format!("decide step '{name}': {e}"))
+                    })?;
+
+                    decision_client::validate_questions(questions, &self.decide_limits).map_err(
+                        |e| WorkflowError::InvalidStep(format!("decide step '{name}': {e}")),
+                    )?;
+
+                    if let Some(mc) = min_confidence {
+                        if !(0.0..=1.0).contains(mc) {
+                            return Err(WorkflowError::InvalidStep(format!(
+                                "decide step '{name}': min_confidence must be within \
+                                 0.0..=1.0, got {mc}"
+                            )));
+                        }
+                    }
+
+                    let questions_value = serde_json::to_value(questions).map_err(|e| {
+                        WorkflowError::InvalidStep(format!(
+                            "decide step '{name}': questions serialize: {e}"
+                        ))
+                    })?;
+                    let mut refs = template::extract_refs_in_value(state).map_err(|e| {
+                        WorkflowError::InvalidTemplateRef(format!("decide step '{name}': {e}"))
+                    })?;
+                    refs.extend(template::extract_refs_in_value(&questions_value).map_err(
+                        |e| WorkflowError::InvalidTemplateRef(format!("decide step '{name}': {e}")),
+                    )?);
                     for r in &refs {
                         validate_ref_against_prior_steps(name, r, &seen_step_names)?;
                     }

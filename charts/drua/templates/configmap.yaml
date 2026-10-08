@@ -284,6 +284,28 @@ data:
         default_team: {{ . | quote }}
         {{- end }}
       {{- end }}
+      {{- with .Values.galoyAgents.config.decide }}
+      decide:
+        enabled: {{ .enabled | default false }}
+        {{- with .endpointUrl }}
+        endpoint_url: {{ . | quote }}
+        {{- end }}
+        {{- with .model }}
+        model: {{ . | quote }}
+        {{- end }}
+        {{- /* hasKey, not `with`: an explicit 0 is a real limit (immediate
+        timeout, or reject every decide call) and Helm's `with` treats 0 as
+        empty, which would silently fall back to the crate default instead. */}}
+        {{- if hasKey . "timeoutMs" }}
+        timeout_ms: {{ printf "%d" (int .timeoutMs) }}
+        {{- end }}
+        {{- if hasKey . "maxQuestions" }}
+        max_questions: {{ printf "%d" (int .maxQuestions) }}
+        {{- end }}
+        {{- if hasKey . "maxStateBytes" }}
+        max_state_bytes: {{ printf "%d" (int .maxStateBytes) }}
+        {{- end }}
+      {{- end }}
       {{- with .Values.galoyAgents.config.compose }}
       compose:
         max_tool_calls: {{ printf "%d" (int .maxToolCalls) }}

@@ -262,6 +262,27 @@ enum WorkflowStepParam {
         #[serde(default)]
         condition: Option<String>,
     },
+    /// Deterministic dispatch to the `decide` tool. Output shape is fixed
+    /// by the tool (`{success, model, answers, usage, confident,
+    /// low_confidence}`) — there is no `output_schema` field.
+    Decide {
+        name: String,
+        /// What the model reads; `${{ … }}`-substituted at run time.
+        state: serde_json::Value,
+        /// 1..=`max_questions` closed-set questions. Keys and `type` are
+        /// never templated; `instructions` / `criteria` text is.
+        questions: std::collections::BTreeMap<String, decision_client::Question>,
+        #[serde(default)]
+        model: Option<String>,
+        /// Per-answer confidence floor below which `confident: false` and
+        /// the key appears in `low_confidence`. Default `0.0` never flags.
+        #[serde(default)]
+        min_confidence: Option<f64>,
+        #[serde(default)]
+        timeout_seconds: Option<u64>,
+        #[serde(default)]
+        condition: Option<String>,
+    },
 }
 
 impl WorkflowStepParam {
@@ -337,6 +358,23 @@ impl WorkflowStepParam {
                 name,
                 tool,
                 params,
+                timeout_seconds,
+                condition,
+            }),
+            WorkflowStepParam::Decide {
+                name,
+                state,
+                questions,
+                model,
+                min_confidence,
+                timeout_seconds,
+                condition,
+            } => Ok(WorkflowStepDef::Decide {
+                name,
+                state,
+                questions,
+                model,
+                min_confidence,
                 timeout_seconds,
                 condition,
             }),
@@ -452,7 +490,7 @@ struct WorkflowSandboxOutput {
 #[derive(serde::Serialize, schemars::JsonSchema)]
 struct WorkflowStepOutput {
     name: String,
-    /// `agent_step`, `tool_step`, `script_step`, or `wait`.
+    /// `agent_step`, `tool_step`, `script_step`, `decide`, or `wait`.
     step_type: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     script: Option<String>,
@@ -462,7 +500,7 @@ struct WorkflowStepOutput {
     args: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tool_calls: Option<usize>,
-    /// Empty string for `tool_step`.
+    /// Empty string for `tool_step` / `decide`.
     skill: String,
     /// Set on `tool_step`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -471,6 +509,13 @@ struct WorkflowStepOutput {
     sandbox: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     timeout_seconds: Option<u64>,
+    /// Set on `decide`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    questions: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min_confidence: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
 }
 
 #[derive(serde::Serialize, schemars::JsonSchema)]
@@ -1202,6 +1247,9 @@ fn step_to_output(s: &WorkflowStepDef) -> WorkflowStepOutput {
             sandbox: sandbox.clone(),
             timeout_seconds: *timeout_seconds,
             tool: None,
+            questions: None,
+            min_confidence: None,
+            model: None,
         },
         WorkflowStepDef::ToolStep {
             name,
@@ -1219,6 +1267,31 @@ fn step_to_output(s: &WorkflowStepDef) -> WorkflowStepOutput {
             sandbox: None,
             timeout_seconds: *timeout_seconds,
             tool: Some(tool.clone()),
+            questions: None,
+            min_confidence: None,
+            model: None,
+        },
+        WorkflowStepDef::Decide {
+            name,
+            questions,
+            model,
+            min_confidence,
+            timeout_seconds,
+            ..
+        } => WorkflowStepOutput {
+            name: name.clone(),
+            script: None,
+            entry: None,
+            args: None,
+            max_tool_calls: None,
+            step_type: "decide".to_string(),
+            skill: String::new(),
+            sandbox: None,
+            timeout_seconds: *timeout_seconds,
+            tool: None,
+            questions: serde_json::to_value(questions).ok(),
+            min_confidence: *min_confidence,
+            model: model.clone(),
         },
         WorkflowStepDef::ScriptStep {
             name,
@@ -1239,6 +1312,9 @@ fn step_to_output(s: &WorkflowStepDef) -> WorkflowStepOutput {
             sandbox: None,
             timeout_seconds: *timeout_seconds,
             tool: None,
+            questions: None,
+            min_confidence: None,
+            model: None,
         },
         WorkflowStepDef::Wait { name, .. } => WorkflowStepOutput {
             name: name.clone(),
@@ -1251,6 +1327,9 @@ fn step_to_output(s: &WorkflowStepDef) -> WorkflowStepOutput {
             sandbox: None,
             timeout_seconds: None,
             tool: None,
+            questions: None,
+            min_confidence: None,
+            model: None,
         },
     }
 }
@@ -1545,6 +1624,18 @@ fn format_get_text(d: &WorkflowDefinition) -> String {
                     "  - tool_step name={name} tool={tool} timeout_s={timeout_seconds:?}\n"
                 ));
             }
+            WorkflowStepDef::Decide {
+                name,
+                questions,
+                model,
+                min_confidence,
+                ..
+            } => {
+                out.push_str(&format!(
+                    "  - decide name={name} questions={} model={model:?} min_confidence={min_confidence:?}\n",
+                    questions.len()
+                ));
+            }
             WorkflowStepDef::ScriptStep {
                 name,
                 script,
@@ -1726,6 +1817,37 @@ mod script_step_tests {
         assert_eq!(output["entry"], "inventory");
         assert_eq!(output["args"]["date"], "${{ run.date }}");
         assert_eq!(output["max_tool_calls"], 1500);
+    }
+}
+
+#[cfg(test)]
+mod decide_step_tests {
+    use super::*;
+
+    #[test]
+    fn public_workflow_tool_accepts_and_reports_decide_steps() {
+        let input: WorkflowStepParam = serde_json::from_value(serde_json::json!({
+            "type": "decide", "name": "triage",
+            "state": "${{ steps.prep.outputs.result }}",
+            "questions": {
+                "duplicate": { "type": "noul", "instructions": "Is this a duplicate?" }
+            },
+            "min_confidence": 0.8
+        }))
+        .unwrap();
+        let step = input.into_step().unwrap();
+        let WorkflowStepDef::Decide { state, .. } = &step else {
+            panic!("expected Decide");
+        };
+        assert_eq!(
+            state,
+            &serde_json::json!("${{ steps.prep.outputs.result }}"),
+            "template reference must survive parsing unresolved"
+        );
+        let output = serde_json::to_value(step_to_output(&step)).unwrap();
+        assert_eq!(output["step_type"], "decide");
+        assert_eq!(output["min_confidence"], 0.8);
+        assert!(output["questions"]["duplicate"].is_object());
     }
 }
 

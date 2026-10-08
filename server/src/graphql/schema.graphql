@@ -850,6 +850,15 @@ type WorkflowStep {
 	condition: String
 	entry: String
 	maxToolCalls: Int
+	"""
+	`decide` step only: per-answer confidence floor below which the
+	step output's `confident` is false.
+	"""
+	minConfidence: Float
+	"""
+	`decide` step only: decision-model id override for this step.
+	"""
+	model: String
 	name: String!
 	outputSchema: Json
 	"""
@@ -860,6 +869,11 @@ type WorkflowStep {
 	Wait-step only: webhook provider this step parks on.
 	"""
 	provider: String
+	"""
+	`decide` step only: the closed-set questions asked, serialized as
+	`{ key: Question }`.
+	"""
+	questions: Json
 	"""
 	Wait-step only: CEL boolean evaluated against the inbound
 	webhook payload (`resume_payload.*`) plus `trigger` and `steps`.
@@ -894,6 +908,7 @@ enum WorkflowStepState {
 
 enum WorkflowStepType {
 	AGENT_STEP
+	DECIDE
 	SCRIPT_STEP
 	TOOL_STEP
 	WAIT

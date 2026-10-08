@@ -335,6 +335,27 @@ pub enum WorkflowStepDef {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         condition: Option<String>,
     },
+    /// Deterministic dispatch to the `decide` tool: asks a decision model
+    /// closed-set questions about `state` and exposes the calibrated
+    /// answers to downstream `condition:` expressions. Output shape is
+    /// fixed by the tool (`{success, model, answers, usage, confident,
+    /// low_confidence}`) — no `output_schema` field. `state` and the
+    /// question text fields may reference prior step outputs through
+    /// `${{ … }}`-injected JSON values the same way an `agent_step`
+    /// prompt does, so the same prompt-injection exposure applies.
+    Decide {
+        name: String,
+        state: serde_json::Value,
+        questions: std::collections::BTreeMap<String, decision_client::Question>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        min_confidence: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_seconds: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        condition: Option<String>,
+    },
     /// Runs a library JavaScript export as `(args, run)` without a model turn.
     ScriptStep {
         name: String,
@@ -383,6 +404,7 @@ impl WorkflowStepDef {
             WorkflowStepDef::AgentStep { name, .. }
             | WorkflowStepDef::ScriptStep { name, .. }
             | WorkflowStepDef::ToolStep { name, .. }
+            | WorkflowStepDef::Decide { name, .. }
             | WorkflowStepDef::Wait { name, .. } => name,
         }
     }
@@ -392,6 +414,7 @@ impl WorkflowStepDef {
             WorkflowStepDef::AgentStep { model_chain, .. } => model_chain.as_ref(),
             WorkflowStepDef::ScriptStep { .. }
             | WorkflowStepDef::ToolStep { .. }
+            | WorkflowStepDef::Decide { .. }
             | WorkflowStepDef::Wait { .. } => None,
         }
     }
@@ -401,16 +424,20 @@ impl WorkflowStepDef {
             WorkflowStepDef::AgentStep { compaction, .. } => compaction.as_ref(),
             WorkflowStepDef::ScriptStep { .. }
             | WorkflowStepDef::ToolStep { .. }
+            | WorkflowStepDef::Decide { .. }
             | WorkflowStepDef::Wait { .. } => None,
         }
     }
 
-    /// Agent and script outputs share validation; tool steps use the tool's schema.
+    /// Agent and script outputs share validation; tool steps and decide
+    /// steps have a fixed shape owned by the tool, so neither declares one.
     pub fn output_schema(&self) -> Option<&OutputSchema> {
         match self {
             WorkflowStepDef::AgentStep { output_schema, .. }
             | WorkflowStepDef::ScriptStep { output_schema, .. } => Some(output_schema.as_ref()),
-            WorkflowStepDef::ToolStep { .. } | WorkflowStepDef::Wait { .. } => None,
+            WorkflowStepDef::ToolStep { .. }
+            | WorkflowStepDef::Decide { .. }
+            | WorkflowStepDef::Wait { .. } => None,
         }
     }
 
@@ -421,6 +448,7 @@ impl WorkflowStepDef {
             WorkflowStepDef::AgentStep { condition, .. }
             | WorkflowStepDef::ScriptStep { condition, .. }
             | WorkflowStepDef::ToolStep { condition, .. }
+            | WorkflowStepDef::Decide { condition, .. }
             | WorkflowStepDef::Wait { condition, .. } => condition.as_deref(),
         }
     }
@@ -694,6 +722,46 @@ mod tests {
         assert_eq!(back.name(), "dispatch");
         assert!(back.output_schema().is_none());
         assert!(back.model_chain().is_none());
+    }
+
+    #[test]
+    fn decide_step_round_trips_through_serde() {
+        let mut questions = std::collections::BTreeMap::new();
+        questions.insert(
+            "destination".to_string(),
+            decision_client::Question::Noul {
+                instructions: "Is `doc.body` a duplicate?".into(),
+                criteria: None,
+            },
+        );
+        let step = WorkflowStepDef::Decide {
+            name: "triage".into(),
+            state: serde_json::json!("${{ steps.prepare.outputs.result.pack }}"),
+            questions,
+            model: Some("typesafe/jev-1.13".into()),
+            min_confidence: Some(0.8),
+            timeout_seconds: Some(60),
+            condition: None,
+        };
+        let value = serde_json::to_value(&step).unwrap();
+        assert_eq!(value.get("type").and_then(|v| v.as_str()), Some("decide"));
+        assert_eq!(
+            value.get("state").and_then(|v| v.as_str()),
+            Some("${{ steps.prepare.outputs.result.pack }}"),
+            "state template reference must survive serialization unresolved"
+        );
+        let back: WorkflowStepDef = serde_json::from_value(value).unwrap();
+        assert_eq!(back.name(), "triage");
+        assert!(back.output_schema().is_none());
+        assert!(back.model_chain().is_none());
+        assert!(back.compaction().is_none());
+        let WorkflowStepDef::Decide { state, .. } = &back else {
+            panic!("expected Decide");
+        };
+        assert_eq!(
+            state,
+            &serde_json::json!("${{ steps.prepare.outputs.result.pack }}")
+        );
     }
 
     /// `params` deserializes to `Value::Null` when omitted (serde

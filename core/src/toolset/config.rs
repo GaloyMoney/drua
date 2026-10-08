@@ -23,6 +23,8 @@ pub struct ToolSetsConfig {
     pub code_assistant: CodeAssistantToolSetConfig,
     #[serde(default)]
     pub compose: ComposeConfig,
+    #[serde(default)]
+    pub decide: DecideToolSetConfig,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -219,6 +221,37 @@ pub struct ConcourseToolSetConfig {
     pub password: String,
 }
 
+/// `decide` top-level tool — a provider-agnostic decision-model client
+/// (TypeSafe Jev / OpenRouter / Clef). Disabled by default: flip
+/// `enabled` per environment once a key is reachable (see
+/// `server::config` for the `DECIDE_API_KEY` / OpenRouter fallback).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DecideToolSetConfig {
+    pub enabled: bool,
+    pub endpoint_url: String,
+    pub model: String,
+    pub timeout_ms: u64,
+    pub max_questions: usize,
+    pub max_state_bytes: usize,
+    #[serde(skip)]
+    pub api_key: String,
+}
+
+impl Default for DecideToolSetConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint_url: "https://openrouter.ai/api/alpha/decisions".to_string(),
+            model: "typesafe/jev-1.13".to_string(),
+            timeout_ms: 30_000,
+            max_questions: 64,
+            max_state_bytes: 131_072,
+            api_key: String::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ZendutyToolSetConfig {
     #[serde(default)]
@@ -308,6 +341,50 @@ tunnel_log_tools:
             cfg.tunnel_log_tools.get("kubernetes").unwrap(),
             &["pods_log".to_string(), "nodes_log".to_string()]
         );
+    }
+
+    /// No chart-reading parity test exists for `decide` (unlike
+    /// `tunnel_log_tools` above, which the Helm chart also renders) — this
+    /// is the only guard against a field rename silently reverting every
+    /// deployment to the hard-coded defaults.
+    #[test]
+    fn decide_config_parses_from_yaml() {
+        let cfg: ToolSetsConfig = serde_yaml::from_str(
+            r#"
+decide:
+  enabled: true
+  endpoint_url: https://openrouter.ai/api/alpha/decisions
+  model: typesafe/jev-1.13
+  timeout_ms: 15000
+  max_questions: 32
+  max_state_bytes: 65536
+"#,
+        )
+        .expect("decide config parses");
+        assert!(cfg.decide.enabled);
+        assert_eq!(
+            cfg.decide.endpoint_url,
+            "https://openrouter.ai/api/alpha/decisions"
+        );
+        assert_eq!(cfg.decide.model, "typesafe/jev-1.13");
+        assert_eq!(cfg.decide.timeout_ms, 15000);
+        assert_eq!(cfg.decide.max_questions, 32);
+        assert_eq!(cfg.decide.max_state_bytes, 65536);
+        assert_eq!(cfg.decide.api_key, "", "api_key must never come from YAML");
+    }
+
+    #[test]
+    fn decide_config_defaults_when_omitted() {
+        let cfg: ToolSetsConfig = serde_yaml::from_str("{}").unwrap();
+        assert!(!cfg.decide.enabled);
+        assert_eq!(
+            cfg.decide.endpoint_url,
+            "https://openrouter.ai/api/alpha/decisions"
+        );
+        assert_eq!(cfg.decide.model, "typesafe/jev-1.13");
+        assert_eq!(cfg.decide.timeout_ms, 30_000);
+        assert_eq!(cfg.decide.max_questions, 64);
+        assert_eq!(cfg.decide.max_state_bytes, 131_072);
     }
 }
 

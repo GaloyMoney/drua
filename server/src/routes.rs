@@ -1828,6 +1828,21 @@ fn workflow_step_to_view(s: &domain::workflow::WorkflowStepDef) -> WorkflowStepV
             sandbox: None,
             timeout_seconds: *timeout_seconds,
         },
+        domain::workflow::WorkflowStepDef::Decide {
+            name,
+            questions,
+            timeout_seconds,
+            ..
+        } => WorkflowStepView {
+            name: name.clone(),
+            step_type: "decide".to_string(),
+            // Mirrors script_step's reuse of `skill` to report the
+            // script path — here it reports the question count.
+            skill: questions.len().to_string(),
+            tool: None,
+            sandbox: None,
+            timeout_seconds: *timeout_seconds,
+        },
         domain::workflow::WorkflowStepDef::ScriptStep {
             name,
             script,

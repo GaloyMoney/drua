@@ -114,6 +114,8 @@ toolsets:
     enabled: false
     url: ''
     default_team: 'c634c1cb-405d-451f-a83b-23fa06475e89'
+  decide:
+    enabled: true
   mcp_upstreams:
     - name: honeycomb
       url: https://mcp.honeycomb.io/mcp

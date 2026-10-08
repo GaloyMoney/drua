@@ -48,6 +48,13 @@ toolsets:
     memory_limit_bytes: 268435456
     stack_limit_bytes: 524288
     timeout_ms: 420000
+  decide:
+    enabled: false
+    endpoint_url: https://openrouter.ai/api/alpha/decisions
+    model: typesafe/jev-1.13
+    timeout_ms: 30000
+    max_questions: 64
+    max_state_bytes: 131072
 sandbox:
   backend:
     provider: local

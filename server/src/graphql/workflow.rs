@@ -170,6 +170,14 @@ pub struct WorkflowStep {
     /// Wait-step only: CEL boolean evaluated against the inbound
     /// webhook payload (`resume_payload.*`) plus `trigger` and `steps`.
     resume_condition: Option<String>,
+    /// `decide` step only: the closed-set questions asked, serialized as
+    /// `{ key: Question }`.
+    questions: Option<JsonValue>,
+    /// `decide` step only: per-answer confidence floor below which the
+    /// step output's `confident` is false.
+    min_confidence: Option<f64>,
+    /// `decide` step only: decision-model id override for this step.
+    model: Option<String>,
 }
 
 impl From<&DomainWorkflowStepDef> for WorkflowStep {
@@ -203,6 +211,9 @@ impl From<&DomainWorkflowStepDef> for WorkflowStep {
                 outputs: None,
                 provider: None,
                 resume_condition: None,
+                questions: None,
+                min_confidence: None,
+                model: None,
             },
             DomainWorkflowStepDef::ToolStep {
                 name,
@@ -227,6 +238,38 @@ impl From<&DomainWorkflowStepDef> for WorkflowStep {
                 outputs: None,
                 provider: None,
                 resume_condition: None,
+                questions: None,
+                min_confidence: None,
+                model: None,
+            },
+            DomainWorkflowStepDef::Decide {
+                name,
+                questions,
+                model,
+                min_confidence,
+                timeout_seconds,
+                condition,
+                ..
+            } => Self {
+                name: name.clone(),
+                script: None,
+                entry: None,
+                args: None,
+                max_tool_calls: None,
+                step_type: WorkflowStepType::Decide,
+                skill: None,
+                tool: None,
+                sandbox: None,
+                sandbox_mode: None,
+                timeout_seconds: timeout_seconds.map(|s| s.min(i32::MAX as u64) as i32),
+                condition: condition.clone(),
+                output_schema: None,
+                outputs: None,
+                provider: None,
+                resume_condition: None,
+                questions: serde_json::to_value(questions).ok().map(Into::into),
+                min_confidence: *min_confidence,
+                model: model.clone(),
             },
             DomainWorkflowStepDef::ScriptStep {
                 name,
@@ -256,6 +299,9 @@ impl From<&DomainWorkflowStepDef> for WorkflowStep {
                 outputs: None,
                 provider: None,
                 resume_condition: None,
+                questions: None,
+                min_confidence: None,
+                model: None,
             },
             DomainWorkflowStepDef::Wait {
                 name,
@@ -281,6 +327,9 @@ impl From<&DomainWorkflowStepDef> for WorkflowStep {
                 outputs: serde_json::to_value(outputs).ok().map(Into::into),
                 provider: Some(provider.clone()),
                 resume_condition: Some(resume_condition.clone()),
+                questions: None,
+                min_confidence: None,
+                model: None,
             },
         }
     }
@@ -291,6 +340,7 @@ pub enum WorkflowStepType {
     ScriptStep,
     AgentStep,
     ToolStep,
+    Decide,
     Wait,
 }
 

@@ -1004,6 +1004,31 @@ impl Executor {
                     })?;
                 Ok(output)
             }
+            WorkflowStepDef::Decide {
+                name,
+                state,
+                questions,
+                model,
+                min_confidence,
+                timeout_seconds,
+                ..
+            } => {
+                self.execute_decide_step(
+                    project_id,
+                    workflow_id,
+                    run_id,
+                    name,
+                    state,
+                    questions,
+                    model.as_deref(),
+                    *min_confidence,
+                    *timeout_seconds,
+                    trigger_context,
+                    step_outputs,
+                    run_context,
+                )
+                .await
+            }
             WorkflowStepDef::ToolStep {
                 name,
                 tool,
@@ -1318,6 +1343,106 @@ impl Executor {
         .await
     }
 
+    /// Dispatches to the `decide` top-level tool and annotates the
+    /// result with confidence gating (§2.2 of the handoff) for
+    /// downstream `condition:` expressions. Shares `find_for_workflow` /
+    /// `dispatch_step` with `execute_tool_step`; unlike a `tool_step`
+    /// there's no `output_schema` to validate against — the shape is
+    /// fixed by the tool.
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_decide_step(
+        &self,
+        project_id: ProjectId,
+        workflow_id: WorkflowDefinitionId,
+        run_id: WorkflowRunId,
+        step_name: &str,
+        state: &serde_json::Value,
+        questions: &std::collections::BTreeMap<String, decision_client::Question>,
+        model: Option<&str>,
+        min_confidence: Option<f64>,
+        timeout_seconds: Option<u64>,
+        trigger_context: &serde_json::Value,
+        step_outputs: &HashMap<String, serde_json::Value>,
+        run_context: &serde_json::Value,
+    ) -> Result<serde_json::Value, WorkflowError> {
+        // Defensive: `Workflows::validate_steps` already checked this at
+        // create/update time.
+        self.toolsets
+            .find_for_workflow("decide")
+            .map_err(|e| WorkflowError::ToolNotFound(format!("decide step '{step_name}': {e}")))?;
+
+        let template_ctx = TemplateContext {
+            trigger: trigger_context,
+            steps: step_outputs,
+            run: run_context,
+        };
+        let step_error = |e: super::template::TemplateError| WorkflowError::StepErrored {
+            step: step_name.to_string(),
+            reason: e.to_string(),
+        };
+        let state = template_ctx.substitute(state).map_err(step_error)?;
+        let questions_value =
+            serde_json::to_value(questions).map_err(|e| WorkflowError::StepErrored {
+                step: step_name.to_string(),
+                reason: format!("questions serialize: {e}"),
+            })?;
+        let questions_value = template_ctx
+            .substitute(&questions_value)
+            .map_err(step_error)?;
+
+        let mut arguments = serde_json::Map::new();
+        arguments.insert("state".to_string(), state);
+        arguments.insert("questions".to_string(), questions_value);
+        if let Some(model) = model {
+            arguments.insert(
+                "model".to_string(),
+                serde_json::Value::String(model.to_string()),
+            );
+        }
+
+        let subject = AuthSubject::workflow_executor(project_id, workflow_id, run_id);
+        let timeout =
+            Duration::from_secs(timeout_seconds.unwrap_or(DEFAULT_TOOL_STEP_TIMEOUT_SECS));
+        let dispatch_started = Instant::now();
+
+        let call = self
+            .toolsets
+            .call_top_level_tool(&subject, "decide", Some(arguments));
+        let envelope =
+            match dispatch_step(step_name, "decide", Some(timeout), call, "", false).await {
+                Ok(envelope) => envelope,
+                Err(err) => {
+                    tracing::warn!(
+                        %run_id,
+                        step = %step_name,
+                        question_count = questions.len(),
+                        elapsed_ms = dispatch_started.elapsed().as_millis() as u64,
+                        error = %err,
+                        "decide_step: dispatch failed"
+                    );
+                    return Err(err);
+                }
+            };
+
+        let mut output =
+            envelope
+                .get("result")
+                .cloned()
+                .ok_or_else(|| WorkflowError::StepErrored {
+                    step: step_name.to_string(),
+                    reason: "decide returned no result".into(),
+                })?;
+
+        annotate_confidence(&mut output, min_confidence.unwrap_or(0.0)).map_err(|reason| {
+            WorkflowError::StepErrored {
+                step: step_name.to_string(),
+                reason,
+            }
+        })?;
+
+        Ok(output)
+    }
+
     async fn detach_step_sandbox(&self, sandbox_id: SandboxId, agent_id: AgentId) {
         let mut op = match self.sandboxes.begin_op().await {
             Ok(op) => op,
@@ -1424,6 +1549,107 @@ async fn dispatch_step(
             "tool '{tool}' returned no structured_content; tool_step requires it"
         ))
     })
+}
+
+/// Pure confidence-gating pass over a `decide` step's output: decodes
+/// `output["answers"]`, computes which keys fall below `min_confidence`
+/// (`Answer::confidence_floor`), and writes `confident` / `low_confidence`
+/// / `success: true` into `output` in place. Split out of
+/// `execute_decide_step` so it's unit-testable without a dispatcher. A
+/// low confidence never fails the step — the next step's `condition:`
+/// decides what to do about it.
+fn annotate_confidence(output: &mut serde_json::Value, min_confidence: f64) -> Result<(), String> {
+    let answers_value = output
+        .get("answers")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let answers: std::collections::BTreeMap<String, decision_client::Answer> =
+        serde_json::from_value(answers_value)
+            .map_err(|e| format!("decide step: unparseable answers: {e}"))?;
+
+    // `BTreeMap` iterates in key order, so this is already sorted.
+    let low_confidence: Vec<String> = answers
+        .iter()
+        .filter(|(_, answer)| answer.confidence_floor() < min_confidence)
+        .map(|(key, _)| key.clone())
+        .collect();
+
+    let obj = output
+        .as_object_mut()
+        .ok_or_else(|| "decide step: result was not a JSON object".to_string())?;
+    obj.insert(
+        "confident".to_string(),
+        serde_json::Value::Bool(low_confidence.is_empty()),
+    );
+    obj.insert(
+        "low_confidence".to_string(),
+        serde_json::to_value(&low_confidence).expect("Vec<String> serializes"),
+    );
+    obj.insert("success".to_string(), serde_json::Value::Bool(true));
+    Ok(())
+}
+
+#[cfg(test)]
+mod decide_step_tests {
+    use super::*;
+
+    fn output_with_answers(answers: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "model": "stub", "answers": answers, "usage": {} })
+    }
+
+    #[test]
+    fn noul_below_threshold_is_not_confident() {
+        let mut output = output_with_answers(serde_json::json!({
+            "dup": { "type": "noul", "noul": 0.3 }
+        }));
+        annotate_confidence(&mut output, 0.8).unwrap();
+        assert_eq!(output["confident"], false);
+        assert_eq!(output["low_confidence"], serde_json::json!(["dup"]));
+        assert_eq!(output["success"], true);
+    }
+
+    #[test]
+    fn choice_at_threshold_is_confident() {
+        let mut output = output_with_answers(serde_json::json!({
+            "route": { "type": "choice", "choice": "a", "confidence": 0.84,
+                       "probabilities": { "a": 0.84, "b": 0.16 } }
+        }));
+        annotate_confidence(&mut output, 0.8).unwrap();
+        assert_eq!(output["confident"], true);
+        assert_eq!(output["low_confidence"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn mixed_answers_list_exactly_the_failing_keys_sorted() {
+        let mut output = output_with_answers(serde_json::json!({
+            "z_low": { "type": "noul", "noul": 0.5 },
+            "a_low": { "type": "choice", "choice": "a", "confidence": 0.1,
+                       "probabilities": { "a": 0.1, "b": 0.9 } },
+            "ok": { "type": "score", "score": 1.0, "confidence": 0.95,
+                    "legend": {}, "probabilities": {} }
+        }));
+        annotate_confidence(&mut output, 0.8).unwrap();
+        assert_eq!(output["confident"], false);
+        assert_eq!(
+            output["low_confidence"],
+            serde_json::json!(["a_low", "z_low"])
+        );
+    }
+
+    #[test]
+    fn default_zero_threshold_is_always_confident() {
+        let mut output = output_with_answers(serde_json::json!({
+            "dup": { "type": "noul", "noul": 0.0 }
+        }));
+        annotate_confidence(&mut output, 0.0).unwrap();
+        assert_eq!(output["confident"], true);
+    }
+
+    #[test]
+    fn unparseable_answers_is_an_error() {
+        let mut output = serde_json::json!({ "answers": "not a map" });
+        assert!(annotate_confidence(&mut output, 0.0).is_err());
+    }
 }
 
 #[cfg(test)]
