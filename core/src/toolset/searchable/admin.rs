@@ -291,7 +291,8 @@ struct SpacesParams {
     command: SpacesCommand,
     /// Slug for `create`, `get`, `mount`, `unmount`, `view`, `edit`,
     /// `search`. Must match `[a-z0-9-]+` with no leading / trailing /
-    /// double hyphens.
+    /// double hyphens. For `view`/`edit`, `<slug>@<changeset-id>` is the
+    /// same as passing `id`.
     slug: Option<String>,
     /// Optional human-readable summary, used by `create`.
     description: Option<String>,
@@ -309,6 +310,8 @@ struct SpacesParams {
     op_args: Option<JsonObject>,
     /// Defaults to `main` for `view`, `draft` for `edit` — writing
     /// straight to `main` is opt-in via an explicit `target: "main"`.
+    /// Rejected as `main` when an `id` is given — a changeset is always
+    /// a draft.
     #[serde(default)]
     target: Option<SpaceTarget>,
 
@@ -328,6 +331,9 @@ struct SpacesParams {
     title: Option<String>,
     #[serde(default)]
     body: Option<String>,
+    /// Changeset to act on. Omitted: the caller's own open draft (`view`
+    /// with no `target` reads `main`). For `view`/`edit` it may be any
+    /// changeset, e.g. a workflow run's from `list-drafts`.
     #[schemars(with = "Option<uuid::Uuid>")]
     #[serde(default)]
     id: Option<crate::primitives::ChangesetId>,
@@ -899,8 +905,8 @@ static TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "spaces",
         description: "Manage library spaces — bounded collaborative folders under \
-                       `spaces/<slug>/` in the knowledge-base repo. `view`/`edit` \
-                       default to `target: draft` — your unpublished draft, started \
+                       `spaces/<slug>/` in the knowledge-base repo. `edit` defaults \
+                       to `target: draft` (`view` to `main`) — your unpublished draft, started \
                        on first write or with `start-draft` — and are landed with \
                        `merge-draft` (an admin always holds write authority, \
                        so this always succeeds) or sent for review with \
@@ -915,10 +921,15 @@ static TOOLS: &[ToolDef] = &[
                        `unmount` (requires `slug` and `project_id`; idempotent), \
                        `view` (read-only file ops; requires `slug`, `view_op` \
                        (read|ls|grep|glob), `op_args`, optional `target` \
-                       ('main' default | 'draft')), \
+                       ('main' default = published tree | 'draft' = your own \
+                       draft); optional `id` reads any other changeset, e.g. a \
+                       workflow run's from `list-drafts`, and is incompatible \
+                       with `target: main`), \
                        `edit` (mutating file ops; requires `slug`, `edit_op` \
                        (write|str_replace|insert|delete|move), `op_args`, \
-                       optional `target` ('draft' default | 'main')), \
+                       optional `target` ('draft' default | 'main'); optional \
+                       `id` writes into that open changeset instead of your \
+                       own draft), \
                        `search` (hybrid FTS + semantic search inside a single \
                        space; requires `slug`, `query`; optional `paths` \
                        (subtree prefixes; reject leading `/`, `..`, globs); \
@@ -1391,40 +1402,28 @@ impl AdminToolSet {
                 let slug = params.slug.ok_or_else(|| {
                     ToolSetsError::MissingArgument("slug is required for view".to_string())
                 })?;
+                let (slug, target) =
+                    file_op_address(slug, params.id, params.target, SpaceTarget::Main)?;
                 let op = params.view_op.ok_or_else(|| {
                     ToolSetsError::MissingArgument("view_op is required for view".to_string())
                 })?;
                 let op_args = params.op_args.unwrap_or_default();
                 Audit::record_action("spaces.view");
-                dispatch_view(
-                    &self.space_fs,
-                    subject,
-                    &slug,
-                    op,
-                    op_args,
-                    params.target.unwrap_or(SpaceTarget::Main),
-                )
-                .await
+                dispatch_view(&self.space_fs, subject, &slug, op, op_args, target).await
             }
 
             SpacesCommand::Edit => {
                 let slug = params.slug.ok_or_else(|| {
                     ToolSetsError::MissingArgument("slug is required for edit".to_string())
                 })?;
+                let (slug, target) =
+                    file_op_address(slug, params.id, params.target, SpaceTarget::Draft)?;
                 let op = params.edit_op.ok_or_else(|| {
                     ToolSetsError::MissingArgument("edit_op is required for edit".to_string())
                 })?;
                 let op_args = params.op_args.unwrap_or_default();
                 Audit::record_action("spaces.edit");
-                dispatch_edit(
-                    &self.space_fs,
-                    subject,
-                    &slug,
-                    op,
-                    op_args,
-                    params.target.unwrap_or(SpaceTarget::Draft),
-                )
-                .await
+                dispatch_edit(&self.space_fs, subject, &slug, op, op_args, target).await
             }
 
             SpacesCommand::Search => {
@@ -2694,6 +2693,45 @@ fn format_spaces(spaces: &[Space]) -> String {
     lines.join("\n")
 }
 
+// SpaceFs spells a specific changeset `space:<slug>@<id>` (`draft:` is
+// own-draft only), so a changeset returns the `Main` scheme.
+fn file_op_address(
+    slug: String,
+    id: Option<crate::primitives::ChangesetId>,
+    target: Option<SpaceTarget>,
+    default_target: SpaceTarget,
+) -> Result<(String, SpaceTarget), ToolSetsError> {
+    let (base, slug_id) = match slug.split_once('@') {
+        Some((base, raw)) => {
+            let parsed = raw.parse::<crate::primitives::ChangesetId>().map_err(|_| {
+                ToolSetsError::InvalidArgument(format!(
+                    "'{raw}' in slug '{slug}' is not a changeset id"
+                ))
+            })?;
+            (base.to_string(), Some(parsed))
+        }
+        None => (slug.clone(), None),
+    };
+    let changeset = match (slug_id, id) {
+        (Some(a), Some(b)) if a != b => {
+            return Err(ToolSetsError::InvalidArgument(format!(
+                "slug '{slug}' names changeset {a} but `id` is {b}; pass one or make them match"
+            )));
+        }
+        (a, b) => a.or(b),
+    };
+    match changeset {
+        None => Ok((base, target.unwrap_or(default_target))),
+        Some(cs) if target == Some(SpaceTarget::Main) => {
+            Err(ToolSetsError::InvalidArgument(format!(
+                "`target: main` is the published tree and can't address changeset {cs}; \
+                 use `target: draft` or omit it"
+            )))
+        }
+        Some(cs) => Ok((format!("{base}@{cs}"), SpaceTarget::Main)),
+    }
+}
+
 fn format_draft_status(draft: &Changeset, view: &ChangesetStatusView) -> String {
     format!(
         "Open draft: {} [{}] {}\n  commits: {}\n  mergeable: {}{}\n  touched: {} file(s)",
@@ -2860,6 +2898,51 @@ mod tests {
             Some(&["research/".to_string(), "decisions/".to_string()][..])
         );
         assert_eq!(p.limit, Some(25));
+    }
+
+    #[test]
+    fn file_op_address_accepts_id_or_slug_suffix() {
+        let id: crate::primitives::ChangesetId =
+            "01a11f9f-aeda-7570-aae7-47722e345dc1".parse().expect("id");
+        let other: crate::primitives::ChangesetId =
+            "01a11f9f-aeda-7570-aae7-47722e345dc2".parse().expect("id");
+        let suffixed = format!("lib@{id}");
+
+        let (slug, target) =
+            file_op_address("lib".into(), None, None, SpaceTarget::Draft).expect("plain");
+        assert_eq!((slug.as_str(), target), ("lib", SpaceTarget::Draft));
+
+        for (slug, id_arg) in [
+            ("lib".to_string(), Some(id)),
+            (suffixed.clone(), None),
+            (suffixed.clone(), Some(id)),
+        ] {
+            let (slug, target) =
+                file_op_address(slug, id_arg, None, SpaceTarget::Draft).expect("changeset");
+            assert_eq!(
+                (slug.as_str(), target),
+                (suffixed.as_str(), SpaceTarget::Main)
+            );
+        }
+
+        let (slug, _) = file_op_address(
+            "lib".into(),
+            Some(id),
+            Some(SpaceTarget::Draft),
+            SpaceTarget::Main,
+        )
+        .expect("explicit draft");
+        assert_eq!(slug, suffixed);
+
+        assert!(file_op_address(suffixed.clone(), Some(other), None, SpaceTarget::Main).is_err());
+        assert!(file_op_address(
+            "lib".into(),
+            Some(id),
+            Some(SpaceTarget::Main),
+            SpaceTarget::Draft
+        )
+        .is_err());
+        assert!(file_op_address("lib@nope".into(), None, None, SpaceTarget::Main).is_err());
     }
 
     #[test]
