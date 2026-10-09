@@ -310,6 +310,8 @@ struct SpacesParams {
     op_args: Option<JsonObject>,
     /// Defaults to `main` for `view`, `draft` for `edit` — writing
     /// straight to `main` is opt-in via an explicit `target: "main"`.
+    /// Rejected as `main` when an `id` is given — a changeset is always
+    /// a draft.
     #[serde(default)]
     target: Option<SpaceTarget>,
 
@@ -329,8 +331,9 @@ struct SpacesParams {
     title: Option<String>,
     #[serde(default)]
     body: Option<String>,
-    /// Changeset to act on; defaults to the caller's own open draft. For
-    /// `view`/`edit` it addresses any changeset (e.g. a workflow run's).
+    /// Changeset to act on. Omitted: the caller's own open draft (`view`
+    /// with no `target` reads `main`). For `view`/`edit` it may be any
+    /// changeset, e.g. a workflow run's from `list-drafts`.
     #[schemars(with = "Option<uuid::Uuid>")]
     #[serde(default)]
     id: Option<crate::primitives::ChangesetId>,
@@ -902,8 +905,8 @@ static TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "spaces",
         description: "Manage library spaces — bounded collaborative folders under \
-                       `spaces/<slug>/` in the knowledge-base repo. `view`/`edit` \
-                       default to `target: draft` — your unpublished draft, started \
+                       `spaces/<slug>/` in the knowledge-base repo. `edit` defaults \
+                       to `target: draft` (`view` to `main`) — your unpublished draft, started \
                        on first write or with `start-draft` — and are landed with \
                        `merge-draft` (an admin always holds write authority, \
                        so this always succeeds) or sent for review with \
@@ -918,15 +921,15 @@ static TOOLS: &[ToolDef] = &[
                        `unmount` (requires `slug` and `project_id`; idempotent), \
                        `view` (read-only file ops; requires `slug`, `view_op` \
                        (read|ls|grep|glob), `op_args`, optional `target` \
-                       ('main' default | 'draft'); `main` is always the \
-                       published tree, `draft` is your own draft unless an \
-                       `id` (or `slug: \"<slug>@<changeset-id>\"`) names \
-                       another changeset, e.g. a workflow run's from \
-                       `list-drafts` — giving one implies `draft`), \
+                       ('main' default = published tree | 'draft' = your own \
+                       draft); optional `id` reads any other changeset, e.g. a \
+                       workflow run's from `list-drafts`, and is incompatible \
+                       with `target: main`), \
                        `edit` (mutating file ops; requires `slug`, `edit_op` \
                        (write|str_replace|insert|delete|move), `op_args`, \
                        optional `target` ('draft' default | 'main'); optional \
-                       `id` writes into that open changeset instead), \
+                       `id` writes into that open changeset instead of your \
+                       own draft), \
                        `search` (hybrid FTS + semantic search inside a single \
                        space; requires `slug`, `query`; optional `paths` \
                        (subtree prefixes; reject leading `/`, `..`, globs); \
@@ -2690,10 +2693,8 @@ fn format_spaces(spaces: &[Space]) -> String {
     lines.join("\n")
 }
 
-// `view`/`edit` accept a changeset as `id` or as `slug@<id>`. `main` is
-// always the published tree; a changeset is a draft. SpaceFs spells a
-// specific changeset `space:<slug>@<id>` (`draft:` is own-draft only), hence
-// the `Main` scheme returned for it.
+// SpaceFs spells a specific changeset `space:<slug>@<id>` (`draft:` is
+// own-draft only), so a changeset returns the `Main` scheme.
 fn file_op_address(
     slug: String,
     id: Option<crate::primitives::ChangesetId>,
