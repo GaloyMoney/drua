@@ -5,6 +5,18 @@ use url::Url;
 use crate::error::ZendutyError;
 use crate::types::*;
 
+const MAX_RETRIES: u32 = 2;
+const MAX_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
+const BASE_BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
+
+fn retry_delay(attempt: u32, retry_after: Option<&str>) -> std::time::Duration {
+    retry_after
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or_else(|| BASE_BACKOFF * 2u32.pow(attempt.min(4)))
+        .min(MAX_RETRY_AFTER)
+}
+
 /// Async client for the Zenduty REST API.
 pub struct ZendutyClient {
     http: reqwest::Client,
@@ -48,9 +60,46 @@ impl ZendutyClient {
         Ok(self.base_url.join(trimmed)?)
     }
 
+    /// Sends a freshly built request per attempt (a `RequestBuilder` can't be
+    /// reused after `send`). Retries up to `MAX_RETRIES` times on 429, and on
+    /// 502/503 when `idempotent` (a gateway error on a write may have been
+    /// applied). Honours `Retry-After` seconds, capped at `MAX_RETRY_AFTER`,
+    /// else backs off 500 ms, 1 s. The final response is returned as-is so
+    /// exhaustion still surfaces as the usual error.
+    async fn send_with_retry(
+        &self,
+        idempotent: bool,
+        build: impl Fn() -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, ZendutyError> {
+        let mut attempt: u32 = 0;
+        loop {
+            let resp = build().send().await?;
+            let status = resp.status().as_u16();
+            let retryable = status == 429 || (idempotent && matches!(status, 502 | 503));
+            if !retryable || attempt >= MAX_RETRIES {
+                return Ok(resp);
+            }
+            let retry_after = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok());
+            let delay = retry_delay(attempt, retry_after);
+            tracing::warn!(
+                attempt = attempt + 1,
+                status,
+                delay_ms = delay.as_millis() as u64,
+                "zenduty-client: retrying after transient HTTP error"
+            );
+            tokio::time::sleep(delay).await;
+            attempt += 1;
+        }
+    }
+
     async fn get<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, ZendutyError> {
         let url = self.api_url(path)?;
-        let resp = self.http.get(url).send().await?;
+        let resp = self
+            .send_with_retry(true, || self.http.get(url.clone()))
+            .await?;
         Self::handle_response(resp).await
     }
 
@@ -60,7 +109,9 @@ impl ZendutyClient {
         B: Serialize + ?Sized,
     {
         let url = self.api_url(path)?;
-        let resp = self.http.post(url).json(body).send().await?;
+        let resp = self
+            .send_with_retry(false, || self.http.post(url.clone()).json(body))
+            .await?;
         Self::handle_response(resp).await
     }
 
@@ -76,7 +127,11 @@ impl ZendutyClient {
         Q: Serialize + ?Sized,
     {
         let url = self.api_url(path)?;
-        let resp = self.http.post(url).query(query).json(body).send().await?;
+        let resp = self
+            .send_with_retry(false, || {
+                self.http.post(url.clone()).query(query).json(body)
+            })
+            .await?;
         Self::handle_response(resp).await
     }
 
@@ -86,7 +141,9 @@ impl ZendutyClient {
         B: Serialize + ?Sized,
     {
         let url = self.api_url(path)?;
-        let resp = self.http.patch(url).json(body).send().await?;
+        let resp = self
+            .send_with_retry(false, || self.http.patch(url.clone()).json(body))
+            .await?;
         Self::handle_response(resp).await
     }
 
@@ -205,7 +262,9 @@ impl ZendutyClient {
         note_id: &str,
     ) -> Result<(), ZendutyError> {
         let url = self.api_url(&format!("/api/incidents/{incident_id}/note/{note_id}/"))?;
-        let resp = self.http.delete(url).send().await?;
+        let resp = self
+            .send_with_retry(true, || self.http.delete(url.clone()))
+            .await?;
         Self::handle_no_content(resp).await
     }
 
@@ -293,7 +352,109 @@ fn incident_filter_status(statuses: Option<&[u8]>) -> i8 {
 
 #[cfg(test)]
 mod tests {
-    use super::incident_filter_status;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::routing::get;
+    use axum::Router;
+
+    use super::{incident_filter_status, retry_delay, ZendutyClient};
+    use crate::error::ZendutyError;
+
+    /// Serves `GET /api/incidents/abc/` with `respond(attempt)` ->
+    /// `(status, retry_after)`; returns the client and the attempt counter.
+    async fn fake_zenduty(
+        respond: impl Fn(u32) -> (StatusCode, Option<&'static str>) + Send + Sync + 'static,
+    ) -> (ZendutyClient, Arc<AtomicU32>) {
+        let attempts = Arc::new(AtomicU32::new(0));
+        let counter = Arc::clone(&attempts);
+        let respond = Arc::new(respond);
+        let app = Router::new().route(
+            "/api/incidents/abc/",
+            get(move || {
+                let attempt = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                let (status, retry_after) = respond(attempt);
+                async move {
+                    let mut headers = HeaderMap::new();
+                    headers.insert("content-type", "application/json".parse().unwrap());
+                    if let Some(ra) = retry_after {
+                        headers.insert("retry-after", ra.parse().unwrap());
+                    }
+                    let body = if status.is_success() {
+                        r#"{"title":"disk full"}"#
+                    } else {
+                        r#"{"detail":"Too many requests"}"#
+                    };
+                    (status, headers, body)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let client = ZendutyClient::new(&format!("http://{addr}/"), "tok").unwrap();
+        (client, attempts)
+    }
+
+    #[tokio::test]
+    async fn get_incident_retries_once_on_429_then_succeeds() {
+        let (client, attempts) = fake_zenduty(|attempt| {
+            if attempt == 1 {
+                (StatusCode::TOO_MANY_REQUESTS, Some("0"))
+            } else {
+                (StatusCode::OK, None)
+            }
+        })
+        .await;
+        let incident = client
+            .get_incident("abc")
+            .await
+            .expect("retried to success");
+        assert_eq!(incident.title, "disk full");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn get_incident_exhausts_retries_and_surfaces_rate_limited() {
+        let (client, attempts) = fake_zenduty(|_| (StatusCode::TOO_MANY_REQUESTS, Some("0"))).await;
+        let err = client
+            .get_incident("abc")
+            .await
+            .expect_err("never succeeds");
+        assert!(matches!(err, ZendutyError::RateLimited(_)), "{err}");
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            3,
+            "1 try + 2 retries, no more"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_retryable_status_is_not_retried() {
+        let (client, attempts) = fake_zenduty(|_| (StatusCode::NOT_FOUND, None)).await;
+        assert!(client.get_incident("abc").await.is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn retry_delay_honours_retry_after_with_a_cap() {
+        assert_eq!(retry_delay(0, Some("2")), Duration::from_secs(2));
+        assert_eq!(retry_delay(0, Some("3600")), Duration::from_secs(5));
+        assert_eq!(retry_delay(0, Some("0")), Duration::ZERO);
+    }
+
+    #[test]
+    fn retry_delay_backs_off_without_a_usable_header() {
+        assert_eq!(retry_delay(0, None), Duration::from_millis(500));
+        assert_eq!(retry_delay(1, None), Duration::from_secs(1));
+        assert_eq!(
+            retry_delay(1, Some("Wed, 21 Oct 2026 07:28:00 GMT")),
+            Duration::from_secs(1)
+        );
+        assert_eq!(retry_delay(30, None), Duration::from_secs(5));
+    }
 
     #[test]
     fn incident_filter_status_maps_zenduty_filter_codes() {

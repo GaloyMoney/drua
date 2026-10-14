@@ -759,10 +759,11 @@ impl ToolSets {
     ) -> Result<CallToolResult, ToolSetsError> {
         let tool = {
             let map = self.top_level.read().expect("top_level lock poisoned");
-            Arc::clone(
-                map.get(name)
-                    .ok_or_else(|| ToolSetsError::ToolNotFound(name.to_string()))?,
-            )
+            dispatch::candidate_tool_names(name)
+                .iter()
+                .find_map(|c| map.get(c))
+                .map(Arc::clone)
+                .ok_or_else(|| ToolSetsError::ToolNotFound(name.to_string()))?
         };
 
         self.call_top_level_instance(subject, tool, arguments).await
@@ -788,6 +789,7 @@ impl ToolSets {
         async move {
             Audit::record_subject(subject);
             Audit::record_entrypoint(format!("mcp: {}", name));
+            Audit::record_action(name);
             Audit::record_interaction_type(crate::audit::primitives::InteractionType::McpCall);
 
             // Some MCP clients JSON-encode complex nested args as strings.
@@ -836,6 +838,8 @@ impl ToolSets {
 
             let final_result = match raw_result {
                 Ok(raw) => {
+                    record_result_outcome(&raw);
+                    let raw = fill_empty_result(name, raw);
                     let cached = match (default_cache, tool_caching.as_ref()) {
                         (true, Some(tc)) => {
                             let args_for_cache = args_value
@@ -848,7 +852,6 @@ impl ToolSets {
                         _ => raw,
                     };
                     Audit::record_tokens(estimate_tokens(&cached));
-                    Audit::record_success();
                     Ok(cached)
                 }
                 Err(e) => {
@@ -865,6 +868,37 @@ impl ToolSets {
         }
         .with_event_context(seed)
         .await
+    }
+}
+
+/// Gives a model-facing success with no output a fixed placeholder so it
+/// never reads an empty result as "nothing happened". Never echoes payloads.
+fn fill_empty_result(name: &str, raw: CallToolResult) -> CallToolResult {
+    let empty = raw.is_error != Some(true)
+        && raw.structured_content.is_none()
+        && raw.content.iter().all(|c| match &c.raw {
+            rmcp::model::RawContent::Text(t) => t.text.is_empty(),
+            _ => false,
+        });
+    if !empty {
+        return raw;
+    }
+    tracing::debug!(
+        tool = name,
+        "tool returned an empty result; substituting placeholder"
+    );
+    CallToolResult::success(vec![rmcp::model::Content::text(format!(
+        "(tool {name} returned no output)"
+    ))])
+}
+
+/// An upstream `is_error` result travels as `Ok` on the wire but must be an
+/// audit error.
+fn record_result_outcome(result: &CallToolResult) {
+    if result.is_error == Some(true) {
+        Audit::record_error(drua_tool_caching::extract_text(result));
+    } else {
+        Audit::record_success();
     }
 }
 
@@ -1847,6 +1881,160 @@ mod tests {
             Some(true),
             "wrapped args are unwrapped and the retry succeeds"
         );
+    }
+
+    struct ActionProbeTool(Arc<std::sync::Mutex<Option<String>>>);
+
+    #[async_trait::async_trait]
+    impl TopLevelTool for ActionProbeTool {
+        fn name(&self) -> &str {
+            "action_probe"
+        }
+        fn description(&self) -> &str {
+            "stub"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static S: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            S.get_or_init(|| serde_json::json!({ "type": "object" }))
+        }
+        async fn call(
+            &self,
+            _subject: &AuthSubject,
+            _arguments: Option<JsonObject>,
+        ) -> Result<CallToolResult, ToolSetsError> {
+            *self.0.lock().unwrap() = Audit::collect_context().and_then(|c| c.action);
+            Err(ToolSetsError::InvalidArgument("bad".into()))
+        }
+    }
+
+    struct EmptyTool;
+
+    #[async_trait::async_trait]
+    impl TopLevelTool for EmptyTool {
+        fn name(&self) -> &str {
+            "empty_tool"
+        }
+        fn description(&self) -> &str {
+            "stub"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static S: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            S.get_or_init(|| serde_json::json!({ "type": "object" }))
+        }
+        async fn call(
+            &self,
+            _subject: &AuthSubject,
+            _arguments: Option<JsonObject>,
+        ) -> Result<CallToolResult, ToolSetsError> {
+            Ok(CallToolResult::success(vec![rmcp::model::Content::text(
+                "",
+            )]))
+        }
+    }
+
+    #[tokio::test]
+    async fn call_top_level_tool_replaces_empty_success_content() {
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_top_level(EmptyTool);
+        let result = toolsets
+            .call_top_level_tool(&AuthSubject::Anonymous, "empty_tool", None)
+            .await
+            .expect("dispatch ok");
+        assert_eq!(
+            drua_tool_caching::extract_text(&result),
+            "(tool empty_tool returned no output)"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_top_level_tool_resolves_drua_prefixed_alias() {
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_top_level(EmptyTool);
+        let result = toolsets
+            .call_top_level_tool(&AuthSubject::Anonymous, "drua_empty_tool", None)
+            .await
+            .expect("alias resolves");
+        assert!(drua_tool_caching::extract_text(&result).contains("empty_tool"));
+        assert!(matches!(
+            toolsets
+                .call_top_level_tool(&AuthSubject::Anonymous, "drua_ghost", None)
+                .await,
+            Err(ToolSetsError::ToolNotFound(n)) if n == "drua_ghost"
+        ));
+    }
+
+    #[tokio::test]
+    async fn call_top_level_tool_records_action_before_parse_failure() {
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_top_level(ActionProbeTool(Arc::clone(&seen)));
+        let result = toolsets
+            .call_top_level_tool(&AuthSubject::Anonymous, "action_probe", None)
+            .await;
+        assert!(result.is_err());
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("action_probe"));
+    }
+
+    #[test]
+    fn fill_empty_result_replaces_empty_success_content() {
+        for empty in [
+            CallToolResult::success(vec![rmcp::model::Content::text("")]),
+            CallToolResult::success(vec![]),
+        ] {
+            let filled = fill_empty_result("probe", empty);
+            assert_eq!(
+                drua_tool_caching::extract_text(&filled),
+                "(tool probe returned no output)"
+            );
+            assert_ne!(filled.is_error, Some(true));
+        }
+    }
+
+    #[test]
+    fn fill_empty_result_leaves_real_output_and_errors_alone() {
+        let ok = CallToolResult::success(vec![rmcp::model::Content::text("x")]);
+        assert_eq!(
+            drua_tool_caching::extract_text(&fill_empty_result("p", ok)),
+            "x"
+        );
+
+        let err = CallToolResult::error(vec![rmcp::model::Content::text("")]);
+        let kept = fill_empty_result("p", err);
+        assert_eq!(kept.is_error, Some(true));
+        assert_eq!(drua_tool_caching::extract_text(&kept), "");
+
+        let mut structured = CallToolResult::success(vec![]);
+        structured.structured_content = Some(serde_json::json!({ "files": [] }));
+        let kept = fill_empty_result("p", structured);
+        assert!(kept.content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn record_result_outcome_marks_is_error_result_as_audit_error() {
+        use crate::audit::primitives::InteractionOutcome;
+        use es_entity::context::{EventContext, WithEventContext};
+
+        let seed = EventContext::current().data();
+        let outcome = async {
+            let err = CallToolResult::error(vec![rmcp::model::Content::text("boom")]);
+            record_result_outcome(&err);
+            Audit::collect_context().and_then(|c| c.outcome)
+        }
+        .with_event_context(seed.clone())
+        .await;
+        match outcome {
+            Some(InteractionOutcome::Error { message }) => assert_eq!(message, "boom"),
+            other => panic!("expected error outcome, got {other:?}"),
+        }
+
+        let outcome = async {
+            let ok = CallToolResult::success(vec![rmcp::model::Content::text("fine")]);
+            record_result_outcome(&ok);
+            Audit::collect_context().and_then(|c| c.outcome)
+        }
+        .with_event_context(seed)
+        .await;
+        assert!(matches!(outcome, Some(InteractionOutcome::Success)));
     }
 
     #[tokio::test]

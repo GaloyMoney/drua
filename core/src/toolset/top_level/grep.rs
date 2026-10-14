@@ -61,10 +61,37 @@ impl TopLevelTool for Grep {
         subject.can_use_agent_file_tools()
     }
 
+    fn script_memoizable(&self) -> bool {
+        true
+    }
+
     async fn call(
         &self,
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        self.run(subject, arguments, true).await
+    }
+
+    async fn call_from_script(
+        &self,
+        subject: &AuthSubject,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        self.run(subject, arguments, false).await
+    }
+}
+
+fn no_match_message(pattern: &str, path: Option<&str>) -> String {
+    format!("No matches for {pattern} in {}", path.unwrap_or("."))
+}
+
+impl Grep {
+    async fn run(
+        &self,
+        subject: &AuthSubject,
+        arguments: Option<JsonObject>,
+        for_model: bool,
     ) -> Result<CallToolResult, ToolSetsError> {
         let mut input: GrepInput = parse_params(arguments)?;
         Audit::record_action("grep");
@@ -85,7 +112,10 @@ impl TopLevelTool for Grep {
         let path_for_space = input.path.as_deref().unwrap_or("");
         let space_output = self.space_fs.grep(subject, path_for_space, &input).await?;
 
-        if let Some((output, _stamp)) = space_output {
+        if let Some((mut output, _stamp)) = space_output {
+            if for_model && output.is_empty() {
+                output = no_match_message(&input.pattern, input.path.as_deref());
+            }
             let out = TextOutput {
                 output: output.clone(),
             };
@@ -104,13 +134,17 @@ impl TopLevelTool for Grep {
 
         match client.execute_grep(&input).await {
             Ok(resp) => {
+                let mut output = resp.output;
+                if for_model && !resp.is_error && output.is_empty() {
+                    output = no_match_message(&input.pattern, input.path.as_deref());
+                }
                 let out = TextOutput {
-                    output: resp.output.clone(),
+                    output: output.clone(),
                 };
                 Ok(if resp.is_error {
-                    GREP_OUTPUT.error(resp.output, &out)
+                    GREP_OUTPUT.error(output, &out)
                 } else {
-                    GREP_OUTPUT.success(resp.output, &out)
+                    GREP_OUTPUT.success(output, &out)
                 })
             }
             Err(e) => Ok(CallToolResult::error(vec![Content::text(format!(
@@ -319,4 +353,18 @@ fn is_known_rg_type(t: &str) -> bool {
             | "zsh"
             | "zstd"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_match_message_names_pattern_and_path() {
+        assert_eq!(
+            no_match_message("foo", Some("space:s/")),
+            "No matches for foo in space:s/"
+        );
+        assert_eq!(no_match_message("foo", None), "No matches for foo in .");
+    }
 }

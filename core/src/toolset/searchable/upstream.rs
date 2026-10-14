@@ -218,6 +218,10 @@ impl SearchableToolSet for UpstreamToolSet {
         }
     }
 
+    fn script_memoizable(&self, tool_name: &str) -> bool {
+        self.name == "github" && GITHUB_MEMOIZABLE_READS.contains(&tool_name)
+    }
+
     async fn call(
         &self,
         _subject: &AuthSubject,
@@ -233,6 +237,16 @@ impl SearchableToolSet for UpstreamToolSet {
         Ok(normalize_upstream_result(&self.name, tool_name, result))
     }
 }
+
+const GITHUB_MEMOIZABLE_READS: [&str; 7] = [
+    "pull_request_read",
+    "get_file_contents",
+    "list_commits",
+    "issue_read",
+    "search_pull_requests",
+    "list_pull_requests",
+    "search_code",
+];
 
 fn has_required_scopes(required: &[AuthScope], subject: &AuthSubject) -> bool {
     required.iter().all(|scope| subject.has_scope(scope))

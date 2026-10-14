@@ -77,10 +77,37 @@ impl TopLevelTool for Ls {
         subject.can_use_agent_file_tools()
     }
 
+    fn script_memoizable(&self) -> bool {
+        true
+    }
+
     async fn call(
         &self,
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        self.run(subject, arguments, true).await
+    }
+
+    async fn call_from_script(
+        &self,
+        subject: &AuthSubject,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        self.run(subject, arguments, false).await
+    }
+}
+
+fn empty_dir_message(path: &str) -> String {
+    format!("{path} is an empty directory")
+}
+
+impl Ls {
+    async fn run(
+        &self,
+        subject: &AuthSubject,
+        arguments: Option<JsonObject>,
+        for_model: bool,
     ) -> Result<CallToolResult, ToolSetsError> {
         let params: LsParams = parse_params(arguments)?;
         Audit::record_action("ls");
@@ -92,7 +119,10 @@ impl TopLevelTool for Ls {
                 .await?;
             if let Some((entries, _stamp)) = space_entries {
                 let filtered = filter_ignored_detailed(entries, &params.ignore);
-                let (entries, text, details) = render_detailed(filtered);
+                let (entries, mut text, details) = render_detailed(filtered);
+                if for_model && text.is_empty() {
+                    text = empty_dir_message(&params.path);
+                }
                 let out = EntriesOutput { entries, details };
                 return Ok(LS_OUTPUT.success(text, &out));
             }
@@ -105,7 +135,10 @@ impl TopLevelTool for Ls {
 
         if let Some((entries, _stamp)) = space_entries {
             let filtered = filter_ignored(entries, &params.ignore);
-            let text = filtered.join("\n");
+            let mut text = filtered.join("\n");
+            if for_model && text.is_empty() {
+                text = empty_dir_message(&params.path);
+            }
             let out = EntriesOutput {
                 entries: filtered,
                 details: None,
@@ -135,7 +168,10 @@ impl TopLevelTool for Ls {
             Ok(resp) => {
                 let entries: Vec<String> = resp.output.lines().map(String::from).collect();
                 let filtered = filter_ignored(entries, &params.ignore);
-                let text = filtered.join("\n");
+                let mut text = filtered.join("\n");
+                if for_model && !resp.is_error && text.is_empty() {
+                    text = empty_dir_message(&params.path);
+                }
                 let out = EntriesOutput {
                     entries: filtered,
                     details: None,
@@ -175,4 +211,17 @@ fn filter_ignored_detailed(entries: Vec<DetailedEntry>, ignore: &[String]) -> Ve
 fn is_ignored(name: &str, ignore: &[String]) -> bool {
     let trimmed = name.trim_end_matches('/');
     ignore.iter().any(|ig| ig == trimmed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_dir_message_names_path() {
+        assert_eq!(
+            empty_dir_message("space:s/empty"),
+            "space:s/empty is an empty directory"
+        );
+    }
 }

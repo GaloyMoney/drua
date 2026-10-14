@@ -113,6 +113,7 @@ pub(crate) async fn dispatch_view(
             let text = match view {
                 FileView::File(text) => text,
                 FileView::Dir(entries) => entries.join("\n"),
+                FileView::PastEof { .. } => String::new(),
             };
             (text, stamp)
         }

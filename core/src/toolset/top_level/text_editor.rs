@@ -77,7 +77,28 @@ impl TextEditor {
                             .view_file_with_cap(subject, &path, range, None)
                             .await?
                     };
-                    viewed.map(|(view, _stamp)| render_view(view, for_model, view_range))
+                    if let (true, Some((FileView::PastEof { total_lines }, _))) =
+                        (for_model, &viewed)
+                    {
+                        let start = range.map_or(1, |(s, _)| s.max(1));
+                        let message = format!(
+                            "Edit view: line {start} is past the end of {path} ({total_lines} lines). \
+                             Use a view_range starting at or before line {total_lines}, or omit view_range."
+                        );
+                        let out = TextOutput {
+                            output: message.clone(),
+                        };
+                        return Ok(TEXT_EDITOR_OUTPUT.error(message, &out));
+                    }
+                    viewed.map(|(view, _stamp)| {
+                        let is_dir = matches!(view, FileView::Dir(_));
+                        let text = render_view(view, for_model, view_range);
+                        if for_model && text.is_empty() {
+                            super::read::empty_view_message(&path, is_dir, view_range.is_some())
+                        } else {
+                            text
+                        }
+                    })
                 }
                 TextEditorAction::Create { path, file_text } => self
                     .space_fs
@@ -180,6 +201,7 @@ fn render_view(view: FileView, number: bool, view_range: Option<[i64; 2]>) -> St
         }
         FileView::File(text) => text,
         FileView::Dir(entries) => entries.join("\n"),
+        FileView::PastEof { .. } => String::new(),
     }
 }
 

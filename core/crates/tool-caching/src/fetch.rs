@@ -406,6 +406,133 @@ impl FetchQuery {
     }
 }
 
+/// Bytes held back from the fetch cap for the `[AUTO-WINDOWED …]` note and
+/// the recovery hint appended after an auto-windowed value.
+const AUTO_WINDOW_NOTE_RESERVE: usize = 2048;
+
+struct AutoWindow {
+    value: Value,
+    /// Where `value` lives; deeper than the requested path when the window
+    /// descended into an oversize first element.
+    path: String,
+    note: String,
+}
+
+/// A fitting window onto `value`, chosen by its type; the byte-range floor
+/// means this always produces something. `start` is the first line/item
+/// (from the caller's own query). `addressable` is false when `value` is not
+/// what `path` resolves to (a grep result), so continuation by query is off.
+fn auto_window(
+    value: &Value,
+    path: &str,
+    start: usize,
+    budget: usize,
+    addressable: bool,
+) -> AutoWindow {
+    match value {
+        Value::String(s) if addressable => {
+            let lines = FetchQuery::Lines {
+                offset: start as i64,
+                len: usize::MAX,
+            };
+            if let Ok(Some(shrunk)) = lines.shrink_to_fit(value.clone(), budget, path) {
+                let total = s.lines().count();
+                let note = format!(
+                    "[AUTO-WINDOWED: the value at {path} is {} bytes; returned lines {start}–{} \
+                     of {total}. Continue with query: {{mode:\"lines\", offset:{}, len:{}}}]",
+                    s.len(),
+                    shrunk.next_offset.saturating_sub(1),
+                    shrunk.next_offset,
+                    shrunk.actual_len,
+                );
+                return AutoWindow {
+                    value: shrunk.value,
+                    path: path.to_string(),
+                    note,
+                };
+            }
+            let byte_start: usize = s
+                .split_inclusive('\n')
+                .take(start)
+                .map(str::len)
+                .sum::<usize>()
+                .min(s.len());
+            let (a, b) = resolve_utf8_byte_window_usize(s, byte_start, budget);
+            AutoWindow {
+                value: Value::String(s[a..b].to_string()),
+                path: path.to_string(),
+                note: format!(
+                    "[AUTO-WINDOWED: the value at {path} is {} bytes; returned bytes {a}–{b}. \
+                     Continue with query: {{mode:\"range\", offset:{b}, len:{budget}}}]",
+                    s.len(),
+                ),
+            }
+        }
+        Value::Array(items) if addressable => {
+            let slice = FetchQuery::JsonArraySlice {
+                offset: start as i64,
+                len: usize::MAX,
+            };
+            if let Ok(Some(shrunk)) = slice.shrink_to_fit(value.clone(), budget, path) {
+                let note = format!(
+                    "[AUTO-WINDOWED: the array at {path} has {} items; returned items {start}–{}. \
+                     Continue with query: {{mode:\"json_array_slice\", offset:{}, len:{}}}]",
+                    items.len(),
+                    shrunk.next_offset.saturating_sub(1),
+                    shrunk.next_offset,
+                    shrunk.actual_len,
+                );
+                return AutoWindow {
+                    value: shrunk.value,
+                    path: path.to_string(),
+                    note,
+                };
+            }
+            match items.get(start) {
+                Some(first) => auto_window(first, &format!("{path}[{start}]"), 0, budget, true),
+                None => json_text_window(value, path, budget, ""),
+            }
+        }
+        _ => {
+            let hint = match value {
+                Value::Object(map) if addressable => {
+                    let mut sizes: Vec<(usize, &String)> = map
+                        .iter()
+                        .map(|(k, v)| (fetch_text_for_raw(v).len(), k))
+                        .collect();
+                    sizes.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(b.1)));
+                    let keys: Vec<String> = sizes
+                        .iter()
+                        .take(5)
+                        .map(|(n, k)| format!("{k} ({n} B)"))
+                        .collect();
+                    format!(
+                        " Fetch a child by extending `path`; largest keys: {}.",
+                        keys.join(", ")
+                    )
+                }
+                _ => " Narrow the query or `path`.".to_string(),
+            };
+            json_text_window(value, path, budget, &hint)
+        }
+    }
+}
+
+/// First `budget` bytes of the value's JSON text.
+fn json_text_window(value: &Value, path: &str, budget: usize, hint: &str) -> AutoWindow {
+    let text = fetch_text_for_raw(value);
+    let end = floor_char_boundary(&text, budget);
+    AutoWindow {
+        value: Value::String(text[..end].to_string()),
+        path: path.to_string(),
+        note: format!(
+            "[AUTO-WINDOWED: the value at {path} is {} bytes; returned the first {end} bytes \
+             of its JSON text.{hint}]",
+            text.len()
+        ),
+    }
+}
+
 fn resolve_utf8_byte_window(s: &str, offset: i64, len: usize) -> (usize, usize) {
     let requested_start = resolve_offset(offset, s.len());
     resolve_utf8_byte_window_usize(s, requested_start, len)
@@ -475,9 +602,19 @@ impl StoredInvocation {
             });
         }
 
+        if max_bytes == 0 {
+            return Err(ToolCachingError::FetchResponseTooLarge {
+                size: text.len(),
+                max: max_bytes,
+                hint: String::new(),
+            });
+        }
+
         let mut shrink_failed = false;
+        let mut window_start = 0;
+        let mut addressable = true;
         if let Some(q) = query {
-            match q.shrink_to_fit(resolved, max_bytes, path)? {
+            match q.shrink_to_fit(resolved.clone(), max_bytes, path)? {
                 Some(shrunk) => {
                     let text = fetch_text_for_raw(&shrunk.value);
                     let wrapped = wrap_at_path(path, shrunk.value)?;
@@ -522,14 +659,41 @@ impl StoredInvocation {
                             | FetchQuery::Lines { .. }
                             | FetchQuery::Range { .. }
                     );
+                    match q {
+                        FetchQuery::Lines { offset, .. } => {
+                            let lines = resolved.as_str().map_or(0, |s| s.lines().count());
+                            window_start = resolve_offset(*offset, lines);
+                        }
+                        FetchQuery::JsonArraySlice { offset, .. } => {
+                            let items = resolved.as_array().map_or(0, Vec::len);
+                            window_start = resolve_offset(*offset, items);
+                        }
+                        _ => addressable = false,
+                    }
                 }
             }
         }
 
-        Err(ToolCachingError::FetchResponseTooLarge {
-            size: text.len(),
-            max: max_bytes,
-            hint: self.too_large_hint(path, max_bytes, shrink_failed),
+        // Every well-formed request gets a window, never an error.
+        let budget = if max_bytes > 2 * AUTO_WINDOW_NOTE_RESERVE {
+            max_bytes - AUTO_WINDOW_NOTE_RESERVE
+        } else {
+            max_bytes / 2
+        };
+        let target = if addressable { &resolved } else { &sliced };
+        let window = auto_window(target, path, window_start, budget.max(1), addressable);
+        let window_text = fetch_text_for_raw(&window.value);
+        let hint = self.too_large_hint(path, max_bytes, shrink_failed);
+        let hint = hint.trim_start_matches(". ");
+        // The note carries caller-supplied paths and keys, so it can outgrow
+        // the reserve; clip the whole trailer so `max_bytes` is a hard cap.
+        let trailer = format!("\n\n{}\n{hint}", window.note);
+        let room = max_bytes.saturating_sub(window_text.len());
+        let trailer = &trailer[..floor_char_boundary(&trailer, room)];
+        let wrapped = wrap_at_path(&window.path, window.value)?;
+        Ok(FetchResult {
+            result: CallToolResult::success(vec![Content::text(format!("{window_text}{trailer}"))]),
+            structured: wrapped,
         })
     }
 
@@ -1222,6 +1386,109 @@ mod tests {
         let err = inv.navigate("$.foo").unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("value is a string"), "got: {msg}");
+    }
+
+    fn result_text(r: &FetchResult) -> String {
+        crate::extract_text(&r.result)
+    }
+
+    const CAP: usize = 16 * 1024;
+
+    #[test]
+    fn oversize_string_without_query_returns_a_lines_window_and_note() {
+        let body: String = (0..2000)
+            .map(|i| format!("line {i:05} xxxxxxxxxxxx\n"))
+            .collect();
+        assert!(body.len() > 30_000);
+        let inv = stored(serde_json::json!({ "content": body }));
+        let r = inv
+            .query("$.content", None, CAP)
+            .expect("windowed, not an error");
+        let text = result_text(&r);
+        assert!(text.len() <= CAP + 256, "{}", text.len());
+        assert!(text.starts_with("line 00000"), "{text}");
+        assert!(text.contains("[AUTO-WINDOWED"), "{text}");
+        assert!(text.contains("mode:\"lines\", offset:"), "{text}");
+    }
+
+    #[test]
+    fn oversize_array_without_query_returns_an_items_window() {
+        let items: Vec<Value> = (0..200)
+            .map(|i| serde_json::json!({ "i": i, "pad": "p".repeat(1000) }))
+            .collect();
+        let inv = stored(serde_json::json!({ "rows": items }));
+        let r = inv.query("$.rows", None, CAP).expect("windowed");
+        let text = result_text(&r);
+        assert!(text.contains("[AUTO-WINDOWED"), "{text}");
+        assert!(text.contains("mode:\"json_array_slice\""), "{text}");
+        let window = r.structured["rows"].as_array().expect("array window");
+        assert!(!window.is_empty() && window.len() < 200, "{}", window.len());
+    }
+
+    #[test]
+    fn single_oversize_array_element_is_windowed_instead_of_rejected() {
+        let big = "z".repeat(40_000);
+        let inv = stored(serde_json::json!({ "rows": [{ "blob": big }, { "blob": "small" }] }));
+        let q = FetchQuery::JsonArraySlice { offset: 0, len: 1 };
+        let r = inv.query("$.rows", Some(&q), CAP).expect("windowed");
+        let text = result_text(&r);
+        assert!(text.contains("[AUTO-WINDOWED"), "{text}");
+        assert!(text.contains("$.rows[0]"), "{text}");
+    }
+
+    #[test]
+    fn oversize_object_gets_a_json_text_window_naming_largest_keys() {
+        let inv = stored(serde_json::json!({ "obj": { "big": "b".repeat(30_000), "tiny": 1 } }));
+        let r = inv.query("$.obj", None, CAP).expect("windowed");
+        let text = result_text(&r);
+        assert!(text.contains("first"), "{text}");
+        assert!(text.contains("big (30000 B)"), "{text}");
+    }
+
+    #[test]
+    fn auto_window_text_never_exceeds_max_bytes_even_with_long_keys() {
+        let long_key = "k".repeat(6_000);
+        let inv = stored(serde_json::json!({ "obj": { long_key: "b".repeat(30_000), "t": 1 } }));
+        for cap in [64usize, 512, 3_000, CAP] {
+            let r = inv.query("$.obj", None, cap).expect("windowed");
+            let text = result_text(&r);
+            assert!(text.len() <= cap, "cap {cap}: got {}", text.len());
+        }
+    }
+
+    #[test]
+    fn oversize_single_line_string_falls_back_to_a_byte_range() {
+        let inv = stored(serde_json::json!({ "s": "y".repeat(40_000) }));
+        let r = inv.query("$.s", None, CAP).expect("windowed");
+        let text = result_text(&r);
+        assert!(text.contains("mode:\"range\""), "{text}");
+        assert!(text.len() <= CAP + 256, "{}", text.len());
+    }
+
+    #[test]
+    fn grep_over_the_cap_keeps_the_matches_truncation() {
+        let body: String = (0..400)
+            .map(|i| format!("needle {i} {}\n", "n".repeat(200)))
+            .collect();
+        let inv = stored(serde_json::json!({ "log": body }));
+        let q = FetchQuery::Grep {
+            pattern: "needle".into(),
+            ignore_case: false,
+            context: 0,
+            max_matches: 400,
+        };
+        let text = result_text(&inv.query("$.log", Some(&q), CAP).unwrap());
+        assert!(text.contains("[TRUNCATED: returned"), "{text}");
+        assert!(!text.contains("AUTO-WINDOWED"), "{text}");
+    }
+
+    #[test]
+    fn zero_byte_cap_is_the_only_remaining_too_large_error() {
+        let inv = stored(serde_json::json!({ "s": "abc" }));
+        assert!(matches!(
+            inv.query("$.s", None, 0),
+            Err(ToolCachingError::FetchResponseTooLarge { .. })
+        ));
     }
 
     #[test]

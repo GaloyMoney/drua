@@ -243,6 +243,7 @@ impl TopLevelTool for ComposeTool {
             audit: self.audit.clone(),
             tool_caching: self.tool_caching.clone(),
             sub_invocations: Arc::clone(&sub_invocations),
+            memo: ScriptMemo::new(self.config.max_memo_bytes),
         });
 
         let engine = js_engine::JsEngine::new()
@@ -374,11 +375,176 @@ struct CatalogDispatcher {
     audit: Option<Arc<Audit>>,
     tool_caching: Option<Arc<ToolCaching>>,
     sub_invocations: Arc<Mutex<Vec<SubInvocation>>>,
+    memo: ScriptMemo,
+}
+
+#[derive(Default)]
+struct MemoState {
+    entries: HashMap<(String, String), serde_json::Value>,
+    bytes: usize,
+    generation: u64,
+}
+
+// Lives and dies with one `CatalogDispatcher` (one compose invocation, one
+// caller identity); never shared across invocations, agents or users.
+struct ScriptMemo {
+    state: Mutex<MemoState>,
+    max_bytes: usize,
+}
+
+impl ScriptMemo {
+    fn new(max_bytes: usize) -> Self {
+        Self {
+            state: Mutex::new(MemoState::default()),
+            max_bytes,
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, MemoState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn get(&self, key: &(String, String)) -> Option<serde_json::Value> {
+        self.lock().entries.get(key).cloned()
+    }
+
+    fn generation(&self) -> u64 {
+        self.lock().generation
+    }
+
+    fn invalidate(&self) {
+        let mut state = self.lock();
+        state.entries.clear();
+        state.bytes = 0;
+        state.generation += 1;
+    }
+
+    /// Skipped when an invalidation landed since `generation` was read, so
+    /// a read that raced a write can't cache pre-write state.
+    fn insert(&self, generation: u64, key: (String, String), value: serde_json::Value) {
+        let size = serde_json::to_vec(&value).map_or(usize::MAX, |b| b.len());
+        let mut state = self.lock();
+        if state.generation != generation || state.bytes.saturating_add(size) > self.max_bytes {
+            return;
+        }
+        state.bytes += size;
+        state.entries.insert(key, value);
+    }
+}
+
+fn canonical_json(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => serde_json::Value::Object(
+            map.iter()
+                .map(|(k, v)| (k.clone(), canonical_json(v)))
+                .collect::<BTreeMap<_, _>>()
+                .into_iter()
+                .collect(),
+        ),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(canonical_json).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+fn memo_key(name: &str, args: &serde_json::Value) -> (String, String) {
+    (name.to_string(), canonical_json(args).to_string())
+}
+
+fn record_memo_hit_context(action: String, name: &str, args: &serde_json::Value) {
+    Audit::record_action(action);
+    Audit::record_entrypoint(format!("compose > mcp: {name}"));
+    Audit::record_interaction_type(InteractionType::McpCall);
+    Audit::record_metadata(serde_json::json!({
+        "tool_name": name,
+        "arguments": args,
+        "memo_hit": true,
+    }));
+    Audit::record_duration(std::time::Instant::now());
+    Audit::record_tokens(0);
+    Audit::record_success();
 }
 
 #[async_trait::async_trait]
 impl js_engine::ToolDispatcher for CatalogDispatcher {
     async fn call_tool(
+        &self,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        // Resolve aliases first: visibility, composability, audit and the
+        // memo key all see the canonical name.
+        let name = &self.canonical_name(name);
+        let Some(action) = self.memo_action(name) else {
+            self.memo.invalidate();
+            let result = self.dispatch(name, args).await;
+            self.memo.invalidate();
+            return result;
+        };
+
+        let key = memo_key(name, &args);
+        if let Some(hit) = self.memo.get(&key) {
+            let audit = self.audit.clone();
+            let name = name.to_string();
+            let parent_seed = EventContext::current().data();
+            async move {
+                record_memo_hit_context(action, &name, &args);
+                if let Some(audit) = audit.as_ref() {
+                    audit.record_from_context();
+                }
+            }
+            .with_event_context(parent_seed)
+            .await;
+            return Ok(hit);
+        }
+
+        let generation = self.memo.generation();
+        let result = self.dispatch(name, args).await;
+        if let Ok(value) = &result {
+            self.memo.insert(generation, key, value.clone());
+        }
+        result
+    }
+}
+
+impl CatalogDispatcher {
+    /// First spelling of `name` that resolves for this caller (searchable
+    /// set visible to them, or a visible top-level tool); the original name
+    /// when none does, so errors keep the caller's spelling. Resolution
+    /// goes through the same gates `dispatch` applies to the result.
+    fn canonical_name(&self, name: &str) -> String {
+        super::super::dispatch::candidate_tool_names(name)
+            .into_iter()
+            .find(|c| {
+                self.find_set(c).is_ok() || {
+                    let map = self.top_level.read().expect("top_level lock poisoned");
+                    map.get(c).is_some_and(|t| t.is_visible(&self.subject))
+                }
+            })
+            .unwrap_or_else(|| name.to_string())
+    }
+
+    /// `Some(audit action)` only when the name resolves, for this caller,
+    /// to a tool that declares itself memoizable — the same visibility and
+    /// composability gates `dispatch` applies, so a memo hit can never
+    /// serve a tool the caller couldn't have dispatched.
+    fn memo_action(&self, name: &str) -> Option<String> {
+        if let Ok((set, tool_name)) = self.find_set(name) {
+            return set
+                .script_memoizable(&tool_name)
+                .then(|| format!("compose > catalog: {name}"));
+        }
+        let map = self.top_level.read().expect("top_level lock poisoned");
+        match map.get(name) {
+            Some(t) if t.is_visible(&self.subject) && t.composable() && t.script_memoizable() => {
+                Some(format!("compose > top_level: {name}"))
+            }
+            _ => None,
+        }
+    }
+
+    async fn dispatch(
         &self,
         name: &str,
         args: serde_json::Value,
@@ -447,9 +613,7 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
 
         self.call_top_level(name, args).await
     }
-}
 
-impl CatalogDispatcher {
     fn find_set(
         &self,
         prefixed_name: &str,
@@ -898,6 +1062,270 @@ mod tests {
         let scoped = test_tool(ceiling).for_script(Some(999_999), Some(999_999_999));
         assert_eq!(scoped.config.max_tool_calls, ceiling.max_tool_calls);
         assert_eq!(scoped.config.timeout_ms, ceiling.timeout_ms);
+    }
+
+    struct CountingSet {
+        entries: Vec<super::super::super::ToolSetEntry>,
+        calls: Arc<Mutex<Vec<String>>>,
+        visible: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl CountingSet {
+        fn new(
+            calls: Arc<Mutex<Vec<String>>>,
+            visible: Arc<std::sync::atomic::AtomicBool>,
+        ) -> Self {
+            let entries = ["read", "write", "volatile"]
+                .into_iter()
+                .map(|n| {
+                    let mut tool = rmcp::model::Tool::default();
+                    tool.name = n.to_string().into();
+                    super::super::super::ToolSetEntry {
+                        name: n.to_string(),
+                        description: tool,
+                    }
+                })
+                .collect();
+            Self {
+                entries,
+                calls,
+                visible,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SearchableToolSet for CountingSet {
+        fn name(&self) -> &str {
+            "docs"
+        }
+        fn category(&self) -> &str {
+            "test"
+        }
+        fn category_description(&self) -> &str {
+            "test"
+        }
+        fn tools(&self) -> &[super::super::super::ToolSetEntry] {
+            &self.entries
+        }
+        fn is_visible(&self, _subject: &AuthSubject) -> bool {
+            self.visible.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn script_memoizable(&self, tool_name: &str) -> bool {
+            tool_name == "read"
+        }
+        async fn call(
+            &self,
+            _subject: &AuthSubject,
+            tool_name: &str,
+            _arguments: Option<JsonObject>,
+        ) -> Result<CallToolResult, ToolSetsError> {
+            let n = {
+                let mut calls = self.calls.lock().unwrap();
+                calls.push(tool_name.to_string());
+                calls.len()
+            };
+            let mut result = CallToolResult::success(Vec::new());
+            result.structured_content = Some(serde_json::json!({ "n": n }));
+            Ok(result)
+        }
+    }
+
+    struct MemoHarness {
+        dispatcher: CatalogDispatcher,
+        calls: Arc<Mutex<Vec<String>>>,
+        visible: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    fn memo_harness(max_memo_bytes: usize) -> MemoHarness {
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let visible = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let set: Arc<dyn SearchableToolSet> =
+            Arc::new(CountingSet::new(Arc::clone(&calls), Arc::clone(&visible)));
+        let dispatcher = CatalogDispatcher {
+            sets: Arc::new(RwLock::new(vec![set])),
+            top_level: Arc::new(RwLock::new(HashMap::new())),
+            subject: AuthSubject::Anonymous,
+            audit: None,
+            tool_caching: None,
+            sub_invocations: Arc::new(Mutex::new(Vec::new())),
+            memo: ScriptMemo::new(max_memo_bytes),
+        };
+        MemoHarness {
+            dispatcher,
+            calls,
+            visible,
+        }
+    }
+
+    use js_engine::ToolDispatcher as _;
+
+    #[tokio::test]
+    async fn memo_serves_identical_reads_from_one_dispatch() {
+        let h = memo_harness(1 << 20);
+        let a = h
+            .dispatcher
+            .call_tool(
+                "docs_read",
+                serde_json::json!({ "p": 1, "q": { "x": 1, "y": 2 } }),
+            )
+            .await
+            .unwrap();
+        let b = h
+            .dispatcher
+            .call_tool(
+                "docs_read",
+                serde_json::json!({ "q": { "y": 2, "x": 1 }, "p": 1 }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(a, b);
+        assert_eq!(h.calls.lock().unwrap().len(), 1);
+
+        h.dispatcher
+            .call_tool("docs_read", serde_json::json!({ "p": 2 }))
+            .await
+            .unwrap();
+        assert_eq!(h.calls.lock().unwrap().len(), 2, "different args miss");
+    }
+
+    #[tokio::test]
+    async fn memo_is_cleared_by_a_non_memoizable_call() {
+        let h = memo_harness(1 << 20);
+        let args = serde_json::json!({ "p": 1 });
+        h.dispatcher
+            .call_tool("docs_read", args.clone())
+            .await
+            .unwrap();
+        h.dispatcher
+            .call_tool("docs_write", args.clone())
+            .await
+            .unwrap();
+        h.dispatcher.call_tool("docs_read", args).await.unwrap();
+        assert_eq!(
+            h.calls.lock().unwrap().as_slice(),
+            ["read", "write", "read"]
+        );
+    }
+
+    #[tokio::test]
+    async fn memo_skips_tools_that_do_not_opt_in() {
+        let h = memo_harness(1 << 20);
+        let args = serde_json::json!({});
+        h.dispatcher
+            .call_tool("docs_volatile", args.clone())
+            .await
+            .unwrap();
+        h.dispatcher.call_tool("docs_volatile", args).await.unwrap();
+        assert_eq!(h.calls.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn memo_is_scoped_to_one_dispatcher() {
+        let a = memo_harness(1 << 20);
+        let b = memo_harness(1 << 20);
+        let args = serde_json::json!({ "p": 1 });
+        a.dispatcher
+            .call_tool("docs_read", args.clone())
+            .await
+            .unwrap();
+        b.dispatcher
+            .call_tool("docs_read", args.clone())
+            .await
+            .unwrap();
+        a.dispatcher
+            .call_tool("docs_read", args.clone())
+            .await
+            .unwrap();
+        assert_eq!(a.calls.lock().unwrap().len(), 1);
+        assert_eq!(
+            b.calls.lock().unwrap().len(),
+            1,
+            "b dispatched for itself instead of reusing a's memo"
+        );
+    }
+
+    #[tokio::test]
+    async fn memo_never_serves_a_tool_the_caller_can_no_longer_resolve() {
+        let h = memo_harness(1 << 20);
+        let args = serde_json::json!({ "p": 1 });
+        h.dispatcher
+            .call_tool("docs_read", args.clone())
+            .await
+            .unwrap();
+        h.visible.store(false, std::sync::atomic::Ordering::SeqCst);
+        let err = h
+            .dispatcher
+            .call_tool("docs_read", args)
+            .await
+            .expect_err("invisible tool must not be served from the memo");
+        assert!(err.contains("Tool not found"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn aliased_names_resolve_and_share_the_canonical_memo_entry() {
+        let h = memo_harness(1 << 20);
+        let args = serde_json::json!({ "p": 1 });
+        for name in [
+            "docs_read",
+            "docs_docs_read",
+            "drua_docs_read",
+            "docs.read",
+            " docs_read",
+        ] {
+            h.dispatcher.call_tool(name, args.clone()).await.unwrap();
+        }
+        assert_eq!(h.calls.lock().unwrap().as_slice(), ["read"]);
+    }
+
+    #[tokio::test]
+    async fn aliases_cannot_reach_a_set_hidden_from_the_caller() {
+        let h = memo_harness(1 << 20);
+        h.visible.store(false, std::sync::atomic::Ordering::SeqCst);
+        for name in ["docs_read", "docs_docs_read", "drua_docs_read", "docs.read"] {
+            let err = h
+                .dispatcher
+                .call_tool(name, serde_json::json!({}))
+                .await
+                .expect_err(name);
+            assert!(err.contains("Tool not found"), "{name}: {err}");
+        }
+        assert!(h.calls.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn memo_stops_inserting_past_the_byte_cap() {
+        let h = memo_harness(1);
+        let args = serde_json::json!({ "p": 1 });
+        h.dispatcher
+            .call_tool("docs_read", args.clone())
+            .await
+            .unwrap();
+        h.dispatcher.call_tool("docs_read", args).await.unwrap();
+        assert_eq!(h.calls.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn memo_hit_audit_context_carries_memo_hit_flag() {
+        let seed = EventContext::current().data();
+        let ctx = async {
+            record_memo_hit_context(
+                "compose > catalog: docs_read".into(),
+                "docs_read",
+                &serde_json::json!({ "p": 1 }),
+            );
+            Audit::collect_context().expect("context recorded")
+        }
+        .with_event_context(seed)
+        .await;
+        let metadata = ctx.metadata.expect("metadata");
+        assert_eq!(metadata["memo_hit"], serde_json::json!(true));
+        assert_eq!(metadata["tool_name"], "docs_read");
+        assert_eq!(ctx.tokens_returned, Some(0));
+        assert!(matches!(
+            ctx.outcome,
+            Some(crate::audit::primitives::InteractionOutcome::Success)
+        ));
     }
 
     #[test]

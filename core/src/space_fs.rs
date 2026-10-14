@@ -40,6 +40,7 @@ const MAX_VIEW_FILE_BYTES: usize = 1_048_576; // 1 MiB
 /// return their listing so callers can format consistently.
 pub enum FileView {
     File(String),
+    PastEof { total_lines: usize },
     Dir(Vec<String>),
 }
 
@@ -367,7 +368,10 @@ impl SpaceFs {
             .map_err(|e| -> ProjectError { e.into() })?
             .ok_or_else(|| io_err(format!("no such file: {}", resolved.rel_path)))?;
         let content = text_from_bytes(bytes, cap)?;
-        let view = FileView::File(apply_view_range(&content, view_range));
+        let view = match past_eof_total_lines(&content, view_range) {
+            Some(total_lines) => FileView::PastEof { total_lines },
+            None => FileView::File(apply_view_range(&content, view_range)),
+        };
         Ok(Some((view, resolved.stamp)))
     }
 
@@ -846,12 +850,14 @@ impl SpaceFs {
     }
 }
 
-/// Strips `.` segments — the no-op CWD shorthand. Callers (`resolve`,
-/// `move_file`) normalise before validation so agents can pass `.` /
-/// `./foo` / `foo/./bar` interchangeably with `""` / `foo` / `foo/bar`.
-/// Does NOT collapse `..` (real traversal); those still fail validation.
+/// Strips `.` segments — the no-op CWD shorthand — and trailing `/`s.
+/// Callers (`resolve`, `move_file`) normalise before validation so agents
+/// can pass `.` / `./foo` / `foo/./bar` / `foo/` interchangeably with `""` /
+/// `foo` / `foo/bar` / `foo`. Does NOT collapse `..` (real traversal) or
+/// interior empty segments (`a//b`); those still fail validation.
 fn normalize_rel_path(rel: &str) -> String {
-    rel.split('/')
+    rel.trim_end_matches('/')
+        .split('/')
         .filter(|seg| *seg != ".")
         .collect::<Vec<_>>()
         .join("/")
@@ -1147,6 +1153,14 @@ fn glob_to_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
     regex::Regex::new(&out)
 }
 
+/// Total line count when the range starts beyond the last line of a
+/// non-empty file; `start == total` is the last line and still valid.
+fn past_eof_total_lines(content: &str, view_range: Option<(i64, i64)>) -> Option<usize> {
+    let (start, _) = view_range?;
+    let total = content.lines().count();
+    (total > 0 && start.max(1) as usize > total).then_some(total)
+}
+
 /// Slice `content` to the requested 1-based, inclusive line range.
 /// `end == -1` (or unset) means EOF.
 fn apply_view_range(content: &str, view_range: Option<(i64, i64)>) -> String {
@@ -1288,6 +1302,12 @@ mod tests {
         assert_eq!(normalize_rel_path("foo/./bar"), "foo/bar");
         assert_eq!(normalize_rel_path("foo/bar"), "foo/bar");
         assert_eq!(normalize_rel_path(""), "");
+        assert_eq!(normalize_rel_path("playbooks/"), "playbooks");
+        assert_eq!(normalize_rel_path("a/b//"), "a/b");
+        assert_eq!(normalize_rel_path("/"), "");
+        assert_eq!(normalize_rel_path("a/./"), "a");
+        assert_eq!(normalize_rel_path("a//b"), "a//b");
+        assert!(SpaceFs::validate_rel_path(&normalize_rel_path("a//b")).is_err());
     }
 
     #[test]
@@ -1354,6 +1374,21 @@ mod tests {
     fn view_range_empty_when_inverted() {
         let txt = "a\nb\nc";
         assert_eq!(apply_view_range(txt, Some((3, 1))), "");
+    }
+
+    #[test]
+    fn past_eof_reports_total_lines() {
+        let txt = "a\nb\nc";
+        assert_eq!(past_eof_total_lines(txt, Some((4, -1))), Some(3));
+        assert_eq!(past_eof_total_lines(txt, Some((100, 120))), Some(3));
+    }
+
+    #[test]
+    fn past_eof_is_not_flagged_for_the_last_line_or_unranged_or_empty() {
+        let txt = "a\nb\nc";
+        assert_eq!(past_eof_total_lines(txt, Some((3, -1))), None);
+        assert_eq!(past_eof_total_lines(txt, None), None);
+        assert_eq!(past_eof_total_lines("", Some((5, -1))), None);
     }
 
     #[test]

@@ -80,7 +80,19 @@ impl Read {
         };
 
         if let Some((view, _stamp)) = space_view {
-            let content = render_file_view(view, for_model, view_range);
+            if let (true, FileView::PastEof { total_lines }) = (for_model, &view) {
+                let offset = view_range.map_or(0, |(start, _)| start - 1);
+                let message = past_eof_message(&params.path, offset, *total_lines);
+                let out = ContentOutput {
+                    content: message.clone(),
+                };
+                return Ok(READ_OUTPUT.error(message, &out));
+            }
+            let is_dir = matches!(view, FileView::Dir(_));
+            let mut content = render_file_view(view, for_model, view_range);
+            if for_model && content.is_empty() {
+                content = empty_view_message(&params.path, is_dir, view_range.is_some());
+            }
             let out = ContentOutput {
                 content: content.clone(),
             };
@@ -115,6 +127,8 @@ impl Read {
             Ok(resp) => {
                 let content = if resp.is_error || !for_model {
                     resp.output
+                } else if resp.output.is_empty() {
+                    empty_view_message(&params.path, false, view_range.is_some())
                 } else {
                     sandbox::number_lines(&resp.output, numbering_range(view_range))
                 };
@@ -162,6 +176,10 @@ impl TopLevelTool for Read {
 
     fn is_visible(&self, subject: &AuthSubject) -> bool {
         subject.can_use_agent_file_tools()
+    }
+
+    fn script_memoizable(&self) -> bool {
+        true
     }
 
     async fn call(
@@ -217,6 +235,24 @@ fn render_file_view(view: FileView, number: bool, view_range: Option<(i64, i64)>
         FileView::File(text) if number => sandbox::number_lines(&text, numbering_range(view_range)),
         FileView::File(text) => text,
         FileView::Dir(entries) => entries.join("\n"),
+        FileView::PastEof { .. } => String::new(),
+    }
+}
+
+pub(super) fn past_eof_message(path: &str, offset: i64, total_lines: usize) -> String {
+    format!(
+        "Read: offset {offset} is past the end of {path} ({total_lines} lines). \
+         Use offset < {total_lines}, or omit offset to read the whole file."
+    )
+}
+
+pub(super) fn empty_view_message(path: &str, is_dir: bool, ranged: bool) -> String {
+    if is_dir {
+        format!("(empty: {path} is an empty directory)")
+    } else if ranged {
+        format!("(empty: {path} has no content in the requested range)")
+    } else {
+        format!("(empty: {path} is an empty file)")
     }
 }
 
@@ -270,6 +306,36 @@ mod tests {
     fn render_file_view_dir_ignores_number_flag() {
         let dir = FileView::Dir(vec!["a.md".into(), "b/".into()]);
         assert_eq!(render_file_view(dir, true, None), "a.md\nb/");
+    }
+
+    #[test]
+    fn past_eof_message_names_offset_path_and_total() {
+        let msg = past_eof_message("space:s/triage-log.md", 445, 120);
+        assert!(msg.contains("offset 445"), "{msg}");
+        assert!(msg.contains("space:s/triage-log.md (120 lines)"), "{msg}");
+        assert!(msg.contains("offset < 120"), "{msg}");
+    }
+
+    #[test]
+    fn empty_view_message_blames_the_range_only_when_one_was_given() {
+        assert_eq!(
+            empty_view_message("space:s/a.md", false, false),
+            "(empty: space:s/a.md is an empty file)"
+        );
+        assert_eq!(
+            empty_view_message("space:s/a.md", false, true),
+            "(empty: space:s/a.md has no content in the requested range)"
+        );
+        assert_eq!(
+            empty_view_message("space:s/d/", true, false),
+            "(empty: space:s/d/ is an empty directory)"
+        );
+    }
+
+    #[test]
+    fn render_file_view_past_eof_is_empty_text_for_scripts() {
+        let out = render_file_view(FileView::PastEof { total_lines: 3 }, false, Some((10, -1)));
+        assert_eq!(out, "");
     }
 
     #[test]

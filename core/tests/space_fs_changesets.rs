@@ -581,8 +581,23 @@ async fn workflow_run_subject_overlays_its_run_draft() {
         drua_core::space_fs::FileView::File(content) => {
             assert_eq!(content, "staged by run\n");
         }
-        drua_core::space_fs::FileView::Dir(_) => panic!("expected a file"),
+        drua_core::space_fs::FileView::Dir(_) | drua_core::space_fs::FileView::PastEof { .. } => {
+            panic!("expected a file")
+        }
     }
+
+    let (past, _stamp) = fs
+        .view_file(&run_sub, "space:docs/a.md", Some((10_000, -1)))
+        .await
+        .expect("view_file dispatch")
+        .expect("space path");
+    assert!(
+        matches!(
+            past,
+            drua_core::space_fs::FileView::PastEof { total_lines: 1 }
+        ),
+        "a range starting past the last line reports the total"
+    );
 
     let (read, _stamp) = fs
         .view_file(&run_sub, "draft:docs/a.md", None)
@@ -593,7 +608,9 @@ async fn workflow_run_subject_overlays_its_run_draft() {
         drua_core::space_fs::FileView::File(content) => {
             assert_eq!(content, "staged by run\n");
         }
-        drua_core::space_fs::FileView::Dir(_) => panic!("expected a file"),
+        drua_core::space_fs::FileView::Dir(_) | drua_core::space_fs::FileView::PastEof { .. } => {
+            panic!("expected a file")
+        }
     }
 
     let idpath = format!("space:docs@{}/a.md", cs.id);
@@ -1091,7 +1108,9 @@ async fn space_read_with_no_open_draft_falls_back_to_main() {
         .expect("space path");
     let text = match view {
         drua_core::space_fs::FileView::File(t) => t,
-        drua_core::space_fs::FileView::Dir(_) => panic!("expected a file"),
+        drua_core::space_fs::FileView::Dir(_) | drua_core::space_fs::FileView::PastEof { .. } => {
+            panic!("expected a file")
+        }
     };
     assert_eq!(text, "main content\n");
 
@@ -1689,7 +1708,9 @@ async fn six_concurrent_str_replace_on_one_file_all_land() {
         .expect("space path");
     let text = match view {
         drua_core::space_fs::FileView::File(s) => s,
-        drua_core::space_fs::FileView::Dir(_) => panic!("expected a file, got a directory"),
+        drua_core::space_fs::FileView::Dir(_) | drua_core::space_fs::FileView::PastEof { .. } => {
+            panic!("expected a file, got a directory")
+        }
     };
     for i in 0..6 {
         assert!(
