@@ -91,9 +91,10 @@ impl TextEditor {
                         return Ok(TEXT_EDITOR_OUTPUT.error(message, &out));
                     }
                     viewed.map(|(view, _stamp)| {
+                        let is_dir = matches!(view, FileView::Dir(_));
                         let text = render_view(view, for_model, view_range);
                         if for_model && text.is_empty() {
-                            super::read::empty_range_message(&path)
+                            super::read::empty_view_message(&path, is_dir, view_range.is_some())
                         } else {
                             text
                         }
