@@ -788,6 +788,7 @@ impl ToolSets {
         async move {
             Audit::record_subject(subject);
             Audit::record_entrypoint(format!("mcp: {}", name));
+            Audit::record_action(name);
             Audit::record_interaction_type(crate::audit::primitives::InteractionType::McpCall);
 
             // Some MCP clients JSON-encode complex nested args as strings.
@@ -836,6 +837,7 @@ impl ToolSets {
 
             let final_result = match raw_result {
                 Ok(raw) => {
+                    record_result_outcome(&raw);
                     let cached = match (default_cache, tool_caching.as_ref()) {
                         (true, Some(tc)) => {
                             let args_for_cache = args_value
@@ -848,7 +850,6 @@ impl ToolSets {
                         _ => raw,
                     };
                     Audit::record_tokens(estimate_tokens(&cached));
-                    Audit::record_success();
                     Ok(cached)
                 }
                 Err(e) => {
@@ -865,6 +866,16 @@ impl ToolSets {
         }
         .with_event_context(seed)
         .await
+    }
+}
+
+/// An upstream `is_error` result travels as `Ok` on the wire but must be an
+/// audit error.
+fn record_result_outcome(result: &CallToolResult) {
+    if result.is_error == Some(true) {
+        Audit::record_error(drua_tool_caching::extract_text(result));
+    } else {
+        Audit::record_success();
     }
 }
 
@@ -1847,6 +1858,70 @@ mod tests {
             Some(true),
             "wrapped args are unwrapped and the retry succeeds"
         );
+    }
+
+    struct ActionProbeTool(Arc<std::sync::Mutex<Option<String>>>);
+
+    #[async_trait::async_trait]
+    impl TopLevelTool for ActionProbeTool {
+        fn name(&self) -> &str {
+            "action_probe"
+        }
+        fn description(&self) -> &str {
+            "stub"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static S: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            S.get_or_init(|| serde_json::json!({ "type": "object" }))
+        }
+        async fn call(
+            &self,
+            _subject: &AuthSubject,
+            _arguments: Option<JsonObject>,
+        ) -> Result<CallToolResult, ToolSetsError> {
+            *self.0.lock().unwrap() = Audit::collect_context().and_then(|c| c.action);
+            Err(ToolSetsError::InvalidArgument("bad".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn call_top_level_tool_records_action_before_parse_failure() {
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_top_level(ActionProbeTool(Arc::clone(&seen)));
+        let result = toolsets
+            .call_top_level_tool(&AuthSubject::Anonymous, "action_probe", None)
+            .await;
+        assert!(result.is_err());
+        assert_eq!(seen.lock().unwrap().as_deref(), Some("action_probe"));
+    }
+
+    #[tokio::test]
+    async fn record_result_outcome_marks_is_error_result_as_audit_error() {
+        use crate::audit::primitives::InteractionOutcome;
+        use es_entity::context::{EventContext, WithEventContext};
+
+        let seed = EventContext::current().data();
+        let outcome = async {
+            let err = CallToolResult::error(vec![rmcp::model::Content::text("boom")]);
+            record_result_outcome(&err);
+            Audit::collect_context().and_then(|c| c.outcome)
+        }
+        .with_event_context(seed.clone())
+        .await;
+        match outcome {
+            Some(InteractionOutcome::Error { message }) => assert_eq!(message, "boom"),
+            other => panic!("expected error outcome, got {other:?}"),
+        }
+
+        let outcome = async {
+            let ok = CallToolResult::success(vec![rmcp::model::Content::text("fine")]);
+            record_result_outcome(&ok);
+            Audit::collect_context().and_then(|c| c.outcome)
+        }
+        .with_event_context(seed)
+        .await;
+        assert!(matches!(outcome, Some(InteractionOutcome::Success)));
     }
 
     #[tokio::test]
