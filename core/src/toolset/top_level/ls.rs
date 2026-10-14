@@ -77,6 +77,10 @@ impl TopLevelTool for Ls {
         subject.can_use_agent_file_tools()
     }
 
+    fn script_memoizable(&self) -> bool {
+        true
+    }
+
     async fn call(
         &self,
         subject: &AuthSubject,

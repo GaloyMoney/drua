@@ -539,6 +539,10 @@ impl SearchableToolSet for LibraryToolSet {
         }
     }
 
+    fn script_memoizable(&self, tool_name: &str) -> bool {
+        matches!(tool_name, "search" | "get_files")
+    }
+
     async fn call(
         &self,
         subject: &AuthSubject,

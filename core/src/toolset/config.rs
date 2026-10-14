@@ -45,6 +45,10 @@ pub struct ComposeConfig {
     /// Cap on a single inner-tool result, in bytes.
     #[serde(default = "default_max_tool_result_bytes")]
     pub max_tool_result_bytes: usize,
+    /// Cap on the total bytes memoized across repeated read-only sub-calls
+    /// within one script run; inserts stop once reached.
+    #[serde(default = "default_max_memo_bytes")]
+    pub max_memo_bytes: usize,
     /// Cap on the script's final return value, in bytes.
     #[serde(default = "default_max_return_bytes")]
     pub max_return_bytes: usize,
@@ -75,6 +79,7 @@ impl Default for ComposeConfig {
             max_script_dependency_depth: default_max_script_dependency_depth(),
             max_tool_calls: default_max_tool_calls(),
             max_tool_result_bytes: default_max_tool_result_bytes(),
+            max_memo_bytes: default_max_memo_bytes(),
             max_return_bytes: default_max_return_bytes(),
             max_console_bytes: default_max_console_bytes(),
             memory_limit_bytes: default_memory_limit_bytes(),
@@ -111,6 +116,10 @@ fn default_max_tool_result_bytes() -> usize {
     // cap exists for safety against pathological cases, not as a normal
     // throttle.
     32 * 1024 * 1024
+}
+
+fn default_max_memo_bytes() -> usize {
+    64 * 1024 * 1024
 }
 
 fn default_max_return_bytes() -> usize {

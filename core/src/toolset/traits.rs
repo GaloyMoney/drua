@@ -71,6 +71,14 @@ pub trait TopLevelTool: Send + Sync {
         Ok(())
     }
 
+    /// Compose memoizes repeated identical calls to this tool within one
+    /// script run. Only for side-effect-free reads whose result depends
+    /// only on the arguments and the space/sandbox state; any other tool
+    /// call evicts the memo.
+    fn script_memoizable(&self) -> bool {
+        false
+    }
+
     async fn call(
         &self,
         subject: &AuthSubject,
@@ -129,6 +137,12 @@ pub trait SearchableToolSet: Send + Sync {
     /// the default.
     fn output_shape(&self, _tool_name: &str) -> ToolOutputShape {
         ToolOutputShape::default()
+    }
+
+    /// Same contract as [`TopLevelTool::script_memoizable`], keyed by the
+    /// set's own unprefixed tool name.
+    fn script_memoizable(&self, _tool_name: &str) -> bool {
+        false
     }
 
     async fn call(
