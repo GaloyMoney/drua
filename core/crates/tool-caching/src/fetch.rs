@@ -685,14 +685,14 @@ impl StoredInvocation {
         let window_text = fetch_text_for_raw(&window.value);
         let hint = self.too_large_hint(path, max_bytes, shrink_failed);
         let hint = hint.trim_start_matches(". ");
-        let room = AUTO_WINDOW_NOTE_RESERVE.saturating_sub(window.note.len());
-        let hint = &hint[..floor_char_boundary(hint, room)];
+        // The note carries caller-supplied paths and keys, so it can outgrow
+        // the reserve; clip the whole trailer so `max_bytes` is a hard cap.
+        let trailer = format!("\n\n{}\n{hint}", window.note);
+        let room = max_bytes.saturating_sub(window_text.len());
+        let trailer = &trailer[..floor_char_boundary(&trailer, room)];
         let wrapped = wrap_at_path(&window.path, window.value)?;
         Ok(FetchResult {
-            result: CallToolResult::success(vec![Content::text(format!(
-                "{window_text}\n\n{}\n{hint}",
-                window.note
-            ))]),
+            result: CallToolResult::success(vec![Content::text(format!("{window_text}{trailer}"))]),
             structured: wrapped,
         })
     }
@@ -1443,6 +1443,17 @@ mod tests {
         let text = result_text(&r);
         assert!(text.contains("first"), "{text}");
         assert!(text.contains("big (30000 B)"), "{text}");
+    }
+
+    #[test]
+    fn auto_window_text_never_exceeds_max_bytes_even_with_long_keys() {
+        let long_key = "k".repeat(6_000);
+        let inv = stored(serde_json::json!({ "obj": { long_key: "b".repeat(30_000), "t": 1 } }));
+        for cap in [64usize, 512, 3_000, CAP] {
+            let r = inv.query("$.obj", None, cap).expect("windowed");
+            let text = result_text(&r);
+            assert!(text.len() <= cap, "cap {cap}: got {}", text.len());
+        }
     }
 
     #[test]
