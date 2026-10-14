@@ -850,12 +850,14 @@ impl SpaceFs {
     }
 }
 
-/// Strips `.` segments — the no-op CWD shorthand. Callers (`resolve`,
-/// `move_file`) normalise before validation so agents can pass `.` /
-/// `./foo` / `foo/./bar` interchangeably with `""` / `foo` / `foo/bar`.
-/// Does NOT collapse `..` (real traversal); those still fail validation.
+/// Strips `.` segments — the no-op CWD shorthand — and trailing `/`s.
+/// Callers (`resolve`, `move_file`) normalise before validation so agents
+/// can pass `.` / `./foo` / `foo/./bar` / `foo/` interchangeably with `""` /
+/// `foo` / `foo/bar` / `foo`. Does NOT collapse `..` (real traversal) or
+/// interior empty segments (`a//b`); those still fail validation.
 fn normalize_rel_path(rel: &str) -> String {
-    rel.split('/')
+    rel.trim_end_matches('/')
+        .split('/')
         .filter(|seg| *seg != ".")
         .collect::<Vec<_>>()
         .join("/")
@@ -1300,6 +1302,12 @@ mod tests {
         assert_eq!(normalize_rel_path("foo/./bar"), "foo/bar");
         assert_eq!(normalize_rel_path("foo/bar"), "foo/bar");
         assert_eq!(normalize_rel_path(""), "");
+        assert_eq!(normalize_rel_path("playbooks/"), "playbooks");
+        assert_eq!(normalize_rel_path("a/b//"), "a/b");
+        assert_eq!(normalize_rel_path("/"), "");
+        assert_eq!(normalize_rel_path("a/./"), "a");
+        assert_eq!(normalize_rel_path("a//b"), "a//b");
+        assert!(SpaceFs::validate_rel_path(&normalize_rel_path("a//b")).is_err());
     }
 
     #[test]
