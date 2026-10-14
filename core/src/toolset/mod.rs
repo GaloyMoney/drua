@@ -759,10 +759,11 @@ impl ToolSets {
     ) -> Result<CallToolResult, ToolSetsError> {
         let tool = {
             let map = self.top_level.read().expect("top_level lock poisoned");
-            Arc::clone(
-                map.get(name)
-                    .ok_or_else(|| ToolSetsError::ToolNotFound(name.to_string()))?,
-            )
+            dispatch::candidate_tool_names(name)
+                .iter()
+                .find_map(|c| map.get(c))
+                .map(Arc::clone)
+                .ok_or_else(|| ToolSetsError::ToolNotFound(name.to_string()))?
         };
 
         self.call_top_level_instance(subject, tool, arguments).await
@@ -1943,6 +1944,23 @@ mod tests {
             drua_tool_caching::extract_text(&result),
             "(tool empty_tool returned no output)"
         );
+    }
+
+    #[tokio::test]
+    async fn call_top_level_tool_resolves_drua_prefixed_alias() {
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_top_level(EmptyTool);
+        let result = toolsets
+            .call_top_level_tool(&AuthSubject::Anonymous, "drua_empty_tool", None)
+            .await
+            .expect("alias resolves");
+        assert!(drua_tool_caching::extract_text(&result).contains("empty_tool"));
+        assert!(matches!(
+            toolsets
+                .call_top_level_tool(&AuthSubject::Anonymous, "drua_ghost", None)
+                .await,
+            Err(ToolSetsError::ToolNotFound(n)) if n == "drua_ghost"
+        ));
     }
 
     #[tokio::test]

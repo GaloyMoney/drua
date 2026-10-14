@@ -18,6 +18,7 @@ use rmcp::model::{CallToolResult, Content, JsonObject, Tool};
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
 
+use super::super::dispatch::candidate_tool_names;
 use super::super::error::ToolSetsError;
 use super::super::traits::{SearchableToolSet, TopLevelTool};
 use super::schema_for;
@@ -301,9 +302,11 @@ impl DescribeCatalogTool {
 
     fn execute_describe(&self, subject: &AuthSubject, prefixed_name: &str) -> Option<CatalogEntry> {
         let sets = self.sets.read().expect("toolset lock poisoned");
-        visible_entries(subject, &sets)
-            .into_iter()
-            .find(|e| e.prefixed_name == prefixed_name)
+        let entries = visible_entries(subject, &sets);
+        candidate_tool_names(prefixed_name)
+            .iter()
+            .find_map(|c| entries.iter().position(|e| &e.prefixed_name == c))
+            .map(|i| entries.into_iter().nth(i).expect("position in range"))
     }
 
     fn format_entry(entry: &CatalogEntry) -> String {
@@ -494,12 +497,18 @@ impl CallCatalogTool {
     }
 }
 
-/// Models confuse naming conventions (audit: `github.pull_request_read`,
-/// `mcp__drua__tool_output_fetch`) — map those spellings back to the
-/// canonical prefixed name before declaring a miss.
-fn canonicalize_tool_name(name: &str) -> String {
-    let stripped = name.strip_prefix("mcp__drua__").unwrap_or(name);
-    stripped.replace('.', "_")
+enum Resolved {
+    Set(String, (Arc<dyn SearchableToolSet>, String)),
+    TopLevel(Arc<dyn TopLevelTool>),
+}
+
+const TOOL_NAME_KEYS: &[&str] = &["tool_name", "name", "tool"];
+const ARGUMENTS_KEYS: &[&str] = &["arguments", "args", "input", "params", "parameters"];
+
+/// Removes and returns the first alias in `keys` that is present; later
+/// aliases stay so the stray-field hint still reports them.
+fn take_first_key(args: &mut JsonObject, keys: &[&str]) -> Option<serde_json::Value> {
+    keys.iter().find_map(|key| args.remove(*key))
 }
 
 fn name_tokens(s: &str) -> Vec<String> {
@@ -573,8 +582,7 @@ impl TopLevelTool for CallCatalogTool {
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
         let mut args = arguments.unwrap_or_default();
-        let tool_name = args
-            .remove("tool_name")
+        let tool_name = take_first_key(&mut args, TOOL_NAME_KEYS)
             .and_then(|v| v.as_str().map(str::to_string))
             .ok_or_else(|| {
                 let received: Vec<&String> = args.keys().collect();
@@ -592,21 +600,26 @@ impl TopLevelTool for CallCatalogTool {
                 };
                 ToolSetsError::InvalidArgument(msg)
             })?;
-        let inner_args = args.remove("arguments").and_then(|v| match v {
+        let inner_args = take_first_key(&mut args, ARGUMENTS_KEYS).and_then(|v| match v {
             serde_json::Value::Object(obj) => Some(obj),
             _ => None,
         });
 
         let extra_keys: Vec<String> = args.keys().cloned().collect();
 
-        let canonical = canonicalize_tool_name(&tool_name);
-        let (set, name) = match self
-            .find_set(subject, &tool_name)
-            .or_else(|| self.find_set(subject, &canonical))
-        {
-            Some(found) => found,
-            None => {
-                if let Some(tool) = self.find_top_level(subject, &canonical) {
+        // Aliases resolve through the same visibility-gated lookups as the
+        // real name, so the check always runs on the name that matched.
+        let candidates = candidate_tool_names(&tool_name);
+        let resolved = candidates.iter().find_map(|c| {
+            if let Some(found) = self.find_set(subject, c) {
+                return Some(Resolved::Set(c.clone(), found));
+            }
+            self.find_top_level(subject, c).map(Resolved::TopLevel)
+        });
+        let (tool_name, (set, name)) = match resolved {
+            Some(Resolved::Set(canonical, found)) => (canonical, found),
+            other => {
+                if let Some(Resolved::TopLevel(tool)) = other {
                     Audit::record_action(tool.name());
                     // Same arg-coercion treatment as direct top-level dispatch.
                     let inner_args = inner_args.map(|mut a| {
@@ -1217,19 +1230,164 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_handles_dots_and_mcp_prefix() {
+    fn take_first_key_consumes_only_the_first_alias() {
+        let mut args = JsonObject::default();
+        args.insert("name".into(), json!("a"));
+        args.insert("tool".into(), json!("b"));
+        assert_eq!(take_first_key(&mut args, TOOL_NAME_KEYS), Some(json!("a")));
+        assert!(!args.contains_key("name"));
+        assert!(args.contains_key("tool"), "unconsumed alias stays stray");
+    }
+
+    struct RecordingTool {
+        name: &'static str,
+        visible: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl TopLevelTool for RecordingTool {
+        fn name(&self) -> &str {
+            self.name
+        }
+        fn description(&self) -> &str {
+            "stub"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static S: LazyLock<serde_json::Value> = LazyLock::new(|| json!({ "type": "object" }));
+            &S
+        }
+        fn is_visible(&self, _subject: &AuthSubject) -> bool {
+            self.visible
+        }
+        async fn call(
+            &self,
+            _subject: &AuthSubject,
+            _arguments: Option<JsonObject>,
+        ) -> Result<CallToolResult, ToolSetsError> {
+            Ok(CallToolResult::success(vec![Content::text(format!(
+                "ran {}",
+                self.name
+            ))]))
+        }
+    }
+
+    fn call_tool_with_top_level(tools: Vec<RecordingTool>) -> CallCatalogTool {
+        let map = tools
+            .into_iter()
+            .map(|t| (t.name.to_string(), Arc::new(t) as Arc<dyn TopLevelTool>))
+            .collect();
+        let sets: Vec<Arc<dyn SearchableToolSet>> = vec![];
+        CallCatalogTool::new(
+            Arc::new(RwLock::new(sets)),
+            Arc::new(RwLock::new(map)),
+            None,
+        )
+    }
+
+    async fn call_with(call: &CallCatalogTool, envelope: serde_json::Value) -> String {
+        let args = envelope.as_object().cloned();
+        match call.call(&AuthSubject::Anonymous, args).await {
+            Ok(r) => drua_tool_caching::extract_text(&r),
+            Err(e) => format!("ERR {e}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn envelope_aliases_resolve_tool_and_arguments() {
+        let call = call_tool_with_top_level(vec![RecordingTool {
+            name: "echo",
+            visible: true,
+        }]);
+        for envelope in [
+            json!({ "name": "echo", "arguments": {} }),
+            json!({ "tool": "echo", "args": {} }),
+            json!({ "tool": "echo", "arguments": {} }),
+            json!({ "tool_name": "echo", "input": {} }),
+        ] {
+            assert_eq!(
+                call_with(&call, envelope.clone()).await,
+                "ran echo",
+                "{envelope}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn aliased_names_resolve_to_the_real_tool() {
+        let call = call_tool_with_top_level(vec![RecordingTool {
+            name: "echo",
+            visible: true,
+        }]);
+        for alias in ["drua_echo", "mcp__drua__echo", "  echo", "echo."] {
+            assert_eq!(
+                call_with(&call, json!({ "tool_name": alias })).await,
+                "ran echo",
+                "{alias}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn alias_cannot_reach_a_tool_hidden_from_the_caller() {
+        let call = call_tool_with_top_level(vec![RecordingTool {
+            name: "secret",
+            visible: false,
+        }]);
+        for name in [
+            "secret",
+            "drua_secret",
+            "mcp__drua__secret",
+            " secret",
+            "secret.",
+        ] {
+            let out = call_with(&call, json!({ "tool_name": name })).await;
+            assert!(
+                out.starts_with("ERR"),
+                "{name} reached a hidden tool: {out}"
+            );
+            assert!(out.contains("no such tool"), "{name}: {out}");
+        }
+    }
+
+    #[tokio::test]
+    async fn drua_prefixed_real_name_wins_over_stripped_alias() {
+        let call = call_tool_with_top_level(vec![
+            RecordingTool {
+                name: "drua_admin_spaces",
+                visible: true,
+            },
+            RecordingTool {
+                name: "admin_spaces",
+                visible: true,
+            },
+        ]);
         assert_eq!(
-            canonicalize_tool_name("github.pull_request_read"),
-            "github_pull_request_read"
+            call_with(&call, json!({ "tool_name": "drua_admin_spaces" })).await,
+            "ran drua_admin_spaces"
         );
-        assert_eq!(
-            canonicalize_tool_name("mcp__drua__tool_output_fetch"),
-            "tool_output_fetch"
-        );
-        assert_eq!(
-            canonicalize_tool_name("zenduty_get_incident"),
-            "zenduty_get_incident"
-        );
+    }
+
+    #[test]
+    fn describe_resolves_aliases_but_only_for_visible_entries() {
+        let stub = StubToolSet::with_tools(vec![("pull_request_read", "Read a PR")]);
+        let sets: Vec<Arc<dyn SearchableToolSet>> = vec![Arc::new(stub)];
+        let describe = DescribeCatalogTool::new(Arc::new(RwLock::new(sets)));
+        let anon = AuthSubject::Anonymous;
+        for alias in [
+            "stub_pull_request_read",
+            "drua_stub_pull_request_read",
+            "stub.pull_request_read",
+            "stub_stub_pull_request_read",
+            " stub_pull_request_read",
+        ] {
+            let entry = describe.execute_describe(&anon, alias);
+            assert_eq!(
+                entry.map(|e| e.prefixed_name).as_deref(),
+                Some("stub_pull_request_read"),
+                "{alias}"
+            );
+        }
+        assert!(describe.execute_describe(&anon, "stub_nope").is_none());
     }
 
     #[test]

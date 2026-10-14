@@ -473,6 +473,9 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
         name: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
+        // Resolve aliases first: visibility, composability, audit and the
+        // memo key all see the canonical name.
+        let name = &self.canonical_name(name);
         let Some(action) = self.memo_action(name) else {
             self.memo.invalidate();
             let result = self.dispatch(name, args).await;
@@ -506,6 +509,22 @@ impl js_engine::ToolDispatcher for CatalogDispatcher {
 }
 
 impl CatalogDispatcher {
+    /// First spelling of `name` that resolves for this caller (searchable
+    /// set visible to them, or a visible top-level tool); the original name
+    /// when none does, so errors keep the caller's spelling. Resolution
+    /// goes through the same gates `dispatch` applies to the result.
+    fn canonical_name(&self, name: &str) -> String {
+        super::super::dispatch::candidate_tool_names(name)
+            .into_iter()
+            .find(|c| {
+                self.find_set(c).is_ok() || {
+                    let map = self.top_level.read().expect("top_level lock poisoned");
+                    map.get(c).is_some_and(|t| t.is_visible(&self.subject))
+                }
+            })
+            .unwrap_or_else(|| name.to_string())
+    }
+
     /// `Some(audit action)` only when the name resolves, for this caller,
     /// to a tool that declares itself memoizable — the same visibility and
     /// composability gates `dispatch` applies, so a memo hit can never
@@ -1241,6 +1260,37 @@ mod tests {
             .await
             .expect_err("invisible tool must not be served from the memo");
         assert!(err.contains("Tool not found"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn aliased_names_resolve_and_share_the_canonical_memo_entry() {
+        let h = memo_harness(1 << 20);
+        let args = serde_json::json!({ "p": 1 });
+        for name in [
+            "docs_read",
+            "docs_docs_read",
+            "drua_docs_read",
+            "docs.read",
+            " docs_read",
+        ] {
+            h.dispatcher.call_tool(name, args.clone()).await.unwrap();
+        }
+        assert_eq!(h.calls.lock().unwrap().as_slice(), ["read"]);
+    }
+
+    #[tokio::test]
+    async fn aliases_cannot_reach_a_set_hidden_from_the_caller() {
+        let h = memo_harness(1 << 20);
+        h.visible.store(false, std::sync::atomic::Ordering::SeqCst);
+        for name in ["docs_read", "docs_docs_read", "drua_docs_read", "docs.read"] {
+            let err = h
+                .dispatcher
+                .call_tool(name, serde_json::json!({}))
+                .await
+                .expect_err(name);
+            assert!(err.contains("Tool not found"), "{name}: {err}");
+        }
+        assert!(h.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
