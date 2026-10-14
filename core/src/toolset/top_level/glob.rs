@@ -94,6 +94,29 @@ impl TopLevelTool for GlobTool {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
+        self.run(subject, arguments, true).await
+    }
+
+    async fn call_from_script(
+        &self,
+        subject: &AuthSubject,
+        arguments: Option<JsonObject>,
+    ) -> Result<CallToolResult, ToolSetsError> {
+        self.run(subject, arguments, false).await
+    }
+}
+
+fn no_files_message(pattern: &str, path: Option<&str>) -> String {
+    format!("No files match {pattern} under {}", path.unwrap_or("."))
+}
+
+impl GlobTool {
+    async fn run(
+        &self,
+        subject: &AuthSubject,
+        arguments: Option<JsonObject>,
+        for_model: bool,
+    ) -> Result<CallToolResult, ToolSetsError> {
         let params: GlobParams = parse_params(arguments)?;
         Audit::record_action("glob");
 
@@ -105,7 +128,10 @@ impl TopLevelTool for GlobTool {
                 .glob_detailed(subject, path_for_space, &params.pattern)
                 .await?;
             if let Some((entries, _stamp)) = space_entries {
-                let (files, text, details) = render_detailed(entries);
+                let (files, mut text, details) = render_detailed(entries);
+                if for_model && text.is_empty() {
+                    text = no_files_message(&params.pattern, params.path.as_deref());
+                }
                 let out = FilesOutput { files, details };
                 return Ok(GLOB_OUTPUT.success(text, &out));
             }
@@ -120,7 +146,10 @@ impl TopLevelTool for GlobTool {
             .await?;
 
         if let Some((files, _stamp)) = space_files {
-            let text = files.join("\n");
+            let mut text = files.join("\n");
+            if for_model && text.is_empty() {
+                text = no_files_message(&params.pattern, params.path.as_deref());
+            }
             let out = FilesOutput {
                 files,
                 details: None,
@@ -142,6 +171,7 @@ impl TopLevelTool for GlobTool {
             pattern: params.pattern,
             path: params.path,
         };
+        let no_files = no_files_message(&input.pattern, input.path.as_deref());
 
         match client.execute_glob(&input).await {
             Ok(resp) => {
@@ -151,7 +181,10 @@ impl TopLevelTool for GlobTool {
                     .filter(|l| !l.is_empty())
                     .map(String::from)
                     .collect();
-                let text = files.join("\n");
+                let mut text = files.join("\n");
+                if for_model && !resp.is_error && text.is_empty() {
+                    text = no_files;
+                }
                 let out = FilesOutput {
                     files,
                     details: None,
@@ -166,5 +199,22 @@ impl TopLevelTool for GlobTool {
                 "sandbox /execute call failed: {e}"
             ))])),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_files_message_names_pattern_and_path() {
+        assert_eq!(
+            no_files_message("**/*.rs", Some("space:s/x")),
+            "No files match **/*.rs under space:s/x"
+        );
+        assert_eq!(
+            no_files_message("*.md", None),
+            "No files match *.md under ."
+        );
     }
 }

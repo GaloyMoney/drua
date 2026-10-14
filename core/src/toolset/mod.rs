@@ -838,6 +838,7 @@ impl ToolSets {
             let final_result = match raw_result {
                 Ok(raw) => {
                     record_result_outcome(&raw);
+                    let raw = fill_empty_result(name, raw);
                     let cached = match (default_cache, tool_caching.as_ref()) {
                         (true, Some(tc)) => {
                             let args_for_cache = args_value
@@ -867,6 +868,27 @@ impl ToolSets {
         .with_event_context(seed)
         .await
     }
+}
+
+/// Gives a model-facing success with no output a fixed placeholder so it
+/// never reads an empty result as "nothing happened". Never echoes payloads.
+fn fill_empty_result(name: &str, raw: CallToolResult) -> CallToolResult {
+    let empty = raw.is_error != Some(true)
+        && raw.structured_content.is_none()
+        && raw.content.iter().all(|c| match &c.raw {
+            rmcp::model::RawContent::Text(t) => t.text.is_empty(),
+            _ => false,
+        });
+    if !empty {
+        return raw;
+    }
+    tracing::debug!(
+        tool = name,
+        "tool returned an empty result; substituting placeholder"
+    );
+    CallToolResult::success(vec![rmcp::model::Content::text(format!(
+        "(tool {name} returned no output)"
+    ))])
 }
 
 /// An upstream `is_error` result travels as `Ok` on the wire but must be an
@@ -1884,6 +1906,45 @@ mod tests {
         }
     }
 
+    struct EmptyTool;
+
+    #[async_trait::async_trait]
+    impl TopLevelTool for EmptyTool {
+        fn name(&self) -> &str {
+            "empty_tool"
+        }
+        fn description(&self) -> &str {
+            "stub"
+        }
+        fn input_schema(&self) -> &serde_json::Value {
+            static S: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+            S.get_or_init(|| serde_json::json!({ "type": "object" }))
+        }
+        async fn call(
+            &self,
+            _subject: &AuthSubject,
+            _arguments: Option<JsonObject>,
+        ) -> Result<CallToolResult, ToolSetsError> {
+            Ok(CallToolResult::success(vec![rmcp::model::Content::text(
+                "",
+            )]))
+        }
+    }
+
+    #[tokio::test]
+    async fn call_top_level_tool_replaces_empty_success_content() {
+        let toolsets = ToolSets::empty_for_test();
+        toolsets.register_top_level(EmptyTool);
+        let result = toolsets
+            .call_top_level_tool(&AuthSubject::Anonymous, "empty_tool", None)
+            .await
+            .expect("dispatch ok");
+        assert_eq!(
+            drua_tool_caching::extract_text(&result),
+            "(tool empty_tool returned no output)"
+        );
+    }
+
     #[tokio::test]
     async fn call_top_level_tool_records_action_before_parse_failure() {
         let seen = Arc::new(std::sync::Mutex::new(None));
@@ -1894,6 +1955,40 @@ mod tests {
             .await;
         assert!(result.is_err());
         assert_eq!(seen.lock().unwrap().as_deref(), Some("action_probe"));
+    }
+
+    #[test]
+    fn fill_empty_result_replaces_empty_success_content() {
+        for empty in [
+            CallToolResult::success(vec![rmcp::model::Content::text("")]),
+            CallToolResult::success(vec![]),
+        ] {
+            let filled = fill_empty_result("probe", empty);
+            assert_eq!(
+                drua_tool_caching::extract_text(&filled),
+                "(tool probe returned no output)"
+            );
+            assert_ne!(filled.is_error, Some(true));
+        }
+    }
+
+    #[test]
+    fn fill_empty_result_leaves_real_output_and_errors_alone() {
+        let ok = CallToolResult::success(vec![rmcp::model::Content::text("x")]);
+        assert_eq!(
+            drua_tool_caching::extract_text(&fill_empty_result("p", ok)),
+            "x"
+        );
+
+        let err = CallToolResult::error(vec![rmcp::model::Content::text("")]);
+        let kept = fill_empty_result("p", err);
+        assert_eq!(kept.is_error, Some(true));
+        assert_eq!(drua_tool_caching::extract_text(&kept), "");
+
+        let mut structured = CallToolResult::success(vec![]);
+        structured.structured_content = Some(serde_json::json!({ "files": [] }));
+        let kept = fill_empty_result("p", structured);
+        assert!(kept.content.is_empty());
     }
 
     #[tokio::test]
