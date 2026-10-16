@@ -54,4 +54,14 @@ impl SandboxRepo {
             .await?;
         Ok(())
     }
+
+    /// Resource names (`sb-<id>`) of every non-deleted sandbox. The PVC
+    /// janitor diffs the k8s PVC `sandbox-name` labels against this set;
+    /// any PVC owner absent here is a leaked volume. Expression must
+    /// match `Sandbox::resource_name`.
+    pub async fn live_resource_names(&self) -> Result<Vec<String>, sqlx::Error> {
+        sqlx::query_scalar("SELECT 'sb-' || id::text FROM sandboxes WHERE NOT deleted")
+            .fetch_all(&self.pool)
+            .await
+    }
 }

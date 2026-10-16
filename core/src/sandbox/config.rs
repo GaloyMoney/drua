@@ -27,6 +27,11 @@ pub enum SandboxBackendConfig {
         /// binary in the sandbox image.
         #[serde(default)]
         nix_store: Option<NixStorePersistenceConfig>,
+        /// PVC-janitor sweep interval. Only meaningful on k8s; the janitor
+        /// reclaims `managed-by=drua` PVCs whose sandbox row is gone — the
+        /// gap left by best-effort cascade teardown swallowing k8s errors.
+        #[serde(default = "default_pvc_janitor_interval_secs")]
+        pvc_janitor_interval_secs: u64,
     },
 }
 
@@ -55,4 +60,8 @@ pub struct SandboxConfig {
 
 fn default_local_repo_root() -> PathBuf {
     PathBuf::from(".")
+}
+
+fn default_pvc_janitor_interval_secs() -> u64 {
+    900
 }
