@@ -809,7 +809,11 @@ impl SpaceFs {
         if oid.is_none() {
             return Ok(resolved.stamp.clone());
         }
-        let refreshed = match self.changesets.draft_info(draft.id).await {
+        let refreshed = match self
+            .changesets
+            .draft_info(draft.id, &resolved.space.slug)
+            .await
+        {
             Ok(info) => info,
             Err(e) => {
                 tracing::warn!(error = %e, changeset_id = %draft.id, "stamp_after_write: refresh failed; stamp rendered from the pre-write draft info");
@@ -1081,12 +1085,23 @@ fn stamp(
             crate::changeset::short_id(*id)
         ),
         Some(DraftInfo {
-            id, title, touched, ..
-        }) => format!(
-            "[{prefix}:{slug} · draft {} \"{title}\" · {touched} file{}]",
-            crate::changeset::short_id(*id),
-            if *touched == 1 { "" } else { "s" }
-        ),
+            id,
+            title,
+            touched,
+            touched_here,
+            ..
+        }) => {
+            let in_draft = if touched == touched_here {
+                String::new()
+            } else {
+                format!(" ({touched} in draft)")
+            };
+            format!(
+                "[{prefix}:{slug} · draft {} \"{title}\" · {touched_here} file{} here{in_draft}]",
+                crate::changeset::short_id(*id),
+                if *touched_here == 1 { "" } else { "s" }
+            )
+        }
     }
 }
 
@@ -1593,8 +1608,45 @@ mod tests {
             status: ChangesetStatus::Open,
             title: "workflow-fix-typos run ab12cd34".to_string(),
             touched: 2,
+            touched_here: 2,
             just_started,
         }
+    }
+
+    fn plain_draft_info(touched: usize, touched_here: usize) -> DraftInfo {
+        DraftInfo {
+            touched,
+            touched_here,
+            ..draft_info(false)
+        }
+    }
+
+    #[test]
+    fn stamp_draft_counts_files_in_this_space() {
+        let draft = plain_draft_info(1, 1);
+        let s = stamp(SpaceScheme::Draft, "docs", Some(&draft), None, false);
+        assert!(s.ends_with("· 1 file here]"), "got: {s}");
+    }
+
+    #[test]
+    fn stamp_draft_pluralizes_files_here() {
+        let draft = plain_draft_info(3, 3);
+        let s = stamp(SpaceScheme::Draft, "docs", Some(&draft), None, false);
+        assert!(s.ends_with("· 3 files here]"), "got: {s}");
+    }
+
+    #[test]
+    fn stamp_draft_spanning_spaces_reports_the_draft_wide_total() {
+        let draft = plain_draft_info(5, 2);
+        let s = stamp(SpaceScheme::Space, "docs", Some(&draft), None, false);
+        assert!(s.ends_with("· 2 files here (5 in draft)]"), "got: {s}");
+    }
+
+    #[test]
+    fn stamp_draft_with_nothing_in_this_space_says_zero_here() {
+        let draft = plain_draft_info(1, 0);
+        let s = stamp(SpaceScheme::Space, "docs", Some(&draft), None, false);
+        assert!(s.ends_with("· 0 files here (1 in draft)]"), "got: {s}");
     }
 
     #[test]

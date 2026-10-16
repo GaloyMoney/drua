@@ -185,7 +185,14 @@ impl Changeset {
         for event in self.events.iter_all().rev() {
             match event {
                 ChangesetEvent::CommitRecorded { .. } => count += 1,
-                ChangesetEvent::Opened { .. } | ChangesetEvent::Rebased { .. } => break,
+                ChangesetEvent::Opened { .. } => break,
+                // A rebase that kept content squashed it into one commit.
+                ChangesetEvent::Rebased { base_oid, head_oid } => {
+                    if head_oid != base_oid {
+                        count += 1;
+                    }
+                    break;
+                }
                 _ => {}
             }
         }
@@ -592,11 +599,26 @@ mod tests {
         cs.rebase("new-main...".to_string(), "squashed...".to_string())
             .unwrap()
             .did_execute();
-        assert_eq!(cs.commit_count(), 0, "rebase resets the op count");
+        assert_eq!(cs.commit_count(), 1, "the squash commit counts as one");
         assert!(
             cs.has_commits(),
             "base and head still differ after a rebase that squashed real content"
         );
+    }
+
+    #[test]
+    fn commit_count_after_a_squashing_rebase_adds_later_commits() {
+        let mut cs = open_changeset();
+        cs.record_commit("bbb...".to_string(), "edit", "a.md")
+            .unwrap()
+            .did_execute();
+        cs.rebase("new-main...".to_string(), "squashed...".to_string())
+            .unwrap()
+            .did_execute();
+        cs.record_commit("ddd...".to_string(), "edit", "b.md")
+            .unwrap()
+            .did_execute();
+        assert_eq!(cs.commit_count(), 2);
     }
 
     #[test]

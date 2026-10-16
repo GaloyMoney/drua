@@ -1177,7 +1177,7 @@ async fn stamp_formats_match_the_documented_forms() {
     assert_eq!(
         draft_scheme_stamp,
         format!(
-            "[draft:docs · draft {short_id} \"{}\" · 1 file]",
+            "[draft:docs · draft {short_id} \"{}\" · 1 file here]",
             draft.title
         )
     );
@@ -1201,7 +1201,7 @@ async fn stamp_formats_match_the_documented_forms() {
     assert_eq!(
         explicit_stamp,
         format!(
-            "[space:docs · draft {short_id} \"{}\" · 1 file]",
+            "[space:docs · draft {short_id} \"{}\" · 1 file here]",
             draft.title
         )
     );
@@ -1234,6 +1234,43 @@ async fn write_file_returns_its_own_touched_count_not_the_prior_writes() {
         .expect("write_file dispatch")
         .expect("space path");
     assert!(third.contains("3 files"), "got: {third}");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn stamp_counts_files_in_this_space_and_in_the_whole_draft() {
+    let (app, user) = setup("stamp_two_spaces").await;
+    project_with_space(&app, &user, "proj-stamp-two-a", "docs").await;
+    project_with_space(&app, &user, "proj-stamp-two-b", "notes").await;
+    let fs = space_fs(&app);
+
+    fs.write_file(&user, "draft:docs/a.md", "one\n".into())
+        .await
+        .expect("write_file dispatch")
+        .expect("space path");
+    let in_notes = fs
+        .write_file(&user, "draft:notes/b.md", "two\n".into())
+        .await
+        .expect("write_file dispatch")
+        .expect("space path");
+    assert!(
+        in_notes.starts_with("[draft:notes · draft "),
+        "got: {in_notes}"
+    );
+    assert!(
+        in_notes.ends_with("· 1 file here (2 in draft)]"),
+        "got: {in_notes}"
+    );
+
+    let (_, in_docs) = fs
+        .view_file(&user, "draft:docs/a.md", None)
+        .await
+        .expect("view_file dispatch")
+        .expect("space path");
+    assert!(
+        in_docs.ends_with("· 1 file here (2 in draft)]"),
+        "got: {in_docs}"
+    );
 }
 
 #[tokio::test]

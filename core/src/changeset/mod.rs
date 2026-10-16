@@ -112,6 +112,8 @@ pub struct DraftInfo {
     pub status: ChangesetStatus,
     pub title: String,
     pub touched: usize,
+    /// Of `touched`, the files in the space being rendered.
+    pub touched_here: usize,
     pub just_started: bool,
 }
 
@@ -404,7 +406,7 @@ impl Changesets {
                         });
                     }
                 }
-                self.resolved_for_changeset(cs, false).await
+                self.resolved_for_changeset(cs, slug, false).await
             }
             SpaceAddress::OwnDraft => {
                 if intent == SpaceIntent::Read {
@@ -414,7 +416,7 @@ impl Changesets {
                         });
                     }
                     return match self.open_draft_for(sub).await? {
-                        Some(cs) => self.resolved_for_changeset(cs, false).await,
+                        Some(cs) => self.resolved_for_changeset(cs, slug, false).await,
                         None => Ok(ResolvedTarget {
                             target: drua_library::SpaceTarget::Main,
                             draft: None,
@@ -427,13 +429,13 @@ impl Changesets {
                     });
                 }
                 match self.open_draft_for(sub).await? {
-                    Some(cs) => self.resolved_for_changeset(cs, false).await,
+                    Some(cs) => self.resolved_for_changeset(cs, slug, false).await,
                     None if sub.in_workflow_run() => Err(ChangesetError::RunReadOnly {
                         slug: slug.to_string(),
                     }),
                     None => {
                         let cs = self.draft_for(sub, None, None, first_touched_path).await?;
-                        self.resolved_for_changeset(cs, true).await
+                        self.resolved_for_changeset(cs, slug, true).await
                     }
                 }
             }
@@ -467,15 +469,16 @@ impl Changesets {
     async fn resolved_for_changeset(
         &self,
         cs: Changeset,
+        slug: &str,
         just_started: bool,
     ) -> Result<ResolvedTarget, ChangesetError> {
         // ensure_ref first: it recovers from a not-yet-fetched base commit,
-        // so touched_count's diff runs once that recovery has had a
+        // so touched_counts' diff runs once that recovery has had a
         // chance to bring the objects in.
         let handle = self.ensure_ref(&cs).await?;
-        let touched = self.touched_count(&cs).await.unwrap_or_else(|e| {
-            tracing::warn!(error = %e, changeset_id = %cs.id, "resolved_for_changeset: touched_count failed; reporting 0");
-            0
+        let (touched, touched_here) = self.touched_counts(&cs, slug).await.unwrap_or_else(|e| {
+            tracing::warn!(error = %e, changeset_id = %cs.id, "resolved_for_changeset: touched_counts failed; reporting 0");
+            (0, 0)
         });
         Ok(ResolvedTarget {
             target: drua_library::SpaceTarget::Draft(handle),
@@ -484,6 +487,7 @@ impl Changesets {
                 status: cs.status,
                 title: cs.title,
                 touched,
+                touched_here,
                 just_started,
             }),
         })
@@ -495,17 +499,22 @@ impl Changesets {
     /// already in (the `on_committed` callback records it under the
     /// git engine's push lock before the write entry point returns).
     #[instrument(name = "domain.changeset.draft_info", skip(self))]
-    pub async fn draft_info(&self, id: ChangesetId) -> Result<DraftInfo, ChangesetError> {
+    pub async fn draft_info(
+        &self,
+        id: ChangesetId,
+        slug: &str,
+    ) -> Result<DraftInfo, ChangesetError> {
         let cs = self.repo.find_by_id(id).await?;
-        let touched = self.touched_count(&cs).await.unwrap_or_else(|e| {
-            tracing::warn!(error = %e, changeset_id = %cs.id, "draft_info: touched_count failed; reporting 0");
-            0
+        let (touched, touched_here) = self.touched_counts(&cs, slug).await.unwrap_or_else(|e| {
+            tracing::warn!(error = %e, changeset_id = %cs.id, "draft_info: touched_counts failed; reporting 0");
+            (0, 0)
         });
         Ok(DraftInfo {
             id: cs.id,
             status: cs.status,
             title: cs.title,
             touched,
+            touched_here,
             just_started: false,
         })
     }
@@ -1121,8 +1130,15 @@ impl Changesets {
         Err(ChangesetError::Forbidden { id: cs.id, action })
     }
 
-    pub(crate) async fn touched_count(&self, cs: &Changeset) -> Result<usize, ChangesetError> {
-        Ok(self.touched_files(cs).await?.len())
+    /// `(files touched in the whole draft, of those, files in `slug`)`.
+    async fn touched_counts(
+        &self,
+        cs: &Changeset,
+        slug: &str,
+    ) -> Result<(usize, usize), ChangesetError> {
+        let files = self.touched_files(cs).await?;
+        let here = files.iter().filter(|t| t.space_slug == slug).count();
+        Ok((files.len(), here))
     }
 
     pub(crate) async fn touched_paths_in(
