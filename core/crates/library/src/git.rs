@@ -38,10 +38,18 @@ const LIBRARY_PUSH_LOCK_NAMESPACE: i32 = 0x6472_7561;
 const MAIN_HEAD_EVENT: obix::out::EphemeralEventType =
     obix::out::EphemeralEventType::new("library_main_head");
 
-/// Payload of [`MAIN_HEAD_EVENT`].
+/// obix ephemeral event published when a push advances any ref other than
+/// `refs/heads/main`. Wake-only: peers fetch on it, nothing reads its value.
+const REF_HEAD_EVENT: obix::out::EphemeralEventType =
+    obix::out::EphemeralEventType::new("library_ref_head");
+
+/// Payload of [`MAIN_HEAD_EVENT`] and [`REF_HEAD_EVENT`]. `refname` is
+/// absent from rows stored before `REF_HEAD_EVENT` existed.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-struct MainHead {
+struct HeadEvent {
     oid: String,
+    #[serde(default)]
+    refname: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -310,7 +318,7 @@ pub struct GitEngine {
     /// Cross-replica read-your-write fence. The writer publishes the
     /// pushed `refs/heads/main` oid here (see [`Self::process_batch`]);
     /// reads at HEAD check it before serving.
-    outbox: obix::Outbox<MainHead>,
+    outbox: obix::Outbox<HeadEvent>,
     /// For the one-row authoritative fence read in
     /// [`Self::ensure_main_current`].
     pool: PgPool,
@@ -363,7 +371,7 @@ impl GitEngine {
         // Only the ephemeral `library_main_head` row is ever used — no
         // persistent events are published on this mailbox — so every
         // `MailboxConfig` field keeps its obix default.
-        let outbox = obix::Outbox::<MainHead>::init(
+        let outbox = obix::Outbox::<HeadEvent>::init(
             &pool,
             obix::MailboxConfig::builder()
                 .build()
@@ -406,20 +414,21 @@ impl GitEngine {
     }
 
     /// Cluster-wide counterpart of the writer's local wake-up: any
-    /// replica's successful push publishes [`MAIN_HEAD_EVENT`]; every
+    /// replica's successful push publishes [`MAIN_HEAD_EVENT`] (or
+    /// [`REF_HEAD_EVENT`] for any other ref); every
     /// replica's `listen_ephemeral()` stream observes it (obix backfills
     /// the current row on subscribe, which costs one spurious wake at
     /// boot) and wakes this replica's fetcher immediately. While obix's
     /// underlying LISTEN connection is down, sync degrades to ticker
     /// cadence — obix itself handles reconnection.
     fn spawn_peer_listener(
-        outbox: &obix::Outbox<MainHead>,
+        outbox: &obix::Outbox<HeadEvent>,
         commit_notify: Arc<Notify>,
     ) -> JoinHandle<()> {
         let mut events = outbox.listen_ephemeral();
         tokio::spawn(async move {
             while let Some(ev) = events.next().await {
-                if ev.event_type == MAIN_HEAD_EVENT {
+                if ev.event_type == MAIN_HEAD_EVENT || ev.event_type == REF_HEAD_EVENT {
                     commit_notify.notify_one();
                 }
             }
@@ -646,14 +655,14 @@ impl GitEngine {
     /// Would become `self.outbox.latest_ephemeral(&MAIN_HEAD_EVENT)`
     /// after the obix 0.9.0 → ≥0.13 upgrade (handoff §9 item 2.1).
     async fn load_main_head_row<Tbl>(
-        outbox: &obix::Outbox<MainHead, Tbl>,
+        outbox: &obix::Outbox<HeadEvent, Tbl>,
         pool: &PgPool,
-    ) -> Result<Option<MainHead>, sqlx::Error>
+    ) -> Result<Option<HeadEvent>, sqlx::Error>
     where
         Tbl: obix::MailboxTables,
     {
         let _ = outbox; // the anchor only pins `Tbl`; the read itself is a free function on it
-        let mut rows = Tbl::load_ephemeral_events::<MainHead>(pool, Some(MAIN_HEAD_EVENT)).await?;
+        let mut rows = Tbl::load_ephemeral_events::<HeadEvent>(pool, Some(MAIN_HEAD_EVENT)).await?;
         debug_assert!(
             rows.len() <= 1,
             "event_type is UNIQUE; a load_ephemeral_events filtered by it returns at most one row"
@@ -1804,7 +1813,7 @@ impl GitEngine {
         commit_notify: Arc<Notify>,
         mut rx: mpsc::Receiver<QueuedOp>,
         pool: PgPool,
-        outbox: obix::Outbox<MainHead>,
+        outbox: obix::Outbox<HeadEvent>,
         local_main: tokio::sync::watch::Sender<Option<String>>,
     ) {
         // A ref-level op that arrives mid-collection closes the batch
@@ -1865,7 +1874,7 @@ impl GitEngine {
         github_app: Option<&Arc<GitHubAppTokenProvider>>,
         repo_mutex: &Mutex<()>,
         pool: &PgPool,
-        outbox: &obix::Outbox<MainHead>,
+        outbox: &obix::Outbox<HeadEvent>,
         local_main: &tokio::sync::watch::Sender<Option<String>>,
         batch: Vec<QueuedOp>,
     ) -> bool {
@@ -1949,6 +1958,19 @@ impl GitEngine {
             }
         }
 
+        // Unlike the main fence, nothing downstream relies on this being
+        // observed (a draft's fence is `changesets.head_oid`), so a failure
+        // only costs peers a ticker interval.
+        if let Some((refname, oid)) = accepted
+            .iter()
+            .filter(|(refname, _)| refname.as_str() != "refs/heads/main")
+            .min_by_key(|(refname, _)| refname.as_str())
+        {
+            if let Err(e) = Self::publish_ref_head(outbox, refname, oid).await {
+                tracing::warn!(error = %e, %refname, "library ref-head publish failed; peers fall back to their ticker");
+            }
+        }
+
         // Journal the commit while this ref's push lock is still held —
         // the same serialization that orders the pushes also orders these
         // callbacks, so two journal writes for one draft can never
@@ -2017,14 +2039,31 @@ impl GitEngine {
     /// this overwrites rather than accumulates — see
     /// [`MAIN_HEAD_EVENT`]) and wakes every subscribed peer listener.
     async fn publish_main_head(
-        outbox: &obix::Outbox<MainHead>,
+        outbox: &obix::Outbox<HeadEvent>,
         oid: &str,
     ) -> Result<(), sqlx::Error> {
         outbox
             .publish_ephemeral(
                 MAIN_HEAD_EVENT,
-                MainHead {
+                HeadEvent {
                     oid: oid.to_string(),
+                    refname: None,
+                },
+            )
+            .await
+    }
+
+    async fn publish_ref_head(
+        outbox: &obix::Outbox<HeadEvent>,
+        refname: &str,
+        oid: &str,
+    ) -> Result<(), sqlx::Error> {
+        outbox
+            .publish_ephemeral(
+                REF_HEAD_EVENT,
+                HeadEvent {
+                    oid: oid.to_string(),
+                    refname: Some(refname.to_string()),
                 },
             )
             .await
@@ -2033,7 +2072,7 @@ impl GitEngine {
     /// [`Self::publish_main_head`] with one retry (OQ-4) before giving
     /// up. Logs the first failure; the second is left for the caller.
     async fn publish_main_head_with_retry(
-        outbox: &obix::Outbox<MainHead>,
+        outbox: &obix::Outbox<HeadEvent>,
         oid: &str,
     ) -> Result<(), sqlx::Error> {
         if let Err(e) = Self::publish_main_head(outbox, oid).await {
@@ -4231,6 +4270,145 @@ mod tests {
         drop(holder);
     }
 
+    #[test]
+    fn head_event_deserializes_a_payload_without_refname() {
+        let ev: HeadEvent = serde_json::from_str(r#"{"oid": "abc123"}"#).unwrap();
+        assert_eq!(ev.oid, "abc123");
+        assert_eq!(ev.refname, None);
+    }
+
+    /// Rows written before `HeadEvent` gained `refname` (and by peers still
+    /// running that code) must keep deserializing, through the fence loader.
+    #[tokio::test]
+    #[ignore = "requires postgres; run with --ignored"]
+    async fn fence_loader_reads_a_pre_rename_main_head_row() {
+        let pool = test_pool().await;
+        sqlx::query("DELETE FROM ephemeral_outbox_events WHERE event_type = 'library_main_head'")
+            .execute(&pool)
+            .await
+            .expect("clear fence row");
+        sqlx::query(
+            "INSERT INTO ephemeral_outbox_events (event_type, payload) \
+             VALUES ('library_main_head', '{\"oid\": \"abc123\"}'::jsonb)",
+        )
+        .execute(&pool)
+        .await
+        .expect("insert legacy row");
+        let outbox =
+            obix::Outbox::<HeadEvent>::init(&pool, obix::MailboxConfig::builder().build().unwrap())
+                .await
+                .expect("outbox init");
+
+        let row = GitEngine::load_main_head_row(&outbox, &pool)
+            .await
+            .expect("load")
+            .expect("row present");
+        assert_eq!(row.oid, "abc123");
+        assert_eq!(row.refname, None);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires postgres; run with --ignored"]
+    async fn draft_ref_push_publishes_ref_head_event() {
+        let pool = test_pool().await;
+        for event_type in ["library_main_head", "library_ref_head"] {
+            sqlx::query("DELETE FROM ephemeral_outbox_events WHERE event_type = $1")
+                .bind(event_type)
+                .execute(&pool)
+                .await
+                .expect("clear event rows");
+        }
+        let (origin_dir, _local_dir, _local_repo) = origin_and_clone("ref-head-event");
+        let data_dir = unique_dir("ref-head-event-engine");
+        let engine = GitEngine::init(
+            &origin_dir.to_string_lossy(),
+            data_dir.clone(),
+            None,
+            pool.clone(),
+            5_000,
+        )
+        .await
+        .expect("engine init");
+
+        engine
+            .write_file(
+                "a.md".into(),
+                b"main".to_vec(),
+                "add a".into(),
+                CommitAttribution::library_default(),
+            )
+            .await
+            .expect("main write");
+        let main_row_before: serde_json::Value = sqlx::query_scalar(
+            "SELECT payload FROM ephemeral_outbox_events WHERE event_type = 'library_main_head'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("main fence row");
+        let ref_rows_after_main: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM ephemeral_outbox_events WHERE event_type = 'library_ref_head'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count ref-head rows");
+        assert_eq!(ref_rows_after_main, 0, "a main push publishes no ref-head");
+
+        let main_oid = engine
+            .resolve_ref("refs/heads/main")
+            .await
+            .unwrap()
+            .expect("main");
+        let draft_ref = format!("refs/heads/drua/{}", uuid::Uuid::new_v4());
+        engine
+            .create_ref(&draft_ref, &main_oid)
+            .await
+            .expect("create draft ref");
+        let draft_tip = engine
+            .enqueue(BatchOp {
+                commit_message: "draft write".into(),
+                kind: BatchOpKind::Write {
+                    path: "note.md".into(),
+                    content: b"draft".to_vec(),
+                },
+                attribution: CommitAttribution::library_default(),
+                target_ref: Some(draft_ref.clone()),
+                on_committed: None,
+            })
+            .await
+            .expect("draft write")
+            .expect("real commit");
+
+        let ref_rows: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM ephemeral_outbox_events WHERE event_type = 'library_ref_head'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count ref-head rows");
+        assert_eq!(ref_rows, 1);
+        let ref_payload: serde_json::Value = sqlx::query_scalar(
+            "SELECT payload FROM ephemeral_outbox_events WHERE event_type = 'library_ref_head'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("ref-head row");
+        assert_eq!(ref_payload["refname"], draft_ref.as_str());
+        assert_eq!(ref_payload["oid"], draft_tip.as_str());
+
+        let main_row_after: serde_json::Value = sqlx::query_scalar(
+            "SELECT payload FROM ephemeral_outbox_events WHERE event_type = 'library_main_head'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("main fence row");
+        assert_eq!(
+            main_row_before, main_row_after,
+            "a draft push must not move the main fence"
+        );
+
+        let _ = std::fs::remove_dir_all(&origin_dir);
+        let _ = std::fs::remove_dir_all(&data_dir);
+    }
+
     #[tokio::test]
     #[ignore = "requires postgres; run with --ignored"]
     async fn publish_main_head_upserts_the_fence_row() {
@@ -4240,7 +4418,7 @@ mod tests {
             .await
             .expect("clear fence row");
         let outbox =
-            obix::Outbox::<MainHead>::init(&pool, obix::MailboxConfig::builder().build().unwrap())
+            obix::Outbox::<HeadEvent>::init(&pool, obix::MailboxConfig::builder().build().unwrap())
                 .await
                 .expect("outbox init");
 

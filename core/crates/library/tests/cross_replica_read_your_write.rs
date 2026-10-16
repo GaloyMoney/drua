@@ -500,3 +500,73 @@ async fn wait_until(what: &str, timeout: Duration, mut cond: impl FnMut() -> boo
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
+
+/// A draft-ref push on one replica must wake a peer's fetcher: the reader's
+/// ticker is effectively disabled and nothing reads on it, so only the
+/// `library_ref_head` wake can bring the draft commit into its clone.
+#[tokio::test]
+#[ignore = "requires postgres + writes to tests/.library; run with --ignored"]
+async fn draft_ref_push_wakes_a_peer_without_a_ticker() {
+    let test_name = "draft_ref_push_wakes_a_peer_without_a_ticker";
+    let fixture = TestRepo::init(&[("README.md", "init\n")]);
+    let pool = pool().await;
+    reset_library_db_state(&pool).await;
+    sqlx::query("DELETE FROM ephemeral_outbox_events WHERE event_type = 'library_ref_head'")
+        .execute(&pool)
+        .await
+        .expect("clear ref-head row");
+    let repo_url = fixture.path().to_string_lossy().to_string();
+
+    let (writer, _jobs_w) = init_replica(
+        test_name,
+        "writer",
+        &repo_url,
+        &pool,
+        WRITER_FETCH_INTERVAL_MS,
+        true,
+    )
+    .await;
+    let (_reader, _jobs_r) = init_replica(
+        test_name,
+        "reader",
+        &repo_url,
+        &pool,
+        READER_FETCH_INTERVAL_MS,
+        false,
+    )
+    .await;
+    let reader_path = library_data_dir(test_name).join("reader");
+
+    let slug = "wake";
+    writer
+        .spaces()
+        .create(slug.into(), None, attr())
+        .await
+        .expect("create space");
+    let base = writer.drafts().fresh_base().await.expect("fresh base");
+    let name = DraftName::from(uuid::Uuid::new_v4());
+    writer.drafts().open(name, &base).await.expect("open draft");
+    let tip = writer
+        .spaces()
+        .write_file(
+            slug,
+            "note.md",
+            "draft\n".into(),
+            attr(),
+            &SpaceTarget::Draft(DraftHandle::new(name, base.clone())),
+            None,
+        )
+        .await
+        .expect("draft write")
+        .expect("real commit");
+
+    wait_until(
+        "reader fetched the draft ref",
+        Duration::from_secs(5),
+        || {
+            ref_oid(&reader_path, &format!("refs/heads/{}", name.branch())).as_deref()
+                == Some(tip.as_str())
+        },
+    )
+    .await;
+}
