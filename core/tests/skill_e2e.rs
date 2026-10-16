@@ -178,7 +178,7 @@ async fn skill_create_propagates_to_search_and_upstream() {
             // 1s is plenty short for the test; the forward-sync hook
             // doesn't depend on the fetch tick — only the inbound
             // (reverse) sync would.
-            skill_sync_interval_secs: 1,
+            fetch_interval_ms: 1_000,
             ..Default::default()
         },
         ..Default::default()

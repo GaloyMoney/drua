@@ -1662,7 +1662,7 @@ async fn api_agent_secrets(
 
     // Auto-provision a GitHub token if the GitHub App is configured.
     let github_token_provisioned = if let Some(github_app) = state.app.github_app() {
-        match github_app.generate_token().await {
+        match github_app.generate_fresh_token().await {
             Ok(token) => {
                 tracing::info!("GitHub App token generated successfully");
                 body.push(serde_json::json!({

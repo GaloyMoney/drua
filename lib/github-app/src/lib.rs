@@ -8,9 +8,69 @@ pub use config::*;
 pub use error::*;
 pub use pulls::PullRequest;
 
+const REFRESH_MARGIN: chrono::Duration = chrono::Duration::minutes(5);
+
+// No `Debug`: the token must never reach a log, span or error message.
+#[derive(Clone)]
 pub struct InstallationToken {
     pub token: String,
     pub expires_at: String,
+}
+
+struct CachedToken {
+    token: InstallationToken,
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// In-memory only. Holding the lock across the mint makes concurrent
+/// callers share one exchange.
+#[derive(Clone, Default)]
+struct TokenCache(std::sync::Arc<tokio::sync::Mutex<Option<CachedToken>>>);
+
+impl TokenCache {
+    async fn get_or_mint<F, Fut>(
+        &self,
+        now: chrono::DateTime<chrono::Utc>,
+        mint: F,
+    ) -> Result<InstallationToken, GitHubAppError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<InstallationToken, GitHubAppError>>,
+    {
+        let mut slot = self.0.lock().await;
+        if let Some(c) = slot.as_ref() {
+            if c.expires_at - now > REFRESH_MARGIN {
+                return Ok(c.token.clone());
+            }
+        }
+        let token = mint().await?;
+        *slot = CachedToken::parse(&token);
+        Ok(token)
+    }
+
+    async fn mint_and_store<F, Fut>(&self, mint: F) -> Result<InstallationToken, GitHubAppError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<InstallationToken, GitHubAppError>>,
+    {
+        let mut slot = self.0.lock().await;
+        let token = mint().await?;
+        *slot = CachedToken::parse(&token);
+        Ok(token)
+    }
+}
+
+impl CachedToken {
+    /// `None` for an unparseable `expires_at`: such a token is never reused.
+    fn parse(token: &InstallationToken) -> Option<Self> {
+        let expires_at = chrono::DateTime::parse_from_rfc3339(&token.expires_at)
+            .ok()?
+            .with_timezone(&chrono::Utc);
+        Some(Self {
+            token: token.clone(),
+            expires_at,
+        })
+    }
 }
 
 /// RS256 JWT flow → GitHub installation access tokens. Designed to be shared.
@@ -20,6 +80,7 @@ pub struct GitHubAppTokenProvider {
     installation_id: String,
     encoding_key: jsonwebtoken::EncodingKey,
     http_client: reqwest::Client,
+    cache: TokenCache,
 }
 
 impl GitHubAppTokenProvider {
@@ -39,11 +100,27 @@ impl GitHubAppTokenProvider {
             installation_id: config.installation_id.clone(),
             encoding_key,
             http_client: reqwest::Client::new(),
+            cache: TokenCache::default(),
         })
     }
 
+    /// Cached while more than five minutes of validity remain. Callers that
+    /// hold the token for a long time must use [`Self::generate_fresh_token`].
     #[instrument(name = "github_app.generate_token", skip_all)]
     pub async fn generate_token(&self) -> Result<InstallationToken, GitHubAppError> {
+        self.cache
+            .get_or_mint(chrono::Utc::now(), || self.mint())
+            .await
+    }
+
+    /// Always mints (and refreshes the cache): for tokens handed to
+    /// something that outlives the cache margin.
+    #[instrument(name = "github_app.generate_fresh_token", skip_all)]
+    pub async fn generate_fresh_token(&self) -> Result<InstallationToken, GitHubAppError> {
+        self.cache.mint_and_store(|| self.mint()).await
+    }
+
+    async fn mint(&self) -> Result<InstallationToken, GitHubAppError> {
         let jwt = self.sign_jwt()?;
         self.exchange_for_installation_token(&jwt).await
     }
@@ -121,7 +198,119 @@ fn installation_token_request_body() -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::installation_token_request_body;
+    use super::{installation_token_request_body, InstallationToken, TokenCache};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn at(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(rfc3339)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+    }
+
+    async fn mint_fake(
+        calls: &AtomicUsize,
+        expires_at: &str,
+    ) -> Result<InstallationToken, crate::GitHubAppError> {
+        let n = calls.fetch_add(1, Ordering::SeqCst) + 1;
+        Ok(InstallationToken {
+            token: format!("fake-token-{n}"),
+            expires_at: expires_at.to_string(),
+        })
+    }
+
+    #[tokio::test]
+    async fn token_is_reused_until_five_minutes_before_expiry_then_reminted() {
+        let cache = TokenCache::default();
+        let calls = AtomicUsize::new(0);
+        let expires = "2026-01-01T01:00:00Z";
+
+        let first = cache
+            .get_or_mint(at("2026-01-01T00:00:00Z"), || mint_fake(&calls, expires))
+            .await
+            .unwrap();
+        assert_eq!(first.token, "fake-token-1");
+
+        let reused = cache
+            .get_or_mint(at("2026-01-01T00:54:00Z"), || mint_fake(&calls, expires))
+            .await
+            .unwrap();
+        assert_eq!(reused.token, "fake-token-1");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+
+        let reminted = cache
+            .get_or_mint(at("2026-01-01T00:55:01Z"), || {
+                mint_fake(&calls, "2026-01-01T01:55:01Z")
+            })
+            .await
+            .unwrap();
+        assert_eq!(reminted.token, "fake-token-2");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn token_with_unparseable_expiry_is_never_reused() {
+        let cache = TokenCache::default();
+        let calls = AtomicUsize::new(0);
+        let now = at("2026-01-01T00:00:00Z");
+
+        cache
+            .get_or_mint(now, || mint_fake(&calls, "not-a-timestamp"))
+            .await
+            .unwrap();
+        cache
+            .get_or_mint(now, || mint_fake(&calls, "not-a-timestamp"))
+            .await
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_failed_mint_is_not_cached() {
+        let cache = TokenCache::default();
+        let now = at("2026-01-01T00:00:00Z");
+
+        let failed = cache
+            .get_or_mint(now, || async {
+                Err(crate::GitHubAppError::ApiError {
+                    status: 500,
+                    message: "boom".into(),
+                })
+            })
+            .await;
+        assert!(failed.is_err());
+
+        let calls = AtomicUsize::new(0);
+        let ok = cache
+            .get_or_mint(now, || mint_fake(&calls, "2026-01-01T01:00:00Z"))
+            .await
+            .unwrap();
+        assert_eq!(ok.token, "fake-token-1");
+    }
+
+    #[tokio::test]
+    async fn fresh_mint_replaces_the_cached_token() {
+        let cache = TokenCache::default();
+        let calls = AtomicUsize::new(0);
+        let now = at("2026-01-01T00:00:00Z");
+        let expires = "2026-01-01T01:00:00Z";
+
+        cache
+            .get_or_mint(now, || mint_fake(&calls, expires))
+            .await
+            .unwrap();
+        let fresh = cache
+            .mint_and_store(|| mint_fake(&calls, expires))
+            .await
+            .unwrap();
+        assert_eq!(fresh.token, "fake-token-2");
+
+        let next = cache
+            .get_or_mint(now, || mint_fake(&calls, expires))
+            .await
+            .unwrap();
+        assert_eq!(next.token, "fake-token-2");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
 
     #[test]
     fn installation_token_requests_ci_read_permissions() {

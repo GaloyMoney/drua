@@ -423,6 +423,12 @@ data:
       {{- with .repoUrl }}
       repo_url: {{ . | quote }}
       {{- end }}
+      {{- with .fetchIntervalMs }}
+      fetch_interval_ms: {{ . }}
+      {{- end }}
+      {{- with .readCatchUpTimeoutMs }}
+      read_catch_up_timeout_ms: {{ . }}
+      {{- end }}
     {{- end }}
     {{- with .Values.galoyAgents.config.toolCaching }}
     tool_caching:

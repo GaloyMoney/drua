@@ -17,6 +17,9 @@ use crate::primitives::SpaceId;
 use crate::user::Users;
 
 const DEFAULT_SKILL_SYNC_INTERVAL_SECS: u64 = 20;
+/// One fetch is ~300-400ms and the GitHub App token is cached, so 5s is cheap.
+const DEFAULT_FETCH_INTERVAL_MS: u64 = 5_000;
+const MIN_FETCH_INTERVAL_MS: u64 = 100;
 /// OQ-1: interactive tool call budget, not the 10s the prior
 /// read-your-write prototype used.
 const DEFAULT_READ_CATCH_UP_TIMEOUT_MS: u64 = 5_000;
@@ -28,9 +31,14 @@ pub struct LibraryConfig {
     pub data_dir: Option<String>,
     #[serde(default)]
     pub repo_url: Option<String>,
-    /// Default 20s. Reused as the upstream-fetch interval.
+    /// Unused; accepted so existing configs still parse. Superseded by
+    /// `fetch_interval_ms`.
     #[serde(default = "default_skill_sync_interval_secs")]
     pub skill_sync_interval_secs: u64,
+    /// How often each replica fetches from origin. Peer pushes wake the
+    /// fetcher sooner; this is the backstop. Default 5000, floor 100.
+    #[serde(default = "default_fetch_interval_ms")]
+    pub fetch_interval_ms: u64,
     /// Upper bound a space read at HEAD, or a draft handle, waits for
     /// this replica to catch up to an acked write before failing.
     /// Default 5000.
@@ -44,6 +52,7 @@ impl Default for LibraryConfig {
             data_dir: None,
             repo_url: None,
             skill_sync_interval_secs: DEFAULT_SKILL_SYNC_INTERVAL_SECS,
+            fetch_interval_ms: DEFAULT_FETCH_INTERVAL_MS,
             read_catch_up_timeout_ms: DEFAULT_READ_CATCH_UP_TIMEOUT_MS,
         }
     }
@@ -51,6 +60,10 @@ impl Default for LibraryConfig {
 
 fn default_skill_sync_interval_secs() -> u64 {
     DEFAULT_SKILL_SYNC_INTERVAL_SECS
+}
+
+fn default_fetch_interval_ms() -> u64 {
+    DEFAULT_FETCH_INTERVAL_MS
 }
 
 fn default_read_catch_up_timeout_ms() -> u64 {
@@ -70,7 +83,7 @@ impl LibraryConfig {
         drua_library::LibraryConfig {
             data_dir,
             repo_url: self.repo_url.unwrap_or_default(),
-            fetch_interval_ms: self.skill_sync_interval_secs.saturating_mul(1000).max(1000),
+            fetch_interval_ms: self.fetch_interval_ms.max(MIN_FETCH_INTERVAL_MS),
             read_catch_up_timeout_ms: self.read_catch_up_timeout_ms,
         }
     }
@@ -226,5 +239,30 @@ impl AuthedSearch {
         }
         Audit::record_action_if_unset("library.search.find_by_ids");
         Ok(self.inner.find_by_ids(ids).await?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::LibraryConfig;
+
+    #[test]
+    fn fetch_interval_defaults_to_five_seconds_independent_of_skill_sync() {
+        let cfg: LibraryConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(cfg.skill_sync_interval_secs, 20);
+        assert_eq!(cfg.into_drua().fetch_interval_ms, 5_000);
+    }
+
+    #[test]
+    fn legacy_skill_sync_interval_still_parses_but_does_not_drive_the_fetcher() {
+        let cfg: LibraryConfig =
+            serde_json::from_str(r#"{"skill_sync_interval_secs": 60}"#).unwrap();
+        assert_eq!(cfg.into_drua().fetch_interval_ms, 5_000);
+    }
+
+    #[test]
+    fn fetch_interval_has_a_floor() {
+        let cfg: LibraryConfig = serde_json::from_str(r#"{"fetch_interval_ms": 0}"#).unwrap();
+        assert_eq!(cfg.into_drua().fetch_interval_ms, 100);
     }
 }
