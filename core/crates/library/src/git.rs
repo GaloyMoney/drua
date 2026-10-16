@@ -989,11 +989,26 @@ impl GitEngine {
         repo: &'repo git2::Repository,
         oid: &str,
     ) -> Result<git2::Tree<'repo>, LibraryError> {
-        let oid = git2::Oid::from_str(oid)
+        let parsed = git2::Oid::from_str(oid)
             .map_err(|e| LibraryError::Git(format!("parse commit oid: {e}")))?;
-        repo.find_commit(oid)
-            .and_then(|c| c.tree())
+        Self::find_commit_typed(repo, parsed)?
+            .tree()
             .map_err(|e| LibraryError::Git(format!("commit tree: {e}")))
+    }
+
+    fn find_commit_typed(
+        repo: &git2::Repository,
+        oid: git2::Oid,
+    ) -> Result<git2::Commit<'_>, LibraryError> {
+        repo.find_commit(oid).map_err(|e| {
+            if e.code() == git2::ErrorCode::NotFound {
+                LibraryError::MissingObject {
+                    oid: oid.to_string(),
+                }
+            } else {
+                LibraryError::Git(format!("find commit {oid}: {e}"))
+            }
+        })
     }
 
     fn blobs_at_head(
@@ -1372,6 +1387,8 @@ impl GitEngine {
                 git2::Oid::from_str(&a).map_err(|e| LibraryError::Git(format!("parse a: {e}")))?;
             let b_oid =
                 git2::Oid::from_str(&b).map_err(|e| LibraryError::Git(format!("parse b: {e}")))?;
+            Self::find_commit_typed(&repo, a_oid)?;
+            Self::find_commit_typed(&repo, b_oid)?;
             match repo.merge_base(a_oid, b_oid) {
                 Ok(oid) => Ok(Some(oid.to_string())),
                 Err(e) if e.code() == git2::ErrorCode::NotFound => Ok(None),
@@ -1442,13 +1459,10 @@ impl GitEngine {
         Ok(Ok(tree_oid.to_string()))
     }
 
-    #[tracing::instrument(name = "library.git.merge_into_main", skip_all, fields(%changeset_tip))]
-    pub async fn merge_into_main(
+    async fn plan_merge_into_main(
         &self,
         changeset_tip: &str,
-        message: String,
-        attribution: CommitAttribution,
-    ) -> Result<String, LibraryError> {
+    ) -> Result<(String, Result<String, Vec<String>>), LibraryError> {
         let main_oid = self
             .resolve_ref("refs/heads/main")
             .await?
@@ -1457,7 +1471,26 @@ impl GitEngine {
             .merge_base(&main_oid, changeset_tip)
             .await?
             .ok_or_else(|| LibraryError::Git("merge_into_main: no merge base with main".into()))?;
-        if let Err(paths) = self.merge_trees(&base, changeset_tip, &main_oid).await? {
+        let merged = self.merge_trees(&base, changeset_tip, &main_oid).await?;
+        Ok((base, merged))
+    }
+
+    #[tracing::instrument(name = "library.git.merge_into_main", skip_all, fields(%changeset_tip))]
+    pub async fn merge_into_main(
+        &self,
+        changeset_tip: &str,
+        message: String,
+        attribution: CommitAttribution,
+    ) -> Result<String, LibraryError> {
+        let (base, merged) = match self.plan_merge_into_main(changeset_tip).await {
+            Err(LibraryError::MissingObject { oid }) => {
+                tracing::info!(%oid, "merge_into_main: commit missing locally; fetching once");
+                self.fetch_and_head().await?;
+                self.plan_merge_into_main(changeset_tip).await?
+            }
+            planned => planned?,
+        };
+        if let Err(paths) = merged {
             return Err(LibraryError::MergeConflicts { paths });
         }
         let oid = self
@@ -4242,6 +4275,78 @@ mod tests {
         .await
         .expect("fence row exists");
         assert_eq!(payload["oid"], "cafef00d00000000000000000000000000000000");
+    }
+
+    /// Replica B has not fetched a commit a peer pushed to a draft ref:
+    /// `merge_base` must say so with a typed error (not `Ok(None)` or an
+    /// opaque git string), and `merge_into_main` must fetch once and merge.
+    #[tokio::test]
+    #[ignore = "requires postgres; run with --ignored"]
+    async fn merge_base_reports_missing_object_as_typed_error() {
+        let pool = test_pool().await;
+        let (origin_dir, _local_dir, _local_repo) = origin_and_clone("missing-object-origin");
+        let data_dir = unique_dir("missing-object-engine-b");
+        let engine_b = GitEngine::init(
+            &origin_dir.to_string_lossy(),
+            data_dir.clone(),
+            None,
+            pool.clone(),
+            5_000,
+        )
+        .await
+        .expect("engine B init");
+        let main_oid = engine_b
+            .resolve_ref("refs/heads/main")
+            .await
+            .expect("resolve main")
+            .expect("main exists");
+
+        let clone_a_dir = unique_dir("missing-object-clone-a");
+        let clone_a = git2::build::RepoBuilder::new()
+            .bare(true)
+            .clone(&origin_dir.to_string_lossy(), &clone_a_dir)
+            .unwrap();
+        let tip = commit_file(
+            &clone_a,
+            Some(git2::Oid::from_str(&main_oid).unwrap()),
+            "note.md",
+            b"from A",
+            "a@example.com",
+            "draft work",
+        );
+        clone_a
+            .reference("refs/heads/drua/missing", tip, true, "test")
+            .unwrap();
+        clone_a
+            .find_remote("origin")
+            .unwrap()
+            .push(&["refs/heads/drua/missing:refs/heads/drua/missing"], None)
+            .unwrap();
+
+        let err = engine_b
+            .merge_base(&main_oid, &tip.to_string())
+            .await
+            .expect_err("B does not hold the commit");
+        assert!(
+            matches!(&err, LibraryError::MissingObject { oid } if *oid == tip.to_string()),
+            "expected MissingObject, got: {err}"
+        );
+
+        let merge_oid = engine_b
+            .merge_into_main(
+                &tip.to_string(),
+                "merge draft".into(),
+                CommitAttribution::library_default(),
+            )
+            .await
+            .expect("merge_into_main fetches once and merges");
+        let main_after = engine_b.resolve_ref("refs/heads/main").await.unwrap();
+        assert_eq!(main_after.as_deref(), Some(merge_oid.as_str()));
+        assert_ne!(main_after.as_deref(), Some(main_oid.as_str()));
+
+        let _ = std::fs::remove_dir_all(&origin_dir);
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let _ = std::fs::remove_dir_all(&clone_a_dir);
     }
 
     #[tokio::test]

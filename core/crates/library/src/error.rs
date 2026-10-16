@@ -30,6 +30,8 @@ pub enum LibraryError {
         required: String,
         local: Option<String>,
     },
+    #[error("commit {oid} is not in this replica's clone yet")]
+    MissingObject { oid: String },
     #[error("job: {0}")]
     Job(#[from] job::error::JobError),
     #[error("sqlx: {0}")]
