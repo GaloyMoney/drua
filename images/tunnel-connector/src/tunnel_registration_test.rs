@@ -13,6 +13,20 @@ use tokio_tungstenite::tungstenite;
 
 use super::*;
 use crate::cli::Cli;
+use crate::lana_admin_mcp::{LanaAdminMcpConfig, LanaAdminMcpInstanceDiscoverer};
+
+#[derive(Clone)]
+struct FakeLanaAdminDiscoverer;
+
+#[async_trait::async_trait]
+impl LanaAdminMcpInstanceDiscoverer for FakeLanaAdminDiscoverer {
+    async fn discover_ready_sandboxes(
+        &self,
+        _config: &LanaAdminMcpConfig,
+    ) -> anyhow::Result<Vec<String>> {
+        Ok(Vec::new())
+    }
+}
 use crate::mcp_upstream::{registration_fingerprint, RegisteredToolSet};
 use crate::postgres_mcp::{
     PostgresMcpConfig, PostgresMcpHandler, PostgresSource, PostgresSourceDiscoverer,
@@ -119,12 +133,31 @@ async fn registers_reconciled_postgres_mcp_tools() -> anyhow::Result<()> {
         postgres_mcp_request_memory: DEFAULT_POSTGRES_MCP_REQUEST_MEMORY.to_string(),
         postgres_mcp_limit_cpu: DEFAULT_POSTGRES_MCP_LIMIT_CPU.to_string(),
         postgres_mcp_limit_memory: DEFAULT_POSTGRES_MCP_LIMIT_MEMORY.to_string(),
+        lana_admin_mcp_enabled: false,
+        lana_admin_mcp_sandbox_namespace:
+            crate::lana_admin_mcp::DEFAULT_LANA_ADMIN_MCP_SANDBOX_NAMESPACE.to_string(),
+        lana_admin_mcp_keycloak_base_url: None,
+        lana_admin_mcp_client_id: crate::lana_admin_mcp::DEFAULT_LANA_ADMIN_MCP_CLIENT_ID
+            .to_string(),
+        lana_admin_mcp_username_template:
+            crate::lana_admin_mcp::DEFAULT_LANA_ADMIN_MCP_USERNAME_TEMPLATE.to_string(),
+        lana_admin_mcp_password: String::new(),
+        lana_admin_mcp_url_template: crate::lana_admin_mcp::DEFAULT_LANA_ADMIN_MCP_URL_TEMPLATE
+            .to_string(),
+        lana_admin_mcp_static_instances: String::new(),
     };
     let static_upstreams = Vec::new();
     let mut backoff = INITIAL_BACKOFF;
 
     let tunnel_task = tokio::spawn(async move {
-        run_tunnel(&cli, &static_upstreams, &postgres_mcp, &mut backoff).await
+        run_tunnel(
+            &cli,
+            &static_upstreams,
+            &postgres_mcp,
+            None::<&crate::lana_admin_mcp::LanaAdminMcpController<FakeLanaAdminDiscoverer>>,
+            &mut backoff,
+        )
+        .await
     });
 
     let registered = tokio::time::timeout(Duration::from_secs(5), registered_rx).await??;

@@ -180,6 +180,7 @@ where
                 "http://{}:{}/mcp",
                 self.config.resource_name, self.config.service_port
             ),
+            auth: None,
         }))
     }
 }
