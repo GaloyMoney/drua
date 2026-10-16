@@ -23,6 +23,14 @@ pub trait AdminClient: Send + Sync {
     /// owning project goes away. Idempotent: missing storage is a no-op.
     async fn delete_pvcs(&self, name: &str) -> Result<(), AdminError>;
 
+    /// Grow the workspace PVC's `storage` request to `new_size`. PVC
+    /// shrinks aren't supported by k8s — callers must reject those
+    /// before reaching this layer. Pod-level CPU/memory changes are
+    /// applied by recreating the sandbox (`delete_sandbox` +
+    /// `create_sandbox`), so this method only touches storage. No-op
+    /// for backends without persistent storage (local).
+    async fn resize_pvc(&self, name: &str, new_size: &str) -> Result<(), AdminError>;
+
     async fn get_sandbox(&self, name: &str) -> Result<Sandbox, AdminError>;
 
     async fn list_sandboxes(&self) -> Result<Vec<Sandbox>, AdminError>;
