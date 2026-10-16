@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::mpsc;
+use tokio::sync::watch;
 
 pub use attribution::{CommitAttribution, CommitSubjectKind};
 pub use config::LibraryConfig;
@@ -104,7 +104,7 @@ impl Library {
             Arc::clone(&importers),
         ));
 
-        let (tick_tx, tick_rx) = mpsc::channel::<CommitTick>(64);
+        let (tick_tx, tick_rx) = watch::channel::<Option<CommitTick>>(None);
         let fetcher = Self::spawn_fetcher(
             Arc::clone(&git),
             tick_tx,
@@ -164,7 +164,7 @@ impl Library {
 
     fn spawn_fetcher(
         git: Arc<GitEngine>,
-        tick_tx: mpsc::Sender<CommitTick>,
+        tick_tx: watch::Sender<Option<CommitTick>>,
         interval: Duration,
         commit_notify: Arc<tokio::sync::Notify>,
     ) -> tokio::task::JoinHandle<()> {
@@ -183,9 +183,7 @@ impl Library {
                             continue;
                         }
                         last_head = Some(head.clone());
-                        if tick_tx.send(CommitTick { head }).await.is_err() {
-                            return;
-                        }
+                        tick_tx.send_replace(Some(CommitTick { head }));
                     }
                     Ok(None) => {}
                     Err(e) => {

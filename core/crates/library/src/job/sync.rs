@@ -5,7 +5,7 @@ use job::{
     ResidentJobRunner,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{watch, RwLock};
 
 use super::LibraryEmbedConfig;
 use crate::git::{CommitDelta, DeltaKind, GitEngine};
@@ -36,7 +36,7 @@ struct LibrarySyncState {
 pub(crate) type ImporterRegistry = Arc<RwLock<Vec<Arc<dyn LibraryImporter>>>>;
 
 pub(crate) struct LibrarySyncJobInitializer {
-    rx: Arc<Mutex<mpsc::Receiver<CommitTick>>>,
+    rx: watch::Receiver<Option<CommitTick>>,
     git: Arc<GitEngine>,
     search: SearchStore,
     importers: ImporterRegistry,
@@ -46,7 +46,7 @@ pub(crate) struct LibrarySyncJobInitializer {
 
 impl LibrarySyncJobInitializer {
     pub fn new(
-        rx: mpsc::Receiver<CommitTick>,
+        rx: watch::Receiver<Option<CommitTick>>,
         git: Arc<GitEngine>,
         search: SearchStore,
         importers: ImporterRegistry,
@@ -54,7 +54,7 @@ impl LibrarySyncJobInitializer {
         head_advanced_hooks: HeadAdvancedHooks,
     ) -> Self {
         Self {
-            rx: Arc::new(Mutex::new(rx)),
+            rx,
             git,
             search,
             importers,
@@ -73,7 +73,7 @@ impl ResidentJobInitializer for LibrarySyncJobInitializer {
 
     fn init(&self, _job: &Job) -> Result<Box<dyn ResidentJobRunner>, Box<dyn std::error::Error>> {
         Ok(Box::new(LibrarySyncRunner {
-            rx: Arc::clone(&self.rx),
+            rx: self.rx.clone(),
             git: Arc::clone(&self.git),
             search: self.search.clone(),
             importers: Arc::clone(&self.importers),
@@ -84,7 +84,7 @@ impl ResidentJobInitializer for LibrarySyncJobInitializer {
 }
 
 struct LibrarySyncRunner {
-    rx: Arc<Mutex<mpsc::Receiver<CommitTick>>>,
+    rx: watch::Receiver<Option<CommitTick>>,
     git: Arc<GitEngine>,
     search: SearchStore,
     importers: ImporterRegistry,
@@ -99,58 +99,26 @@ impl ResidentJobRunner for LibrarySyncRunner {
         &self,
         mut current_job: CurrentJob,
     ) -> Result<ResidentJobCompletion, Box<dyn std::error::Error>> {
-        let mut rx = self.rx.lock().await;
+        let mut rx = self.rx.clone();
         let mut state: LibrarySyncState = current_job.execution_state()?.unwrap_or_default();
+        // `borrow_and_update` marks the value seen, so a head published while
+        // a tick is processing still trips the next `changed()`.
+        let mut pending = rx.borrow_and_update().clone();
         loop {
+            if let Some(tick) = pending.take() {
+                self.handle_tick(&mut current_job, &mut state, tick).await?;
+            }
             tokio::select! {
                 _ = current_job.shutdown_requested() => {
                     tracing::debug!("library.sync: shutdown requested");
                     return Ok(ResidentJobCompletion::RescheduleNow);
                 }
-                msg = rx.recv() => {
-                    match msg {
-                        Some(tick) => {
-                            if state.last_processed_head.as_deref() == Some(tick.head.as_str()) {
-                                continue;
-                            }
-                            tracing::debug!(head = %tick.head, "library.sync: processing tick");
-                            // Advance `last_processed_head` only if the tick was
-                            // actually processed. If `process_tick` fails before
-                            // computing deltas (e.g. `external_changes_since` errors), the
-                            // next tick must diff forward from the same start
-                            // point or we'd lose every change in this commit
-                            // range.
-                            match self
-                                .process_tick(
-                                    &current_job,
-                                    state.last_processed_head.as_deref(),
-                                    &tick.head,
-                                )
-                                .await
-                            {
-                                Ok(()) => {
-                                    state.last_processed_head = Some(tick.head.clone());
-                                    current_job.update_execution_state(state.clone()).await?;
-                                    for hook in self.head_advanced_hooks.read().await.iter() {
-                                        hook(tick.head.clone()).await;
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        error = %e,
-                                        head = %tick.head,
-                                        "library.sync: tick processing failed; \
-                                         leaving last_processed_head unchanged \
-                                         so the next tick reprocesses this range"
-                                    );
-                                }
-                            }
-                        }
-                        None => {
-                            tracing::debug!("library.sync: tick channel closed, rescheduling");
-                            return Ok(ResidentJobCompletion::RescheduleNow);
-                        }
+                changed = rx.changed() => {
+                    if changed.is_err() {
+                        tracing::debug!("library.sync: tick sender dropped, rescheduling");
+                        return Ok(ResidentJobCompletion::RescheduleNow);
                     }
+                    pending = rx.borrow_and_update().clone();
                 }
             }
         }
@@ -158,6 +126,49 @@ impl ResidentJobRunner for LibrarySyncRunner {
 }
 
 impl LibrarySyncRunner {
+    async fn handle_tick(
+        &self,
+        current_job: &mut CurrentJob,
+        state: &mut LibrarySyncState,
+        tick: CommitTick,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if state.last_processed_head.as_deref() == Some(tick.head.as_str()) {
+            return Ok(());
+        }
+        tracing::debug!(head = %tick.head, "library.sync: processing tick");
+        // Advance `last_processed_head` only if the tick was actually
+        // processed. If `process_tick` fails before computing deltas (e.g.
+        // `external_changes_since` errors), the next tick must diff forward
+        // from the same start point or we'd lose every change in this commit
+        // range.
+        match self
+            .process_tick(
+                current_job,
+                state.last_processed_head.as_deref(),
+                &tick.head,
+            )
+            .await
+        {
+            Ok(()) => {
+                state.last_processed_head = Some(tick.head.clone());
+                current_job.update_execution_state(state.clone()).await?;
+                for hook in self.head_advanced_hooks.read().await.iter() {
+                    hook(tick.head.clone()).await;
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    head = %tick.head,
+                    "library.sync: tick processing failed; \
+                     leaving last_processed_head unchanged \
+                     so the next tick reprocesses this range"
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Returns `Err` only when the diff itself failed and no deltas could
     /// be computed. Per-delta dispatch failures are logged and swallowed
     /// (importers are idempotent), so they don't block the head advance.
