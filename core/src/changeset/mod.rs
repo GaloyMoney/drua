@@ -341,6 +341,23 @@ impl Changesets {
         Ok(self.drafts.handle(cs.draft_name(), &cs.head_oid).await?)
     }
 
+    /// Blocks until this replica's clone holds `cs.head_oid`. Callers keep
+    /// operating on the journaled head, never the ref tip: a tip ahead of the
+    /// journal holds commits that `observe_main` reconciles separately.
+    async fn wait_for_head(&self, cs: &Changeset, op: &'static str) -> Result<(), ChangesetError> {
+        let handle = self.ensure_ref(cs).await?;
+        if handle.tip() != cs.head_oid {
+            tracing::info!(
+                changeset_id = %cs.id,
+                tip = %handle.tip(),
+                head_oid = %cs.head_oid,
+                op,
+                "changeset: draft ref is ahead of the journaled head; using the journaled head"
+            );
+        }
+        Ok(())
+    }
+
     pub(crate) async fn record_commit(
         &self,
         id: ChangesetId,
@@ -570,6 +587,13 @@ impl Changesets {
     ) -> Result<ChangesetStatusView, ChangesetError> {
         let cs = self.repo.find_by_id(id).await?;
         self.check_same_project(sub, &cs)?;
+        // A finished changeset's ref is deleted; `ensure_ref` would recreate it.
+        if matches!(
+            cs.status,
+            ChangesetStatus::Open | ChangesetStatus::Submitted
+        ) {
+            self.wait_for_head(&cs, "status").await?;
+        }
 
         let main_oid = self.drafts.current_main().await?;
         let (mergeable, conflicts) =
@@ -646,6 +670,7 @@ impl Changesets {
         if !cs.has_commits() {
             return Err(ChangesetError::Empty { id });
         }
+        self.wait_for_head(&cs, "submit").await?;
 
         match self.drafts.mergeability(&cs.base_oid, &cs.head_oid).await? {
             Mergeability::Clean => {}
@@ -701,6 +726,7 @@ impl Changesets {
         if !cs.has_commits() {
             return Err(ChangesetError::Empty { id });
         }
+        self.wait_for_head(&cs, "apply").await?;
 
         let actor = actor_for_subject(sub)?;
         let attribution = self.users.commit_attribution().await;
@@ -779,6 +805,7 @@ impl Changesets {
                 op: "rebase",
             });
         }
+        self.wait_for_head(&cs, "rebase").await?;
 
         let attribution = self.users.commit_attribution().await;
         let message = format!("changeset: {} (rebased)", cs.title);

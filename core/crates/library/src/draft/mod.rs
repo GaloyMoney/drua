@@ -170,11 +170,7 @@ impl Drafts {
         message: String,
         attribution: CommitAttribution,
     ) -> Result<RebaseOutcome, LibraryError> {
-        let main_oid = self
-            .git
-            .resolve_ref("refs/heads/main")
-            .await?
-            .ok_or(LibraryError::MainUnborn)?;
+        let main_oid = self.fresh_base().await?;
         match self
             .git
             .rebase_ref(&name.git_ref(), &main_oid, known_head, message, attribution)
