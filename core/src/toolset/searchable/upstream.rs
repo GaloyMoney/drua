@@ -67,7 +67,7 @@ impl UpstreamToolSet {
             McpAuthMode::GithubApp => {
                 let provider = github_app
                     .ok_or_else(|| ToolSetsError::GithubAppNotConfigured(upstream.name.clone()))?;
-                let token = provider.generate_token().await?;
+                let token = provider.generate_fresh_token().await?;
                 format!("Bearer {}", token.token)
             }
         };
@@ -152,7 +152,7 @@ async fn refresh_loop(
 ) {
     loop {
         tokio::time::sleep(GITHUB_APP_REFRESH_INTERVAL).await;
-        let token = match provider.generate_token().await {
+        let token = match provider.generate_fresh_token().await {
             Ok(t) => t,
             Err(e) => {
                 tracing::warn!(

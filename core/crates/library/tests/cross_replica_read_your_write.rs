@@ -51,9 +51,7 @@ async fn init_replica(
     if start_poll {
         jobs.start_poll().await.expect("start poll");
     }
-    // `jobs` must outlive the test: dropping it drops the sync-job
-    // initializer holding the fetcher's tick receiver, and the fetcher
-    // exits on the first failed send.
+    // `jobs` must outlive the test so the replica's job runners stay alive.
     (library, jobs)
 }
 
@@ -348,4 +346,227 @@ async fn reader_draft_handle_waits_for_a_replica_that_is_behind_head_oid() {
         .await
         .expect("round 2: read");
     assert_eq!(read2, Some(b"round 2\n".to_vec()));
+}
+
+fn ref_oid(repo_path: &std::path::Path, refname: &str) -> Option<String> {
+    let repo = git2::Repository::open_bare(repo_path).ok()?;
+    let oid = repo.refname_to_id(refname).ok()?;
+    Some(oid.to_string())
+}
+
+/// Red-first: on a pod that never runs the `library.sync` resident job
+/// nothing drains the fetcher's tick channel, so the fetcher's
+/// `send().await` blocks after 64 distinct main heads and the pod stops
+/// fetching. On `main` before the watch-channel fix this stalls at write
+/// 65, hence `WRITES` must stay above 64.
+#[tokio::test]
+#[ignore = "requires postgres + writes to tests/.library; run with --ignored"]
+async fn non_leader_fetcher_keeps_fetching_past_64_main_advances() {
+    const WRITES: usize = 70;
+    let test_name = "non_leader_fetcher_keeps_fetching_past_64_main_advances";
+    let fixture = TestRepo::init(&[("README.md", "init\n")]);
+    let pool = pool().await;
+    reset_library_db_state(&pool).await;
+    let repo_url = fixture.path().to_string_lossy().to_string();
+
+    let (writer, _jobs_w) = init_replica(test_name, "writer", &repo_url, &pool, 100, true).await;
+    let (_reader, _jobs_r) = init_replica(test_name, "reader", &repo_url, &pool, 100, false).await;
+    let reader_path = library_data_dir(test_name).join("reader");
+
+    let slug = "non-leader";
+    writer
+        .spaces()
+        .create(slug.into(), None, attr())
+        .await
+        .expect("create space");
+
+    for write in 0..WRITES {
+        writer
+            .spaces()
+            .write_file(
+                slug,
+                "doc.md",
+                format!("write {write}\n"),
+                attr(),
+                &SpaceTarget::Main,
+                None,
+            )
+            .await
+            .expect("write");
+
+        let upstream_main = ref_oid(fixture.path(), "refs/heads/main").expect("upstream main");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if ref_oid(&reader_path, "refs/heads/main").as_deref() == Some(upstream_main.as_str()) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "write {write}: reader's fetcher stopped fetching (upstream main {upstream_main})"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}
+
+struct RecordingImporter {
+    seen: std::sync::Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl drua_library::LibraryImporter for RecordingImporter {
+    fn matches(&self, path: &str) -> bool {
+        path.starts_with("probe/")
+    }
+
+    fn doc_type(&self) -> drua_library::DocType {
+        drua_library::DocType::new("probe")
+    }
+
+    async fn upsert_in_op(
+        &self,
+        _op: &mut es_entity::DbOp<'_>,
+        _old_file_hash: Option<drua_library::GitFileHash>,
+        _file_hash: drua_library::GitFileHash,
+        path: &str,
+        _content: &[u8],
+    ) -> Result<Option<drua_library::SearchableFields>, drua_library::UpsertError> {
+        self.seen.lock().unwrap().push(path.to_string());
+        Ok(None)
+    }
+}
+
+/// A head the fetcher published before the sync job started running must
+/// still be imported once the job starts, and heads after that must wake it.
+#[tokio::test]
+#[ignore = "requires postgres + writes to tests/.library; run with --ignored"]
+async fn sync_job_processes_a_head_that_arrived_before_it_started() {
+    let test_name = "sync_job_processes_a_head_that_arrived_before_it_started";
+    let fixture = TestRepo::init(&[("README.md", "init\n")]);
+    let pool = pool().await;
+    reset_library_db_state(&pool).await;
+    let repo_url = fixture.path().to_string_lossy().to_string();
+
+    let (replica, mut jobs) = init_replica(test_name, "late", &repo_url, &pool, 100, false).await;
+    let importer = Arc::new(RecordingImporter {
+        seen: std::sync::Mutex::new(Vec::new()),
+    });
+    replica.register_importer(importer.clone()).await;
+    let replica_path = library_data_dir(test_name).join("late");
+
+    fixture.commit(&[("probe/before.md", "before start\n")], "probe before");
+    let upstream_main = ref_oid(fixture.path(), "refs/heads/main").expect("upstream main");
+    wait_until(
+        "fetcher reaches upstream main",
+        Duration::from_secs(5),
+        || ref_oid(&replica_path, "refs/heads/main").as_deref() == Some(upstream_main.as_str()),
+    )
+    .await;
+    assert!(
+        importer.seen.lock().unwrap().is_empty(),
+        "sync job must not have run yet"
+    );
+
+    jobs.start_poll().await.expect("start poll");
+    wait_until("probe/before.md imported", Duration::from_secs(10), || {
+        importer
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p == "probe/before.md")
+    })
+    .await;
+
+    fixture.commit(&[("probe/after.md", "after start\n")], "probe after");
+    wait_until("probe/after.md imported", Duration::from_secs(10), || {
+        importer
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|p| p == "probe/after.md")
+    })
+    .await;
+}
+
+async fn wait_until(what: &str, timeout: Duration, mut cond: impl FnMut() -> bool) {
+    let deadline = Instant::now() + timeout;
+    while !cond() {
+        assert!(
+            Instant::now() < deadline,
+            "{what}: not met within {timeout:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// A draft-ref push on one replica must wake a peer's fetcher: the reader's
+/// ticker is effectively disabled and nothing reads on it, so only the
+/// `library_ref_head` wake can bring the draft commit into its clone.
+#[tokio::test]
+#[ignore = "requires postgres + writes to tests/.library; run with --ignored"]
+async fn draft_ref_push_wakes_a_peer_without_a_ticker() {
+    let test_name = "draft_ref_push_wakes_a_peer_without_a_ticker";
+    let fixture = TestRepo::init(&[("README.md", "init\n")]);
+    let pool = pool().await;
+    reset_library_db_state(&pool).await;
+    sqlx::query("DELETE FROM ephemeral_outbox_events WHERE event_type = 'library_ref_head'")
+        .execute(&pool)
+        .await
+        .expect("clear ref-head row");
+    let repo_url = fixture.path().to_string_lossy().to_string();
+
+    let (writer, _jobs_w) = init_replica(
+        test_name,
+        "writer",
+        &repo_url,
+        &pool,
+        WRITER_FETCH_INTERVAL_MS,
+        true,
+    )
+    .await;
+    let (_reader, _jobs_r) = init_replica(
+        test_name,
+        "reader",
+        &repo_url,
+        &pool,
+        READER_FETCH_INTERVAL_MS,
+        false,
+    )
+    .await;
+    let reader_path = library_data_dir(test_name).join("reader");
+
+    let slug = "wake";
+    writer
+        .spaces()
+        .create(slug.into(), None, attr())
+        .await
+        .expect("create space");
+    let base = writer.drafts().fresh_base().await.expect("fresh base");
+    let name = DraftName::from(uuid::Uuid::new_v4());
+    writer.drafts().open(name, &base).await.expect("open draft");
+    let tip = writer
+        .spaces()
+        .write_file(
+            slug,
+            "note.md",
+            "draft\n".into(),
+            attr(),
+            &SpaceTarget::Draft(DraftHandle::new(name, base.clone())),
+            None,
+        )
+        .await
+        .expect("draft write")
+        .expect("real commit");
+
+    wait_until(
+        "reader fetched the draft ref",
+        Duration::from_secs(5),
+        || {
+            ref_oid(&reader_path, &format!("refs/heads/{}", name.branch())).as_deref()
+                == Some(tip.as_str())
+        },
+    )
+    .await;
 }

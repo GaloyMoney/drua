@@ -154,7 +154,7 @@ async fn setup(test_name: &str) -> (App, AuthSubject, AuthSubject) {
         library: LibraryConfig {
             data_dir: Some(data_dir.to_string_lossy().into_owned()),
             repo_url: Some(upstream.to_string_lossy().into_owned()),
-            skill_sync_interval_secs: 1,
+            fetch_interval_ms: 1_000,
             ..Default::default()
         },
         // Enabled (with a dummy key, never dialled — these tests only

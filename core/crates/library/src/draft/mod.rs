@@ -170,11 +170,7 @@ impl Drafts {
         message: String,
         attribution: CommitAttribution,
     ) -> Result<RebaseOutcome, LibraryError> {
-        let main_oid = self
-            .git
-            .resolve_ref("refs/heads/main")
-            .await?
-            .ok_or(LibraryError::MainUnborn)?;
+        let main_oid = self.fresh_base().await?;
         match self
             .git
             .rebase_ref(&name.git_ref(), &main_oid, known_head, message, attribution)
@@ -261,13 +257,11 @@ impl Drafts {
 }
 
 /// The decision core of [`Drafts::observe`]'s advance check, isolated so
-/// it's unit-testable without a `GitEngine`. `Ok(None)` collapses two
-/// distinct `merge_base` outcomes — no common ancestor, and one oid's
-/// object missing from this replica's clone — and an `Err` (e.g. the
-/// same missing-object case surfacing as a git error instead) are all
-/// treated as "can't confirm a genuine advance", which is the safe
-/// default: reporting a falsely-advanced `tip` would let a caller move
-/// its recorded head backwards.
+/// it's unit-testable without a `GitEngine`. `Ok(None)` (no common
+/// ancestor) and any `Err` (including `MissingObject`, an oid this
+/// replica hasn't fetched) are treated as "can't confirm a genuine
+/// advance", which is the safe default: reporting a falsely-advanced
+/// `tip` would let a caller move its recorded head backwards.
 fn is_genuine_advance(merge_base: &Result<Option<String>, LibraryError>, tip: &str) -> bool {
     matches!(merge_base, Ok(Some(base)) if base != tip)
 }

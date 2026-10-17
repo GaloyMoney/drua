@@ -179,7 +179,7 @@ async fn setup_with_upstream(test_name: &str) -> (App, AuthSubject, PathBuf) {
         library: LibraryConfig {
             data_dir: Some(data_dir.to_string_lossy().into_owned()),
             repo_url: Some(upstream.to_string_lossy().into_owned()),
-            skill_sync_interval_secs: 1,
+            fetch_interval_ms: 1_000,
             ..Default::default()
         },
         ..Default::default()
@@ -1177,7 +1177,7 @@ async fn stamp_formats_match_the_documented_forms() {
     assert_eq!(
         draft_scheme_stamp,
         format!(
-            "[draft:docs · draft {short_id} \"{}\" · 1 file]",
+            "[draft:docs · draft {short_id} \"{}\" · 1 file here]",
             draft.title
         )
     );
@@ -1201,7 +1201,7 @@ async fn stamp_formats_match_the_documented_forms() {
     assert_eq!(
         explicit_stamp,
         format!(
-            "[space:docs · draft {short_id} \"{}\" · 1 file]",
+            "[space:docs · draft {short_id} \"{}\" · 1 file here]",
             draft.title
         )
     );
@@ -1234,6 +1234,43 @@ async fn write_file_returns_its_own_touched_count_not_the_prior_writes() {
         .expect("write_file dispatch")
         .expect("space path");
     assert!(third.contains("3 files"), "got: {third}");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn stamp_counts_files_in_this_space_and_in_the_whole_draft() {
+    let (app, user) = setup("stamp_two_spaces").await;
+    project_with_space(&app, &user, "proj-stamp-two-a", "docs").await;
+    project_with_space(&app, &user, "proj-stamp-two-b", "notes").await;
+    let fs = space_fs(&app);
+
+    fs.write_file(&user, "draft:docs/a.md", "one\n".into())
+        .await
+        .expect("write_file dispatch")
+        .expect("space path");
+    let in_notes = fs
+        .write_file(&user, "draft:notes/b.md", "two\n".into())
+        .await
+        .expect("write_file dispatch")
+        .expect("space path");
+    assert!(
+        in_notes.starts_with("[draft:notes · draft "),
+        "got: {in_notes}"
+    );
+    assert!(
+        in_notes.ends_with("· 1 file here (2 in draft)]"),
+        "got: {in_notes}"
+    );
+
+    let (_, in_docs) = fs
+        .view_file(&user, "draft:docs/a.md", None)
+        .await
+        .expect("view_file dispatch")
+        .expect("space path");
+    assert!(
+        in_docs.ends_with("· 1 file here (2 in draft)]"),
+        "got: {in_docs}"
+    );
 }
 
 #[tokio::test]
@@ -1889,5 +1926,168 @@ async fn journal_failure_during_on_committed_does_not_fail_the_write() {
     assert!(
         ref_exists(app.library().repo_path(), &refname),
         "the commit must be on the ref regardless of the journal outcome"
+    );
+}
+
+struct StaleReplica {
+    app: App,
+    user: AuthSubject,
+    changesets_b: drua_core::changeset::Changesets,
+    id: ChangesetId,
+    upstream: PathBuf,
+    _library_b: drua_library::Library,
+    _jobs_b: job::Jobs,
+}
+
+/// Replica A (the full `App`, polling jobs) opens a draft and writes it;
+/// replica B is a second `Library` over the same upstream and Postgres whose
+/// ticker is effectively disabled and whose job poller never starts, wrapped
+/// in its own `Changesets`. B is never told about the draft head, so it
+/// does not hold `head_oid` until a `Changesets` method makes it wait.
+async fn stale_replica_draft(test_name: &str) -> StaleReplica {
+    let (app, user, upstream) = setup_with_upstream(test_name).await;
+    project_with_space(&app, &user, &format!("proj-{test_name}"), "docs").await;
+
+    let pool = pool().await;
+    let embedder = Arc::new(code_assistant_core::embedder::Embedder::new().expect("embedder"));
+    let job_config = job::JobSvcConfig::builder()
+        .pool(pool.clone())
+        .build()
+        .expect("job config");
+    let mut jobs_b = job::Jobs::init(job_config).await.expect("jobs init");
+    let library_b = drua_library::Library::init(
+        &pool,
+        &drua_library::LibraryConfig {
+            data_dir: fresh_dir(&format!("{test_name}-replica-b"))
+                .to_string_lossy()
+                .into_owned(),
+            repo_url: upstream.to_string_lossy().into_owned(),
+            fetch_interval_ms: 3_600_000,
+            read_catch_up_timeout_ms: 5_000,
+        },
+        embedder,
+        &mut jobs_b,
+        None,
+    )
+    .await
+    .expect("replica B init");
+    let changesets_b = drua_core::changeset::Changesets::new(
+        &pool,
+        &Arc::new(app.agents().clone()),
+        &library_b,
+        app.users(),
+        None,
+        None,
+    );
+
+    let cs = app
+        .changesets()
+        .draft_for(&user, Some("stale replica".into()), None, None)
+        .await
+        .expect("open changeset");
+    space_fs(&app)
+        .write_file(&user, "draft:docs/b.md", "staged on A\n".into())
+        .await
+        .expect("write_file dispatch")
+        .expect("space path");
+
+    StaleReplica {
+        app,
+        user,
+        changesets_b,
+        id: cs.id,
+        upstream,
+        _library_b: library_b,
+        _jobs_b: jobs_b,
+    }
+}
+
+/// Red-first: without `Changesets::apply` waiting for the local clone this
+/// fails with `merge_base: object not found - no match for id (<head>)`.
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn apply_on_a_replica_that_has_not_fetched_the_draft_head_waits_for_it() {
+    let s = stale_replica_draft("apply_stale_replica").await;
+    let (cs, merge_oid) = s
+        .changesets_b
+        .apply(&s.user, s.id, None, None)
+        .await
+        .expect("apply must wait for B to hold the draft head");
+    assert_eq!(cs.status, ChangesetStatus::Applied);
+    let merged = s
+        .app
+        .library()
+        .spaces()
+        .read_file("docs", "b.md", &drua_library::SpaceTarget::Main)
+        .await
+        .expect("read main");
+    assert_eq!(merged, Some(b"staged on A\n".to_vec()), "merge {merge_oid}");
+}
+
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn status_on_a_replica_that_has_not_fetched_the_draft_head_waits_for_it() {
+    let s = stale_replica_draft("status_stale_replica").await;
+    let view = s
+        .changesets_b
+        .status(&s.user, s.id)
+        .await
+        .expect("status must wait for B to hold the draft head");
+    assert!(view.mergeable, "conflicts: {:?}", view.conflicts);
+}
+
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn rebase_on_a_replica_that_has_not_fetched_the_draft_head_waits_for_it() {
+    let s = stale_replica_draft("rebase_stale_replica").await;
+    s.app
+        .library()
+        .spaces()
+        .write_file(
+            "docs",
+            "c.md",
+            "main moved on\n".into(),
+            CommitAttribution::library_default(),
+            &drua_library::SpaceTarget::Main,
+            None,
+        )
+        .await
+        .expect("advance main on A");
+    let origin_main = git2::Repository::open_bare(&s.upstream)
+        .expect("open upstream")
+        .refname_to_id("refs/heads/main")
+        .expect("upstream main")
+        .to_string();
+
+    let cs = s
+        .changesets_b
+        .rebase(&s.user, s.id)
+        .await
+        .expect("rebase must wait for B to hold the draft head");
+    assert!(cs.has_commits());
+    assert_eq!(
+        cs.base_oid, origin_main,
+        "rebase must land on origin's main"
+    );
+}
+
+/// `submit` checks mergeability before it needs a GitHub App, so on a
+/// fixture without one the outcome distinguishes "waited, then reached the
+/// PR step" (`PrUnavailable`) from "merge_base: object not found".
+#[tokio::test]
+#[ignore = "requires postgres + writes a working library clone; run with --ignored"]
+async fn submit_on_a_replica_that_has_not_fetched_the_draft_head_waits_for_it() {
+    let s = stale_replica_draft("submit_stale_replica").await;
+    let err = match s
+        .changesets_b
+        .submit(&s.user, s.id, "t".into(), "b".into())
+        .await
+    {
+        Ok(_) => panic!("fixture has no GitHub App; submit cannot succeed"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(err, ChangesetError::PrUnavailable),
+        "expected PrUnavailable after the mergeability check, got: {err}"
     );
 }
