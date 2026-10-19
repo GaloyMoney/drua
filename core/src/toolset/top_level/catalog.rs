@@ -392,12 +392,17 @@ impl TopLevelTool for DescribeCatalogTool {
         subject: &AuthSubject,
         arguments: Option<JsonObject>,
     ) -> Result<CallToolResult, ToolSetsError> {
-        let tool_name = arguments
-            .as_ref()
-            .and_then(|a| a.get("tool_name"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        match self.execute_describe(subject, tool_name) {
+        let mut args = arguments.unwrap_or_default();
+        let Some(tool_name) =
+            take_first_key(&mut args, TOOL_NAME_KEYS).and_then(|v| v.as_str().map(str::to_string))
+        else {
+            let received: Vec<&String> = args.keys().collect();
+            return Err(ToolSetsError::InvalidArgument(format!(
+                "missing required field `tool_name`; received keys: {received:?}. \
+                 describe_tool takes {{tool_name: \"<prefixed name from search_tools>\"}}"
+            )));
+        };
+        match self.execute_describe(subject, &tool_name) {
             Some(entry) => {
                 let text = Self::format_entry(&entry);
                 let tool = &entry.full_tool;
@@ -1388,6 +1393,32 @@ mod tests {
             );
         }
         assert!(describe.execute_describe(&anon, "stub_nope").is_none());
+    }
+
+    #[tokio::test]
+    async fn describe_accepts_tool_name_key_aliases() {
+        let stub = StubToolSet::with_tools(vec![("pull_request_read", "Read a PR")]);
+        let sets: Vec<Arc<dyn SearchableToolSet>> = vec![Arc::new(stub)];
+        let describe = DescribeCatalogTool::new(Arc::new(RwLock::new(sets)));
+        for key in TOOL_NAME_KEYS {
+            let args = json!({ *key: "stub_pull_request_read" })
+                .as_object()
+                .cloned();
+            let result = describe
+                .call(&AuthSubject::Anonymous, args)
+                .await
+                .expect("describe succeeds");
+            assert_ne!(result.is_error, Some(true), "{key}");
+        }
+
+        let err = describe
+            .call(
+                &AuthSubject::Anonymous,
+                json!({ "tool": 7, "foo": "x" }).as_object().cloned(),
+            )
+            .await
+            .expect_err("missing tool name is an error");
+        assert!(err.to_string().contains("received keys"), "{err}");
     }
 
     #[test]
