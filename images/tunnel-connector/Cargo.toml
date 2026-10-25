@@ -19,6 +19,7 @@ chrono = "0.4"
 clap = { workspace = true }
 ed25519-dalek = { workspace = true }
 futures = { workspace = true }
+drua-mcp-client = { workspace = true }
 k8s-openapi = { version = "0.25", features = ["v1_33"] }
 kube = { version = "1", features = ["runtime", "client"] }
 rand = { workspace = true }
