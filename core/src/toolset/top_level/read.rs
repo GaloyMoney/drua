@@ -25,6 +25,8 @@ use rmcp::model::{CallToolResult, Content, JsonObject};
 use sandbox::instance_client::ExecuteRequest;
 use serde::Deserialize;
 
+use drua_tool_caching::ToolOutputShape;
+
 use crate::audit::Audit;
 use crate::auth::AuthSubject;
 use crate::sandbox::Sandboxes;
@@ -180,6 +182,16 @@ impl TopLevelTool for Read {
 
     fn script_memoizable(&self) -> bool {
         true
+    }
+
+    /// A file read is a document: the caller reads it in full and recovers
+    /// every elided byte, so elision only earns its keep above the 64 KB
+    /// document floor. Without this, `Read` fell under the 8 KB generic
+    /// threshold — a 28 KB space file came back as 8 KB plus a recovery
+    /// hint, and curate-live run 01a18562 spent 113 `tool_output_fetch`
+    /// turns (1.2 MB of tool results) paging a 486 KB evidence pack.
+    fn output_shape(&self) -> ToolOutputShape {
+        ToolOutputShape::Document
     }
 
     async fn call(
