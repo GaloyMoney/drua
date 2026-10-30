@@ -44,8 +44,15 @@ galoyAgents:
           - name: deepseek/deepseek-v4-pro-0813
             maxTokensPerResponse: 16384
             contextWindowTokens: 1048576
+            ## Relace (2026-10-05) and Wafer (2026-10-27 onward) both return
+            ## Edit tool calls with the large string argument missing
+            ## (`file_text`/`old_str` absent, ~145 non-reasoning output
+            ## tokens billed, finish_reason=tool_calls). Wafer delivered
+            ## 15-17 KB arguments through 2026-10-26; curate-live runs
+            ## 01a17b15/01a1803c/01a18562/01a18a89 then dropped 8-19 writes
+            ## each, the last at 205k context, and hit the breaker.
             routing:
-              ignore: ["Relace"]
+              ignore: ["Relace", "Wafer"]
           - name: deepseek/deepseek-v4.1-flash
             maxTokensPerResponse: 16384
             contextWindowTokens: 1048576
