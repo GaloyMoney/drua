@@ -125,6 +125,13 @@ impl UpstreamToolSet {
     }
 }
 
+fn redirect_rejecting_http_client() -> Result<reqwest::Client, ToolSetsError> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| ToolSetsError::Transport(e.to_string()))
+}
+
 async fn build_rmcp_client(
     upstream: &McpUpstreamConfig,
     header_value: &str,
@@ -140,7 +147,8 @@ async fn build_rmcp_client(
     }
     let transport_config = StreamableHttpClientTransportConfig::with_uri(upstream.url.as_str())
         .custom_headers(headers);
-    let worker = StreamableHttpClientWorker::new(reqwest::Client::new(), transport_config);
+    let worker =
+        StreamableHttpClientWorker::new(redirect_rejecting_http_client()?, transport_config);
     let client = ().serve(worker).await.map_err(Box::new)?;
     Ok(client)
 }
@@ -370,6 +378,40 @@ mod tests {
         let normalized = normalize_upstream_result("demo", "count", result);
 
         assert_ne!(normalized.is_error, Some(true));
+    }
+
+    #[tokio::test]
+    async fn upstream_http_client_does_not_follow_redirects() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let redirect = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let redirect_addr = redirect.local_addr().unwrap();
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+
+        let redirect_task = tokio::spawn(async move {
+            let (mut socket, _) = redirect.accept().await.unwrap();
+            let mut request = vec![0; 1024];
+            let _ = socket.read(&mut request).await.unwrap();
+            let response = format!(
+                "HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{target_addr}/secret-capture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let response = redirect_rejecting_http_client()
+            .unwrap()
+            .get(format!("http://{redirect_addr}/mcp"))
+            .header("x-api-key", "must-not-leak")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::TEMPORARY_REDIRECT);
+        redirect_task.await.unwrap();
+
+        let followed =
+            tokio::time::timeout(std::time::Duration::from_millis(100), target.accept()).await;
+        assert!(followed.is_err(), "redirect target received a request");
     }
 
     #[test]
