@@ -18,9 +18,11 @@ make start            # Postgres + migrations + server on :4200 (dev login)
 ```
 
 The web UI is at `http://localhost:4200`. `make start` uses dev login (no
-GitHub OAuth). For GitHub OAuth in production, run `make run-server` with
+GitHub OAuth). For GitHub OAuth in production, set `oauth.login: github` and
+`GITHUB_ALLOWED_TEAMS=YourOrg/your-team`, then run `make run-server` with
 `GITHUB_CLIENT_SECRET` set and an [OAuth App](https://github.com/settings/developers)
-(callback `http://localhost:4200/auth/github/callback`).
+(callback `http://localhost:4200/auth/github/callback`). Startup fails if the
+team allowlist is empty.
 
 ## CLI
 

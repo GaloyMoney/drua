@@ -17,7 +17,7 @@ configuration lives in `drua.yml`; secrets come from environment variables
 | `OPENAI_API_KEY` | No | `""` | OpenAI Platform API key used by `openai` (Chat Completions API) and `openai-responses` (Responses API). |
 | `OPENAI_CODEX_ACCESS_TOKEN` | No | `""` | Optional override for `openai-codex`. If unset, Drua reads the cached Codex/ChatGPT login from `~/.codex/auth.json`. |
 | `DRUA_CONFIG` | No | `drua.yml` | Path to the YAML config file. |
-| `GITHUB_ALLOWED_TEAMS` | No | `""` (all users) | Comma-separated GitHub teams allowed to log in (`org/team-slug`). |
+| `GITHUB_ALLOWED_TEAMS` | When `oauth.login: github` | No default | Comma-separated GitHub teams allowed to log in (`org/team-slug`). Startup fails if GitHub login is enabled with an empty list. |
 | `CONCOURSE_USERNAME` | No | — | Concourse CI basic-auth username (when concourse toolset is enabled). |
 | `CONCOURSE_PASSWORD` | No | — | Concourse CI basic-auth password. |
 | `ZENDUTY_API_TOKEN` | No | — | Zenduty API token (sent as `Authorization: Token <token>`). Required when the zenduty toolset is enabled. |
@@ -58,7 +58,7 @@ the included `drua.yml` for a complete local-dev example. Key sections:
 | Section | Purpose |
 |---|---|
 | `server` | Host, port, secure cookies, MCP endpoint URL |
-| `oauth` | GitHub OAuth client ID, redirect URI, allowed teams |
+| `oauth` | Login mode (`dev` or `github`), GitHub OAuth client ID, redirect URI, required team allowlist for GitHub login |
 | `agents.builtin_roles` | Per-role LLM model, system prompt, max tokens, auto-reset timer |
 | `toolsets.concourse` | Concourse CI URL, team, enabled flag |
 | `toolsets.zenduty` | Zenduty API URL override, default team, enabled flag |

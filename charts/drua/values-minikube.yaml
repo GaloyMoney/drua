@@ -8,6 +8,7 @@ galoyAgents:
       secureCookies: false
       mcpEndpoint: "http://localhost:5254/mcp"
     oauth:
+      login: "dev"
       githubClientId: "dummy-client-id"
       githubRedirectUri: "http://localhost:5254/auth/callback"
   secrets:
