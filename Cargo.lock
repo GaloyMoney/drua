@@ -1545,6 +1545,7 @@ dependencies = [
  "derive_builder",
  "drua-git-proxy",
  "drua-library",
+ "drua-mcp-client",
  "drua-tool-caching",
  "drua-tunnel",
  "es-entity",
@@ -1625,6 +1626,16 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "drua-mcp-client"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "reqwest 0.13.3",
+ "rmcp",
+ "tokio",
 ]
 
 [[package]]
@@ -6676,6 +6687,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "clap",
+ "drua-mcp-client",
  "ed25519-dalek",
  "fake-mcp-upstream",
  "futures",

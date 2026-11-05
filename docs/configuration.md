@@ -67,6 +67,14 @@ the included `drua.yml` for a complete local-dev example. Key sections:
 | `sandbox.backend` | `local` (child process) or `k8s` (namespace + template) |
 | `github_app` | GitHub App client ID and installation ID (private key via env) |
 
+### MCP upstream tool-call timeouts
+
+Direct MCP upstream calls and calls forwarded by the tunnel connector wait up
+to 120 seconds for a tool response. On expiry, Drua returns a timeout error and
+sends an MCP cancellation notification upstream. This does not guarantee that a
+remote tool stops work or rolls back its side effects. Initialization and tool
+catalog discovery are separate from this response timeout.
+
 ### OpenAI Providers
 
 Drua exposes two OpenAI API protocols, and they are not aliases:
