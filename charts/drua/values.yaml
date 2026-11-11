@@ -317,7 +317,6 @@ galoyAgents:
     githubClientSecret: ""
     concourseUsername: ""
     concoursePassword: ""
-    concourseWebhookSecret: ""
     zendutyApiToken: ""
     zendutyWebhookSecret: ""
     anthropicApiKey: ""
