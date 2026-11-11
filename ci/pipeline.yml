@@ -40,10 +40,6 @@ jobs:
           - |
             cd repo
             nix flake check
-  on_failure:
-    put: drua-concourse-provider
-    params:
-      alert_type: ci_failure
 
 - name: test-integration
   serial: true
@@ -631,16 +627,6 @@ resources:
     username: #@ data.values.gar_registry_user
     password: #@ data.values.gar_registry_password
     repository: #@ data.values.gar_registry + "/concourse-drua-resource"
-
-#! Provider fan-out: fires every workflow whose trigger has
-#! `provider: concourse`. Any job can `put` this on `on_failure:`
-#! (or `on_success:`, `ensure:`, etc.) to notify drua.
-- name: drua-concourse-provider
-  type: drua-workflow
-  source:
-    url: #@ data.values.drua_url
-    provider: concourse
-    secret: #@ data.values.drua_concourse_provider_secret
 
 - name: tf-galoy-agents-prod
   type: terraform
