@@ -98,11 +98,13 @@ pub(crate) async fn call_tool(
         params = params.with_arguments(args);
     }
 
-    let result = client
-        .peer()
-        .call_tool(params)
-        .await
-        .map_err(|e| e.to_string())?;
+    let result = drua_mcp_client::call_tool(
+        client.peer(),
+        params,
+        drua_mcp_client::UPSTREAM_TOOL_CALL_TIMEOUT,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     serde_json::to_value(&result).map_err(|e| format!("serialize result: {e}"))
 }

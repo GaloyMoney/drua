@@ -17,6 +17,7 @@ drua-library = { path = "crates/library" }
 drua-tool-caching = { path = "crates/tool-caching" }
 drua-tunnel = { workspace = true }
 github-app = { workspace = true }
+drua-mcp-client = { workspace = true }
 openai-client = { workspace = true }
 anyhow = { workspace = true }
 async-trait = "0.1"

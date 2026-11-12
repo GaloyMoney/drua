@@ -233,7 +233,12 @@ impl SearchableToolSet for UpstreamToolSet {
             params = params.with_arguments(args);
         }
         let client = self.client.read().await;
-        let result = client.peer().call_tool(params).await?;
+        let result = drua_mcp_client::call_tool(
+            client.peer(),
+            params,
+            drua_mcp_client::UPSTREAM_TOOL_CALL_TIMEOUT,
+        )
+        .await?;
         Ok(normalize_upstream_result(&self.name, tool_name, result))
     }
 }
