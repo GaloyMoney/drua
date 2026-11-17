@@ -23,6 +23,12 @@ pub trait AdminClient: Send + Sync {
     /// owning project goes away. Idempotent: missing storage is a no-op.
     async fn delete_pvcs(&self, name: &str) -> Result<(), AdminError>;
 
+    /// Distinct `sandbox-name` label values across every PVC this
+    /// backend owns (k8s: `managed-by=drua`). Feeds the PVC janitor,
+    /// which deletes any owner with no live DB row. Local backend has
+    /// no persistent volumes → empty.
+    async fn list_pvc_owners(&self) -> Result<Vec<String>, AdminError>;
+
     async fn get_sandbox(&self, name: &str) -> Result<Sandbox, AdminError>;
 
     async fn list_sandboxes(&self) -> Result<Vec<Sandbox>, AdminError>;
