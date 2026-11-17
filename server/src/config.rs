@@ -346,6 +346,7 @@ impl Config {
             }
         }
 
+        validate_oauth_config(&config.oauth)?;
         Ok(config)
     }
 
@@ -358,6 +359,50 @@ impl Config {
             github_allowed_teams: self.oauth.github_allowed_teams.clone(),
             dev_mode_agent_tokens: self.oauth.dev_mode_agent_tokens,
         }
+    }
+}
+
+fn validate_oauth_config(config: &OAuthConfig) -> anyhow::Result<()> {
+    if config.login == LoginMethod::GitHub && config.github_allowed_teams.is_empty() {
+        anyhow::bail!(
+            "oauth.github_allowed_teams must contain at least one org/team when oauth.login is github"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod oauth_validation_tests {
+    use super::*;
+
+    #[test]
+    fn github_login_requires_a_team_allowlist() {
+        let config = OAuthConfig {
+            login: LoginMethod::GitHub,
+            github_allowed_teams: vec![],
+            ..Default::default()
+        };
+        assert!(validate_oauth_config(&config).is_err());
+    }
+
+    #[test]
+    fn dev_login_allows_an_empty_team_allowlist() {
+        let config = OAuthConfig {
+            login: LoginMethod::Dev,
+            github_allowed_teams: vec![],
+            ..Default::default()
+        };
+        assert!(validate_oauth_config(&config).is_ok());
+    }
+
+    #[test]
+    fn github_login_accepts_a_configured_team() {
+        let config = OAuthConfig {
+            login: LoginMethod::GitHub,
+            github_allowed_teams: vec!["GaloyMoney/dev".to_string()],
+            ..Default::default()
+        };
+        assert!(validate_oauth_config(&config).is_ok());
     }
 }
 

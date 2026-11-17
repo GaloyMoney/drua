@@ -32,6 +32,7 @@ galoyAgents:
       tunnel:
         deployments: {}
     oauth:
+      login: "github"
       githubClientId: ""
       githubRedirectUri: ""
       githubAllowedTeams: []

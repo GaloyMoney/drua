@@ -85,22 +85,20 @@ pub async fn github_callback(
     let access_token = token_result.access_token().secret();
     let github_user = fetch_github_user(access_token).await?;
 
-    if !state.github_allowed_teams.is_empty() {
-        let user_teams = fetch_github_teams(access_token).await?;
-        let is_member = user_teams.iter().any(|team| {
-            let full_slug = format!("{}/{}", team.organization.login, team.slug);
-            state
-                .github_allowed_teams
-                .iter()
-                .any(|allowed| allowed.eq_ignore_ascii_case(&full_slug))
-        });
-        if !is_member {
-            tracing::warn!(
-                github_id = github_user.id,
-                "user not in any allowed GitHub team"
-            );
-            return Err(AuthError::TeamNotAuthorized);
-        }
+    if state.github_allowed_teams.is_empty() {
+        tracing::error!(
+            github_id = github_user.id,
+            "rejecting GitHub login because no team allowlist is configured"
+        );
+        return Err(AuthError::TeamNotAuthorized);
+    }
+    let user_teams = fetch_github_teams(access_token).await?;
+    if !github_team_is_allowed(&state.github_allowed_teams, &user_teams) {
+        tracing::warn!(
+            github_id = github_user.id,
+            "user not in any allowed GitHub team"
+        );
+        return Err(AuthError::TeamNotAuthorized);
     }
 
     let github_id_str = github_user.id.to_string();
@@ -136,6 +134,16 @@ pub async fn github_callback(
     Ok((jar.add(remove_cookie), Redirect::temporary(&redirect_to)))
 }
 
+fn github_team_is_allowed(allowed_teams: &[String], user_teams: &[GitHubTeam]) -> bool {
+    !allowed_teams.is_empty()
+        && user_teams.iter().any(|team| {
+            let full_slug = format!("{}/{}", team.organization.login, team.slug);
+            allowed_teams
+                .iter()
+                .any(|allowed| allowed.eq_ignore_ascii_case(&full_slug))
+        })
+}
+
 async fn fetch_github_user(access_token: &str) -> Result<GitHubUser, reqwest::Error> {
     reqwest::Client::new()
         .get("https://api.github.com/user")
@@ -161,4 +169,36 @@ async fn fetch_github_teams(access_token: &str) -> Result<Vec<GitHubTeam>, reqwe
         .error_for_status()?
         .json::<Vec<GitHubTeam>>()
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn team(org: &str, slug: &str) -> GitHubTeam {
+        GitHubTeam {
+            slug: slug.to_string(),
+            organization: GitHubOrganization {
+                login: org.to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn empty_team_allowlist_is_never_authorized() {
+        assert!(!github_team_is_allowed(&[], &[team("GaloyMoney", "dev")]));
+    }
+
+    #[test]
+    fn only_configured_team_is_authorized() {
+        let allowed = vec!["GaloyMoney/dev".to_string()];
+        assert!(github_team_is_allowed(
+            &allowed,
+            &[team("galoymoney", "DEV")]
+        ));
+        assert!(!github_team_is_allowed(
+            &allowed,
+            &[team("GaloyMoney", "other")]
+        ));
+    }
 }

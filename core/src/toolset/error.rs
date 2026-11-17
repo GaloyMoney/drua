@@ -14,6 +14,8 @@ pub enum ToolSetsError {
     GithubApp(#[from] github_app::GitHubAppError),
     #[error("ToolSetsError - InvalidHeader: {0}")]
     InvalidHeader(String),
+    #[error("ToolSetsError - Transport: {0}")]
+    Transport(String),
     #[error("ToolSetsError - ToolNotFound: {0}")]
     ToolNotFound(String),
     #[error("ToolSetsError - MissingArgument: {0}")]
