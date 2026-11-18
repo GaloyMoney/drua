@@ -62,6 +62,9 @@ galoyAgents:
           - name: anthropic/claude-sonnet-5
             maxTokensPerResponse: 16384
             contextWindowTokens: 1000000
+          - name: anthropic/claude-sonnet-5.5
+            maxTokensPerResponse: 16384
+            contextWindowTokens: 1000000
           - name: minimax/minimax-m3
             maxTokensPerResponse: 16384
             contextWindowTokens: 524288
