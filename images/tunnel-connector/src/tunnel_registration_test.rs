@@ -96,6 +96,7 @@ async fn registers_reconciled_postgres_mcp_tools() -> anyhow::Result<()> {
         private_key_file,
         deployment_id: "galoy-staging".to_string(),
         upstreams: "".to_string(),
+        read_only_upstreams: "".to_string(),
         tool_refresh_interval_secs: 0,
         postgres_mcp_namespace: Some("test".to_string()),
         postgres_mcp_runtime_dsn: "postgres://mcp:secret@postgres.local:5432/postgres".to_string(),

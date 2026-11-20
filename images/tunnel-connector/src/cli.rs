@@ -38,6 +38,11 @@ pub(crate) struct Cli {
     #[arg(long, env = "TUNNEL_UPSTREAMS", default_value = "")]
     pub(crate) upstreams: String,
 
+    /// Comma-separated upstream names restricted to tools explicitly annotated
+    /// readOnlyHint=true and destructiveHint=false, in discovery and execution.
+    #[arg(long, env = "TUNNEL_READ_ONLY_UPSTREAMS", default_value = "")]
+    pub(crate) read_only_upstreams: String,
+
     /// Poll interval for upstream MCP tool catalog changes. A value of 0 disables refresh.
     #[arg(
         long,
