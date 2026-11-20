@@ -37,7 +37,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
 
     let cli = cli::Cli::parse();
-    let static_upstreams = parse_upstreams(&cli.upstreams);
+    let static_upstreams = parse_upstreams(&cli.upstreams, &cli.read_only_upstreams)?;
     let postgres_mcp = build_postgres_mcp(&cli).await?;
 
     let mut backoff = INITIAL_BACKOFF;
